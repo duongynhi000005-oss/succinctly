@@ -488,6 +488,13 @@ OPERANDS = [
     "(foreach (. as $x | ($x, $x) as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach ($x as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; f | f | f | f | . as {a:$a} | .) as $k (.; .; .))",
+    # ...and the third's: a register-held `$x` as a stage, a closure argument as the source, a
+    # `$x` behind `try`, and a nested fold destructuring an outer fold's item (jq answers).
+    "(foreach (. as $x | $x | . as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (. as $x | if true then $x else . end | . as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (. as $x | (try $x) as {a:$a} | .) as $k (.; .; .))",
+    "(def h(q): foreach (q as {a:$a} | .) as $k (.; .; .); h(.))",
+    "(reduce .[]? as $it (.; foreach ($it as {a:$a} | .) as $k (.; .; .)))",
     "(foreach ((.|.) as {a:$a} | .) as $k (.; .; .))",
     # ...and the same inside a nested fold: a nested `foreach` over `.` moves the register
     # for the outer one, a nested `reduce` does not (it is backtracked), so the latter is
