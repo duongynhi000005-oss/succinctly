@@ -125173,3 +125173,85 @@ fn test_input_resumes_after_a_caught_parse_error_4311() -> Result<()> {
     assert_eq!((stdout.as_str(), code), ("1\n2\n", 5));
     Ok(())
 }
+
+/// #4287: a slice reads only its range -- by index once the array has proved wide (#4035) -- and
+/// must hold what the slice of an owned copy of the array holds. Every row slices one document
+/// array more than three times, so the later slices are answered from the index; the owned copy
+/// (`[.[]]`) is sliced by the owned-value route, which never consults one. The ranges cover the
+/// head, the tail, a window running off either end, an empty range, fractional and `null` bounds.
+#[test]
+fn test_slice_of_a_wide_array_equals_the_slice_of_its_copy_4287() -> Result<()> {
+    let elements: Vec<String> = (0..150)
+        .map(|i| match i % 4 {
+            0 => i.to_string(),
+            1 => format!(r#"{{"k":{i}}}"#),
+            2 => format!(r#"[{i},"{i}"]"#),
+            _ => "null".to_string(),
+        })
+        .collect();
+    let doc = format!("[{}]", elements.join(","));
+    for bound in [
+        "$i-7:$i+2",
+        "$i:",
+        ":$i",
+        "$i:$i",
+        "$i:$i+1",
+        "$i+0.5:$i+2.5",
+        "null:$i",
+        "-$i:",
+    ] {
+        let sliced = format!("[range(-3; length + 4) as $i | .[{bound}]]");
+        let copied = format!("[.[]] as $o | [range(-3; length + 4) as $i | $o[{bound}]]");
+        let (stdout, code) = run_jq_stdin(&sliced, &doc, &["-c"])?;
+        assert_eq!(code, 0, "{sliced}");
+        assert_eq!(
+            (stdout, code),
+            run_jq_stdin(&copied, &doc, &["-c"])?,
+            "{bound}"
+        );
+    }
+    Ok(())
+}
+
+/// #4287: a malformed member inside the range of an indexed array still raises, and one outside it
+/// still does not -- the range read converts exactly the elements the slice holds, as the collecting
+/// read did. jq itself rejects the document at parse.
+#[test]
+fn test_slice_of_an_indexed_array_converts_only_its_range_4287() -> Result<()> {
+    let elements: Vec<String> = (0..150)
+        .map(|i| {
+            if i == 100 {
+                "1.2.3".into()
+            } else {
+                i.to_string()
+            }
+        })
+        .collect();
+    let doc = format!("[{}]", elements.join(","));
+    for (filter, expected) in [
+        // Fifteen slices of one array; none holds element 100.
+        (
+            "[range(0; 140; 10) as $i | .[$i+1:$i+5] | add]",
+            "[10,50,90,130,170,210,250,290,330,370,410,450,490,530]\n",
+        ),
+        (
+            "[range(0; 100; 10) as $i | .[$i:$i+5] | add] | add",
+            "2350\n",
+        ),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, &doc, &["-c"])?,
+            (expected.to_string(), 0),
+            "{filter}"
+        );
+    }
+    for filter in [
+        "[range(0; 110; 10) as $i | .[$i:$i+5] | add]",
+        r#"[range(0; 110; 10) as $i | try (.[$i:$i+5] | add) catch "c"]"#,
+        "[range(0; 110; 10) as $i | .[$i:$i+5]? | add]",
+    ] {
+        let (stdout, code) = run_jq_stdin(filter, &doc, &["-c"])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+    }
+    Ok(())
+}

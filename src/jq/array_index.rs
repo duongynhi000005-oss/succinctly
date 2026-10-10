@@ -306,6 +306,49 @@ pub(crate) enum Read<C> {
     Unregistered,
 }
 
+/// The values of elements `range` of `elements`, in order: what
+/// `collect_values()[range]` holds, without visiting an element past the
+/// range or collecting the array (#4287). `range` must lie within the length
+/// [`len_checked_memoized`] found for this list.
+///
+/// From an [`ElementIndex`] when one exists, one read per position; otherwise
+/// one walk that steps over the elements before `range.start`. Never builds.
+pub(crate) fn values_in_range<E>(elements: &E, range: core::ops::Range<usize>) -> Vec<E::Value>
+where
+    E: DocumentElements,
+    E::Cursor: DocumentCursor<Value = E::Value>,
+{
+    let mut values = Vec::with_capacity(range.len());
+    if range.is_empty() {
+        return values;
+    }
+    if let Some(Element::Found(first)) = memo::get(elements, range.start) {
+        values.push(first.value());
+        for index in range.start + 1..range.end {
+            let Some(cursor) = get_cursor_memoized(elements, index) else {
+                break; // patchcov: coverage tolerate-line reason="defensive: an index answers every position below the length it was built for, and `range` lies within that length"
+            };
+            values.push(cursor.value());
+        }
+        return values;
+    }
+    let mut elems = *elements;
+    for _ in 0..range.start {
+        let Some((_, rest)) = elems.uncons() else {
+            return values; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
+        };
+        elems = rest;
+    }
+    while values.len() < range.len() {
+        let Some((value, rest)) = elems.uncons() else {
+            break; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
+        };
+        values.push(value);
+        elems = rest;
+    }
+    values
+}
+
 #[cfg(feature = "std")]
 pub(crate) mod memo {
     use std::cell::{Cell, RefCell};
@@ -1015,6 +1058,49 @@ mod tests {
             }
             check(0, 9);
             check(19, 9);
+        }
+
+        /// #4287: a slice's range read holds what `collect_values()[range]`
+        /// holds, for ranges at the head, the tail, the middle, one element
+        /// wide and empty, while the array is walked and once it is indexed;
+        /// it reads from the index once there is one, and never builds one.
+        #[test]
+        fn values_in_range_agrees_with_the_collected_slice_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let owned = |values: &[_]| to_owned_all::<JqSemantics, _>(values).unwrap();
+            let ranges = [0..n, 0..1, 0..8, n - 8..n, n - 1..n, 40..48, 5..5, n..n];
+            let check = |phase: &str| {
+                for range in ranges.clone() {
+                    assert_eq!(
+                        owned(&values_in_range(&elements, range.clone())),
+                        owned(&collected[range.clone()]),
+                        "{phase}: {range:?}"
+                    );
+                }
+            };
+            let before = memo::work();
+            check("walked");
+            assert_eq!(memo::work(), before, "a range read builds nothing");
+            // Three length lookups build the index (the length the slice reads).
+            for _ in 0..3 {
+                assert_eq!(len_checked_memoized(&elements).ok(), Some(n));
+            }
+            let (builds, hits) = memo::work();
+            assert_eq!(builds - before.0, 1);
+            check("indexed");
+            let (builds_after, hits_after) = memo::work();
+            assert_eq!(builds_after, builds, "a range read builds nothing");
+            // One hit per element of every non-empty range: the walk is gone.
+            let read: usize = ranges.iter().map(|r| r.len()).sum();
+            assert_eq!(hits_after - hits, read, "every element came from the index");
         }
 
         #[test]

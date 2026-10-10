@@ -22373,8 +22373,22 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
     }
     // patchcov: coverage end
     if let Some(elements) = target.as_array() {
-        let items = elements.collect_values();
-        let range = SliceBounds::from_literals(start, end).resolve(items.len());
+        // #4287: the range is resolved from the memoized length and only its
+        // elements are read -- by index once the array has proved wide (#4035)
+        // -- so a narrow slice of a wide array is O(range), not O(length). A
+        // delimiter the length walk raises on keeps the collecting read: the
+        // slice never ran that walk's checks, and still does not.
+        let items = match crate::jq::array_index::len_checked_memoized(&elements) {
+            Ok(len) => {
+                let range = SliceBounds::from_literals(start, end).resolve(len);
+                crate::jq::array_index::values_in_range(&elements, range)
+            }
+            Err(_) => {
+                let items = elements.collect_values();
+                let range = SliceBounds::from_literals(start, end).resolve(items.len());
+                items[range].to_vec()
+            }
+        };
         // #2001 (code review): a #1194 malformed-member error nested
         // inside a sliced element respects `optional` here too -- this is
         // the `eval_generic` twin of `eval.rs`'s own `eval_single`
@@ -22387,7 +22401,7 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
         // `optional && !e.is_decode_failure()` to drift (the exact drift
         // `suppresses`'s own doc comment records happening twice already,
         // #1902 and #1934).
-        return match to_owned_all::<S, _>(items[range].iter()) {
+        return match to_owned_all::<S, _>(items.iter()) {
             Ok(v) => GenericResult::Owned(OwnedValue::array_from(v)),
             Err(e) if suppresses(&e, optional) => GenericResult::None,
             Err(e) => GenericResult::Error(e),
