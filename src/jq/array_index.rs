@@ -1099,7 +1099,7 @@ mod tests {
             let (builds_after, hits_after) = memo::work();
             assert_eq!(builds_after, builds, "a range read builds nothing");
             // One hit per element of every non-empty range: the walk is gone.
-            let read: usize = ranges.iter().map(|r| r.len()).sum();
+            let read: usize = ranges.iter().map(ExactSizeIterator::len).sum();
             assert_eq!(hits_after - hits, read, "every element came from the index");
         }
 
