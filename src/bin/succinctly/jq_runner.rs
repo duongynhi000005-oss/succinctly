@@ -5662,12 +5662,14 @@ fn get_inputs(
                         let (parsed, parse_error) = parse_json_stream_prefix(segment);
                         let (spans, split_error) = split_json_values(segment.as_bytes());
                         if spans.len() < parsed.len() {
+                            // patchcov: coverage tolerate reason="unreachable: the splitter is the more lenient of the two and the prefix parse materializes from its spans, so it cannot find fewer values -- the same internal-error guard as the non-resuming branch below (#1064), kept per segment (#4311)"
                             return Ok(Err(anyhow::anyhow!(
                                 "internal error: the JSON splitter found {} values where the \
                                  stream parse found {}",
                                 spans.len(),
                                 parsed.len()
                             )));
+                            // patchcov: coverage end
                         }
                         let mut parsed = parsed;
                         let start = parse_error.is_some().then(|| {
@@ -5709,8 +5711,23 @@ fn get_inputs(
                             },
                         ));
                         let mut next = resume;
+                        // A read that starts inside a character starts on a byte
+                        // no JSON token begins with: jq raises there too and
+                        // discards that read as well (`}` padded so the read ends
+                        // inside `é`, then ` 7\n8\n`, reads the error twice, then
+                        // `8`).
                         while next < raw.len() && !raw.is_char_boundary(next) {
-                            next += 1;
+                            let line = faults.line_at_read_of(next);
+                            resumed_errors.push((
+                                values.len(),
+                                TrailingParseError {
+                                    error: EvalError::new("Invalid JSON text"),
+                                    source: u32::try_from(src).unwrap_or(u32::MAX),
+                                    line: u32::try_from(line).unwrap_or(u32::MAX),
+                                    seq_warning: false,
+                                },
+                            ));
+                            next = faults.read_end(next);
                         }
                         if next >= raw.len() {
                             break;
@@ -5722,7 +5739,7 @@ fn get_inputs(
                 }
                 // Parse as JSON stream: the clean prefix, and the parse error
                 // that ended it if the stream turned malformed (#2961).
-                let (mut parsed, parse_error) = parse_json_stream_prefix(&raw);
+                let (parsed, parse_error) = parse_json_stream_prefix(&raw);
                 // `--slurp` stays all-or-nothing: jq prints nothing for a
                 // slurped stream it could not finish parsing. The error goes
                 // out in jq's channel at exit 5, like every other malformed
@@ -5754,6 +5771,12 @@ fn get_inputs(
                             parsed.len()
                         )));
                     }
+                    let ends: Vec<usize> = spans
+                        .iter()
+                        .take(parsed.len())
+                        .map(|&(_, end)| end)
+                        .collect();
+                    locations.extend_from_ends(src, &raw, &ends, parsed.len());
                     if parse_error.is_some() {
                         // The malformed value starts at the first span the
                         // parse did not produce a value for, or where the
@@ -5764,21 +5787,7 @@ fn get_inputs(
                             .or(split_error)
                             .unwrap_or(raw.len());
                         error_line = parse_error_line(raw.as_bytes(), start);
-                        // #4311: a number or literal the fault's own byte
-                        // completes is never read.
-                        if let Some(&last) = parsed.len().checked_sub(1).and_then(|i| spans.get(i))
-                        {
-                            if bare_token_lost_to_fault(raw.as_bytes(), last, start) {
-                                parsed.pop();
-                            }
-                        }
                     }
-                    let ends: Vec<usize> = spans
-                        .iter()
-                        .take(parsed.len())
-                        .map(|&(_, end)| end)
-                        .collect();
-                    locations.extend_from_ends(src, &raw, &ends, parsed.len());
                 }
                 values.extend(parsed);
                 // jq's parser stops at the first malformed value: nothing

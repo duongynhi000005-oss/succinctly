@@ -124674,6 +124674,24 @@ fn test_input_resumes_after_a_caught_parse_error_4311() -> Result<()> {
             "{files:?}: {stderr}"
         );
     }
+    // A read that starts inside a character is a fault of its own, and its read
+    // is discarded too: `}` padded so jq's 4095-byte read ends inside `é`.
+    for (pad, expected) in [
+        (4092, "[\"E\",7,8,\"E\",\"E\"]\n"),
+        (4093, "[\"E\",\"E\",8,\"E\",\"E\"]\n"),
+        (4094, "[\"E\",\"E\",8,\"E\",\"E\"]\n"),
+    ] {
+        let doc = format!("}}{}é 7\n8\n", " ".repeat(pad));
+        let (stdout, stderr, code, _) = run_jq_over_byte_files(
+            &["-nc", r#"[limit(5; repeat(try input catch "E"))]"#],
+            &[doc.as_bytes()],
+        )?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (expected, 0),
+            "pad {pad}: {stderr}"
+        );
+    }
     // Plain processing still stops at the first parse error, and loses the
     // number its faulty byte completes, as jq does.
     let (stdout, _, code, _) = run_jq_over_byte_files(&["-c", "."], &[b"1\n2]\n3\n"])?;
