@@ -84,6 +84,8 @@
 #[cfg(not(test))]
 use alloc::vec::Vec;
 
+use core::ops::Range;
+
 use super::document::{trailing_element_gap_ok, DocumentCursor, DocumentElements};
 use super::error::EvalError;
 
@@ -143,6 +145,16 @@ impl ElementIndex {
 
     pub(crate) fn len(&self) -> usize {
         self.ids.len()
+    }
+
+    /// The cursors of elements `range`, or `None` when the range runs past the
+    /// end or an id does not resolve (the caller then walks).
+    fn range<C: DocumentCursor>(&self, head: &C, range: Range<usize>) -> Option<Vec<C>> {
+        self.ids
+            .get(range)?
+            .iter()
+            .map(|id| head.at_node_id(*id))
+            .collect()
     }
 
     /// The cursor of element `index`, or [`Element::Past`] past the end;
@@ -311,30 +323,24 @@ pub(crate) enum Read<C> {
 /// range or collecting the array (#4287). `range` must lie within the length
 /// [`len_checked_memoized`] found for this list.
 ///
-/// From an [`ElementIndex`] when one exists, one read per position; otherwise
-/// one walk that steps over the elements before `range.start`. Never builds.
-pub(crate) fn values_in_range<E>(elements: &E, range: core::ops::Range<usize>) -> Vec<E::Value>
+/// From an [`ElementIndex`] when one exists, in one lookup; otherwise one walk
+/// that steps over the elements before `range.start` without decoding them.
+/// Never builds.
+pub(crate) fn values_in_range<E>(elements: &E, range: Range<usize>) -> Vec<E::Value>
 where
     E: DocumentElements,
     E::Cursor: DocumentCursor<Value = E::Value>,
 {
-    let mut values = Vec::with_capacity(range.len());
     if range.is_empty() {
-        return values;
+        return Vec::new();
     }
-    if let Some(Element::Found(first)) = memo::get(elements, range.start) {
-        values.push(first.value());
-        for index in range.start + 1..range.end {
-            let Some(cursor) = get_cursor_memoized(elements, index) else {
-                break; // patchcov: coverage tolerate-line reason="defensive: an index answers every position below the length it was built for, and `range` lies within that length"
-            };
-            values.push(cursor.value());
-        }
-        return values;
+    if let Some(cursors) = memo::range(elements, range.clone()) {
+        return cursors.iter().map(DocumentCursor::value).collect();
     }
+    let mut values = Vec::with_capacity(range.len());
     let mut elems = *elements;
     for _ in 0..range.start {
-        let Some((_, rest)) = elems.uncons() else {
+        let Some((_, rest)) = elems.uncons_cursor() else {
             return values; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
         };
         elems = rest;
@@ -514,6 +520,52 @@ pub(crate) mod memo {
         } else {
             Read::Walk
         }
+    }
+
+    /// The cursors of elements `range` of the list `elements`, when an
+    /// existing index can say, else `None` to walk. Never builds.
+    #[inline]
+    pub(crate) fn range<E: DocumentElements>(
+        elements: &E,
+        range: core::ops::Range<usize>,
+    ) -> Option<Vec<E::Cursor>> {
+        let bloom = BLOOM.with(Cell::get);
+        if bloom == 0 {
+            return None;
+        }
+        indexed_range(elements, bloom, range)
+    }
+
+    #[inline(never)]
+    fn indexed_range<E: DocumentElements>(
+        elements: &E,
+        bloom: u64,
+        range: core::ops::Range<usize>,
+    ) -> Option<Vec<E::Cursor>> {
+        let (id, document) = elements.head_id()?;
+        if bloom & bit(id) == 0 {
+            return None;
+        }
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            let state = m.as_mut().filter(|s| s.document == document)?;
+            let at = state.entries.iter().position(|e| e.head == id)?;
+            let entry = state.entries.remove(at);
+            let found = match &entry.kind {
+                Kind::Indexed(index) => match elements.uncons_cursor() {
+                    Some((head, _)) => index.range(&head, range),
+                    None => None, // patchcov: coverage tolerate-line reason="defensive: a list with a head id has a first element"
+                },
+                // Only an index answers a range: a prefix is a run of reads a
+                // walk is serving, and a slice must not start or extend one.
+                Kind::Seen { .. } | Kind::Prefix(_) | Kind::Refused => None,
+            };
+            state.entries.push(entry);
+            if found.is_some() {
+                note_hit();
+            }
+            found
+        })
     }
 
     #[inline(never)]
@@ -770,6 +822,13 @@ pub(crate) mod memo {
     }
 
     pub(crate) fn note_wide_read<E: DocumentElements>(_elements: &E) {}
+
+    pub(crate) fn range<E: DocumentElements>(
+        _elements: &E,
+        _range: core::ops::Range<usize>,
+    ) -> Option<alloc::vec::Vec<E::Cursor>> {
+        None
+    }
 
     pub(crate) fn note_wide<E: DocumentElements>(_elements: &E, _len: usize) {}
 }
@@ -1098,9 +1157,9 @@ mod tests {
             check("indexed");
             let (builds_after, hits_after) = memo::work();
             assert_eq!(builds_after, builds, "a range read builds nothing");
-            // One hit per element of every non-empty range: the walk is gone.
-            let read: usize = ranges.iter().map(ExactSizeIterator::len).sum();
-            assert_eq!(hits_after - hits, read, "every element came from the index");
+            // One hit per non-empty range: the walk is gone.
+            let read = ranges.iter().filter(|r| !r.is_empty()).count();
+            assert_eq!(hits_after - hits, read, "every range came from the index");
         }
 
         #[test]
