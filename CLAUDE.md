@@ -346,8 +346,9 @@ document cannot resolve.
 Two routes carry no `CommentTree` at all and so preserve nothing — not anchors, not
 comments, not style. Both predate #763 and neither is specific to anchors: a filter
 yielding *multiple* results (anything with a comma) loses its cursor to
-`GenericResult::Many` before `evaluate_yaml_cursor` can capture one, and `--inplace`
-never builds a tree in the first place (#1349).
+`GenericResult::Many` before `evaluate_yaml_cursor` can capture one, and `--eval-all`
+evaluates through the owned-value route (#4380). `--inplace` used to be a third and no
+longer is: since #1349 it keeps comments, style and anchors.
 
 **succinctly never emits YAML it cannot read back — real yq does.** A `*name` is written
 only when a matching `&name` exists, is emitted *earlier*, and holds an *equal* value.
