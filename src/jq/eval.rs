@@ -44915,7 +44915,16 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
             delivery.sink,
         );
     }
-    finish_any_all_answers::<S>(delivery, flow, owed, trackable, value)
+    finish_any_all_answers(
+        delivery,
+        flow,
+        owed,
+        // `gen` ran to its end after a swallowed answer, so every one of its forks was
+        // backtracked and jq's register is back where this entered, exactly as for a
+        // generator that emitted nothing. `emitted` is that restoration, not whether
+        // `gen` produced outputs: passing `true` would re-break #3858.
+        drained_register_after::<S>(trackable, value, false),
+    )
 }
 
 /// The path-position body of `isempty(g)` in jq mode (#3456, #3763, #4114).
@@ -44972,7 +44981,19 @@ fn resolve_isempty_sink<'a, S: EvalSemantics>(
             delivery.sink,
         );
     }
-    finish_any_all_answers::<S>(delivery, flow, None, trackable, value)
+    // The identity element `true`, once `g` ran to its end after a swallowed answer,
+    // is at the register jq's retry backtracked to: where this entered. A trackable
+    // entry's is `value`; an untracked one's is the frame's carried register, which
+    // `and`/`or` must be told or they refuse the `true` the base accepted as a single
+    // answer (`1 | (isempty(g) or true)`, #4114 review).
+    let at_entry = if trackable {
+        drained_register_after::<S>(trackable, value, false)
+    } else {
+        frame.register().map_or(BranchRegister::None, |register| {
+            BranchRegister::Unmoved(Cow::Owned(register.clone()))
+        })
+    };
+    finish_any_all_answers(delivery, flow, None, at_entry)
 }
 
 /// The consumer side of `any`/`all`'s path answers (#3827, #3899): each decisive
@@ -45048,12 +45069,11 @@ impl<'s, 'a> AnswerDelivery<'s, 'a> {
 /// `gen` running, #3819), then an escape the drive still owes, which is raised
 /// after the answers as jq does -- an answer that is a valid path is printed
 /// first, and a refused one is the refusal the retry that raised supersedes.
-fn finish_any_all_answers<'a, S: EvalSemantics>(
+fn finish_any_all_answers<'a>(
     mut delivery: AnswerDelivery<'_, 'a>,
     flow: ResolveFlow,
     owed: Option<EvalEscape>,
-    trackable: bool,
-    value: &'a OwnedValue,
+    identity_register: BranchRegister<'a>,
 ) -> ResolveFlow {
     let target_truthy = delivery.target_truthy;
     let (escape, identity_follows) = match (owed, flow) {
@@ -45064,11 +45084,7 @@ fn finish_any_all_answers<'a, S: EvalSemantics>(
     if identity_follows {
         delivery.deliver(untracked_at_register(
             Cow::Owned(OwnedValue::Bool(!target_truthy)),
-            // `gen` ran to its end, so every one of its forks was backtracked and jq's
-            // register is back where this entered, exactly as for a generator that
-            // emitted nothing. `emitted` is that restoration, not whether `gen` produced
-            // outputs: passing `true` would re-break #3858.
-            drained_register_after::<S>(trackable, value, false),
+            identity_register,
         ));
     }
     if let Some(escape) = escape {
@@ -45081,7 +45097,7 @@ fn finish_any_all_answers<'a, S: EvalSemantics>(
     }
 }
 
-/// [`leaf_register`] for the drain arms (`isempty`, `INDEX`, and `last` outside
+/// [`leaf_register`] for the drain arms (`isempty` in yq mode, `INDEX`, and `last` outside
 /// jq mode): each runs its argument through a discarding sink and forwards one
 /// derived value, so none can claim the register stayed where it entered (D5).
 /// Whether jq's own definition leaves it is a promotion with oracle rows of its
@@ -45453,7 +45469,7 @@ fn resolve_from_restored_input<'a, S: EvalSemantics>(
 /// Shared tail for every "drain an argument fully via a discarding sink,
 /// then forward one computed value" arm in [`resolve_node_sink`] (`Array`,
 /// `LastExpr`/`LastStream` in yq mode,
-/// `IsEmpty`, `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond` when nothing
+/// `IsEmpty` in yq mode (jq mode answers per output, [`resolve_isempty_sink`], #4114), `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond` when nothing
 /// decided or `cond` may move the register, #3749): once the drain itself is done (`flow`), build the one branch it
 /// produced and forward it to `sink`, propagating an escape from the drain
 /// immediately and mapping the caller's own `Demand` back to a `ResolveFlow`.

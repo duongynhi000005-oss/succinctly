@@ -118237,6 +118237,62 @@ fn test_isempty_path_answers_through_a_swallowed_break_retry_4114() -> Result<()
     Ok(())
 }
 
+/// #4114 rows over `{"a":1}`: on an untracked entry (`1 | ...`) the identity `true`
+/// that follows a swallowed answer is at the register the frame carries, so an
+/// `and`/`or` around the `isempty` accepts it as jq does. The single answer the
+/// resolver gave before the retry was modelled was accepted; stating no register
+/// for the second one refused it (`del` exited 5). Captured from jq 1.7.1.
+const RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED: &[RetryRow3293] = &[
+    (
+        r#"del(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x.a?)"#,
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r#"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x)"#,
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r#"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) and true) | $x)"#,
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r#"path(. as $x | 1 | (isempty(isempty(. as $q ?// $z | if $q then true else empty end)) and true) | $x)"#,
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r#"path(. as $x | 1 | (isempty(limit(2; . as $q ?// $z | if $q then true else empty end)) or (.a)?) | $x)"#,
+        "[]\n",
+        "",
+        "",
+        0,
+    ),
+];
+
+/// #4114: `isempty`'s identity `true` on an untracked entry, under `and`/`or`.
+#[test]
+fn test_isempty_path_identity_answer_on_an_untracked_entry_4114() -> Result<()> {
+    let input = r#"{"a":1}"#;
+    assert_retry_rows_3293(
+        None,
+        &format!("{input} | "),
+        RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED,
+    )?;
+    assert_retry_rows_3293(Some(input), "", RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED)?;
+    Ok(())
+}
+
 /// #4114: the consumer has `isempty`'s `false` before the retry that follows it
 /// runs (#3899's rule for `any`/`all`), and a `halt` downstream of it is not the
 /// break the `?//` swallows, so the retry never runs. Captured from jq 1.7.1.
