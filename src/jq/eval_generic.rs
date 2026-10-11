@@ -65,7 +65,7 @@ use super::eval::{
     entries_to_object, eval_each_owned, eval_full as full_eval, finish_fork_flow,
     finish_fork_from_flow, finish_short_circuit, fold_escaped_generator_prefix, foreach_forks,
     format_owned, has_type_mismatch_is_permissive, index_component_value, index_in_array_bounds,
-    index_one_owned as index_owned_by_key, is_assignment_expr, is_eager_arg,
+    index_one_owned_read as index_owned_by_key, is_assignment_expr, is_eager_arg,
     is_identity_passthrough, is_retryable_control, is_retryable_stop, key_arrays_eq, limit_raising,
     literal_to_owned, mark_nonretryable_escape, native_stack_exhausted, needs_path_context,
     numeric_key_to_array_index, numeric_key_to_index, numeric_length_owned, owned_bound_to_i64_for,
