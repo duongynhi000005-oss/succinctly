@@ -41454,6 +41454,46 @@ fn test_jq_value_spanning_two_files_counts_each_files_own_lines_4316() -> Result
         );
     }
 
+    // The slurped value of the route that reads `input` too: the last file's own line count.
+    let (stdout, stderr, code, _paths) = run_jq_over_files(
+        &["-sc", "[input_line_number, (try input catch .)]"],
+        &["[1,\n", "2]\n"],
+    )?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "[1,\"break\"]\n");
+
+    // A parse error's line, seen through `input_line_number` after a caught `input`: the fault
+    // follows a value that spans the two files.
+    let catching = "[limit(4; repeat(try (input | input_line_number) catch \
+                    (input_line_number | tostring | \"E\" + .)))]";
+    for (files, expected) in [
+        (&["[1,\n", "2 }\n"], "[\"E1\",\"E1\",\"E0\",\"E0\"]\n"),
+        (&["0\n[1,\n", "2,\n3 }\n"], "[1,\"E2\",\"E2\",\"E0\"]\n"),
+    ] {
+        let (stdout, stderr, code, _paths) = run_jq_over_files(&["-nc", catching], files)?;
+        assert_eq!(code, 0, "{files:?}: {stderr}");
+        assert_eq!(stdout, expected, "{files:?}");
+    }
+
+    // An invalid byte in the moved token is rewritten to a three-byte U+FFFD after the
+    // stitch; the first file's newline is still not the later file's.
+    let mut first = NamedTempFile::new()?;
+    first.write_all(b"[\"\xff\",\n")?;
+    let mut second = NamedTempFile::new()?;
+    second.write_all(b"1]\n")?;
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-nc",
+            "[inputs | input_line_number]",
+            &first.path().to_string_lossy(),
+            &second.path().to_string_lossy(),
+        ],
+        None,
+    )
+    .expect("runs");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "[1]\n");
+
     // `<unknown>` is decided by jq's reads of the last file alone: the `1` moved onto it makes
     // it 4095 bytes here, but jq reads it as 4094, whose first read completes the `1`.
     let (_, stderr, code, _paths) = run_jq_over_files(

@@ -4304,7 +4304,7 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
             }
         };
         // #4305: see [`stitch_json_file_seams`]. Not under `--validate`, which is strict per file.
-        let seams = if args.validate {
+        let mut seams = if args.validate {
             Vec::new()
         } else {
             stitch_json_file_seams(raw_inputs.iter_mut(), false)
@@ -4320,7 +4320,11 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
         let raw_inputs: Vec<Vec<u8>> = if args.validate {
             raw_inputs
         } else {
-            raw_inputs.into_iter().map(utf8_lossy_document).collect()
+            raw_inputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, raw)| utf8_lossy_document(raw, seams.get_mut(index)))
+                .collect()
         };
 
         // #2847: `--slurp` replaces the per-file documents with the single
@@ -4361,6 +4365,10 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
         // rows and the reasoning, and `scripts/jq-m2-streaming-sweep.sh` for
         // the sweep that measures them.
 
+        // A seam belongs to the file at its position; a lookup that missed would count that
+        // file's lines as #4305 left them (#4316).
+        let seams_align = seams.is_empty() || seams.len() == raw_inputs.len();
+        debug_assert!(slurped.is_some() || seams_align);
         for (idx, raw) in raw_inputs.iter().enumerate() {
             // The slurped document answers for the last file (`input_filename`,
             // and the file a diagnostic names), as the materializing route's
@@ -5306,7 +5314,7 @@ fn get_inputs(
     // a file continues in the next one.
     // `--validate` is strict per file (an empty file is rejected too), so it reads the files as
     // written.
-    let seams = if json_input_mode && !args.validate {
+    let mut seams = if json_input_mode && !args.validate {
         stitch_json_file_seams(raw_bytes.iter_mut().map(|(_, raw)| raw), track_eof)
     } else {
         Vec::new()
@@ -5446,7 +5454,7 @@ fn get_inputs(
     // All reads happen first, then decoding: a later file's read error still
     // outranks an earlier file's content error, as it did before.
     let mut raw_inputs: Vec<(Option<usize>, String)> = Vec::with_capacity(raw_bytes.len());
-    for (file_idx, raw) in raw_bytes {
+    for (pos, (file_idx, raw)) in raw_bytes.into_iter().enumerate() {
         // `String::from_utf8`, not `String::from_utf8_lossy(&raw).into_owned()`:
         // the latter allocates and copies the whole document even when it is
         // valid, because the `Cow` it returns is `Borrowed` and `into_owned`
@@ -5500,6 +5508,9 @@ fn get_inputs(
                     // jq scopes the substitution to each string there too
                     // (oracle-verified). The two cases this branch must not
                     // capture are the ones left in the `else` below.
+                    if let Some(seam) = seams.get_mut(pos) {
+                        *seam = seam.after_substitution(e.as_bytes());
+                    }
                     succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(e.as_bytes())
                 } else {
                     // `--raw-input --slurp` (the non-slurp `-R` took the
@@ -5516,6 +5527,7 @@ fn get_inputs(
         raw_inputs.push((file_idx, raw));
     }
 
+    debug_assert!(seams.is_empty() || seams.len() == raw_inputs.len());
     let mut locations = InputLocations::new(
         files
             .iter()
@@ -5561,7 +5573,7 @@ fn get_inputs(
                 None
             } else {
                 // Its own lines, without a token moved onto it (#4316).
-                let own = &raw[seams.last().map_or(0, |seam| seam.base).min(raw.len())..];
+                let own = seams.last().map_or(raw, |seam| seam.own(raw));
                 Some(line_at(own, own.len()))
             }
         })
@@ -6193,7 +6205,7 @@ impl InputLocations {
                 self.push(src, line_counter.read_end_line(end));
             }
         } else {
-            let line = content_lines(&raw[seam.base.min(raw.len())..]);
+            let line = content_lines(raw.get(seam.base..).unwrap_or(raw));
             for _ in 0..values {
                 self.push(src, line);
             }
@@ -6393,10 +6405,16 @@ impl ErrorAt<'_> {
 /// (#1247). `--raw-input` gets the same substitution (jq substitutes there
 /// too) via `get_inputs`' own decode; DSV input, `--arg`/`--argjson` and
 /// `--rawfile` get none.
-fn utf8_lossy_document(raw: Vec<u8>) -> Vec<u8> {
+///
+/// A file [`stitch_json_file_seams`] changed has its `seam` carried through the substitution
+/// ([`Seam::after_substitution`], #4316); `None` for a file nothing was moved on or off.
+fn utf8_lossy_document(raw: Vec<u8>, seam: Option<&mut Seam>) -> Vec<u8> {
     match succinctly::text::utf8::validate_utf8(&raw) {
         Ok(()) => raw,
         Err(_) => {
+            if let Some(seam) = seam {
+                *seam = seam.after_substitution(&raw);
+            }
             succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(&raw).into_bytes()
         }
     }
@@ -6482,7 +6500,8 @@ struct Seam {
     /// How many of this file's own bytes were moved off its end onto the next one. They
     /// are still this file's to jq: its last read runs on into them.
     moved_len: usize,
-    /// Where the first newline among those moved bytes is, counted from the first of them.
+    /// Where the first newline among those moved bytes is, counted from the first of them
+    /// (always before `moved_len`).
     moved_newline: Option<usize>,
 }
 
@@ -6493,9 +6512,26 @@ impl Seam {
         moved_newline: None,
     };
 
+    /// The file's own bytes: `raw` without the ones moved onto its front.
+    fn own<'r>(&self, raw: &'r [u8]) -> &'r [u8] {
+        &raw[self.base.min(raw.len())..]
+    }
+
     /// Only the front of the file was changed.
     fn base(base: usize) -> Self {
         Self { base, ..Self::NONE }
+    }
+
+    /// This seam once `raw`, the file's stitched bytes, has gone through jq's invalid-UTF-8
+    /// substitution ([`utf8_lossy_document`]), which turns each invalid byte into a three-byte
+    /// U+FFFD and so moves `base` (#4316). `moved_len` and `moved_newline` stay as they are:
+    /// they measure the file's own bytes as jq reads them, as [`EofTail`] does.
+    fn after_substitution(self, raw: &[u8]) -> Self {
+        let prefix = &raw[..self.base.min(raw.len())];
+        Self {
+            base: succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(prefix).len(),
+            ..self
+        }
     }
 }
 
@@ -7235,7 +7271,7 @@ fn slurp_documents(
         }
         if idx == last {
             // The last file's own lines, without a token moved onto it (#4316).
-            let own = &raw[seams.get(idx).map_or(0, |seam| seam.base).min(raw.len())..];
+            let own = seams.get(idx).map_or(&raw[..], |seam| seam.own(&raw));
             eof_line = line_at(own, own.len());
         }
     }
@@ -12043,6 +12079,15 @@ mod tests {
             seams(&[b"1", b"", b"2\n"]),
             vec![moved(0, 1, None), moved(1, 0, None), moved(1, 0, None)]
         );
+    }
+
+    /// #4316: a parse error's line is in the file it is met in, whatever was moved onto it.
+    #[test]
+    fn parse_error_line_counts_the_file_as_read_4316() {
+        // `[1,\n` moved onto `2 }\n`: the fault is on line 1 of the later file, 2 as stitched.
+        let stitched = b"[1,\n2 }\n";
+        assert_eq!(parse_error_line(stitched, 6, Seam::NONE), 2);
+        assert_eq!(parse_error_line(stitched, 6, Seam::base(4)), 1);
     }
 
     /// #4316: a counter for a stitched file counts the file as it was on disk.
