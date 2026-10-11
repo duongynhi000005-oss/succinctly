@@ -7072,15 +7072,30 @@ fn token_runs_to_end(tail: &[u8]) -> bool {
     }
 }
 
+/// Whether jq's parser refuses the value `span`. An invalid UTF-8 byte inside a string is not
+/// a refusal: jq substitutes U+FFFD for it before the string is read (#1743), so a span that
+/// only fails on one is judged after the same substitution (#4335). The raw check comes first
+/// and settles every document that is valid UTF-8, which is nearly all of them.
+fn span_is_refused_by_jq(span: &[u8]) -> bool {
+    use succinctly::json::validate::validate_jq_lenient;
+    validate_jq_lenient(span).is_err()
+        && (succinctly::text::utf8::validate_utf8(span).is_ok()
+            || validate_jq_lenient(
+                succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(span).as_bytes(),
+            )
+            .is_err())
+}
+
 /// [`split_json_values`], with a value the splitter accepts but jq's parser refuses (`[1 2]`,
 /// `{1:2}`) taken as the malformed one (#4311): the spans before it, and its start. That is
 /// where `get_inputs`' stream parse stops, so the read jq resumes at follows it. Validates
 /// every span, so only the routes that resume past a parse error ask for it.
 fn split_json_values_strict(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
     let (mut spans, malformed) = split_json_values(bytes);
-    match spans.iter().position(|&(start, end)| {
-        succinctly::json::validate::validate_jq_lenient(&bytes[start..end]).is_err()
-    }) {
+    match spans
+        .iter()
+        .position(|&(start, end)| span_is_refused_by_jq(&bytes[start..end]))
+    {
         Some(bad) => {
             let start = spans[bad].0;
             spans.truncate(bad);
@@ -12006,6 +12021,30 @@ mod tests {
         );
         assert_eq!(stitched(&[b"{\"a\":"]), vec![b"{\"a\":".to_vec()]);
         assert_eq!(stitched(&[]), Vec::<Vec<u8>>::new());
+    }
+
+    /// #4335: an invalid UTF-8 byte inside a string is not a refusal, as jq substitutes U+FFFD for
+    /// it; one outside a string, or a value jq refuses for another reason, still is.
+    #[test]
+    fn span_is_refused_by_jq_judges_invalid_utf8_after_substitution_4335() {
+        for accepted in [
+            &b"\"\xff\""[..],
+            b"[\"a\xe2\x82\", 1]",
+            b"{\"k\xff\": \"v\xfe\"}",
+            b"\"ok\"",
+            b"1",
+        ] {
+            assert!(!span_is_refused_by_jq(accepted), "{accepted:?}");
+        }
+        for refused in [
+            &b"[1 2]"[..],
+            b"{1:2}",
+            b"[\xff]",
+            b"[\"a\xff\" 1]",
+            b"\"a\\x\"",
+        ] {
+            assert!(span_is_refused_by_jq(refused), "{refused:?}");
+        }
     }
 
     /// #4316: the stitch records what it moved, per file, for the line counters.
