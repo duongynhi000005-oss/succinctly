@@ -6544,6 +6544,12 @@ the counter's own first read; the read holding a fault in moved bytes ends at a 
 4095-byte chunk, since where the previous file's line started is not known; and streams over shapes this does not
 model still differ from jq in about one run in forty of a deliberately nasty differential; not yet traced.
 
+The seam machinery is checked with `scripts/jq-multifile-stitch-differential.py`, which splits random token streams
+at random bytes into two or three files and compares what each build reads under `try input catch` (and the
+line `input_line_number` names) with the pinned jq; give it a build of `main` as `--base` to see what a change
+moved. Its nasty pool still differs from jq on some streams (see the residuals above), so read its totals against
+`main`, not against zero.
+
 ## `input`/`inputs` residuals after #1309
 
 [#1309](https://github.com/rust-works/succinctly/issues/1309) closed four of the five gaps
