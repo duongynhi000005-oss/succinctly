@@ -5903,9 +5903,15 @@ fn anchor_decl_prefix(comments: &CommentTree) -> String {
 /// continuation (`a: 1 # m` / blank / `# l`), and nowhere else (`  b: 1 #
 /// m` / `  # l`). An empty stored line stays empty rather than indented.
 fn trailing_comment_suffix(comments: &CommentTree, indent: &str) -> String {
-    let Some(comment) = comments.own() else {
-        return String::new();
-    };
+    comments
+        .own()
+        .map_or_else(String::new, |comment| comment_suffix_text(comment, indent))
+}
+
+/// [`trailing_comment_suffix`] for a comment string rather than a node's own: the first line
+/// after a space, every further line on its own line at `indent`. Also renders a *key's*
+/// comment, which can hold two (a comment floated onto it, then its own; #2806).
+fn comment_suffix_text(comment: &str, indent: &str) -> String {
     let mut lines = comment.split('\n');
     let mut out = format!(" {}", lines.next().unwrap_or_default());
     for (i, line) in lines.enumerate() {
@@ -6370,7 +6376,7 @@ fn emit_yaml_value_at_depth(
                             // the key, not the value (#765).
                             let key_comment_suffix = comments
                                 .key_comment(k)
-                                .map_or_else(String::new, |c| format!(" {c}"));
+                                .map_or_else(String::new, |c| comment_suffix_text(c, indent));
                             // For nested containers, emit one `config.indent_str`
                             // step deeper, which handles its own indentation.
                             // The value's own comment goes on its own line
@@ -6402,7 +6408,7 @@ fn emit_yaml_value_at_depth(
                             // (`? k # c\n: &anc` -> `k: &anc # c`), the DOM
                             // twin of `write_deferred_value`'s own rule
                             // (#1077/#1113).
-                            format!("{indent}{key}:{anchor} {kc}")
+                            format!("{indent}{key}:{anchor}{}", comment_suffix_text(kc, indent))
                         } else {
                             // A flow collection closes at its mapping's own indent
                             // (#2708); everything else steps from its own.
@@ -6430,7 +6436,7 @@ fn emit_yaml_value_at_depth(
                             let comment_suffix = if comment_suffix.is_empty() {
                                 comments
                                     .key_comment(k)
-                                    .map_or_else(String::new, |c| format!(" {c}"))
+                                    .map_or_else(String::new, |c| comment_suffix_text(c, indent))
                             } else {
                                 comment_suffix
                             };
@@ -10255,6 +10261,20 @@ mod tests {
         ] {
             assert_eq!(split(filter), None, "{filter}");
         }
+    }
+
+    /// #2806: a key's comment can hold two lines (a floated comment, then its own); the first
+    /// goes after the key and the rest on lines of their own at the key's indent, with go-yaml's
+    /// blank line before them at the top level only.
+    #[test]
+    fn test_comment_suffix_text_continues_on_the_keys_indent_2806() {
+        assert_eq!(comment_suffix_text("# one", "  "), " # one");
+        assert_eq!(comment_suffix_text("# one\n# two", "  "), " # one\n  # two");
+        assert_eq!(comment_suffix_text("# one\n# two", ""), " # one\n\n# two");
+        assert_eq!(
+            comment_suffix_text("# one\n\n# three", "    "),
+            " # one\n\n    # three"
+        );
     }
 
     /// `Builtin::FirstStream`/`LastStream` (the "Phase 13" builtin-table

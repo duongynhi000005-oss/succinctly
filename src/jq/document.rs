@@ -983,6 +983,15 @@ pub trait DocumentCursor: Sized + Copy + Clone {
         Vec::new()
     }
 
+    /// [`line_comments`](Self::line_comments) in the raw form
+    /// [`line_comment_raw`](Self::line_comment_raw) uses: each entry keeps its
+    /// leading `#`, one entry per comment in source order (#2806). The write
+    /// path stores them newline-joined, so a key that holds both a floated and
+    /// its own comment keeps both through a write.
+    fn line_comments_raw(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Get the standalone comment lines directly above this node — its
     /// *head* comment (#798) — stripped of each line's leading `#`/space,
     /// one entry per line in source order. Empty when the node has none, and

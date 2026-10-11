@@ -7769,6 +7769,13 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     }
 
     #[inline]
+    fn line_comments_raw(&self) -> Vec<String> {
+        YamlCursor::line_comments_raw(self)
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[inline]
     fn head_comment(&self) -> Vec<String> {
         YamlCursor::head_comment(self)
             .map(ToString::to_string)

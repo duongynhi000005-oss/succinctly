@@ -3044,7 +3044,13 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
             // #3601: the same entry also records how the key was quoted, so a
             // write that leaves the key alone does not turn `"1": a` into the
             // integer key `1: a`.
-            let key_comment = field.key_cursor.line_comment_raw();
+            // #2806: every comment the key holds, not the first only -- a comment floated
+            // onto it from an earlier anchor's deferred value, then its own -- stored
+            // newline-joined, the shape a `line_comment = "a\nb"` write stores.
+            let key_comment = {
+                let comments = DocumentCursor::line_comments_raw(&field.key_cursor);
+                (!comments.is_empty()).then(|| comments.join("\n"))
+            };
             let value_absent = key_comment.is_some()
                 && field.value.is_null()
                 && field.value.as_str().map_or(true, |s| s.is_empty());
