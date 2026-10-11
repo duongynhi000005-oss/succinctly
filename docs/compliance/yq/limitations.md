@@ -4584,7 +4584,7 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
   `True == "true"` and `!!bool "yes" == true` are `true` here (yq `false`, its text is
   `True`/`yes`), `"~" == null` is `true` here (yq `false`), and a leading-zero, hex or
   underscored integer compares by its resolved decimal text (`1 == 01` is `true` here,
-  `false` in yq). Every one of these already shows in `tostring`.
+  `false` in yq). Every one of these already shows in `tostring`. So does `split` by such a separator (#4263): `sep: 0x10` splits on `16`, yq on `0x10`.
 
 A third entry used to sit here -- the reindex bridge re-spelling a computed float, so that
 `[(0.5+0.5)] | .[0] == 1` was `false` (yq `true`) and `[(0.5+0.5)] | .[0] | tostring`
