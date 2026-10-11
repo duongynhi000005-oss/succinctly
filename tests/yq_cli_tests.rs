@@ -1637,6 +1637,29 @@ fn test_file_input_field_selection() -> Result<()> {
     Ok(())
 }
 
+/// #2520: `--inplace` on a multi-document stream redirects a write through an alias, and keeps
+/// every document's `&anchor`/`*alias` marks, in each document -- not only the last. The expected
+/// bytes were captured from `yq -i '.b.p = 9'` (pinned v4.53.3) on the same file.
+#[test]
+fn test_inplace_write_through_alias_applies_to_every_document_2520() -> Result<()> {
+    let mut temp_file = NamedTempFile::new()?;
+    write!(
+        temp_file,
+        "a: &x {{p: 1}}\nb: *x\n---\na: &x {{p: 3}}\nb: *x\n"
+    )?;
+    let path = temp_file.path().to_str().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq", "-i", ".b.p = 9", path])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(path)?,
+        "a: &x {p: 9}\nb: *x\n---\na: &x {p: 9}\nb: *x\n"
+    );
+    Ok(())
+}
+
 // ============================================================================
 // YAML Special Values Tests
 // ============================================================================
