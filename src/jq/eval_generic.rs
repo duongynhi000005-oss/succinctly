@@ -12493,6 +12493,17 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
                 if let Err(err) = empty_elements_tail_gap_ok(&elements, cursor.as_ref()) {
                     return GenericResult::Error(err);
                 }
+                // #4274 (yq): a name an array reads as the integer it spells.
+                if S::TAG == EvalTag::Yq {
+                    if let Some(idx) = crate::jq::eval::yq_parse_int64(name) {
+                        return eval_single::<S, V>(
+                            &Expr::Index { idx, key: None },
+                            value,
+                            optional,
+                            cursor,
+                        );
+                    }
+                }
             }
             if let Some(fields) = value.as_object() {
                 // #2594: `find_cursor`'s walk holds only fields, so a
@@ -21050,6 +21061,17 @@ fn index_one_generic<S: EvalSemantics, V: DocumentValue>(
         }
     }
     match key {
+        // #4274: an array read by a string key spells its index.
+        OwnedValue::String(_)
+            if target.as_array().is_some() && {
+                crate::jq::eval::yq_array_string_key_index::<S>(key).is_some()
+            } =>
+        {
+            match crate::jq::eval::yq_array_string_key_index::<S>(key) {
+                Some(index) => index_one_generic::<S, V>(target, &index, optional),
+                None => GenericResult::None, // patchcov: coverage tolerate-line reason="unreachable: the guard just answered Some"
+            }
+        }
         OwnedValue::String(s) => {
             // #2470: same rule as `Expr::Field`'s own arm -- a computed
             // string key is still a key lookup (`.["zzz"] * 2` and

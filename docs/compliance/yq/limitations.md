@@ -2311,6 +2311,27 @@ mechanism at all and turned out to have a separate, more severe divergence (a ha
 instead of missing autovivification) — see
 [#1919](https://github.com/rust-works/succinctly/issues/1919).
 
+### An array read by a string key -- the read side is resolved ([#4274](https://github.com/rust-works/succinctly/issues/4274)); the write side and a fractional key remain
+
+yq reads a string key against an array as the integer it spells (`parseInt64`, the reader `pick`
+uses, #4257): `[10,20,30] | .["1"]` is `20`, `.["-1"]` is `30` (a negative index wraps), `.["01"]`,
+`.["+1"]`, `.["0x1"]` and `.["0o1"]` are `20`, and `.["1_0"]` (index 10) and `.["5"]` are `null`. A
+string that is not an integer (`" 1"`, `"x"`, `"1.0"`, one past `i64`) is an error. This build reads
+all of that the same way for every read route -- a literal key, `.[$k]`, `.[("1")]`, a computed array
+(`(. + [])["1"]`), the slice of an array, and under `?` -- through `eval::yq_array_string_key_index`
+and `eval::yq_parse_int64`. jq mode keeps raising `Cannot index array with string`, as jq does.
+
+**Not matched:**
+
+- **The write side.** `.["1"] = 9`, `.["1"] |= . + 1` and `del(.["1"])` on an array still raise
+  `Cannot index array with string "1"`, where yq writes and deletes element 1.
+- **A fractional number key.** `.[1.5]` and `.[1.0]` index here (truncating); yq raises `cannot index
+  array with '1.5'` (a JSON-sourced `1.0` does index in yq, and the two cannot be told apart in the
+  owned value).
+- **The wording of the refusal.** yq's is `cannot index array with ' 1' (strconv.ParseInt: parsing
+  " 1": invalid syntax)`; this build keeps its own `Cannot index array with string " 1"`.
+- **A mapping indexed by a number**, `{"0":"z"} | del(.[0])`, which yq deletes and this build leaves.
+
 ### A mid-chain `Field`/`Index` step hitting the wrong container type or an out-of-range array index
 
 Found alongside [#1432](https://github.com/rust-works/succinctly/issues/1432)/tracked as
