@@ -1658,6 +1658,19 @@ fn test_yq_dash_file_argument_reads_stdin_4367() -> Result<()> {
             vec![],
             "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n",
         ),
+        // The files after a skipped `-` keep their command-line position (`0`, `1`, `3`).
+        (
+            "file_index",
+            vec![f1_path, "-", "-", f3_path],
+            vec![],
+            "0\n1\n3\n",
+        ),
+        (
+            "[., file_index]",
+            vec![f1_path, "-", "-", f3_path],
+            vec!["--eval-all"],
+            "[{\"a\":1},0,{\"b\":2},1,{\"c\":3},3]\n",
+        ),
         // The slurping and evaluate-all routes read it the same way.
         (
             "[.]",
@@ -1674,6 +1687,16 @@ fn test_yq_dash_file_argument_reads_stdin_4367() -> Result<()> {
             "`{filter}` {files:?} {extra:?}: stderr {err:?}"
         );
     }
+    // `--inplace` has no file to write back to for a `-`: refused, never written to a file named `-`.
+    let dir = TempDir::new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .current_dir(dir.path())
+        .args(["yq", "-i", ".r = 1", "-"])
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8(output.stderr)?.contains("write in place flag only applicable"));
+    assert!(!dir.path().join("-").exists());
     Ok(())
 }
 

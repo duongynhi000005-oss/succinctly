@@ -907,6 +907,28 @@ fn is_drained_stdin_file_argument(path: &Path) -> bool {
         && STDIN_FILE_ARGUMENT_READ.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// The position in `input_files` of each gathered source (#4367): a repeated `-` is skipped by
+/// [`gather_input_sources`], and yq numbers the files that follow it by their position on the
+/// command line (`yq file_index f1 - - f3` is `0`, `1`, `3`), which the M2 loop already does by
+/// walking `input_files`. The routes that walk the gathered sources map back through this.
+fn gathered_file_indices(input_files: &[String]) -> Vec<usize> {
+    if input_files.is_empty() {
+        return vec![0];
+    }
+    let mut seen_stdin = false;
+    let mut indices = Vec::with_capacity(input_files.len());
+    for (index, file) in input_files.iter().enumerate() {
+        if is_stdin_file_argument(Path::new(file)) {
+            if seen_stdin {
+                continue;
+            }
+            seen_stdin = true;
+        }
+        indices.push(index);
+    }
+    indices
+}
+
 /// Read stdin as the contents of a `-` file argument (#4367). Stdin is read once: yq reads the
 /// stream for the first `-` and a second one finds it drained, so it contributes an empty
 /// source (`yq '.' - -` prints one document).
@@ -8985,7 +9007,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         // origin, which is what `file_index`/`document_index` read back.
         let mut all_docs: Vec<(OwnedValue, usize, usize)> = Vec::new();
         let mut global_doc_index: usize = 0;
-        for (file_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+        let source_file_indices = gathered_file_indices(&input_files);
+        for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let file_idx = source_file_indices
+                .get(source_idx)
+                .copied()
+                .unwrap_or(source_idx);
             // #2282: `to_owned_canonicalizing_numbers_at_depth` (reached via
             // plain `parse_input` for JSON-sourced input) now reports its
             // own nesting-depth violations as a catchable error rather than
@@ -9113,7 +9140,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
             deferred_validate_exit_code = validate_exit_code;
 
             let mut global_doc_index: usize = 0;
-            'files: for (file_index, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let source_file_indices = gathered_file_indices(&input_files);
+            'files: for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+                let file_index = source_file_indices
+                    .get(source_idx)
+                    .copied()
+                    .unwrap_or(source_idx);
                 // #2427: `file_index` is a per-file constant on this path -- each
                 // file is evaluated independently, so there is no combined
                 // array whose top-level index could stand in for it. Real yq
@@ -9484,6 +9516,17 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         // Handle --inplace: process each file and write back to it
         if input_files.is_empty() {
             anyhow::bail!("--inplace requires at least one file argument");
+        }
+        // #4367: yq reads `-` as stdin, which has no file to write back to; it does not count as
+        // one (`yq -i . -`: "write in place flag only applicable when giving an expression and
+        // at least one file"). Refusing it also stops the result being written to a file named `-`.
+        if input_files
+            .iter()
+            .any(|file| is_stdin_file_argument(Path::new(file)))
+        {
+            anyhow::bail!(
+                "write in place flag only applicable when giving an expression and at least one file"
+            );
         }
 
         let mut global_doc_index: usize = 0;
@@ -10013,7 +10056,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         // gate below.
         let mut all_results: Vec<Vec<Vec<ResultWithComments>>> = Vec::new();
         let mut global_doc_index: usize = 0;
-        'collect: for (file_index, (bytes, format, _)) in input_sources.iter().enumerate() {
+        let source_file_indices = gathered_file_indices(&input_files);
+        'collect: for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let file_index = source_file_indices
+                .get(source_idx)
+                .copied()
+                .unwrap_or(source_idx);
             // #2427: `file_index` is a per-file constant on this path -- each
             // file is evaluated independently, so there is no combined
             // array whose top-level index could stand in for it. Real yq
