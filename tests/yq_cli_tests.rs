@@ -58529,6 +58529,24 @@ fn test_yq_by_value_stages_keep_no_path_register_3456() -> Result<()> {
     Ok(())
 }
 
+/// #4109: a zero-argument `def` call is as register-keeping as its body in jq mode only
+/// (ADR-0018): yq has no oracle for how `last(f)` leaves the register, so a write through a `$x`
+/// frozen before a call whose body is `last(.a)` keeps refusing, as the plain `last(.a)` stage does.
+#[test]
+fn test_yq_def_call_over_last_keeps_no_path_register_4109() -> Result<()> {
+    let doc = r#"{"a":{"b":1},"b":2}"#;
+    for filter in [
+        "del(. as $x | last(.a) | $x.b)",
+        "del(. as $x | def g: last(.a); g | $x.b)",
+        "(. as $x | def g: last(.a); g | $x.b) = 5",
+    ] {
+        let (stdout, code) = run_yq_stdin(filter, doc, &["-o", "json"])?;
+        assert_ne!(code, 0, "`{filter}`: stdout {stdout:?}");
+        assert!(stdout.is_empty(), "`{filter}`: stdout {stdout:?}");
+    }
+    Ok(())
+}
+
 /// #3724: a `map`/`any`/`all` whose `f` navigates only the register's own node keeps
 /// jq's path register inside an `[E]` collect in jq mode only (ADR-0018). yq has no
 /// oracle for how its `map` leaves the register, so `succinctly yq` keeps refusing the

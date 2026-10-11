@@ -44234,7 +44234,7 @@ fn stage_is_register_keeping<S: EvalSemantics>(expr: &Expr) -> bool {
         // each begins at the entry register; a pipe threads the register from one stage
         // to the next, so each stage must leave it where it found it. A branch that moves
         // it (`.a`) keeps the whole refused, as does one this predicate cannot judge (a
-        // `def` call, never admitted: `cannot_move_register`'s doc).
+        // `def` call with an argument; a zero-argument call is as its body is, #4109).
         Expr::Comma(branches) => branches.iter().all(stage_keeps_register_statically::<S>),
         Expr::Pipe(stages) => stages.iter().all(stage_keeps_register_statically::<S>),
         Expr::Alternative(left, right) => {
@@ -44265,7 +44265,8 @@ fn stage_is_register_keeping<S: EvalSemantics>(expr: &Expr) -> bool {
             is_last_stage(stage)
                 || is_select_stage(stage)
                 || (!core::ptr::eq(stage, unwrap_paren(expr))
-                    && leaves_register_in_place::<S>(stage))
+                    && (leaves_register_in_place::<S>(stage)
+                        || def_call_keeps_register::<S>(stage)))
         }
     }
 }
@@ -44359,7 +44360,8 @@ fn handler_navigates_only_its_input(handler: &Expr) -> bool {
 ///
 /// - [`collect_keeps_register`]: an `[E]` collect the resolver checks as jq does (#3263);
 ///   as a bare stage, and since #4152 as a branch of a compound stage, from the one
-///   definition.
+///   definition;
+/// - [`def_call_keeps_register`]: a zero-argument `def` call over a body of the above (#4109).
 ///
 /// `getpath` is the one shape that needs the run's state (it is per-*branch*,
 /// [`getpath_preserves_register`]), so it is answered at the call site only and is not
@@ -44370,6 +44372,24 @@ fn stage_keeps_register_statically<S: EvalSemantics>(expr: &Expr) -> bool {
         || stage_leaves_register_in_place::<S>(expr)
         || leaves_register_in_place::<S>(expr)
         || collect_keeps_register::<S>(expr)
+        || def_call_keeps_register::<S>(expr)
+}
+
+/// A zero-arity `def` call is as register-keeping as its body (#4109): the resolver resolves the
+/// bound body against the call's own input and frame (`resolve_node_sink`'s `DefCall` arm), so
+/// `def g: last(.a); g | $x` is `[]` as `last(.a) | $x` is. [`cannot_move_register`] reads a call
+/// the same way for a body that navigates nothing (#4124); this is the stage-level half, for a
+/// body that is itself `last(f)`, `select(f)`, a `try` over one and so on. One shared budget of
+/// [`DEF_CALL_SHAPE_BUDGET`] bodies bounds the whole question ([`within_def_call_budget`]); past
+/// it, or for a call with arguments, the call reads as it did before: a stage that moves the
+/// register.
+fn def_call_keeps_register<S: EvalSemantics>(expr: &Expr) -> bool {
+    match unwrap_paren(expr) {
+        Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+            within_def_call_budget(|| stage_keeps_register_statically::<S>(&def.body))
+        }
+        _ => false,
+    }
 }
 
 /// #3263: an array resolved live whose contents the resolver checks as jq does, and jq's
@@ -46404,6 +46424,12 @@ fn handler_leaves_register_on_scalar_payload(handler: &Expr) -> bool {
 /// recognition gated on one (#3790).
 #[cfg(feature = "std")]
 fn def_call_body_cannot_move_register(body: &Expr) -> bool {
+    within_def_call_budget(|| cannot_move_register(body))
+}
+
+/// [`def_call_body_cannot_move_register`]'s budget around any question put to a `def` body.
+#[cfg(feature = "std")]
+fn within_def_call_budget(question: impl FnOnce() -> bool) -> bool {
     use std::cell::Cell;
     thread_local! {
         /// Bodies looked into by the outermost question still being answered.
@@ -46419,14 +46445,27 @@ fn def_call_body_cannot_move_register(body: &Expr) -> bool {
     }
     USED.with(|u| u.set(u.get() + 1));
     NESTED.with(|n| n.set(n.get() + 1));
-    let leaves = cannot_move_register(body);
-    NESTED.with(|n| n.set(n.get() - 1));
-    leaves
+    /// Closes the question on the way out, a panic caught by a harness included: a count left
+    /// open would stop the next outermost question resetting `USED`.
+    struct Close;
+    impl Drop for Close {
+        fn drop(&mut self) {
+            NESTED.with(|n| n.set(n.get() - 1));
+        }
+    }
+    let _close = Close;
+    question()
 }
 
 /// See the `std` half.
 #[cfg(not(feature = "std"))]
 fn def_call_body_cannot_move_register(_body: &Expr) -> bool {
+    false
+}
+
+/// See the `std` half.
+#[cfg(not(feature = "std"))]
+fn within_def_call_budget(_question: impl FnOnce() -> bool) -> bool {
     false
 }
 

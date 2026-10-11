@@ -555,8 +555,7 @@ Each turns a refusal into an answer and needs its own oracle rows:
   register-keeping (`stage_is_register_keeping` recurses through `stage_keeps_register_statically`, the one definition of
   the static admissions that `resolve_seq_stage` reads too: jq backtracks to the fork each alternative of a
   `,` `//` `if` starts from, and a pipe threads the register through, so the whole is as unmoving as its
-  least branch). Still open under #3767: a `def` call (`def g: last(.a); g | $x`), which `cannot_move_register`
-  never admits; `getpath` as a branch (it needs the run's state); a compound `catch`
+  least branch). Still open under #3767: a `def` call with an argument (a zero-argument call is as register-keeping as its body since #4109, `def_call_keeps_register`); `getpath` as a branch (it needs the run's state); a compound `catch`
   handler that navigates (one of `select` stages and constants was lifted by #4151, `handler_navigates_nothing`; one that takes its steps from its own input over a body that raises only message strings, by #4309, `body_raises_only_fresh_messages`). An `[E]` collect as a branch was lifted by #4152 (`collect_keeps_register`, one definition for the bare
   stage and a branch).
 - ~~A `reduce` whose source or `UPDATE` navigates.~~ Done by #3732 (`reduce_leaves_register_in_place`, read by
