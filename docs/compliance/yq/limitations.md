@@ -129,7 +129,8 @@ The redirect runs wherever a write goes through `evaluate_yaml_cursor` — stdou
 [#1349](https://github.com/rust-works/succinctly/issues/1349) `--inplace` too (`yq -i
 '.b.p = 9'` writes `a: &x {p: 9, q: 2}` / `b: *x` back to the file). `--eval-all`
 evaluates the collected documents without it, so `yq ea '.b.p = 9'` still writes `b`
-positionally and drops the marks. A multi-document stream applies the redirect and the
+positionally and drops the marks ([#4380](https://github.com/rust-works/succinctly/issues/4380),
+which also covers its loss of every comment and style). A multi-document stream applies the redirect and the
 anchor marks to every document, on stdout and under `--inplace` alike
 ([#2520](https://github.com/rust-works/succinctly/issues/2520): the report that it reached the
 last document only no longer reproduces; pinned by the `yaml_multidoc_alias_*_2520` goldens and
