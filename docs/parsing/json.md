@@ -761,6 +761,19 @@ The 1.55 M row reproduced at +3.9% median / +3.1% min over 41 reps with its hold
 
 Pinned by `repeated_hashes_tests`, which now checks `any_hash_repeats` against a full sort and `hashes_repeat` on every input it checks `repeated_hashes` on (forcing the boolean to `false` when candidates exist fails two of them). A differential of base against this change on terminus (unique, duplicate, escaped-duplicate and mostly-duplicate keys, 2 to 900,000 keys, objects and arrays of objects, 14 queries) matched stdout, stderr and exit code on all 742 comparisons.
 
+#### A band where the gain disappears on an M4 Pro (#4322)
+
+The `keys_unsorted` bump above is the visible end of something wider. On an M4 Pro the prefilter stops paying for objects of about **1.55 M to 1.77 M keys** at `census` as well, and pays again on either side; on a 7950X there is no such band. Measured with `scripts/ab-cli.py` (interleaved, output identity and exit status gated, 31 reps, medians) on `json generate Nmb -p wide` files, both boxes checked idle first, base `8dd745d58`; "prefilter off" is that base with `repeated_hashes` forced to the plain sort:
+
+| `length`, base vs prefilter off | 1.0 M | 1.22 M | 1.44 M | 1.50 M | **1.55 M** | **1.66 M** | **1.77 M** | 1.88 M | 1.99 M |
+|---------------------------------|------:|-------:|-------:|-------:|-----------:|-----------:|-----------:|-------:|-------:|
+| M4 Pro                          | -9.6% | -10.3% |  -9.6% |  -8.8% |  **-1.5%** |  **-0.2%** |  **-0.2%** |  -9.5% | -10.0% |
+| 7950X                           | -4.3% |  -4.3% |  -4.2% |  -4.2% |      -4.1% |      -4.0% |      -4.1% |  -4.0% |  -4.0% |
+
+`keys | length` gives the same picture, and a repeat run on the M4 Pro read -2.3% / -1.9% / -1.6% inside the band and -8% to -10% outside it. The jump is in the prefilter build's own times (83.3 ms minimum at 1.50 M keys, 96.0 ms at 1.55 M) while the sort's goes from 93.1 to 95.9 ms over the same step, so the prefilter stops paying; `census` is never net slower than the sort. The two materializing sites #4169 switched (`to_entries`, `[.]`) do about five times more work per key and show nothing at these sizes.
+
+**Residual, mechanism not isolated.** It is not layout (a holdout with the prefilter forced off reads about 0% on every band row, and the bump is in absolute times), not duplicate keys (the generated files have none), not a bitset size step (`bits = (8n).next_power_of_two()` is 2^24 bits, two 2 MB bitsets, for every n from 1.05 M to 2.1 M), not the candidates `Vec` doubling (pre-sizing it with `Vec::with_capacity(2 * arrivals)` left the band in place: -0.3% / -0.3% / -2.1% inside it, -10% outside), and not the give-up path (random hashes at these sizes put about 5% of arrivals on already-set bits, far below the 25% cut-off). `time -l` instructions retired fell 6.5% at 1.55 M keys while the wall-clock rose, so it is memory behaviour, not work. What is left are guesses: the hashes `Vec` (8n bytes, about 12.4 MB) plus the two 2 MB bitsets pass 16 MB, an M4 Pro cluster's L2, about there, which does not explain why the band ends by 1.88 M; TLB reach; macOS's large-allocation behaviour. Telling them apart needs Instruments or `xctrace` on Apple silicon, which the benchmark box does not have. Left as is: the gate (`128..=2^21` hashes) stays, since the band is a lost gain, not a loss, at `census`, and the one site where it was a loss (`object_keys_repeat`) already keeps its sort.
+
 ---
 
 ## Optimisation Techniques Used
