@@ -62612,6 +62612,87 @@ fn test_yq_string_split_of_an_empty_string_and_by_an_empty_separator_4260() -> R
     Ok(())
 }
 
+/// #4263: yq's `split(sep)` splits on the separator node's text whatever its tag: `null` is
+/// `null`, a number its spelling, a boolean `true`/`false`, and a container (no text) splits into
+/// characters. jq raises for a non-string separator. Rows captured from yq v4.53.3 (`-p=json
+/// -o=json -I=0`, input `null`).
+#[test]
+fn test_yq_split_by_a_non_string_separator_4263() -> Result<()> {
+    let args = &["-p=json", "-o=json", "-I=0"];
+    for (filter, expected) in [
+        (r#""abc" | split(null)"#, r#"["abc"]"#),
+        (r#""anullb" | split(null)"#, r#"["a","b"]"#),
+        (r#""a1b" | split(1)"#, r#"["a","b"]"#),
+        (r#""a1.5b" | split(1.5)"#, r#"["a","b"]"#),
+        (r#""a1.0b" | split(1.0)"#, r#"["a","b"]"#),
+        (r#""a1b" | split(1e0)"#, r#"["a1b"]"#),
+        (r#""a1e0b" | split(1e0)"#, r#"["a","b"]"#),
+        (r#""a1b" | split(-1)"#, r#"["a1b"]"#),
+        (r#""a-1b" | split(-1)"#, r#"["a","b"]"#),
+        (r#""atrueb" | split(true)"#, r#"["a","b"]"#),
+        (r#""a,b" | split(true)"#, r#"["a,b"]"#),
+        (r#""afalseb" | split(false)"#, r#"["a","b"]"#),
+        (r#""a[1]b" | split([1])"#, r#"["a","[","1","]","b"]"#),
+        (r#""a1b" | split([])"#, r#"["a","1","b"]"#),
+        (r#""a1b" | split({"a": 1})"#, r#"["a","1","b"]"#),
+        // The empty string splits to nothing whatever the separator is.
+        (r#""" | split(null)"#, "[]"),
+        (r#""" | split(1)"#, "[]"),
+        // yq does not fan `split` out: the last separator is not tried.
+        (r#""a1b" | split(null, 1)"#, r#"["a1b"]"#),
+        // `split(re; flags)` still ignores its arguments (#1439).
+        (r#""a1b" | split(1; "g")"#, r#"["a","1","b"]"#),
+        // `null | split(..)` is nothing (#4236).
+        ("null | split(1)", ""),
+    ] {
+        let expected = if expected.is_empty() {
+            String::new()
+        } else {
+            format!("{expected}\n")
+        };
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, "null", args)?,
+            (expected, String::new(), 0),
+            "{filter}"
+        );
+    }
+    // A separator read from the document: its text, not its type.
+    for (doc, length) in [
+        ("sep: 1", "7"),
+        ("sep: 1.0", "2"),
+        ("sep: null", "2"),
+        ("sep: ~", "2"),
+        ("sep: true", "2"),
+        ("sep: True", "2"),
+        ("sep: \"1\"", "7"),
+        ("sep: 1_0", "1"),
+        ("sep: 1e0", "2"),
+        ("sep: [1]", "70"),
+        ("sep: {a: 1}", "70"),
+    ] {
+        let filter = r#".sep as $s | "a1b a1.0b a16b anullb a~b atrueb aTrueb a10b a01b a1e0b a.nanb a-.infb" | split($s) | length"#;
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?,
+            (format!("{length}\n"), String::new(), 0),
+            "{doc}"
+        );
+    }
+    // jq mode keeps requiring a string, as jq does.
+    for filter in [
+        r#""a1b" | split(1)"#,
+        r#""anullb" | split(null)"#,
+        r#""a1b" | split([1])"#,
+    ] {
+        let (stdout, stderr, code) = run_jq_stdin_with_stderr(filter, "null", &[])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+        assert!(
+            stderr.contains("split input and separator must be strings"),
+            "{filter}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.

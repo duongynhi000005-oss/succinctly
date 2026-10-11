@@ -18119,10 +18119,17 @@ fn builtin_split<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             if S::NULL_ENTRIES_AND_SPLIT_YIELD_NOTHING && matches!(value, StandardJson::Null) {
                 return QueryResult::None;
             }
-            let OwnedValue::String(sep) = sep_owned else {
-                return QueryResult::Error(EvalError::new(
-                    "split input and separator must be strings",
-                ));
+            // #4263 (yq): the separator is its node's text whatever its tag -- `null` is
+            // `null`, a number its spelling, a boolean `true`/`false` -- and a container,
+            // which has no text, splits the input into characters. jq requires a string.
+            let sep: Cow<'_, str> = match (&sep_owned, S::TAG == EvalTag::Yq) {
+                (OwnedValue::String(sep), _) => Cow::Borrowed(sep),
+                (_, true) => yq_scalar_text::<S>(&sep_owned).unwrap_or(Cow::Borrowed("")),
+                _ => {
+                    return QueryResult::Error(EvalError::new(
+                        "split input and separator must be strings",
+                    ));
+                }
             };
             match &value {
                 StandardJson::String(s) => {
