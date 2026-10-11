@@ -5997,5 +5997,11 @@ mod element_index_defaults_tests {
         assert!(!elements.is_empty());
         assert_eq!(elements.head_id(), None);
         assert!(elements.at_head_id(0).is_none());
+        // The wrapper still reads the list it wraps: only the index is missing.
+        let (first, rest) = elements.uncons().expect("a first element");
+        assert_eq!(first.as_i64(), Some(1));
+        assert_eq!(rest.get(0).and_then(|v| v.as_i64()), Some(2));
+        let (cursor, _) = rest.uncons_cursor().expect("a second element");
+        assert_eq!(cursor.value().as_i64(), Some(2));
     }
 }
