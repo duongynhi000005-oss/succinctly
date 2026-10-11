@@ -205,6 +205,24 @@ OPERANDS = [
     "empty",
     "tostring",
     "length",
+    # (#4295) `del`/`delpaths`/`setpath` hand their input back as the same `jv` when the
+    # path set is empty, so `path()` accepts them and a `$x` bound to the input still names
+    # it. A non-empty set builds a fresh value and stays a refusal: `del(.[]?)` is empty over
+    # a scalar and not over `[1]`, `del(.b?)` over `[1]` and not over `{"a":1}`.
+    "del(empty)",
+    "del(.[]?)",
+    "del(.b?)",
+    "del(.a?)",
+    "del(.b)",
+    "del(.[0]?)",
+    "delpaths([])",
+    "delpaths([[\"a\"]])",
+    "setpath([]; .)",
+    "setpath([]; 1)",
+    "setpath([\"a\"]; .)",
+    "del((empty))",
+    "delpaths(([]))",
+    "setpath(([]); (.))",
     # by-value operands jq navigates inside (#3428)
     "first",
     "last",

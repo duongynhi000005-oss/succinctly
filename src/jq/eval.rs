@@ -10025,13 +10025,16 @@ pub(crate) fn eval_owned_closed<S: EvalSemantics>(expr: &Expr) -> Option<OwnedVa
 pub(crate) enum FixedPathDel {
     /// `del(.)`: `null`, for any input.
     Null,
-    /// `del(.[]?)` over a value with nothing to iterate: the input itself.
+    /// `del(.[]?)` over a value with nothing to iterate, `del(empty)`,
+    /// `delpaths([])` and `setpath([]; .)`: the input itself.
     Input,
 }
 
 /// `del(.)`, and `del(.[]?)` over a scalar or an empty container, decided
 /// without the reindex bridge (#4283): the two `del` targets whose path set
-/// does not depend on what `.` holds.
+/// does not depend on what `.` holds. `del(empty)`, `delpaths([])` and
+/// `setpath([]; .)` join the second kind (#4295): no path at all, so the input
+/// comes back as the very same `jv`.
 ///
 /// `[.[] | del(.[]?)]` sent every scalar member over the bridge -- its text
 /// written, a one-token index built over it and the scalar decoded back out by
@@ -10044,9 +10047,11 @@ pub(crate) enum FixedPathDel {
 ///
 /// jq mode only: yq v4.53.3 prints nothing for `del(.)` and `[]` for
 /// `null | del(.[]?)`. Every other shape is `None`, left to the bridge with
-/// its diagnostics and identity rules. Callers keep it off while the #2889
-/// embed table is active, as they do [`eval_owned_reindex_free`], so a node a
-/// binding tracks is never answered here.
+/// its diagnostics and identity rules. The `Null` answer is withheld while the
+/// #2889 embed table is active, as [`eval_owned_reindex_free`] is, so a node a
+/// binding tracks is never answered there. `Input` is not: it is the input's
+/// own handle, which is the identity jq's `delpaths` keeps, and the bridge
+/// would rebuild a scalar it cannot (#4295).
 pub(crate) fn fixed_path_del<S: EvalSemantics>(
     expr: &Expr,
     input: &OwnedValue,
@@ -10054,17 +10059,33 @@ pub(crate) fn fixed_path_del<S: EvalSemantics>(
     if S::TAG != EvalTag::Jq {
         return None;
     }
+    let answer = fixed_path_del_shape(expr, input)?;
+    (answer == FixedPathDel::Input || !super::eval_generic::embed_table_active()).then_some(answer)
+}
+
+/// [`fixed_path_del`]'s shape test, before the embed-table gate.
+fn fixed_path_del_shape(expr: &Expr, input: &OwnedValue) -> Option<FixedPathDel> {
     let target = match unwrap_paren(expr) {
         Expr::Builtin(Builtin::Del(target)) => target,
+        // #4295: a path set that is empty by construction.
+        Expr::Builtin(Builtin::DelPaths(paths)) if is_empty_array_literal(unwrap_paren(paths)) => {
+            return Some(FixedPathDel::Input)
+        }
+        Expr::Builtin(Builtin::SetPath(path, value))
+            if is_empty_array_literal(unwrap_paren(path)) && is_identity_stage(value) =>
+        {
+            return Some(FixedPathDel::Input)
+        }
         // `. | del(.)` is `del(.)`, and a lone stage may arrive wrapped (#3692).
         Expr::Pipe(stages) => match skip_identity_stages(stages) {
-            [only] => return fixed_path_del::<S>(only, input),
+            [only] => return fixed_path_del_shape(only, input),
             _ => return None,
         },
         _ => return None,
     };
     match unwrap_paren(target) {
         Expr::Identity => Some(FixedPathDel::Null),
+        Expr::Builtin(Builtin::Empty) => Some(FixedPathDel::Input),
         Expr::Optional(inner) if matches!(unwrap_paren(inner), Expr::Iterate) => {
             let nothing_to_iterate = match input {
                 OwnedValue::Array(items) => items.is_empty(),
@@ -10072,6 +10093,15 @@ pub(crate) fn fixed_path_del<S: EvalSemantics>(
                 _ => true,
             };
             nothing_to_iterate.then_some(FixedPathDel::Input)
+        }
+        // #4295: `.k?` over a value `.k` cannot index (`null` indexes to `null`
+        // and an object to its member, both a path): the error is swallowed
+        // and no path remains.
+        Expr::Optional(inner)
+            if matches!(unwrap_paren(inner), Expr::Field(_))
+                && !matches!(input, OwnedValue::Null | OwnedValue::Object(_)) =>
+        {
+            Some(FixedPathDel::Input)
         }
         _ => None,
     }
@@ -11417,18 +11447,18 @@ fn eval_each_owned_past_front_doors<S: EvalSemantics>(
     {
         return flow;
     }
+    // #4283: see `eval_generic::eval_on_owned_over`.
+    if let Some(answer) = fixed_path_del::<S>(expr, input) {
+        let value = match answer {
+            FixedPathDel::Null => OwnedValue::Null,
+            FixedPathDel::Input => input.clone(),
+        };
+        return match sink(value) {
+            Demand::Continue => Flow::Exhausted,
+            Demand::Stop => Flow::Stopped { pending: None },
+        };
+    }
     if !super::eval_generic::embed_table_active() {
-        // #4283: see `eval_generic::eval_on_owned_over`.
-        if let Some(answer) = fixed_path_del::<S>(expr, input) {
-            let value = match answer {
-                FixedPathDel::Null => OwnedValue::Null,
-                FixedPathDel::Input => input.clone(),
-            };
-            return match sink(value) {
-                Demand::Continue => Flow::Exhausted,
-                Demand::Stop => Flow::Stopped { pending: None },
-            };
-        }
         if let Some(result) = eval_owned_reindex_free::<S>(expr, input) {
             return match result {
                 Ok(value) => match sink(value) {
@@ -40315,6 +40345,30 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         {
             emit_passthrough(value, trackable, snapshot, sink)
         }
+        // #4295: `del(f)` is `delpaths([path(f)])`, and jq's `delpaths` hands its
+        // input back as the same `jv` when the path set is empty, so `path()`
+        // accepts it (`5 | path(del(.[]?))` is `[]`). Judged on the resolved path
+        // set, never on the shape of `f`: `del(.b?)` is empty over `[1]` and not
+        // over `{"a":1}`. A non-empty set builds a fresh value and stays a
+        // refusal. jq only: yq's `del` is a write, not an identity.
+        Expr::Builtin(Builtin::Del(target))
+            if S::TAG == EvalTag::Jq && del_resolves_no_path::<S>(target, value) =>
+        {
+            emit_passthrough(value, trackable, snapshot, sink)
+        }
+        // #4295: `delpaths([])` and `setpath([]; .)` return their input itself.
+        Expr::Builtin(Builtin::DelPaths(paths))
+            if S::TAG == EvalTag::Jq && is_empty_array_literal(unwrap_paren(paths)) =>
+        {
+            emit_passthrough(value, trackable, snapshot, sink)
+        }
+        Expr::Builtin(Builtin::SetPath(path, new_value))
+            if S::TAG == EvalTag::Jq
+                && is_empty_array_literal(unwrap_paren(path))
+                && is_identity_stage(new_value) =>
+        {
+            emit_passthrough(value, trackable, snapshot, sink)
+        }
         // yq's `(.n|tonumber) = 5` writes through a number as well (v4.53.3), so
         // this arm is not mode-gated.
         Expr::Builtin(Builtin::ToNumber)
@@ -56040,6 +56094,42 @@ fn type_filter_keeps(builtin: &Builtin, value: &OwnedValue) -> Option<bool> {
     })
 }
 
+/// Whether `expr` is the literal empty array `[]`, which the parser reads as an
+/// array of an empty comma.
+fn is_empty_array_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Array(inner) if matches!(&**inner, Expr::Comma(items) if items.is_empty()))
+}
+
+/// Whether `del(target)` resolves no path over `value` (#4295), so that jq's
+/// `delpaths([])` returns `value` itself.
+///
+/// Only a target [`del_target_is_effect_free`] admits is resolved: the
+/// resolution is repeated by the refusal path when this answers no, and a
+/// target with a side effect would fire it twice. A resolution that raises
+/// answers no as well, leaving the error to the ordinary path.
+fn del_resolves_no_path<S: EvalSemantics>(target: &Expr, value: &OwnedValue) -> bool {
+    if !del_target_is_effect_free(target) {
+        return false;
+    }
+    // Stops at the first path: a non-empty set is refused by the caller's
+    // ordinary route, which resolves it again, so resolving it all here would
+    // double the work of every refusal.
+    let mut found = false;
+    let flow = resolve_terminal_sink::<S>(target, value, false, Untracked::Refuse, &mut |_| {
+        found = true;
+        Demand::Stop
+    });
+    flow.is_ok() && !found
+}
+
+/// [`is_pure_navigation`]'s grammar plus `empty`, the one non-navigating node
+/// a `del()` target is routinely made of.
+fn del_target_is_effect_free(target: &Expr) -> bool {
+    !any_subexpr(target, &mut |e| {
+        !(is_pure_navigation_node(e) || matches!(e, Expr::Builtin(Builtin::Empty)))
+    })
+}
+
 /// Whether `ltrimstr`/`rtrimstr` with the literal `arg` returns `value` itself
 /// (#4016): `value` or `arg` is not a string, or the edge does not match.
 fn trim_returns_input(is_left: bool, arg: &Expr, value: &OwnedValue) -> bool {
@@ -61879,12 +61969,10 @@ fn eval_owned_input<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     }
     // #4283: see `eval_generic::eval_on_owned_over`.
     if let Some(answer) = fixed_path_del::<S>(expr, input) {
-        if !super::eval_generic::embed_table_active() {
-            return QueryResult::Owned(match answer {
-                FixedPathDel::Null => OwnedValue::Null,
-                FixedPathDel::Input => input.clone(),
-            });
-        }
+        return QueryResult::Owned(match answer {
+            FixedPathDel::Null => OwnedValue::Null,
+            FixedPathDel::Input => input.clone(),
+        });
     }
     // After the fast path on purpose: it never reaches a resolver, and
     // demoting rebuilds `expr` whenever it holds a marker at all.
@@ -91694,16 +91782,63 @@ mod tests {
             "the matrix must hold scalars and empty containers"
         );
         assert_eq!(answered, [4 * values.len(), 3 * flat]);
+        // #4295: the targets with no path at all answer the input on every
+        // value; `.a?` does so wherever `.a` cannot index, and not on `null`
+        // (which indexes to `null`) or an object (which indexes to its
+        // member), where the bridge deletes or keeps a real path.
+        for (src, always) in [
+            ("del(empty)", true),
+            ("del((empty))", true),
+            ("delpaths([])", true),
+            ("(. | delpaths([]))", true),
+            ("setpath([]; .)", true),
+            ("setpath(([]); (.))", true),
+            ("del(.a?)", false),
+            ("del((.a)?)", false),
+        ] {
+            let expr = parse(src).unwrap();
+            for value in &values {
+                let indexes = matches!(value, OwnedValue::Null | OwnedValue::Object(_));
+                let fast = fixed_path_del::<JqSemantics>(&expr, value);
+                if !always && indexes {
+                    assert_eq!(fast, None, "{src} on {value:?}");
+                    continue;
+                }
+                assert_eq!(
+                    fast,
+                    Some(FixedPathDel::Input),
+                    "jq mode: {src:?} on {value:?}"
+                );
+                let (bridge, ended) = normalize(eval_owned_input_bridge::<Vec<u64>, JqSemantics>(
+                    &expr, value, false,
+                ));
+                let bridge: Vec<String> = bridge.iter().map(OwnedValue::to_json).collect();
+                assert_eq!(
+                    (vec![value.to_json()], "ok"),
+                    (bridge, ended.as_str()),
+                    "jq mode: {src:?} on {value:?}"
+                );
+                assert_eq!(
+                    fixed_path_del::<YqSemantics>(&expr, value),
+                    None,
+                    "yq: {src:?}"
+                );
+            }
+        }
         // Any other target is the bridge's, whatever the input.
         for src in [
             "del(.[])",
             "del(.a)",
             "del(.[0])",
             "del(.[0]?)",
-            "del(.a?)",
+            "del(.a?, .b)",
             "del(.[]?.a)",
             "del(., .)",
-            "del(empty)",
+            "delpaths([[]])",
+            "delpaths([[0]])",
+            "delpaths([], [])",
+            "setpath([]; 1)",
+            "setpath([0]; .)",
             "del(..)",
             "del(.)?",
             "del(.) | .a",

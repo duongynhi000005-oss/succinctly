@@ -3581,6 +3581,13 @@ answers `["b"]` — and classified the two residuals appended below):
     analyses do not know these stages return their input; the sweep alphabet cannot spell the bound
     shape, #4017). `ltrimstr`/`rtrimstr` with a literal argument that does not match return their
     input too (#4016); a matching edge builds a fresh string, and a non-literal argument still refuses.
+    `del(f)`, `delpaths([])` and `setpath([]; .)` return their input as well when the path set
+    is empty (#4295: `5 | path(del(.[]?))` and `[1] | path(del(.b?))` are `[[]]`),
+    judged on the resolved path set, never on the shape: `[1] | path(del(.[]?))` and
+    `{"a":1} | path(del(.b?))` still raise, as in jq. The `del` target must be side-effect free
+    (navigation, `empty`, a literal); anything else keeps the refusal. A `$x` bound to a scalar
+    keeps its identity through `del(empty)`, `del(.[]?)`, `del(.k?)`, `delpaths([])` and
+    `setpath([]; .)` when the stage's input is the binding's own value. jq mode only.
     Tracked as
     [#3460](https://github.com/rust-works/succinctly/issues/3460). Closed by #3460's first
     half: the accumulator's node carried from one source element to the next
