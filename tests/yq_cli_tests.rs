@@ -33934,8 +33934,8 @@ fn test_yq_nonterminal_iterate_container_fanout_noop_1432() -> Result<()> {
 /// - a genuinely out-of-range `Index` step *autovivifies* the array out
 ///   to that length in real yq (writing `null` padding, then fanning the
 ///   `Iterate` into the newly-created empty tail -- no error, no RHS
-///   evaluation at all), where succinctly has no such padding and
-///   evaluates the RHS instead;
+///   evaluation at all); succinctly agrees since #1921, so that shape
+///   asserts yq's document below;
 /// - an `Index` step hitting a real `Object` coerces the index to a
 ///   string key and inserts it in real yq (`{"0": []}`), where
 ///   succinctly has no such coercion and raises. Since #2481 it raises
@@ -33972,13 +33972,13 @@ fn test_yq_assign_all_noop_mismatched_element_type_1432() -> Result<()> {
 
     // `Index` mid-prefix is out of range on a real `Array`, with an
     // `Index` still ahead of it in the prefix.
-    let (_out, err, code) = run_yq_stdin_with_stderr(
+    let (out, err, code) = run_yq_stdin_with_stderr(
         ".a[5][].b = error(\"boom\")",
         "a:\n  - 1\n  - 2\n",
-        &["-o", "json"],
+        &["-o=json", "-I=0"],
     )?;
-    assert_ne!(code, 0);
-    assert!(err.contains("boom"), "err={err}");
+    assert_eq!(code, 0, "err={err}");
+    assert_eq!(out.trim(), "{\"a\":[1,2,null,null,null,[]]}");
 
     // `Index` mid-prefix hits a genuine scalar -- permanently no-ops,
     // matching real yq exactly (#1232).
