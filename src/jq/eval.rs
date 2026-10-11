@@ -48690,6 +48690,17 @@ fn foreach_source_destructures_register(source: &Expr) -> bool {
 /// resolver, so the caller routes a source that holds one through it when the
 /// accumulator is not known to be the register.
 fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
+    source_destructures_register_with(source, through_reduce, Vec::new())
+}
+
+/// [`source_destructures_register`] with the `$x` markers of the source that are jq's register at
+/// the fold (#4320, [`fold_source_register_markers`]): `. as $x | foreach ($x as {a:$a} | .) ...`
+/// destructures the register as `. as {a:$a}` does.
+fn source_destructures_register_with(
+    source: &Expr,
+    through_reduce: bool,
+    markers: Vec<*const Tracked>,
+) -> bool {
     let mut walk = RegisterSpine {
         through_reduce,
         vars: Vec::new(),
@@ -48698,8 +48709,38 @@ fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
         calls: SPINE_CALL_BUDGET,
         depth: 0,
         binding: Vec::new(),
+        markers,
     };
     walk.reach(source) == Reach::Destructures
+}
+
+/// The `$x` markers in a `foreach` `source` that are the register in hand (#4320): those
+/// [`marker_identical`] certifies against `ambient`, the same test the resolver applies to a
+/// marker in path position, so a `$x` that is a *different* node (`reduce .[] as $it (.; reduce
+/// ($it as {a:$a} | .) ...)` inside a fold body, which jq answers) is not read as the register.
+/// Only where `.` is jq's register (outside every fold body, or in the one
+/// [`fold_body::acc_is_register`] marked), as [`drive_fold_source_with`] reads
+/// `destructures_unplaced_register`.
+fn fold_source_register_markers<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+) -> Vec<*const Tracked> {
+    let mut markers = Vec::new();
+    if S::TAG != EvalTag::Jq
+        || !ambient.trackable
+        || !(fold_body::depth() == 0 || fold_body::acc_is_register_here())
+    {
+        return markers;
+    }
+    any_subexpr(source, &mut |e| {
+        if let Expr::TrackedVar(marker) = e {
+            if marker_identical::<S>(marker, ambient.value, &ambient.frame) {
+                markers.push(Rc::as_ptr(marker));
+            }
+        }
+        false
+    });
+    markers
 }
 
 /// Calls `visit` with each variable `pattern` binds, in order. One traversal for
@@ -48756,7 +48797,7 @@ fn peel_value_wrappers(e: &Expr) -> &Expr {
 /// not by the `.` rules.
 fn binds_variable(e: &Expr) -> bool {
     match peel_value_wrappers(e) {
-        Expr::Var(_) => true,
+        Expr::Var(_) | Expr::TrackedVar(_) => true,
         // #4320: so is a call with no arguments, which returns what its body does.
         Expr::FuncCall { args, .. } | Expr::DefCall { args, .. } => args.is_empty(),
         Expr::Comma(items) => items.iter().any(binds_variable),
@@ -48807,6 +48848,10 @@ struct RegisterSpine<'e> {
     /// The `def` bodies [`binds_register`](Self::binds_register) is reading the result of
     /// right now, so a recursive definition is read once (#4320).
     binding: Vec<*const Expr>,
+    /// The `$x` markers (bound outside the source) that are jq's register at the fold, by
+    /// `Rc` identity: the caller certified each one against the register it holds
+    /// ([`fold_source_register_markers`], #4320). Empty for a walk with no such caller.
+    markers: Vec<*const Tracked>,
 }
 
 impl<'e> RegisterSpine<'e> {
@@ -48828,6 +48873,13 @@ impl<'e> RegisterSpine<'e> {
     ///
     /// [`body_binds_register`]: Self::body_binds_register
     fn binds_register(&mut self, e: &'e Expr) -> bool {
+        // #4320: a `$x` bound outside the source that is the register at the fold. Only the bare
+        // marker, not one behind `first`/`limit`/`?`: the resolver cannot place those heads, and
+        // its refusal for them is the kind a `try` around the fold does not catch, where jq's is
+        // (`del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) ...) | ...)`).
+        if let Expr::TrackedVar(marker) = unwrap_bind_source(e) {
+            return self.markers.contains(&Rc::as_ptr(marker));
+        }
         match peel_value_wrappers(e) {
             Expr::Var(name) => self.holds_register(name),
             Expr::Comma(items) if items.iter().any(binds_variable) => {
@@ -49481,7 +49533,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
                     )))
     }) || (S::TAG == EvalTag::Jq
         && foreach_source
-        && foreach_source_destructures_register(source))
+        && source_destructures_register_with(
+            source,
+            false,
+            fold_source_register_markers::<S>(source, ambient),
+        ))
         || destructures_unplaced_register
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
