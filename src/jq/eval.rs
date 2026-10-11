@@ -41032,22 +41032,21 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
             forward_drained_branch(flow, result, sink)
         }
 
+        // #3763, #4114: jq defines `isempty(g)` as `first((g | false), true)`, so in
+        // a path it is `any`/`all`'s drain with every output of `g` decisive
+        // ([`resolve_isempty_sink`]). Jq mode only (ADR-0018).
+        Expr::Builtin(Builtin::IsEmpty(inner)) if S::TAG == EvalTag::Jq => {
+            resolve_isempty_sink::<S>(inner, value, trackable, snapshot, frame, keep, sink)
+        }
+
         Expr::Builtin(Builtin::IsEmpty(inner)) => {
             // A single output is all `resolve_bounded_sink` needs to see to
             // know the argument isn't empty -- answering `Demand::Stop`
             // immediately (its own `n = 1` cap already stops the underlying
             // generator after one branch either way) turns its returned
             // `flow` itself into the emptiness signal: `Stopped` means a
-            // branch arrived, `Exhausted` means none did.
-            //
-            // #3763: jq defines `isempty(g)` as `first((g | false), true)`, so
-            // a generator that emits leaves the register on the node `g` put
-            // it on, and `path()` accepts the `false` it answers when that is
-            // identical to it: `isempty(.[]?)` on `[false]` is `[0]`. The first
-            // branch is kept for that (the same `register_after` +
-            // `computed_at_register` rule as `any`/`all(gen; cond)`, jq mode
-            // only). A generator that emits nothing is #3456's case below.
-            let mut first_at: Option<(Rc<PathPrefix>, BranchRegister<'a>)> = None;
+            // branch arrived, `Exhausted` means none did. (yq mode: the jq
+            // arm above states jq's register and answers per output.)
             let flow = resolve_bounded_sink::<S>(
                 inner,
                 value,
@@ -41056,30 +41055,15 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 frame,
                 keep,
                 1,
-                &mut |branch| {
-                    if S::TAG == EvalTag::Jq {
-                        first_at = Some(register_after(inner, branch, frame));
-                    }
-                    Demand::Stop
-                },
+                &mut |_| Demand::Stop,
             );
             let is_empty = !matches!(flow, ResolveFlow::Stopped);
-            match first_at {
-                Some((path, register)) => forward_drained_branch(
-                    flow,
-                    computed_at_register(OwnedValue::Bool(false), path, register),
-                    sink,
-                ),
-                // #3456: an empty generator backtracked every branch it
-                // explored, so jq's register is where it entered; an emitting
-                // one may have moved it ([`drained_register_after`]).
-                None => forward_drained_result(
-                    flow,
-                    OwnedValue::Bool(is_empty),
-                    drained_register_after::<S>(trackable, value, !is_empty),
-                    sink,
-                ),
-            }
+            forward_drained_result(
+                flow,
+                OwnedValue::Bool(is_empty),
+                drained_register_after::<S>(trackable, value, !is_empty),
+                sink,
+            )
         }
 
         // #3349: `any(gen;cond)`/`all(gen;cond)` navigate `gen` live, so an
@@ -44931,7 +44915,85 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
             delivery.sink,
         );
     }
-    finish_any_all_answers::<S>(delivery, flow, owed, trackable, value)
+    finish_any_all_answers(
+        delivery,
+        flow,
+        owed,
+        // `gen` ran to its end after a swallowed answer, so every one of its forks was
+        // backtracked and jq's register is back where this entered, exactly as for a
+        // generator that emitted nothing. `emitted` is that restoration, not whether
+        // `gen` produced outputs: passing `true` would re-break #3858.
+        drained_register_after::<S>(trackable, value, false),
+    )
+}
+
+/// The path-position body of `isempty(g)` in jq mode (#3456, #3763, #4114).
+///
+/// jq defines it as `first((g | false), true)`: the first output of `g` answers
+/// `false` and the `first` then breaks, and only a `g` that ran to its end
+/// answers `true`. That is `any`/`all`'s drain with every output of `g`
+/// decisive and no `cond`, so it hands its answers to the consumer the same way
+/// ([`AnswerDelivery`]): `false` at the register [`register_after`] states, from
+/// inside the drain, and the identity element `true` once `g` ran to its end
+/// after a swallowed answer.
+///
+/// The `first`'s break is an error a `?//` inside `g` catches, as it catches a
+/// path error the consumer raises on the `false` (jq refuses `false` unless it is
+/// identical to the register): the retry resolves the next alternative, which may
+/// answer again or come up dry, and a dry retry leaves `g` running to its end so
+/// the trailing `true` fires (`path(.x | isempty(. as $q ?// $z | if $q then true
+/// else empty end))` on `{"x":true}` is `["x"]`). A `g` with no `?//` stops at its
+/// first output, as it did when this arm drained it through
+/// [`resolve_bounded_sink`]. A generator that emitted nothing backtracked every
+/// branch it explored, so the register is where it entered
+/// ([`drained_register_after`], #3456).
+#[allow(clippy::too_many_arguments)] // STYLE-0004: the resolver's threaded ambient state, plus the arm's operand.
+fn resolve_isempty_sink<'a, S: EvalSemantics>(
+    gen: &Expr,
+    value: &'a OwnedValue,
+    trackable: bool,
+    snapshot: &Snapshot,
+    frame: &Frame,
+    keep: Keep,
+    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
+) -> ResolveFlow {
+    // Every output of `g` is `false` (`target_truthy`), the identity element `true`.
+    let mut delivery = AnswerDelivery::new(sink, false);
+    let flow = resolve_node_sink::<S>(
+        gen,
+        value,
+        trackable,
+        snapshot,
+        frame,
+        // The first output of each resolution is all `first` takes; a retry is
+        // another resolution, with its own.
+        keep.at_most(1),
+        &mut |branch| {
+            delivery.answer(register_after(gen, branch, frame));
+            Demand::Stop
+        },
+    );
+    if delivery.delivered == 0 {
+        return forward_drained_result(
+            flow,
+            OwnedValue::Bool(true),
+            drained_register_after::<S>(trackable, value, false),
+            delivery.sink,
+        );
+    }
+    // The identity element `true`, once `g` ran to its end after a swallowed answer,
+    // is at the register jq's retry backtracked to: where this entered. A trackable
+    // entry's is `value`; an untracked one's is the frame's carried register, which
+    // `and`/`or` must be told or they refuse the `true` the base accepted as a single
+    // answer (`1 | (isempty(g) or true)`, #4114 review).
+    let at_entry = if trackable {
+        drained_register_after::<S>(trackable, value, false)
+    } else {
+        frame.register().map_or(BranchRegister::None, |register| {
+            BranchRegister::Unmoved(Cow::Owned(register.clone()))
+        })
+    };
+    finish_any_all_answers(delivery, flow, None, at_entry)
 }
 
 /// The consumer side of `any`/`all`'s path answers (#3827, #3899): each decisive
@@ -45007,12 +45069,11 @@ impl<'s, 'a> AnswerDelivery<'s, 'a> {
 /// `gen` running, #3819), then an escape the drive still owes, which is raised
 /// after the answers as jq does -- an answer that is a valid path is printed
 /// first, and a refused one is the refusal the retry that raised supersedes.
-fn finish_any_all_answers<'a, S: EvalSemantics>(
+fn finish_any_all_answers<'a>(
     mut delivery: AnswerDelivery<'_, 'a>,
     flow: ResolveFlow,
     owed: Option<EvalEscape>,
-    trackable: bool,
-    value: &'a OwnedValue,
+    identity_register: BranchRegister<'a>,
 ) -> ResolveFlow {
     let target_truthy = delivery.target_truthy;
     let (escape, identity_follows) = match (owed, flow) {
@@ -45023,11 +45084,7 @@ fn finish_any_all_answers<'a, S: EvalSemantics>(
     if identity_follows {
         delivery.deliver(untracked_at_register(
             Cow::Owned(OwnedValue::Bool(!target_truthy)),
-            // `gen` ran to its end, so every one of its forks was backtracked and jq's
-            // register is back where this entered, exactly as for a generator that
-            // emitted nothing. `emitted` is that restoration, not whether `gen` produced
-            // outputs: passing `true` would re-break #3858.
-            drained_register_after::<S>(trackable, value, false),
+            identity_register,
         ));
     }
     if let Some(escape) = escape {
@@ -45040,7 +45097,7 @@ fn finish_any_all_answers<'a, S: EvalSemantics>(
     }
 }
 
-/// [`leaf_register`] for the drain arms (`isempty`, `INDEX`, and `last` outside
+/// [`leaf_register`] for the drain arms (`isempty` in yq mode, `INDEX`, and `last` outside
 /// jq mode): each runs its argument through a discarding sink and forwards one
 /// derived value, so none can claim the register stayed where it entered (D5).
 /// Whether jq's own definition leaves it is a promotion with oracle rows of its
@@ -45412,7 +45469,7 @@ fn resolve_from_restored_input<'a, S: EvalSemantics>(
 /// Shared tail for every "drain an argument fully via a discarding sink,
 /// then forward one computed value" arm in [`resolve_node_sink`] (`Array`,
 /// `LastExpr`/`LastStream` in yq mode,
-/// `IsEmpty`, `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond` when nothing
+/// `IsEmpty` in yq mode (jq mode answers per output, [`resolve_isempty_sink`], #4114), `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond` when nothing
 /// decided or `cond` may move the register, #3749): once the drain itself is done (`flow`), build the one branch it
 /// produced and forward it to `sink`, propagating an escape from the drain
 /// immediately and mapping the caller's own `Demand` back to a `ResolveFlow`.

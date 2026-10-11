@@ -118115,6 +118115,220 @@ fn test_any_all_path_answer_precedes_the_retrys_side_effects_3899() -> Result<()
     Ok(())
 }
 
+/// #4114 rows over `{"x":true}`. jq defines `isempty(g)` as `first((g | false), true)`:
+/// the `first`'s break is swallowed by a `?//` inside `g`, so a retried
+/// alternative answers again and one that comes up dry leaves `g` running to its
+/// end, which fires the trailing `true`. Every row captured from jq 1.7.1.
+const RETRY_ROWS_ISEMPTY_PATH_4114_TRUE: &[RetryRow3293] = &[
+    // the `false` is refused (`true` is the register), the retry is dry, `true` is the answer
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end))"#,
+        "[\"x\"]\n",
+        "AA",
+        "",
+        0,
+    ),
+    (
+        r#"[path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end))]"#,
+        "[[\"x\"]]\n",
+        "AA",
+        "",
+        0,
+    ),
+    (
+        r#"[path(.x | first(isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end)))]"#,
+        "[[\"x\"]]\n",
+        "AA",
+        "",
+        0,
+    ),
+    // the retry raises: the error follows the refused answer's
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else error("E2") end))"#,
+        "",
+        "AA",
+        "E2",
+        5,
+    ),
+    // the retry answers `false` too, which is refused as well
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else false end))"#,
+        "",
+        "AA",
+        "Invalid path expression with result false",
+        5,
+    ),
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else ($z, false) end))"#,
+        "",
+        "AA",
+        "Invalid path expression with result false",
+        5,
+    ),
+    // no alternative is retried when the first one emits nothing: `g` ends, `true`
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then empty else true end))"#,
+        "[\"x\"]\n",
+        "A",
+        "",
+        0,
+    ),
+    // a single alternative answer that is refused with no `?//` to retry is the refusal
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | $q))"#,
+        "",
+        "AA",
+        "Invalid path expression with result false",
+        5,
+    ),
+];
+
+/// #4114 rows over `{"x":false}`: the `false` answer is identical to the register,
+/// so it is accepted, and the retry that follows answers again.
+const RETRY_ROWS_ISEMPTY_PATH_4114_FALSE: &[RetryRow3293] = &[
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then empty else false end))"#,
+        "[\"x\"]\n[\"x\"]\n",
+        "AA",
+        "",
+        0,
+    ),
+    // `g` ran to its end after nothing answered: `true` is refused against a `false` register
+    (
+        r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end))"#,
+        "",
+        "A",
+        "Invalid path expression with result true",
+        5,
+    ),
+];
+
+/// #4114 rows over `{"x":true,"y":1}`: the writes follow the path answer.
+const RETRY_ROWS_ISEMPTY_PATH_4114_WRITE: &[RetryRow3293] = &[
+    (
+        r#"del(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end))"#,
+        "{\"y\":1}\n",
+        "AA",
+        "",
+        0,
+    ),
+    (
+        r#"(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then true else empty end)) |= 5"#,
+        "{\"x\":5,\"y\":1}\n",
+        "AA",
+        "",
+        0,
+    ),
+];
+
+/// #4114: `path(isempty(g))` states the swallowed-break retry `isempty` is defined
+/// with (`first((g | false), true)`), as `any`/`all` have since #3819/#3827, on
+/// the cursor route (a document input) and the owned one (`-n`).
+#[test]
+fn test_isempty_path_answers_through_a_swallowed_break_retry_4114() -> Result<()> {
+    for (input, rows) in [
+        (r#"{"x":true}"#, RETRY_ROWS_ISEMPTY_PATH_4114_TRUE),
+        (r#"{"x":false}"#, RETRY_ROWS_ISEMPTY_PATH_4114_FALSE),
+        (r#"{"x":true,"y":1}"#, RETRY_ROWS_ISEMPTY_PATH_4114_WRITE),
+    ] {
+        assert_retry_rows_3293(None, &format!("{input} | "), rows)?;
+        assert_retry_rows_3293(Some(input), "", rows)?;
+    }
+    Ok(())
+}
+
+/// #4114 rows over `{"a":1}`: on an untracked entry (`1 | ...`) the identity `true`
+/// that follows a swallowed answer is at the register the frame carries, so an
+/// `and`/`or` around the `isempty` accepts it as jq does. The single answer the
+/// resolver gave before the retry was modelled was accepted; stating no register
+/// for the second one refused it (`del` exited 5). Captured from jq 1.7.1.
+const RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED: &[RetryRow3293] = &[
+    (
+        r"del(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x.a?)",
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x)",
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) and true) | $x)",
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"path(. as $x | 1 | (isempty(isempty(. as $q ?// $z | if $q then true else empty end)) and true) | $x)",
+        "[]\n[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"path(. as $x | 1 | (isempty(limit(2; . as $q ?// $z | if $q then true else empty end)) or (.a)?) | $x)",
+        "[]\n",
+        "",
+        "",
+        0,
+    ),
+];
+
+/// #4114: `isempty`'s identity `true` on an untracked entry, under `and`/`or`.
+#[test]
+fn test_isempty_path_identity_answer_on_an_untracked_entry_4114() -> Result<()> {
+    let input = r#"{"a":1}"#;
+    assert_retry_rows_3293(
+        None,
+        &format!("{input} | "),
+        RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED,
+    )?;
+    assert_retry_rows_3293(Some(input), "", RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED)?;
+    Ok(())
+}
+
+/// #4114: the consumer has `isempty`'s `false` before the retry that follows it
+/// runs (#3899's rule for `any`/`all`), and a `halt` downstream of it is not the
+/// break the `?//` swallows, so the retry never runs. Captured from jq 1.7.1.
+#[test]
+fn test_isempty_path_answer_precedes_the_retrys_side_effects_4114() -> Result<()> {
+    let input = r#"{"x":false}"#;
+    for (filter, stdout, stderr, code) in [
+        (
+            r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then empty else false end)) | ("H"|halt_error(3))"#,
+            "",
+            "AH",
+            3,
+        ),
+        (
+            r#"path(.x | isempty(. as $q ?// $z | ("A"|stderr) as $m | if $q then empty else false end)) | ("H"|stderr)"#,
+            "\"H\"\n\"H\"\n",
+            "AHAH",
+            0,
+        ),
+    ] {
+        let owned = format!("{input} | {filter}");
+        for (args, stdin) in [
+            (vec!["-c", filter], Some(input)),
+            (vec!["-nc", owned.as_str()], None),
+        ] {
+            let (out, err, status) = run_jq_full(&args, stdin)?;
+            assert_eq!(
+                (out.as_str(), err.as_str(), status),
+                (stdout, stderr, code),
+                "`{filter}`"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// #3858 rows over `{"x":true}`
 const RETRY_ROWS_ANY_ALL_PATH_IDENTITY_3858_0: &[RetryRow3293] = &[
     (

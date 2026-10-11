@@ -11500,10 +11500,24 @@ retried alternative's side effects (`stderr`, `debug`, `halt`) run after the ans
 as jq's lazy `first(...)` runs them: `path(.x | any(.; ...)) | ("H"|halt_error(3))`
 halts at the first answer without running the retry, and a `stderr` trace in the retry
 comes after the consumer's own (`test_any_all_path_answer_precedes_the_retrys_side_effects_3899`,
-`test_any_all_path_answer_halt_is_not_retried_3827`). `isempty(g)` has no such retry
-to reorder, because jq's `first((g | false), true)` is not modelled past `g`'s first
-output here at all (`path(.x | isempty(. as $q ?// $z | if $q then true else empty end))`
-on `{"x":true}` is `["x"]` in jq, a refusal here).
+`test_any_all_path_answer_halt_is_not_retried_3827`). `isempty(g)` takes the same route
+since #4114, because jq defines it as `first((g | false), true)`: each output of `g` answers
+`false` at the register it left, a `?//` inside `g` swallows the `first`'s break and retries
+(one answer per alternative, the consumer's side effects first), and a retry that comes up
+dry leaves `g` running to its end, which fires the trailing `true`
+(`path(.x | isempty(. as $q ?// $z | if $q then true else empty end))` on `{"x":true}` is
+`["x"]`, `test_isempty_path_answers_through_a_swallowed_break_retry_4114`,
+`test_isempty_path_answer_precedes_the_retrys_side_effects_4114`). yq mode keeps its single
+by-value answer (ADR-0018). The identity `true` that follows a swallowed answer rides the register
+the call entered with, which on an untracked entry is the frame's carried one, so an `and`/`or`
+around it accepts as jq does (`test_isempty_path_identity_answer_on_an_untracked_entry_4114`); the
+same identity element after `any`/`all` and the `true` of an `isempty(g)` whose `g` emitted nothing
+still state no register there (`1 | (isempty(empty) or true)` is `true` in jq, a refusal here). That
+residual is why 13 rows of the register sweep that `main` matched by accident now refuse (all
+`isempty(g ?// ...) or X` inside a `foreach` UPDATE whose extract navigates the computed `true`, or under an
+outer destructuring `?//`): `any(g ?// ...; .) or X` and `isempty(empty) or X` already refused them on
+`main`, so `isempty` joins its siblings rather than gaining a new gap. The sweep over the `isempty` operands
+(226,467 rows) went from 3,550 to 536 ACCEPT_WRONG and from 1,912 to 348 DIFF.
 
 The identity element `any`/`all` answer once `gen` is exhausted after a swallowed answer
 is compared with the register where the call entered, since backtracking through every fork
