@@ -4304,9 +4304,11 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
             }
         };
         // #4305: see [`stitch_json_file_seams`]. Not under `--validate`, which is strict per file.
-        if !args.validate {
-            stitch_json_file_seams(raw_inputs.iter_mut(), false);
-        }
+        let seams = if args.validate {
+            Vec::new()
+        } else {
+            stitch_json_file_seams(raw_inputs.iter_mut(), false)
+        };
         // Substitution is skipped under `--validate` so the strict validator
         // in the loop below still sees the *original* bytes (#1247).
         // Substituting first silently repaired a non-UTF-8 document, leaving
@@ -4327,7 +4329,7 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
         // diagnostic names) is carried here instead, since the one document
         // no longer belongs to any single file.
         let (raw_inputs, slurped) = if args.slurp {
-            match slurp_documents(raw_inputs, &files, args.validate) {
+            match slurp_documents(raw_inputs, &files, args.validate, &seams) {
                 Ok(mut slurped) => (vec![std::mem::take(&mut slurped.combined)], Some(slurped)),
                 // `--validate` already printed its own report.
                 Err(SlurpFailure::Validation(exit_code)) => return Ok(exit_code),
@@ -4417,10 +4419,18 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
             // file rather than in this value's slice. Only a diagnostic reads
             // it, so it is resolved when one does (#4160 on the M2 fast path,
             // #4178 on the general path through `LazyLocation`).
+            // #4316: the bytes a stitched file starts with came from the previous file, so
+            // its lines start after them.
+            let seam = if slurped.is_some() {
+                Seam::NONE
+            } else {
+                seams.get(idx).copied().unwrap_or_default()
+            };
             let locator = ValueLocator::new(
                 raw,
                 filename.as_deref(),
                 slurped.as_ref().map(|slurped| slurped.eof_line),
+                seam,
             );
             for (start, end) in values {
                 let json_bytes = &raw[start..end];
@@ -4677,7 +4687,8 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
             // value and reads nothing after it, this file or any later one
             // (#4313), so the files that follow are not run either.
             if let Some(offset) = split_error {
-                let at = InputLocation::at(filename.as_deref(), parse_error_line(raw, offset));
+                let at =
+                    InputLocation::at(filename.as_deref(), parse_error_line(raw, offset, seam));
                 sink.report(DiagStyle::Jq, &EvalError::new("Invalid JSON text"), &at);
                 break;
             }
@@ -5295,9 +5306,11 @@ fn get_inputs(
     // a file continues in the next one.
     // `--validate` is strict per file (an empty file is rejected too), so it reads the files as
     // written.
-    if json_input_mode && !args.validate {
-        stitch_json_file_seams(raw_bytes.iter_mut().map(|(_, raw)| raw), track_eof);
-    }
+    let seams = if json_input_mode && !args.validate {
+        stitch_json_file_seams(raw_bytes.iter_mut().map(|(_, raw)| raw), track_eof)
+    } else {
+        Vec::new()
+    };
 
     // #1525: real jq warns on stderr when it drops a malformed --seq
     // record; succinctly silently ignored malformed records entirely
@@ -5427,7 +5440,7 @@ fn get_inputs(
     let eof_tail = (track_eof && !args.slurp && !seq_stream_shape && args.input_dsv.is_none())
         .then(|| {
             let sources: Vec<&[u8]> = raw_bytes.iter().map(|(_, raw)| raw.as_slice()).collect();
-            EofTail::of(&sources, args.raw_input)
+            EofTail::of(&sources, args.raw_input, &seams)
         });
 
     // All reads happen first, then decoding: a later file's read error still
@@ -5547,7 +5560,9 @@ fn get_inputs(
             if seq_trailing_record_dropped {
                 None
             } else {
-                Some(line_at(raw, raw.len()))
+                // Its own lines, without a token moved onto it (#4316).
+                let own = &raw[seams.last().map_or(0, |seam| seam.base).min(raw.len())..];
+                Some(line_at(own, own.len()))
             }
         })
     } else {
@@ -5627,8 +5642,11 @@ fn get_inputs(
         values = build_raw_input_values(&raw_inputs, &mut locations);
         debug_assert_eq!(locations.len(), values.len(), "one location per value");
     } else {
-        for (file_idx, raw) in raw_inputs {
+        for (pos, (file_idx, raw)) in raw_inputs.into_iter().enumerate() {
             let src = file_idx.unwrap_or(0);
+            // #4316: the bytes a stitched file starts with came from the previous file, so
+            // its lines start after them.
+            let seam = seams.get(pos).copied().unwrap_or_default();
 
             if let Some(delimiter) = args.input_dsv {
                 // DSV input: each row becomes a JSON array of strings
@@ -5657,7 +5675,7 @@ fn get_inputs(
                     let documents_before = values.len();
                     let mut ends = Vec::new();
                     let mut offset = 0;
-                    let mut faults = LineCounter::new(raw.as_bytes());
+                    let mut faults = LineCounter::at_seam(raw.as_bytes(), seam);
                     loop {
                         let segment = &raw[offset..];
                         let (parsed, parse_error) = parse_json_stream_prefix(segment);
@@ -5735,7 +5753,13 @@ fn get_inputs(
                         }
                         offset = next;
                     }
-                    locations.extend_from_ends(src, &raw, &ends, values.len() - documents_before);
+                    locations.extend_from_ends(
+                        src,
+                        &raw,
+                        seam,
+                        &ends,
+                        values.len() - documents_before,
+                    );
                     continue;
                 }
                 // Parse as JSON stream: the clean prefix, and the parse error
@@ -5777,7 +5801,7 @@ fn get_inputs(
                         .take(parsed.len())
                         .map(|&(_, end)| end)
                         .collect();
-                    locations.extend_from_ends(src, &raw, &ends, parsed.len());
+                    locations.extend_from_ends(src, &raw, seam, &ends, parsed.len());
                     if parse_error.is_some() {
                         // The malformed value starts at the first span the
                         // parse did not produce a value for, or where the
@@ -5787,7 +5811,7 @@ fn get_inputs(
                             .map(|&(start, _)| start)
                             .or(split_error)
                             .unwrap_or(raw.len());
-                        error_line = parse_error_line(raw.as_bytes(), start);
+                        error_line = parse_error_line(raw.as_bytes(), start, seam);
                     }
                 }
                 values.extend(parsed);
@@ -5992,12 +6016,24 @@ const JQ_READ_CHUNK: usize = 4095;
 impl EofTail {
     /// The tail of `sources`, in command-line order, read as JSON text or, with
     /// `raw`, as `-R` lines.
-    fn of(sources: &[&[u8]], raw: bool) -> Self {
-        let newlines = sources.last().map_or(0, |last| count_newlines(last));
+    ///
+    /// `seams` is what [`stitch_json_file_seams`] did to each source (#4316): the last
+    /// source's own lines and reads start after the bytes moved onto it, which belong to an
+    /// earlier file's reads. Nothing is moved off the last source.
+    fn of(sources: &[&[u8]], raw: bool, seams: &[Seam]) -> Self {
+        let base = sources.len().checked_sub(1).map_or(0, |last| {
+            seams
+                .get(last)
+                .map_or(0, |seam| seam.base)
+                .min(sources[last].len())
+        });
+        let newlines = sources
+            .last()
+            .map_or(0, |last| count_newlines(&last[base..]));
         let unknown = if raw {
             Self::raw_line_ends_at_eof(sources)
         } else {
-            Self::json_value_completes_in_final_read(sources)
+            Self::json_value_completes_in_final_read(sources, base)
         };
         Self {
             newlines: newlines as u32,
@@ -6019,24 +6055,25 @@ impl EofTail {
     }
 
     /// JSON: whether the stream's last value completes in the read that
-    /// reaches the end of input.
-    fn json_value_completes_in_final_read(sources: &[&[u8]]) -> bool {
+    /// reaches the end of input. The last source's first `base` bytes were moved there from
+    /// an earlier file (#4316) and are not part of its reads.
+    fn json_value_completes_in_final_read(sources: &[&[u8]], base: usize) -> bool {
         let Some((&last, earlier)) = sources.split_last() else {
             return false;
         };
         // Where the final read starts: reads restart after each newline and
         // take at most `JQ_READ_CHUNK` bytes, so a last line that fills its
         // reads exactly leaves an empty final read.
-        let line_start = last
+        let line_start = last[base..]
             .iter()
             .rposition(|&b| b == b'\n')
-            .map_or(0, |at| at + 1);
+            .map_or(base, |at| base + at + 1);
         let partial = (last.len() - line_start) % JQ_READ_CHUNK;
         let final_read = last.len() - partial;
         // The last thing jq completes in this source: a value, or a parse error
         // where its reads meet the fault. Past a fault jq resumes at its next
         // read (#4311), so the stream's last event may follow one.
-        let mut faults = LineCounter::new(last);
+        let mut faults = LineCounter::at_seam(last, Seam::base(base));
         let mut last_event = None;
         let mut offset = 0;
         loop {
@@ -6132,6 +6169,8 @@ impl InputLocations {
     /// disagree — modes that skip unparsable records can produce fewer values
     /// than the scan found offsets, and a wrong line is worse than a vague one.
     ///
+    /// `seam` is what [`stitch_json_file_seams`] did to `raw` ([`LineCounter::at_seam`], #4316).
+    ///
     /// `ends` is already non-decreasing (this crate's own caller,
     /// `find_json_values`, is a single left-to-right scan), so one shared
     /// `LineCounter` keeps this whole loop O(n) rather than the O(n^2) a
@@ -6140,14 +6179,21 @@ impl InputLocations {
     /// (#1808): a boundary-spanning record's own file can't be recovered
     /// from an isolated `raw`, so `build_seq_values`/`seq_values_with_indices`
     /// track offsets across the whole multi-file stream directly instead.
-    fn extend_from_ends(&mut self, src: usize, raw: &str, ends: &[usize], values: usize) {
+    fn extend_from_ends(
+        &mut self,
+        src: usize,
+        raw: &str,
+        seam: Seam,
+        ends: &[usize],
+        values: usize,
+    ) {
         if ends.len() == values {
-            let mut line_counter = LineCounter::new(raw.as_bytes());
+            let mut line_counter = LineCounter::at_seam(raw.as_bytes(), seam);
             for &end in ends {
                 self.push(src, line_counter.read_end_line(end));
             }
         } else {
-            let line = content_lines(raw);
+            let line = content_lines(&raw[seam.base.min(raw.len())..]);
             for _ in 0..values {
                 self.push(src, line);
             }
@@ -6425,6 +6471,34 @@ fn report_unopenable_input(e: &InputFileOpenError) -> i32 {
     exit_codes::USAGE_ERROR
 }
 
+/// What [`stitch_json_file_seams`] did to one file's bytes (#4305), which jq's own per-file
+/// line counting does not see: jq counts a file's lines, and chunks its 4095-byte reads, over
+/// the file as it was on disk (#4316).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Seam {
+    /// How many bytes were moved onto the front of the file from the previous one. They
+    /// are not this file's: neither their newlines nor their place in a read count here.
+    base: usize,
+    /// How many of this file's own bytes were moved off its end onto the next one. They
+    /// are still this file's to jq: its last read runs on into them.
+    moved_len: usize,
+    /// Where the first newline among those moved bytes is, counted from the first of them.
+    moved_newline: Option<usize>,
+}
+
+impl Seam {
+    const NONE: Self = Self {
+        base: 0,
+        moved_len: 0,
+        moved_newline: None,
+    };
+
+    /// Only the front of the file was changed.
+    fn base(base: usize) -> Self {
+        Self { base, ..Self::NONE }
+    }
+}
+
 /// Incremental version of [`line_at`] for a caller visiting a monotonically
 /// increasing sequence of `end` offsets into the same `bytes` (#1213) --
 /// every per-value location in a multi-value document or `--seq`/`--slurp`
@@ -6451,17 +6525,35 @@ struct LineCounter<'a> {
     /// newline after each value, and a line holding many values would
     /// otherwise be rescanned for each (#4308).
     next_newline: Option<usize>,
+    /// What [`stitch_json_file_seams`] did to `bytes`, whose lines are jq's lines of the file
+    /// as it was on disk (#4316).
+    seam: Seam,
 }
 
 impl<'a> LineCounter<'a> {
     fn new(bytes: &'a [u8]) -> Self {
+        Self::at_seam(bytes, Seam::NONE)
+    }
+
+    /// A counter for a file [`stitch_json_file_seams`] changed, which counts the lines of the
+    /// file as it was on disk (#4316). Line 0 starts at `seam.base`, since the bytes before
+    /// it were read from the earlier file, and the reads that end at `bytes.len()` go on
+    /// into the `seam.moved_len` bytes moved to the next file.
+    fn at_seam(bytes: &'a [u8], seam: Seam) -> Self {
+        let base = seam.base.min(bytes.len());
         Self {
             bytes,
-            pos: 0,
+            pos: base,
             newlines_before_pos: 0,
-            line_start: 0,
+            line_start: base,
             next_newline: None,
+            seam,
         }
+    }
+
+    /// The length of the file as jq read it: `bytes` and the bytes moved off its end.
+    fn read_len(&self) -> usize {
+        self.bytes.len() + self.seam.moved_len
     }
 
     /// jq's line for the value whose exclusive end offset is `end` (#4308):
@@ -6499,8 +6591,8 @@ impl<'a> LineCounter<'a> {
         let chunk_end =
             self.line_start + ((at - self.line_start) / JQ_READ_CHUNK + 1) * JQ_READ_CHUNK;
         match self.next_newline {
-            Some(newline) if newline < chunk_end && newline < self.bytes.len() => newline + 1,
-            _ => chunk_end.min(self.bytes.len()),
+            Some(newline) if newline < chunk_end && newline < self.read_len() => newline + 1,
+            _ => chunk_end.min(self.read_len()),
         }
     }
 
@@ -6520,10 +6612,16 @@ impl<'a> LineCounter<'a> {
             _ => self.bytes[completes_at..]
                 .iter()
                 .position(|&b| b == b'\n')
-                .map_or(self.bytes.len(), |offset| completes_at + offset),
+                .map_or_else(
+                    || {
+                        // None in the file's own bytes: the moved ones may hold it.
+                        self.bytes.len() + self.seam.moved_newline.unwrap_or(self.seam.moved_len)
+                    },
+                    |offset| completes_at + offset,
+                ),
         };
         self.next_newline = Some(next);
-        let same_read = next < self.bytes.len()
+        let same_read = next < self.read_len()
             && (next - self.line_start) / JQ_READ_CHUNK
                 == (completes_at - self.line_start) / JQ_READ_CHUNK;
         self.newlines_before_pos + usize::from(same_read)
@@ -6600,9 +6698,10 @@ struct ValueLocator<'a> {
 }
 
 impl<'a> ValueLocator<'a> {
-    fn new(raw: &'a [u8], filename: Option<&'a str>, slurp_eof: Option<usize>) -> Self {
+    /// `seam` is what [`stitch_json_file_seams`] did to `raw` ([`LineCounter::at_seam`], #4316).
+    fn new(raw: &'a [u8], filename: Option<&'a str>, slurp_eof: Option<usize>, seam: Seam) -> Self {
         Self {
-            counter: RefCell::new(LineCounter::new(raw)),
+            counter: RefCell::new(LineCounter::at_seam(raw, seam)),
             filename,
             slurp_eof,
         }
@@ -6685,8 +6784,10 @@ fn line_at(bytes: &[u8], end: usize) -> usize {
 /// (the marker after a `try input` reaches the error): `0\n[1,\n2,\n}\n` line
 /// 4, `0\n{"a":\n1 2}\n` line 3, `0\n[\n"a<TAB>b"]\n` line 3, `1\n2 }\n\n\n`
 /// line 2.
-fn parse_error_line(bytes: &[u8], start: usize) -> usize {
-    LineCounter::new(bytes).line_at_read_of(parse_error_detection(bytes, start))
+///
+/// `seam` is what [`stitch_json_file_seams`] did to `bytes` ([`LineCounter::at_seam`], #4316).
+fn parse_error_line(bytes: &[u8], start: usize, seam: Seam) -> usize {
+    LineCounter::at_seam(bytes, seam).line_at_read_of(parse_error_detection(bytes, start))
 }
 
 /// The fault in the malformed value starting at `start`, as jq meets it
@@ -6797,31 +6898,45 @@ fn string_close_from(bytes: &[u8], mut at: usize) -> usize {
 /// (an empty file between two others leaves it standing) hands it on again. The last file has
 /// no successor and is left alone, as is a malformed token no later file can repair.
 ///
-/// Recorded residual: the moved tail keeps its newlines, so `input_line_number` for a value
-/// that began in an earlier file and had a newline inside it counts them in the later file
-/// (jq counts the later file's lines alone).
+/// The moved tail keeps its newlines, but jq counts each file's lines over the file as it
+/// was on disk (#4316), so the returned vector records, per file, what was moved onto its
+/// front and off its end ([`Seam`]); a line counter for that file is made from it
+/// ([`LineCounter::at_seam`]).
 ///
 /// `resumes` is set for a program using `input`/`inputs`, which reads past a parse error the
 /// way jq does (#4311), so the search for the open tail does too ([`open_tail_start`]); any
 /// other program stops at the first parse error and never reads what follows it.
-fn stitch_json_file_seams<'a>(raws: impl Iterator<Item = &'a mut Vec<u8>>, resumes: bool) {
+fn stitch_json_file_seams<'a>(
+    raws: impl Iterator<Item = &'a mut Vec<u8>>,
+    resumes: bool,
+) -> Vec<Seam> {
     let mut raws: Vec<&mut Vec<u8>> = raws.collect();
+    let mut seams = vec![Seam::NONE; raws.len()];
     let Some(last) = raws.len().checked_sub(1) else {
-        return;
+        return seams;
     };
     let mut carry: Vec<u8> = Vec::new();
     for (index, raw) in raws.iter_mut().enumerate() {
         if !carry.is_empty() {
+            seams[index].base = carry.len();
             // Exact, not amortized: a doubled capacity on a multi-gigabyte file is the cost.
             raw.reserve_exact(carry.len());
             raw.splice(0..0, std::mem::take(&mut carry));
         }
         if index < last {
-            if let Some(start) = open_tail_start(raw, resumes) {
+            if let Some(start) = open_tail_start(raw, resumes, seams[index].base) {
                 carry = raw.split_off(start);
+                // The part of it that is this file's own, which jq's reads of the file go on
+                // into (a tail that began in an earlier file is that file's).
+                let own = carry
+                    .get(seams[index].base.saturating_sub(start)..)
+                    .unwrap_or(&[]);
+                seams[index].moved_len = own.len();
+                seams[index].moved_newline = own.iter().position(|&b| b == b'\n');
             }
         }
     }
+    seams
 }
 
 /// Where the open tail of a file starts ([`stitch_json_file_seams`]), if it has one.
@@ -6831,8 +6946,8 @@ fn stitch_json_file_seams<'a>(raws: impl Iterator<Item = &'a mut Vec<u8>>, resum
 /// still continues in the next file. A malformed value is then found as `get_inputs` finds
 /// it ([`split_json_values_strict`]), since a fault the lenient splitter lets through moves
 /// where jq resumes. Without it, the first value the splitter refuses ends the search.
-fn open_tail_start(raw: &[u8], resumes: bool) -> Option<usize> {
-    let mut faults = LineCounter::new(raw);
+fn open_tail_start(raw: &[u8], resumes: bool, base: usize) -> Option<usize> {
+    let mut faults = LineCounter::at_seam(raw, Seam::base(base));
     let mut offset = 0;
     loop {
         let split = if resumes {
@@ -7095,6 +7210,7 @@ fn slurp_documents(
     raw_inputs: Vec<Vec<u8>>,
     files: &[PathBuf],
     validate: bool,
+    seams: &[Seam],
 ) -> core::result::Result<SlurpedInput, SlurpFailure> {
     let last = raw_inputs.len().saturating_sub(1);
     let mut combined = Vec::with_capacity(raw_inputs.iter().map(Vec::len).sum::<usize>() + 2);
@@ -7118,7 +7234,9 @@ fn slurp_documents(
             wrote_value = true;
         }
         if idx == last {
-            eof_line = line_at(&raw, raw.len());
+            // The last file's own lines, without a token moved onto it (#4316).
+            let own = &raw[seams.get(idx).map_or(0, |seam| seam.base).min(raw.len())..];
+            eof_line = line_at(own, own.len());
         }
     }
     combined.push(b']');
@@ -11508,7 +11626,7 @@ mod tests {
                 .map(|&(start, _)| start)
                 .or(split_error)
                 .expect("a malformed value");
-            parse_error_line(bytes, start)
+            parse_error_line(bytes, start, Seam::NONE)
         };
         assert_eq!(at("1\n2 }\n\n\n"), 2);
         assert_eq!(at("1\n2\n}\n3\n"), 3);
@@ -11532,7 +11650,7 @@ mod tests {
         assert_eq!(at("0\n\"a\tb"), 1);
         // A value the splitter refused but jq's spellings accept is placed
         // where it starts.
-        assert_eq!(parse_error_line(b"1\n2\n", 2), 2);
+        assert_eq!(parse_error_line(b"1\n2\n", 2, Seam::NONE), 2);
     }
 
     #[test]
@@ -11567,7 +11685,7 @@ mod tests {
             .map(|(_, end)| end)
             .collect();
         for mask in 0..(1u32 << ends.len()) {
-            let locator = ValueLocator::new(bytes, Some("f.json"), None);
+            let locator = ValueLocator::new(bytes, Some("f.json"), None, Seam::NONE);
             for (i, &end) in ends.iter().enumerate() {
                 if mask & (1 << i) == 0 {
                     continue;
@@ -11583,7 +11701,7 @@ mod tests {
     /// synthesized buffer holds (#1520), and never touches the counter.
     #[test]
     fn test_value_locator_slurp_uses_eof_line_4160() {
-        let locator = ValueLocator::new(b"[1,\n2]", None, Some(9));
+        let locator = ValueLocator::new(b"[1,\n2]", None, Some(9), Seam::NONE);
         assert_eq!(locator.at(7).line, Some(9));
     }
 
@@ -11600,7 +11718,7 @@ mod tests {
             .map(|(_, end)| end)
             .collect();
         for mask in 0..(1u32 << ends.len()) {
-            let locator = ValueLocator::new(bytes, Some("f.json"), None);
+            let locator = ValueLocator::new(bytes, Some("f.json"), None, Seam::NONE);
             let mut counted = 0;
             for (i, &end) in ends.iter().enumerate() {
                 let at = LazyLocation::new(&locator, end);
@@ -11640,7 +11758,7 @@ mod tests {
     /// never touches the counter.
     #[test]
     fn test_lazy_location_slurp_uses_eof_line_4178() {
-        let locator = ValueLocator::new(b"[1,\n2]", None, Some(9));
+        let locator = ValueLocator::new(b"[1,\n2]", None, Some(9), Seam::NONE);
         let at = LazyLocation::new(&locator, 7);
         assert_eq!(at.get().line, Some(9));
         assert_eq!(locator.counter.borrow().pos, 0);
@@ -11785,38 +11903,38 @@ mod tests {
     #[test]
     fn open_tail_start_finds_what_the_next_file_continues_4305() {
         // A bare number or keyword at the very end is only ended by the next byte.
-        assert_eq!(open_tail_start(b"1", false), Some(0));
-        assert_eq!(open_tail_start(b"[1]\n2", false), Some(4));
-        assert_eq!(open_tail_start(b"true", false), Some(0));
-        assert_eq!(open_tail_start(b"1.", false), Some(0));
-        assert_eq!(open_tail_start(b"-", false), Some(0));
-        assert_eq!(open_tail_start(b"tr", false), Some(0));
+        assert_eq!(open_tail_start(b"1", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"[1]\n2", false, 0), Some(4));
+        assert_eq!(open_tail_start(b"true", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"1.", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"-", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"tr", false, 0), Some(0));
         // A truncated container or string, however much of it came before.
-        assert_eq!(open_tail_start(b"{\"a\":", false), Some(0));
-        assert_eq!(open_tail_start(b"1 [1, {\"a\": [2", false), Some(2));
-        assert_eq!(open_tail_start(b"{\n  \"a\":\n", false), Some(0));
-        assert_eq!(open_tail_start(b"\"ab", false), Some(0));
-        assert_eq!(open_tail_start(b"\"a\\\"", false), Some(0));
-        assert_eq!(open_tail_start(b"{\"a\":\"x}", false), Some(0));
+        assert_eq!(open_tail_start(b"{\"a\":", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"1 [1, {\"a\": [2", false, 0), Some(2));
+        assert_eq!(open_tail_start(b"{\n  \"a\":\n", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"\"ab", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"\"a\\\"", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"{\"a\":\"x}", false, 0), Some(0));
         // A whole value is not: a string, container, or a scalar a byte follows.
-        assert_eq!(open_tail_start(b"\"ab\"", false), None);
-        assert_eq!(open_tail_start(b"{\"a\":1}", false), None);
-        assert_eq!(open_tail_start(b"[1]", false), None);
-        assert_eq!(open_tail_start(b"1\n", false), None);
-        assert_eq!(open_tail_start(b"1 ", false), None);
-        assert_eq!(open_tail_start(b"", false), None);
-        assert_eq!(open_tail_start(b"  \n", false), None);
+        assert_eq!(open_tail_start(b"\"ab\"", false, 0), None);
+        assert_eq!(open_tail_start(b"{\"a\":1}", false, 0), None);
+        assert_eq!(open_tail_start(b"[1]", false, 0), None);
+        assert_eq!(open_tail_start(b"1\n", false, 0), None);
+        assert_eq!(open_tail_start(b"1 ", false, 0), None);
+        assert_eq!(open_tail_start(b"", false, 0), None);
+        assert_eq!(open_tail_start(b"  \n", false, 0), None);
         // A malformed byte no later file can repair stays where it is.
-        assert_eq!(open_tail_start(b"1 } 2", false), None);
+        assert_eq!(open_tail_start(b"1 } 2", false, 0), None);
         // #4311: a program that resumes past a parse error searches on where jq
         // resumes, the read after the fault's, with the fault found by jq's
         // parser (`{1:2}` is one, though the splitter takes it).
-        assert_eq!(open_tail_start(b"1 } 2", true), None);
-        assert_eq!(open_tail_start(b"}\n2", true), Some(2));
-        assert_eq!(open_tail_start(b"}\n[1,", true), Some(2));
-        assert_eq!(open_tail_start(b"}\n{1:2} 12", true), None);
-        assert_eq!(open_tail_start(b"}\n{1:2}\n12", true), Some(8));
-        assert_eq!(open_tail_start(b"1 ]\n", false), None);
+        assert_eq!(open_tail_start(b"1 } 2", true, 0), None);
+        assert_eq!(open_tail_start(b"}\n2", true, 0), Some(2));
+        assert_eq!(open_tail_start(b"}\n[1,", true, 0), Some(2));
+        assert_eq!(open_tail_start(b"}\n{1:2} 12", true, 0), None);
+        assert_eq!(open_tail_start(b"}\n{1:2}\n12", true, 0), Some(8));
+        assert_eq!(open_tail_start(b"1 ]\n", false, 0), None);
     }
 
     /// #4305: what [`token_runs_to_end`] calls cut off by the end of the file.
@@ -11890,6 +12008,94 @@ mod tests {
         assert_eq!(stitched(&[]), Vec::<Vec<u8>>::new());
     }
 
+    /// #4316: the stitch records what it moved, per file, for the line counters.
+    #[test]
+    fn stitch_json_file_seams_records_what_it_moved_4316() {
+        let seams = |files: &[&[u8]]| -> Vec<Seam> {
+            let mut raws: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
+            stitch_json_file_seams(raws.iter_mut(), false)
+        };
+        let moved = |base, moved_len, moved_newline| Seam {
+            base,
+            moved_len,
+            moved_newline,
+        };
+        // Nothing open: nothing moved.
+        assert_eq!(seams(&[b"1\n", b"2\n"]), vec![Seam::NONE, Seam::NONE]);
+        assert_eq!(seams(&[]), Vec::<Seam>::new());
+        // `[1,\n` moves, its newline at offset 3, and lands in front of `2]\n`.
+        assert_eq!(
+            seams(&[b"[1,\n", b"2]\n"]),
+            vec![moved(0, 4, Some(3)), moved(4, 0, None)]
+        );
+        // The part of the tail that is the file's own: `1 ` stays, `[2,\n3,` moves.
+        assert_eq!(
+            seams(&[b"1 [2,\n3,", b"4]\n"]),
+            vec![moved(0, 6, Some(3)), moved(6, 0, None)]
+        );
+        // A file that is only the tail hands it on again; what it carried in is the earlier
+        // file's, so only its own bytes count as moved off it.
+        assert_eq!(
+            seams(&[b"[1,", b"\n", b"2]\n"]),
+            vec![moved(0, 3, None), moved(3, 1, Some(0)), moved(4, 0, None)]
+        );
+        assert_eq!(
+            seams(&[b"1", b"", b"2\n"]),
+            vec![moved(0, 1, None), moved(1, 0, None), moved(1, 0, None)]
+        );
+    }
+
+    /// #4316: a counter for a stitched file counts the file as it was on disk.
+    #[test]
+    fn line_counter_at_seam_counts_the_file_as_read_4316() {
+        // `[1,\n` moved onto `2]\n`: the value completes on line 1 of the later file, not 2.
+        let stitched = b"[1,\n2]\n";
+        let mut counter = LineCounter::at_seam(stitched, Seam::base(4));
+        assert_eq!(counter.read_end_line(stitched.len() - 1), 1);
+        // The newline in the tail moved off a file is still in that file's last read.
+        let kept = b"1 ";
+        let moved = Seam {
+            base: 0,
+            moved_len: 4,
+            moved_newline: Some(3),
+        };
+        assert_eq!(LineCounter::at_seam(kept, moved).read_end_line(1), 1);
+        assert_eq!(LineCounter::new(kept).read_end_line(1), 0);
+        // Without a newline in the moved bytes the read runs to their end, still no newline.
+        let no_newline = Seam {
+            moved_newline: None,
+            ..moved
+        };
+        assert_eq!(LineCounter::at_seam(kept, no_newline).read_end_line(1), 0);
+        // The 4095-byte read model sees the moved bytes too: a newline past the first read of
+        // the file as it was on disk is not in the same read as the value.
+        let value = b"1 ";
+        let far = Seam {
+            base: 0,
+            moved_len: JQ_READ_CHUNK + 4,
+            moved_newline: Some(JQ_READ_CHUNK + 2),
+        };
+        assert_eq!(LineCounter::at_seam(value, far).read_end_line(1), 0);
+    }
+
+    /// #4316: the final-read arithmetic of [`EofTail`] is over the last file as jq read it,
+    /// without the bytes moved onto it.
+    #[test]
+    fn eof_tail_ignores_the_bytes_moved_onto_the_last_file_4316() {
+        let tail = |files: &[&[u8]]| {
+            let mut raws: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
+            let seams = stitch_json_file_seams(raws.iter_mut(), false);
+            let sources: Vec<&[u8]> = raws.iter().map(Vec::as_slice).collect();
+            let tail = EofTail::of(&sources, false, &seams);
+            (!tail.unknown).then_some(tail.newlines)
+        };
+        // The moved `[1,\n` is the earlier file's newline, not the last file's.
+        assert_eq!(tail(&[b"[1,\n", b"2]\n"]), Some(1));
+        // A 4094-byte last file reads as one short read that completes the moved `1`.
+        let blank = vec![b' '; 4094];
+        assert_eq!(tail(&[b"1\n\n1", &blank]), None);
+    }
+
     #[test]
     fn split_json_values_keeps_the_prefix_before_a_failure_2961() {
         let bytes = b"1 [2] {\"a\":3} [4,";
@@ -11910,7 +12116,7 @@ mod tests {
     fn slurp_documents_joins_every_value_in_file_order_2847() {
         let join_with = |files: &[&str], validate: bool| {
             let raw = files.iter().map(|f| f.as_bytes().to_vec()).collect();
-            match slurp_documents(raw, &[], validate) {
+            match slurp_documents(raw, &[], validate, &[]) {
                 Ok(s) => Ok((
                     String::from_utf8(s.combined).unwrap(),
                     s.last_source,
@@ -12168,7 +12374,7 @@ mod tests {
     #[test]
     fn test_eof_tail_models_jqs_final_read_4303() {
         let at = |sources: &[&[u8]], raw: bool| {
-            let tail = EofTail::of(sources, raw);
+            let tail = EofTail::of(sources, raw, &[]);
             (!tail.unknown).then_some(tail.newlines)
         };
         let spaces = |n: usize| " ".repeat(n);
@@ -13152,7 +13358,7 @@ mod tests {
     /// `standard_json_to_jq_value`'s doc comment).
     /// A locator whose every value is at `<stdin>:1`, for the glue's unit tests.
     fn known_location_4178() -> ValueLocator<'static> {
-        ValueLocator::new(b"", None, Some(1))
+        ValueLocator::new(b"", None, Some(1), Seam::NONE)
     }
 
     #[test]
