@@ -121,13 +121,28 @@ fn an_alternative_over_a_swallowed_lookup_costs_like_its_twin_4227() {
     }
 }
 
-/// The streaming entry (`succinctly jq` drives it) reaches the same shortcut.
+/// The streaming entry (`succinctly jq` drives it) reaches the same shortcut. A `try`
+/// or closure boundary has a floor of its own there (`.[] | path(try .[] catch empty)`
+/// costs two calls per member where `path(.[]?)` costs one, a cost that is not the
+/// message), so each spelling is compared with its own `.[]` twin.
 #[test]
 fn the_streaming_entry_reaches_the_same_shortcut_4227() {
     for (name, json) in fixtures() {
-        let twin = ".[] | path(.[]?)";
-        let (twin_cost, _) = allocations_streaming(twin, &json);
-        for swallowed in [".[] | path(.a?)", ".[] | path(.[0]?)", ".[] | path((.a)?)"] {
+        for (swallowed, twin) in [
+            (".[] | path(.a?)", ".[] | path(.[]?)"),
+            (".[] | path(.[0]?)", ".[] | path(.[]?)"),
+            (".[] | path((.a)?)", ".[] | path(.[]?)"),
+            (
+                ".[] | path(try .a catch empty)",
+                ".[] | path(try .[] catch empty)",
+            ),
+            (".[] | path(try .a)", ".[] | path(try .[])"),
+            (
+                "def opt(f): f?; .[] | path(opt(.a))",
+                "def opt(f): f?; .[] | path(opt(.[]))",
+            ),
+        ] {
+            let (twin_cost, _) = allocations_streaming(twin, &json);
             let (cost, outputs) = allocations_streaming(swallowed, &json);
             assert_eq!(outputs, 0, "{name}: `{swallowed}` reaches nothing");
             assert_costs_like_twin(name, (swallowed, cost), (twin, twin_cost));

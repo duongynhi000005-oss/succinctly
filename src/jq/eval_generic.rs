@@ -1840,7 +1840,7 @@ fn scalar_leaf_iteration<S: EvalSemantics, V: DocumentValue>(
 /// raises a document fault `?` never swallows, so each of those takes the step. A lookup
 /// has no decode failure of its own to report, unlike `.[]` over an undecodable string.
 ///
-/// /// A container with members is told from its cursor ([`DocumentCursor::is_container`])
+/// A container with members is told from its cursor ([`DocumentCursor::is_container`])
 /// without resolving its value, so a container-heavy document does not pay a second
 /// resolve per member for a shortcut that cannot help it; only an empty container
 /// or a scalar is probed (the probe is free over JSON, an alias resolve over YAML,
@@ -1892,8 +1892,11 @@ fn swallowed_path_leaf<S: EvalSemantics, V: DocumentValue>(
             }
         }
         PathNode::Owned(value)
-            if !matches!(**value, OwnedValue::Array(_) | OwnedValue::Object(_))
-                && (iterates || !matches!(**value, OwnedValue::Null)) =>
+            if if iterates {
+                crate::jq::eval::is_owned_scalar(value)
+            } else {
+                crate::jq::eval::is_owned_lookup_scalar(value)
+            } =>
         {
             Some(Ok(()))
         }
@@ -51942,6 +51945,45 @@ mod tests {
             (false, false)
         );
         assert_eq!(settles(&PathNode::Absent, ".a", None), (false, false));
+    }
+
+    /// #4227: the cursor arm's two declines that no well-formed JSON can show. A value
+    /// typed `error` (a malformed keyword or number) raises a document fault `?` never
+    /// swallows, and a YAML null -- `~`, or a bare `!!null` -- indexes to `null`
+    /// (`null | .a` is `null`, so `path(.a?)` delivers `["a"]`). Dropping either clause
+    /// of `swallowed_path_leaf`'s lookup half settles them as nothing.
+    #[test]
+    fn swallowed_path_leaf_lookup_declines_malformed_and_yaml_null_4227() {
+        // `V` is named by the value the cursor resolves to.
+        fn settles<V: DocumentValue>(cursor: V::Cursor, _value: &V) -> bool {
+            swallowed_path_leaf::<JqSemantics, V>(
+                &parse(".a").unwrap(),
+                None,
+                &PathNode::At(cursor),
+            )
+            .is_some()
+        }
+        let json: &[u8] = b"[tru, 1.2.3, 5]";
+        let index = JsonIndex::build(json);
+        let mut member = index.root(json).first_child();
+        let mut settled = Vec::new();
+        while let Some(cursor) = member {
+            settled.push(settles(cursor, &cursor.value()));
+            member = cursor.next_sibling();
+        }
+        // The two malformed members take the step; the well-formed scalar does not.
+        assert_eq!(settled, [false, false, true]);
+
+        let yaml: &[u8] = b"- ~\n- !!null\n- bar\n- 5\n";
+        let index = crate::yaml::YamlIndex::build(yaml).unwrap();
+        let sequence = index.root(yaml).first_child().expect("a document");
+        let mut member = sequence.first_child();
+        let mut settled = Vec::new();
+        while let Some(cursor) = member {
+            settled.push(settles(cursor, &cursor.value()));
+            member = cursor.next_sibling();
+        }
+        assert_eq!(settled, [false, false, true, true]);
     }
 
     /// #2572: a walk step extends the position's trail rather than copying

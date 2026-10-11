@@ -6070,7 +6070,7 @@ fn owned_scalar_iteration_swallowed<S: EvalSemantics>(
 /// unlike a cursor's it has no decode failure left to raise. yq mode never builds the
 /// message (a scalar lookup is empty there) and keeps its own route.
 ///
-/// Only the resolver asks this, and only for a trackable value: an untracked lookup
+/// The resolver asks this only for a trackable value: an untracked lookup
 /// raises `Invalid path expression`, which `?` keeps. It is not a value-position
 /// boundary ([`owned_swallowing_boundary`] declines `.a?`), where the same lookup is
 /// evaluated by the ordinary route.
@@ -6080,14 +6080,21 @@ fn owned_scalar_lookup_swallowed<S: EvalSemantics>(
     value: &OwnedValue,
 ) -> bool {
     crate::jq::eval_generic::swallowing_lookup_boundary::<S>(body, catch)
-        && is_owned_scalar(value)
-        && !matches!(value, OwnedValue::Null)
+        && is_owned_lookup_scalar(value)
+}
+
+/// Whether an owned `value` is a scalar a bare lookup raises `Cannot index ...` over:
+/// any scalar but `null`, which indexes to `null`. One definition for the resolver's
+/// gate above and the document walks' owned arm (`swallowed_path_leaf`), so the two
+/// cannot disagree about it (#4227).
+pub(crate) fn is_owned_lookup_scalar(value: &OwnedValue) -> bool {
+    is_owned_scalar(value) && !matches!(value, OwnedValue::Null)
 }
 
 /// Whether an owned `value` has no members to list, so a swallowed `.[]` over it
 /// is the `Cannot iterate over ...` and nothing else. One definition for the
 /// path-position gate above and the value-position one below.
-fn is_owned_scalar(value: &OwnedValue) -> bool {
+pub(crate) fn is_owned_scalar(value: &OwnedValue) -> bool {
     !matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_))
 }
 
