@@ -47449,41 +47449,34 @@ fn pipe_without_trailing_identity(stages: &[Expr]) -> &[Expr] {
 /// too. The split that remains is a sibling the analysis cannot read at all (a computed key,
 /// `abs`), where the register stays withheld and the body refuses loudly although jq answers;
 /// #3145's `($v[0]?, $v)` is two pipe siblings, `$v[0]?` being `$v | .[0]?`.
+///
+/// Since #4354 an `isempty` call whose operand binds with `?//` is not read as fanning out; see
+/// [`fans_out_with`] for what stays in.
 fn fans_out(expr: &Expr) -> bool {
     fans_out_with(expr, true)
 }
 
 /// [`fans_out`] with `patterns_fan_out` saying whether a destructuring `as` counts.
 ///
-/// #4354: `isempty(g)` and `any`/`all(gen; cond)` hand every answer to their consumer
-/// themselves, each at the register the arm states ([`resolve_isempty_sink`],
-/// [`resolve_any_all_gen_cond_sink`]), and the identity element at the frame's register
-/// ([`drained_register_at_entry`]), so a `?//` bind *inside* their operands (`isempty(. as $q ?//
-/// $z | ..)`) is not a sibling that sees the register differently: it fans out into
-/// answers the arm itself orders. Withholding the register for it left the identity
-/// nothing to state, and a fold whose UPDATE is such a call refused where jq answers. An
-/// operand with any other fan-out (a comma, a fold, a call) still counts, and so does one that
-/// reads a frozen variable (`$k`): the marker re-establishes against the register the frame
-/// would now carry, which is the hazard #3145 withheld it for.
+/// #4354: `isempty(g)` hands every answer to its consumer itself, each at the register the
+/// arm states ([`resolve_isempty_sink`]), and the identity element at the frame's register
+/// ([`drained_register_at_entry`]), so a `?//` bind *inside* its operand
+/// (`isempty(. as $q ?// $z | ..)`) is not a sibling that sees the register differently: it
+/// fans out into answers the arm itself orders. Withholding the register for it left the
+/// identity nothing to state, and a fold whose UPDATE is such a call refused where jq
+/// answers. The exemption is `isempty` alone: an `any`/`all(gen; cond)` whose `cond` binds
+/// runs its live stage against the carried register and trips the resolver's lost-register
+/// assertion. An operand with any other fan-out (a comma, a fold, a call) still counts, and
+/// so does one that reads a frozen variable (`$k`): the marker re-establishes against the
+/// register the frame would now carry, which is the hazard #3145 withheld it for.
 fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
     use crate::jq::walk::{search_subexpr, Visit};
     search_subexpr(expr, &mut |e| match e {
-        Expr::Pipe(_) => Visit::Skip,
+        // A pipe sees the register uniformly at the fold body's top level; inside an exempted
+        // operand it is read through, so a comma, fold or call in a stage still counts.
+        Expr::Pipe(_) if patterns_fan_out => Visit::Skip,
         Expr::Builtin(Builtin::IsEmpty(operand)) if patterns_fan_out => {
             if fans_out_with(operand, false) || mentions_marker(operand) {
-                Visit::Found
-            } else {
-                Visit::Skip
-            }
-        }
-        Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond))
-            if patterns_fan_out =>
-        {
-            if fans_out_with(gen, false)
-                || fans_out_with(cond, false)
-                || mentions_marker(gen)
-                || mentions_marker(cond)
-            {
                 Visit::Found
             } else {
                 Visit::Skip
@@ -47503,6 +47496,7 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         | Expr::Foreach { .. }
         | Expr::FuncCall { .. }
         | Expr::NamespacedCall { .. } => Visit::Found,
+        Expr::DefCall { .. } if !patterns_fan_out => Visit::Found,
         _ => Visit::Descend,
     })
 }

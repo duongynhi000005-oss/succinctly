@@ -1479,6 +1479,12 @@ OPERANDS = [
     "(foreach .a? as $k (.; isempty(. as {a:$q} ?// $z | $q.b?); .))",
     "(foreach (1,2) as $k (.; isempty(. as $q ?// $z | if $q then true else empty end); $k))",
     "(reduce .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end)))",
+    # `any`/`all` stay out of the exemption: a bind in their `cond` runs a live stage against the
+    # carried register (a debug-assertion panic when they were exempted).
+    "(foreach .[]? as $k (.; all(.; . as [$q] ?// $z | $z); .))",
+    "(foreach .[]? as $k (.; any(.; . as [$q] ?// $z | $z); .b?))",
+    "(foreach .[]? as $k (.; all(.; . as {a:$q} ?// $z | $q); .))",
+    "(foreach .[]? as $k (.; any(. as [$q] ?// $z | .a; .); .))",
     "(reduce .[]? as $k (.; isempty(. as $q ?// $z | $k) or (.a)?))",
 ]
 
