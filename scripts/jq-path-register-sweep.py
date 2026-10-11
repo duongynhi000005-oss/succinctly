@@ -513,6 +513,9 @@ OPERANDS = [
     "(foreach (def f: .; def g: f; g as {a:$a} | .) as $k (.; .; .))",
     "(reduce (def f: .; f as {a:$a} | .) as $k (.; .))",
     "(foreach (def f: .; try f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, .) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, f) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, 7) as {a:$a} | .) as $k (.; .; .))",
     # ...and the second review's: a name two chain alternatives bind, a `$x` behind `first` or a
     # comma, a `$x` bound outside the source (still accepted, #4320), and a run of calls to one
     # pass-through `def`.

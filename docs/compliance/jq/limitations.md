@@ -2039,15 +2039,19 @@ is the revert that established what the other one costs.
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
    too. A bound expression that is a call with no arguments is read since
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s first part: `def f: .; f as {a:$a}`, also through a
-   second `def`, a comma body, or a `$x` bound around the definition, is the register as `. as {a:$a}` is
-   (`RegisterSpine::binds_register` reads the body in the scope the `def` was written in, and `resolves_to_register`
-   reads an installed call the same way, so the resolver places the head). `del(foreach (def f: .; f as {a:$a} | .)
-   as $y (.; .; .))` raises as jq does instead of deleting the document. Over the 12 call operands the sweep gained
-   (`--stage-only`, 10,683 rows), 410 wrong accepts and 32 wrong answers go to 0, and 59 matches are lost to a
-   refusal, all inside a `reduce` UPDATE (`path(reduce 1 as $k (.; foreach (def f: .; f as {a:$a} | .) as $k (.; .;
-   .)))` is `[]` in jq): `update_returns_its_input` vets a nested `foreach` source by a closed grammar that has no
-   `def`, as it had none for #4278's shapes. Pinned by
-   `test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320`, and the earlier shapes by
+   second `def`, a comma body or a comma of calls, or a `$x` bound around the definition inside the source, is the
+   register as `. as {a:$a}` is (`RegisterSpine::binds_register` reads the body in the scope the `def` was written in,
+   and past the call budget routes the source; `resolves_to_register` reads an installed call the same way, jq mode
+   only and 16 calls deep, so the resolver places the head). `del(foreach (def f: .; f as {a:$a} | .) as $y (.; .; .))`
+   raises as jq does instead of deleting the document. Over the 15 call operands the sweep gained and every other
+   `def`-bearing fold operand (`--stage-only`, 28,443 rows), 546 wrong accepts and 49 wrong answers go to 12 and 7 (the
+   12 are `(f, 7) as {a:$a}`, a comma with a non-register leaf, which is by value as `($x, 7)` is), 599 matches are
+   gained, and 56 are lost to a refusal, all on the new operands and all inside a `reduce` UPDATE: `path(reduce 1 as $k
+   (.; foreach (def f: .; f as {a:$a} | .) as $k (.; .; .)))` is `[]` in jq and answers here (the nested `foreach` is
+   vetted by `foreach_source_is_path_checked`, which reads a `def` whose body is `.`), but the same with a comma body,
+   a nested `def`, a `$x` captured by the `def`, a `try` or a `reduce` source is refused. A `$x` bound outside the
+   `foreach` and returned by a call (`. as $x | def f: $x; ... foreach (f as {a:$a} | .)`) is the outer-`$x` shape
+   above. Pinned by `test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320`, and the earlier shapes by
    `test_foreach_source_destructure_behind_a_chain_bind_if_or_def_refuses_4278`. Over the 29 register-sweep operands
    it adds (374,787 rows), 4,829 wrong accepts and 807 wrong answers go to 972 and 151 (the 972 are all the `(.|.)` and
    later-bare-alternative operands), 2,908 refusals become matches, and 457 matches are lost to a refusal: 161 inside

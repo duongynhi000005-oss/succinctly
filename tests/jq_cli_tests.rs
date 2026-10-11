@@ -60538,6 +60538,27 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
         ),
         (
             doc,
+            r"del(foreach (def f: .; (f, .) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; (f, f) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
             r"del(foreach (def f: .; f as [$q] | .) as $y (.; .; .))",
             "",
             "Cannot index object with number",
