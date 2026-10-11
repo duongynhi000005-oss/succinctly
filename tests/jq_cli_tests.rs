@@ -41598,6 +41598,13 @@ fn test_jq_fault_detection_skips_an_invalid_utf8_byte_4349() -> Result<()> {
         stdout,
         "[[\"E\",2],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n"
     );
+    // ... and a bare invalid byte outside any string is a fault of its own, resumed after the line.
+    let (stdout, stderr, code) = run(&[b"[1,\xff] 3\n4 [5\n"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout,
+        "[[\"E\",1],[4,2],[\"E\",2],[\"E\",0],[\"E\",0],[\"E\",0]]\n"
+    );
     let (stdout, stderr, code) = run(&[b"\"\xff\n[1,", b"\xff\"] "])?;
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
