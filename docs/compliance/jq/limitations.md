@@ -1637,11 +1637,11 @@ is the revert that established what the other one costs.
    navigating source had already moved and the fold resolved it as though the accumulator sat
    on it; that hole is closed ([#3780](https://github.com/rust-works/succinctly/issues/3780),
    [#3797](https://github.com/rust-works/succinctly/issues/3797)), so `last(.k, .)` refuses
-   there like `(.k, .)` does. The reduce walk cannot read a navigation inside `limit`, `nth`, a
-   `label` or a user `def` call, so `last(f)` over an `f` that may move the register
-   (`last(limit(2; .k, .))`) counts as navigating there and refuses; a *bare* UPDATE of those
-   shapes (`limit(2; .k, .)`) still keeps the persistent register and `del` deletes the document
-   where jq exits 5, tracked as [#3811](https://github.com/rust-works/succinctly/issues/3811).
+   there like `(.k, .)` does. The reduce walk reads a navigation inside a nonzero literal `limit`, a
+   nonnegative literal `nth`, a `label` and a user `def` call
+   ([#3811](https://github.com/rust-works/succinctly/issues/3811), see below), so
+   `del(reduce .[]? as $k (.; limit(2; .k, .)))` refuses as jq does; `last(f)` over an `f` the walk cannot read
+   (`last(limit(2; .k, .))` with a dynamic count) counts as navigating there and refuses.
    Recorded divergence (a refusal, where the alternative deletes the document): inside that
    same reduce UPDATE, a `last(f)` whose passthrough `f` lies outside `cannot_move_register`'s
    allowlist (`last(first(.))`, `last(select(true))`, `last(limit(1; .))`) is read as an `f`
@@ -6832,12 +6832,9 @@ this gap check can actually catch or skip either way, today.
 ## `skip` with a generator count
 
 `skip(n; f)` is a succinctly extension relative to the pinned jq 1.7.1,
-which rejects `skip/2` as undefined. Its count is still evaluated as a single
-value: `[skip((0,1); 10,20,30)]` raises `expected number, got null` instead
-of running the body once per count. Captured on the pre-#2863 checkout;
-accepting the equivalent bare-comma spelling in #2863 does not change this
-existing evaluator limitation. `builtin_skip` needs count fan-out separately
-from the parser change; tracked as [#2934](https://github.com/rust-works/succinctly/issues/2934).
+which rejects `skip/2` as undefined; the oracle is jq 1.8.2 (Homebrew), which defines it. Its count is a generator,
+as in jq 1.8.2: `[skip((0,1); 10,20,30)]` runs the body once per count and is `[10,20,30,20,30]`
+([#2934](https://github.com/rust-works/succinctly/issues/2934)).
 
 `skip(n; f)` is also a path expression (#3611): `path(.a | skip(1; .b[]))`, `del(...)`, `=`, `|=`,
 `+=` and `pick` over it follow the elements it delivers, as `limit` and `nth` do. The path
