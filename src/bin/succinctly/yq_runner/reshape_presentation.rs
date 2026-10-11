@@ -173,16 +173,13 @@ fn trace_at_depth(
                 let OwnedValue::Object(entry) = entry else {
                     return None;
                 };
-                let key_field = ["key", "Key", "name", "Name"]
-                    .into_iter()
-                    .find(|k| entry.contains_key(*k))?;
+                // yq reads exactly a `key` and a `value` (#4399): `evaluated` above already
+                // refused any entry that lacks either.
+                let key_field = "key";
                 let OwnedValue::String(key) = entry.get(key_field)? else {
                     return None;
                 };
-                let value_field = ["value", "Value"]
-                    .into_iter()
-                    .find(|k| entry.contains_key(*k))
-                    .unwrap_or("value");
+                let value_field = "value";
                 let entry_tree = tree.at_index(i);
                 fields.insert(key.to_string(), entry_tree.field(value_field).clone());
                 // Last occurrence wins, including an unstyled key. Never

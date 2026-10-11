@@ -19782,6 +19782,28 @@ fn entry_key_and_value(entry: &OwnedValue) -> Result<(OwnedValue, OwnedValue), E
     Ok((key, value))
 }
 
+/// yq's reading of one entry (#4399): exactly a `key` and a `value` child, no aliases (`name`,
+/// `Name`, `Key` are jq's) and no defaults -- an entry missing either, or not a mapping at all
+/// (`null` and scalars included), is refused with yq's `expected to find one 'key' entry but
+/// found 0 in position N` (the `'key'` is checked first). An `OwnedValue` mapping holds each
+/// key once, so the count is only ever 0 here; a document's duplicate `key` entries collapse
+/// before this point, which yq counts as 2.
+fn yq_entry_key_and_value(
+    entry: &OwnedValue,
+    position: usize,
+) -> Result<(OwnedValue, OwnedValue), EvalError> {
+    let OwnedValue::Object(obj) = entry else {
+        return Err(EvalError::yq_entry_field_missing("key", 0, position));
+    };
+    let key = obj
+        .get("key")
+        .ok_or_else(|| EvalError::yq_entry_field_missing("key", 0, position))?;
+    let value = obj
+        .get("value")
+        .ok_or_else(|| EvalError::yq_entry_field_missing("value", 0, position))?;
+    Ok((key.clone(), value.clone()))
+}
+
 /// jq's `from_entries` over entries already materialised as [`OwnedValue`]s.
 ///
 /// One definition, because `from_entries` and `with_entries` are one
@@ -19808,8 +19830,12 @@ pub(crate) fn entries_to_object<S: EvalSemantics, I: IntoIterator<Item = OwnedVa
     entries: I,
 ) -> Result<IndexMap<String, OwnedValue>, EvalError> {
     let mut result = IndexMap::new();
-    for entry in entries {
-        let (key, value) = entry_key_and_value(&entry)?;
+    for (position, entry) in entries.into_iter().enumerate() {
+        let (key, value) = if S::TAG == EvalTag::Yq {
+            yq_entry_key_and_value(&entry, position)?
+        } else {
+            entry_key_and_value(&entry)?
+        };
         let k = match key {
             OwnedValue::String(s) => s.into_string(),
             _ => match yq_object_key_stringify::<S>(&key) {
