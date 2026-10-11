@@ -132,7 +132,8 @@ runs:
       with:
         # Pin patchcov itself (#3873, #3880, #4324), deliberately and not through the
         # action's own default, so a patchcov release cannot change measured coverage
-        # under an unrelated PR. 0.4.0 carries the extracted coverage engine:
+        # under an unrelated PR (0.4.0 is also the action's current default, but the default
+        # moves with the action's tag and this pin does not). 0.4.0 carries the extracted coverage engine:
         # `.patchcov/config.yaml` discovery and the symmetric ignore list mask
         # popcount's CPU flap (#302); patience diff preserves patch attribution on
         # repetitive evaluator refactors (#1554); source coverage `tolerate` /
