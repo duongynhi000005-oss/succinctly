@@ -292,12 +292,15 @@ Two operators behave differently under `--eval-all` than they do per document, a
 
 `file_index`/`fileIndex`/`fi` returns the 0-indexed origin file position, and `document_index`/`documentIndex`/`di` the document's index within that file. Both answer on the ordinary multi-file path too, not just under `--eval-all`.
 
+`filename` (#2648) returns the origin file's name exactly as it was typed on the command line (`./f1.yaml` stays `./f1.yaml`), `-` for stdin, and the empty string under `-n`. It is real yq's builtin and not jq's, so `succinctly jq` keeps rejecting it as an undefined function. It reads the same origin `file_index` does, so it shares that builtin's reach: see [limitations](../compliance/yq/limitations.md#filename-and-file_index-are-read-from-the-evaluation-context-not-from-the-node-2648) for the shapes where real yq answers differently.
+
 | Function/Flag        | Description                                                          |
 |----------------------|----------------------------------------------------------------------|
 | `--eval-all`, `--ea` | Evaluate once over every document of every file, as one context list |
 | `file_index`         | 0-indexed origin file position                                       |
 | `fileIndex`          | Alias for `file_index` (real yq's own spelling)                      |
 | `fi`                 | Short alias for `file_index`                                         |
+| `filename`           | Origin file's name as given (`-` for stdin; empty under `-n`)        |
 
 ```bash
 # One field count per document

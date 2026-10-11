@@ -175,6 +175,7 @@ pub fn builtin_kids(builtin: &Builtin) -> BuiltinKids<'_> {
         | Builtin::HeadComment
         | Builtin::FootComment
         | Builtin::FileIndex
+        | Builtin::Filename
         | Builtin::Shuffle
         | Builtin::Pivot
         | Builtin::SplitDoc
@@ -488,6 +489,7 @@ pub fn map_builtin_subexprs(builtin: &Builtin, f: &mut dyn FnMut(&Expr) -> Expr)
         | Builtin::HeadComment
         | Builtin::FootComment
         | Builtin::FileIndex
+        | Builtin::Filename
         | Builtin::Shuffle
         | Builtin::Pivot
         | Builtin::SplitDoc
@@ -1676,6 +1678,7 @@ fn stage_escapes_own_input(expr: &Expr) -> bool {
             | Builtin::HeadComment
             | Builtin::FootComment
             | Builtin::FileIndex
+            | Builtin::Filename
             | Builtin::Input
             | Builtin::Inputs
             | Builtin::InputLineNumber
@@ -2202,6 +2205,7 @@ fn node_reads_ambient(node: &Expr) -> bool {
             | Builtin::HeadComment
             | Builtin::FootComment
             | Builtin::FileIndex
+            | Builtin::Filename
             | Builtin::Shuffle
             | Builtin::Pivot
             | Builtin::SplitDoc

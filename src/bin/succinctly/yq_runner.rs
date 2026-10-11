@@ -3756,14 +3756,17 @@ fn resolve_meta_assign_writes(
         .map_or(0, |last| last + 1);
     if stages[..through_last_meta].iter().any(|stage| {
         jq::walk::contains_builtin(stage, |b| {
-            matches!(b, Builtin::DocumentIndex | Builtin::FileIndex)
+            matches!(
+                b,
+                Builtin::DocumentIndex | Builtin::FileIndex | Builtin::Filename
+            )
         })
     }) {
         sink.report(
             DiagStyle::Yq,
             &EvalError::new(
-                "metadata assignment cannot depend on document_index/file_index (it is resolved \
-                 once, against the first document)",
+                "metadata assignment cannot depend on document_index/file_index/filename (it is \
+                 resolved once, against the first document)",
             ),
             &no_location(),
         );
@@ -7521,6 +7524,18 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
 
     // Get input files (with --from-file, the filter positional is an input file)
     let input_files = get_input_files(&args);
+
+    // #2648: `filename` reads the file's name as it was given on the command
+    // line; with no file argument the input is stdin, which real yq names `-`.
+    // `-n` reads nothing, so it has no file to name. Held for the whole run:
+    // each per-file loop below picks its own entry.
+    let _file_names_scope = jq::enter_file_names_scope(if args.null_input {
+        Vec::new()
+    } else if input_files.is_empty() {
+        vec!["-".to_string()]
+    } else {
+        input_files.clone()
+    });
 
     // Validate flag compatibility
     if args.document.is_some() && args.raw_input {

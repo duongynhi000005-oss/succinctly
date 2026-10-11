@@ -7234,6 +7234,13 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::FileIndex));
         }
 
+        // filename - yq (#2648): the origin file's name. Real jq has no such
+        // builtin, so jq mode leaves it an undefined function.
+        if self.mode == ParserMode::Yq && self.matches_keyword("filename") {
+            self.consume_keyword("filename");
+            return Ok(Some(Builtin::Filename));
+        }
+
         // shuffle - yq: randomly shuffle array elements
         if self.matches_keyword("shuffle") {
             self.consume_keyword("shuffle");

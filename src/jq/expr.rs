@@ -2659,6 +2659,12 @@ pub enum Builtin {
     /// functions), returns 0 -- the same "0 outside supported context"
     /// contract `document_index` already has today.
     FileIndex,
+    /// `filename` - the name of the file the current node was read from, as
+    /// given on the command line (`-` for stdin), or the empty string for a
+    /// node with no file (yq only, #2648). Answered from the same origin
+    /// `FileIndex` reads, through the CLI's per-run file-name table. jq has
+    /// no such builtin, so the parser only produces this in yq mode.
+    Filename,
     /// `shuffle` - randomly shuffle array elements (yq)
     Shuffle,
     /// `pivot` - transpose arrays/objects (yq)

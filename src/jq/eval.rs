@@ -2943,7 +2943,8 @@ pub(crate) fn needs_path_context(expr: &Expr) -> bool {
         // `--eval-all`'s `file_index`/`fileIndex`/`fi` (#715) needs the same
         // path-context routing as `Key` above -- it resolves via
         // `current_path`, not a cursor.
-        Expr::Builtin(Builtin::FileIndex) => true,
+        // `filename` (#2648) reads the same origin, so it routes the same way.
+        Expr::Builtin(Builtin::FileIndex | Builtin::Filename) => true,
         // Neither `Compare` nor `Select` carries path context on its own,
         // but a `key`/`document_index`/`file_index` nested in one of their
         // operands does -- e.g. `select(file_index == 0)`, the headline
@@ -15956,6 +15957,19 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 super::eval_generic::ambient_file_index().unwrap_or(0),
             ))
         }
+        // #2648: the name of the file `file_index` above reads, from the
+        // run's name table; `""` without one, real yq's answer for a node no
+        // file produced. The ambient origin rather than `""` here: this arm is
+        // also reached by positioned shapes whose cursor was lost (`.x |=
+        // filename`, `.a = {"n": filename}`), which real yq answers with the
+        // file's name. A detached literal (`1 as $v | $v | filename`) is the
+        // one case that over-answers -- see docs/compliance/yq/limitations.md.
+        Builtin::Filename => QueryResult::Owned(OwnedValue::String(
+            super::eval_generic::filename_of_file(
+                super::eval_generic::ambient_file_index().unwrap_or(0),
+            )
+            .into(),
+        )),
         Builtin::Shuffle => builtin_shuffle::<W, S>(value, optional),
         Builtin::Pivot => builtin_pivot::<W, S>(value, optional),
         Builtin::SplitDoc => {
@@ -30196,6 +30210,20 @@ pub fn enter_file_index_scope(file_index: usize) -> FileIndexScope {
     ))
 }
 
+/// Make `filename` answer `names[file_index]` for every evaluation until the
+/// returned guard is dropped (#2648).
+///
+/// Installed once per run, around the CLI's per-file loops: unlike
+/// [`enter_file_index_scope`]'s number, the table does not change per file --
+/// each file's own scope picks its entry out of it.
+#[must_use = "the scope ends when the guard is dropped"]
+pub fn enter_file_names_scope(names: Vec<String>) -> FileNamesScope {
+    FileNamesScope(super::eval_generic::enter_file_names(names))
+}
+
+/// The scope [`enter_file_names_scope`] opens; dropping it closes the scope.
+pub struct FileNamesScope(#[allow(dead_code)] super::eval_generic::FileNamesGuard);
+
 /// The scope [`enter_file_index_scope`] opens; dropping it closes the scope.
 pub struct FileIndexScope(#[allow(dead_code)] super::eval_generic::NodeOriginGuard);
 
@@ -31941,6 +31969,7 @@ fn builtin_yields_at_most_one_value(builtin: &Builtin) -> bool {
         | Builtin::Explode
         | Builtin::Fabs
         | Builtin::FileIndex
+        | Builtin::Filename
         | Builtin::Finites
         | Builtin::First
         | Builtin::FirstStream(_)
