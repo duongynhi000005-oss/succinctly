@@ -498,6 +498,24 @@ OPERANDS = [
     "(foreach (def g: .; def f: g; def g: . as {a:$a} | .; f) as $k (.; .; .))",
     "(foreach ((if true then . else . end) | . as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; f | . as {a:$a} | .) as $k (.; .; .))",
+    # (#4320) a bound expression that is a call returning the register: a `def` whose body is
+    # `.`, a `$x` bound around the definition, a body that is `.a`, a constant, a comma, or a
+    # definition shadowed before the call, and the same under `reduce`.
+    "(foreach (def f: .; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (. as $x | def f: $x; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; f as [$q] | .) as $k (.; .; .))",
+    "(foreach (def f: .; f as {a:$a} | .a) as $k (.; .; $k))",
+    "(foreach (def f: .a; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: 7; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; def f: 7; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: ., .; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; f as $v | .) as $k (.; .; .))",
+    "(foreach (def f: .; def g: f; g as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (def f: .; f as {a:$a} | .) as $k (.; .))",
+    "(foreach (def f: .; try f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, .) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, f) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; (f, 7) as {a:$a} | .) as $k (.; .; .))",
     # ...and the second review's: a name two chain alternatives bind, a `$x` behind `first` or a
     # comma, a `$x` bound outside the source (still accepted, #4320), and a run of calls to one
     # pass-through `def`.

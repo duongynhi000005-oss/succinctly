@@ -36215,24 +36215,36 @@ fn update_returns_its_input(e: &Expr) -> bool {
 /// fold is driven by value, so a register an earlier stage of the UPDATE moved is never
 /// checked against it and the foreach would be accepted where jq raises at its first step.
 fn foreach_source_is_path_checked(e: &Expr) -> bool {
-    fn navigation(e: &Expr) -> bool {
+    /// `pass` is the name of a no-argument `def` in scope whose body is `.` (#4320): a call to
+    /// it is the register as `.` is, and the resolver places it ([`resolves_to_register`]).
+    fn navigation(e: &Expr, pass: Option<&str>) -> bool {
+        let is_register = |e: &Expr| match unwrap_paren(e) {
+            Expr::Identity => true,
+            Expr::FuncCall { name, args, .. } => args.is_empty() && Some(name.as_str()) == pass,
+            _ => false,
+        };
         match e {
             Expr::Identity | Expr::Field(_) | Expr::Index { .. } | Expr::Iterate => true,
-            Expr::Paren(inner) | Expr::Optional(inner) => navigation(inner),
-            Expr::Pipe(stages) => stages.iter().all(navigation),
+            Expr::Paren(inner) | Expr::Optional(inner) => navigation(inner, pass),
+            Expr::Pipe(stages) => stages.iter().all(|stage| navigation(stage, pass)),
             Expr::AsPattern {
                 expr,
                 patterns,
                 body,
-            } => {
-                patterns.len() == 1
-                    && matches!(unwrap_paren(expr), Expr::Identity)
-                    && body_performs_no_step(body)
+            } => patterns.len() == 1 && is_register(expr) && body_performs_no_step(body),
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                ..
+            } if params.is_empty() && matches!(unwrap_paren(body), Expr::Identity) => {
+                navigation(then, Some(name))
             }
             _ => false,
         }
     }
-    cannot_move_register(e) || navigation(e)
+    cannot_move_register(e) || navigation(e, None)
 }
 
 /// Whether `e` is a no-op in path position: `.`, or a pipe or parenthesised group of
@@ -47697,6 +47709,20 @@ fn resolves_to_register<S: EvalSemantics>(
             resolves_to_register::<S>(then_branch, trackable, reg, frame)
                 && resolves_to_register::<S>(else_branch, trackable, reg, frame)
         }
+        // #4320: a call with no arguments returns what its body does, so a body that is the
+        // register (`def f: .; f as {a:$a}`) makes the call the register. The depth guard of
+        // `probe_def_call` ends a recursive definition.
+        Expr::DefCall {
+            def,
+            args,
+            frames,
+            bound,
+        } if S::TAG == EvalTag::Jq && args.is_empty() && *frames < RESOLVE_REGISTER_CALL_DEPTH => {
+            match probe_def_call(def, args, *frames, bound) {
+                Ok(body) => resolves_to_register::<S>(&body, trackable, reg, frame),
+                Err(_) => false,
+            }
+        }
         // #3279 review: the narrow (pre-#3279) grammar, deliberately. This
         // is an immediate certification with no later value check, and
         // proving a `?//` head identical here lets a pattern's first step
@@ -47730,6 +47756,11 @@ fn resolves_to_register<S: EvalSemantics>(
         _ => false,
     }
 }
+
+/// How many nested installed calls [`resolves_to_register`] reads through before it answers
+/// no (#4320): each level binds a fresh copy of the callee's body, so a recursive definition
+/// would otherwise build one per level up to `MAX_EVAL_FRAMES` for a static check.
+const RESOLVE_REGISTER_CALL_DEPTH: u32 = 16;
 
 /// The register `path()`-tracking compares each `reduce`/`foreach` fold
 /// iteration's own navigation against — jq's `(path, value_at_path)` pair,
@@ -48637,7 +48668,8 @@ fn bind_hands_on_the_register(e: &Expr) -> bool {
 /// nested `foreach`'s own chain over the register ([`routes_destructuring_chain`], #3948).
 ///
 /// The bound expression is a bare `.`, a `select(literal)` that hands it on (#4128), a comma of
-/// those (#4150), or a variable the spine bound to the register (#4278), also behind
+/// those (#4150), a variable the spine bound to the register (#4278), or a call with no
+/// arguments whose body is one of these (#4320), also behind
 /// `first`/`last`/`limit`/`?`/`label` ([`RegisterSpine::binds_register`]). A `(.|.)` bind stays
 /// out, since the resolver reads it as a computed value, and so does a variable bound outside
 /// the source or any other computed bound expression (#4320). The other [`source_destructures_register`] mode, through a nested
@@ -48665,6 +48697,7 @@ fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
         memo: Vec::new(),
         calls: SPINE_CALL_BUDGET,
         depth: 0,
+        binding: Vec::new(),
     };
     walk.reach(source) == Reach::Destructures
 }
@@ -48724,6 +48757,8 @@ fn peel_value_wrappers(e: &Expr) -> &Expr {
 fn binds_variable(e: &Expr) -> bool {
     match peel_value_wrappers(e) {
         Expr::Var(_) => true,
+        // #4320: so is a call with no arguments, which returns what its body does.
+        Expr::FuncCall { args, .. } | Expr::DefCall { args, .. } => args.is_empty(),
         Expr::Comma(items) => items.iter().any(binds_variable),
         _ => false,
     }
@@ -48769,6 +48804,9 @@ struct RegisterSpine<'e> {
     calls: u32,
     /// How deep [`reach`](Self::reach) is nested.
     depth: u32,
+    /// The `def` bodies [`binds_register`](Self::binds_register) is reading the result of
+    /// right now, so a recursive definition is read once (#4320).
+    binding: Vec<*const Expr>,
 }
 
 impl<'e> RegisterSpine<'e> {
@@ -48785,19 +48823,60 @@ impl<'e> RegisterSpine<'e> {
     /// [`bind_hands_on_the_register`] (or, through a `reduce`, [`yields_only_the_register`])
     /// accepts, or a variable the spine bound to the register (#4278), also behind the
     /// wrappers that hand their operand's value on ([`peel_value_wrappers`]) and as a comma of
-    /// them. A variable bound outside the source, and a call returning one, are not read
-    /// (#4320).
-    fn binds_register(&self, e: &Expr) -> bool {
+    /// them, or a call with no arguments whose body is any of these ([`body_binds_register`],
+    /// #4320). A variable bound outside the source is not read (#4320).
+    ///
+    /// [`body_binds_register`]: Self::body_binds_register
+    fn binds_register(&mut self, e: &'e Expr) -> bool {
         match peel_value_wrappers(e) {
             Expr::Var(name) => self.holds_register(name),
             Expr::Comma(items) if items.iter().any(binds_variable) => {
                 items.iter().all(|item| self.binds_register(item))
+            }
+            // #4320: a call with no arguments returns what its body does, read in the scope
+            // the definition was written in.
+            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+                match self.defs.iter().rposition(|def| def.name == name) {
+                    Some(at) => {
+                        let SpineDef { body, vars, .. } = self.defs[at];
+                        self.body_binds_register(body, vars, at + 1)
+                    }
+                    None => false,
+                }
+            }
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let body: &'e Expr = &def.body;
+                self.body_binds_register(body, 0, 0)
             }
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
             _ if self.through_reduce => yields_only_the_register(unwrap_bind_source(e)),
             _ => bind_hands_on_the_register(unwrap_bind_source(e)),
         }
+    }
+
+    /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
+    /// variables and `defs` definitions in scope ([`read_body`](Self::read_body)'s scoping).
+    fn body_binds_register(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
+        let key: *const Expr = body;
+        if self.binding.contains(&key) {
+            return false;
+        }
+        if self.calls == 0 {
+            // Past the budget a `foreach` source is routed, as [`past_budget`](Self::past_budget)
+            // does for a stage: reading the call as not the register would leave a destructure
+            // behind it to the by-value drive, which answers where jq raises.
+            return !self.through_reduce;
+        }
+        self.calls -= 1;
+        self.binding.push(key);
+        let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
+        let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
+        let register = self.binds_register(body);
+        self.vars.extend(vars_tail);
+        self.defs.extend(defs_tail);
+        self.binding.pop();
+        register
     }
 
     /// The names a bind of `expr` to `patterns` binds, each with whether it may hold the
@@ -48809,7 +48888,7 @@ impl<'e> RegisterSpine<'e> {
     /// {a:$a} | $a as {a:$b}`).
     ///
     /// [`binds_register`]: Self::binds_register
-    fn chain_names(&self, expr: &Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
+    fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
         let mut register = self.binds_register(expr);
         let mut names: Vec<(&'e str, bool)> = Vec::new();
         let mut bind =

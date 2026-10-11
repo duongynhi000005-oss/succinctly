@@ -60466,6 +60466,157 @@ fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
     Ok(())
 }
 
+/// #4320 (part): a `foreach` source whose bound expression is a call returning the register
+/// (`def f: .; f as {a:$a} | .`, also through a second `def`, a comma body, or a `$x` bound
+/// around the definition) destructures it as `. as {a:$a}` does: the pattern's step moves
+/// jq's register and the EXTRACT is checked against it, so `del`, `=` and `|=` through it raise
+/// where the by-value drive answered `null` and wrote. The contrasts are a call whose body
+/// navigates or is a constant, a definition shadowed before the call, a bare `$var` bind, a
+/// `$x` bound to a member, and a `reduce`, which backtracks its source. Every row captured from
+/// jq 1.7.1 with `-c`; the message is pinned only where succinctly names the same step (a
+/// constant body is jq's `near attempt to access element`, here the value-mode `Cannot index`,
+/// on `main` too).
+#[test]
+fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> Result<()> {
+    let doc = r#"{"a":false,"b":null}"#;
+    assert_path_rows_3289(&[
+        (
+            doc,
+            r"del(foreach (def f: .; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"(foreach (def f: .; f as {a:$a} | .) as $y (.; .; .)) = 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach (def f: .; f as {a:$a} | .) as $y (.; .; .))]",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; def g: f; g as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (. as $x | def f: $x; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"(foreach (. as $x | def f: $x; f as {a:$a} | .) as $y (.; .; .)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; try f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; (f, .) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; (f, f) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; f as [$q] | .) as $y (.; .; .))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .a; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "near attempt to access element \"a\" of false",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: 7; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Cannot index number with string",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; def f: 7; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Cannot index number with string",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (. as {a:$x} | def f: $x; f as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Cannot index boolean with string \"a\"",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: .; f as $v | .) as $y (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(foreach (. as $x | def f: $x; f as $v | .) as $y (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce (def f: .; f as {a:$a} | .) as $y (.; .))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #3460, yq mode must-not-change: `(.b|tostring) = "z"` is a no-op in yq v4.53.3
 /// and stays one here.
 #[test]
