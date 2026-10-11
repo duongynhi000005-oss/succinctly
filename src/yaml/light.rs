@@ -3190,7 +3190,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     ///
     /// Returns the column number where this value starts, or where its first
     /// `&anchor`/`!tag` starts when it has one (#2712). Column numbers are 1-based
-    /// to match common editor conventions and yq's `column` function.
+    /// to match common editor conventions and yq's `column` function, and count
+    /// characters (Unicode scalar values), not bytes, as yq does (#4364).
     ///
     /// # Example
     ///
@@ -3207,7 +3208,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     #[inline]
     pub fn column(&self) -> usize {
         let offset = self.metadata_position();
-        let (_line, column) = self.index.to_line_column(offset, self.text);
+        let (_line, column) = self.index.to_line_char_column(offset, self.text);
         column
     }
 

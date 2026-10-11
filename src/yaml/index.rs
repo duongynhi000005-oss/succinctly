@@ -120,6 +120,10 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// standalone-comment write site consults it to keep a comment the
     /// header already printed from printing a second time.
     yq_header: OnceCell<(usize, bool)>,
+    /// Whether the indexed text is pure ASCII, measured once on first use (#4364). A column
+    /// that counts characters ([`Self::to_line_char_column`]) is the byte column in that
+    /// case, so an ASCII document pays one scan for the whole run and no per-call prefix walk.
+    text_is_ascii: OnceCell<bool>,
 }
 
 /// Build cumulative popcount index for IB.
@@ -214,6 +218,7 @@ impl YamlIndex<Vec<u64>> {
             canonicalize_numbers: false,
             header_doc_markers: true,
             yq_header: OnceCell::new(),
+            text_is_ascii: OnceCell::new(),
         };
         index.validate_alias_acyclicity()?;
         Ok(index)
@@ -283,6 +288,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             canonicalize_numbers: false,
             header_doc_markers: true,
             yq_header: OnceCell::new(),
+            text_is_ascii: OnceCell::new(),
         }
     }
 
@@ -946,6 +952,31 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[inline]
     pub fn to_line_column(&self, offset: usize, text: &[u8]) -> (usize, usize) {
         self.ensure_lines(text).to_line_column(offset)
+    }
+
+    /// [`Self::to_line_column`] with the column counted in characters, not bytes (#4364):
+    /// `é: [1]` has its `[` at column 4, as yq's `column` says, where the byte column is 5.
+    ///
+    /// A character is a Unicode scalar value (a UTF-8 lead byte), as go-yaml counts runes, not
+    /// grapheme clusters: `e` followed by a combining accent is two columns. Bytes that are not
+    /// valid UTF-8 count one column each. The byte column stays what [`Self::to_line_column`]
+    /// answers (and what `yq-locate` and [`Self::to_offset`] use); an ASCII document, the
+    /// common case, is answered from it without reading the line.
+    pub fn to_line_char_column(&self, offset: usize, text: &[u8]) -> (usize, usize) {
+        let (line, byte_column) = self.to_line_column(offset, text);
+        if *self.text_is_ascii.get_or_init(|| text.is_ascii()) {
+            return (line, byte_column);
+        }
+        // The line starts `byte_column - 1` bytes before `offset`; an offset past the end of the
+        // text adds its overshoot as one column per byte.
+        let line_start = offset.saturating_sub(byte_column - 1).min(text.len());
+        let end = offset.min(text.len());
+        let overshoot = offset - end;
+        let characters = text[line_start..end]
+            .iter()
+            .filter(|byte| (**byte & 0xC0) != 0x80)
+            .count();
+        (line, characters + overshoot + 1)
     }
 
     /// Convert (line, column) to a byte offset using the line index.
@@ -2413,6 +2444,44 @@ mod tests {
             detected, 0,
             "a `-N` scalar must not be detected as a sequence item"
         );
+    }
+
+    /// #4364: the character column counts UTF-8 lead bytes, leaves the byte column alone, and
+    /// is the byte column on an ASCII document or at an offset past the end of the text.
+    #[test]
+    fn to_line_char_column_counts_characters_not_bytes_4364() {
+        // `é` is two bytes, so `[` is at byte 5 but character 4.
+        let yaml = "é: [1]\nk: ü\n".as_bytes();
+        let index = YamlIndex::build(yaml).unwrap();
+        assert_eq!(index.to_line_column(4, yaml), (1, 5));
+        assert_eq!(index.to_line_char_column(4, yaml), (1, 4));
+        // Line 2 starts at byte 8 (`é: [1]\n` is 8 bytes) and its `ü` at byte 11.
+        assert_eq!(index.to_line_column(11, yaml), (2, 4));
+        assert_eq!(index.to_line_char_column(11, yaml), (2, 4));
+        // The newline after `ü` (two bytes) is byte column 6, character column 5.
+        assert_eq!(index.to_line_char_column(13, yaml), (2, 5));
+        assert_eq!(index.to_line_column(13, yaml), (2, 6));
+        // A character is a scalar value: `e` plus a combining accent is two, an astral one is one.
+        let combining = "e\u{301}: 1\n".as_bytes();
+        let index = YamlIndex::build(combining).unwrap();
+        assert_eq!(index.to_line_char_column(5, combining), (1, 5));
+        let astral = "\"\u{1f600}\": 1\n".as_bytes();
+        let index = YamlIndex::build(astral).unwrap();
+        assert_eq!(index.to_line_char_column(7, astral), (1, 5));
+        // Past the end of the text the overshoot counts one column per byte, as the byte column.
+        let tail = "é".as_bytes();
+        let index = YamlIndex::build(tail).unwrap();
+        assert_eq!(index.to_line_char_column(5, tail), (1, 5));
+        // ASCII: identical to the byte column everywhere.
+        let ascii = b"name: Alice\nage: 30";
+        let index = YamlIndex::build(ascii).unwrap();
+        for offset in 0..=ascii.len() {
+            assert_eq!(
+                index.to_line_char_column(offset, ascii),
+                index.to_line_column(offset, ascii),
+                "{offset}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------------

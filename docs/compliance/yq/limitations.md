@@ -5567,14 +5567,21 @@ yq and `p: 3, q: 4` here, the shared node incremented twice), `..` over an owned
 (`to_entries | .[] | ..` expands the alias), a merge key (`<<: *b`, which yq also treats as the
 stop, listing `m.<<` where this lists the merged `m.p`/`m.q`), and `recurse(f; cond)`.
 
-### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363), [#4364](https://github.com/rust-works/succinctly/issues/4364))
+### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in
 yq ([#2712](https://github.com/rust-works/succinctly/issues/2712)): `b: &anc [1,2]` is column 4.
-Two pre-existing differences remain, neither specific to properties:
+One pre-existing difference remains, not specific to properties:
 
 - yq reports `1:1` for the root of a *first* document that opens with an explicit `---` or a leading
   comment (`--- 5`, `# c` / `k: 1`); here the root reports its own position (`[1,5]`, `[2,1]`). A later
   document's root agrees (#4363).
-- Columns are byte offsets here and character offsets in yq, so a multi-byte character earlier on the
-  line shifts the column (`é: [1]` is `[1,5]` here, `[1,4]` in yq; #4364).
+
+`column` counts characters, as yq does ([#4364](https://github.com/rust-works/succinctly/issues/4364)):
+`é: [1]` is `[1,4]`, where it used to read `[1,5]` (the byte column). A character is a Unicode scalar
+value, so `e` plus a combining accent is two columns and an astral character one (checked against yq
+v4.53.3, which counts runes, not grapheme clusters); bytes that are not valid UTF-8 count one each.
+`YamlIndex::to_line_char_column` does it, once the text is known not to be ASCII (an ASCII document
+reads the byte column, with no scan of the line); `YamlIndex::to_line_column`, `to_offset` and
+`yq-locate` stay in bytes, which an editor offset round-trips. The JSON cursor's `column`
+(a succinctly extension with no jq oracle) stays in bytes.
