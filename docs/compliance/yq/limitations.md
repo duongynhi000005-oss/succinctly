@@ -5158,7 +5158,14 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
 commas, `select(f) | ...`, and a navigation in front of an assignment. An `update` that binds
 a variable first (`(.b = 2) as $x | .c = $x`) is not followed: the binding contributes nothing,
 so the assignment after it is dropped where yq applies both. A value-producing stage ahead of
-an assignment is dropped too.
+an assignment is dropped too, and so is its *error*: `{"a":{"b":1}} | with(.a; . + 1)` fails in
+yq (`!!int () cannot be added to a !!map (a)`) and is a no-op here, because `update` is never
+evaluated for a value. A third argument (`with(.a; . = 1; 2)`) is a parse error here; yq accepts
+it and returns its input untouched.
+
+`from_yaml` of text the semi-index does not reject still decodes where yq fails: `"a: b: c"` is
+`{"a":"b"}` here, `"--- \n..."` is `null`, and `"a: !!int x"` is the string `x` (the general
+minimal-validation trade-off of semi-indexing, not specific to the builtin).
 
 `from_json`/`from_yaml` decode through the same scalar resolution as input documents, so an
 implicit-tag scalar yq types specially keeps succinctly's type: `"2020-01-01" | from_json | tag`

@@ -62517,10 +62517,18 @@ fn test_to_number_from_json_from_yaml_4206() -> Result<()> {
         r#""[1, 2" | from_json"#,
         r#""" | from_yaml"#,
         r#"["a"] | from_json"#,
+        // A lone `...` is no document at all; blank text and a comment are an empty one.
+        r#""..." | from_yaml"#,
+        r##""#c\n..." | from_yaml"##,
+        // Text that decodes to no value.
+        r#""a: \"\\q\"" | from_yaml"#,
     ] {
         let (_out, code) = run_yq_stdin(filter, "", args)?;
         assert_ne!(code, 0, "{filter} must fail");
     }
+    // A string that is itself undecodable (yq cannot even load this document).
+    let (_out, code) = run_yq_stdin(".a | from_yaml", "a: \"\\q\"\n", &["-o=json", "-I=0"])?;
+    assert_ne!(code, 0, "an undecodable string must fail");
     Ok(())
 }
 
@@ -62597,6 +62605,65 @@ fn test_with_applies_only_the_assignments_of_its_update_4206() -> Result<()> {
             r#"[{"a":1},{"a":2}] | with(.[] | select(.a == 2); .b = 9)"#,
             r#"[{"a":1},{"a":2,"b":9}]"#,
         ),
+        // Parentheses and commas group the head of the update without changing what it does.
+        (r#"{"a":{"b":1}} | with(.a; (.b = 2))"#, r#"{"a":{"b":2}}"#),
+        (
+            r#"{"a":{"b":1}} | with(.a; ((.b = 2) | .c = 3))"#,
+            r#"{"a":{"b":2,"c":3}}"#,
+        ),
+        (
+            r#"{"a":{"b":1}} | with(.a; (.b = 2) | .c = 3)"#,
+            r#"{"a":{"b":2,"c":3}}"#,
+        ),
+        (
+            r#"{"a":{"b":1}} | with(.a; (select(true)) | .c = 3)"#,
+            r#"{"a":{"b":1,"c":3}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"c":1}}} | with(.a; (.b = 1 | .c = 2) | .d = 3)"#,
+            r#"{"a":{"b":1,"c":2,"d":3}}"#,
+        ),
+        // Every assignment of a comma in front of a stage applies, not just the first.
+        (
+            r#"{"a":{"b":1}} | with(.a; (.b = 2, .c = 3) | .d = 4)"#,
+            r#"{"a":{"b":2,"c":3,"d":4}}"#,
+        ),
+        (
+            r#"{"a":{"b":1}} | with(.a; .b = 2, .c = 3 | .d = 4)"#,
+            r#"{"a":{"b":2,"c":3,"d":4}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"c":1}}} | with(.a; ((.b = 1) , (.c = 2)) | .d = 3)"#,
+            r#"{"a":{"b":1,"c":2,"d":3}}"#,
+        ),
+        // A comma of navigations in front of the assignment fans it out to each.
+        (
+            r#"{"a":{"b":{"x":1},"c":{"y":2}}} | with(.a; (.b, .c) | .d = 1)"#,
+            r#"{"a":{"b":{"x":1,"d":1},"c":{"y":2,"d":1}}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"x":1},"c":{"y":2}}} | with(.a; (.b, .c) | .d = 1 | .e = 2)"#,
+            r#"{"a":{"b":{"x":1,"d":1,"e":2},"c":{"y":2,"d":1,"e":2}}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"x":1},"c":{"y":2}}} | with(.a; .b, .c | .d = 1)"#,
+            r#"{"a":{"b":{"x":1},"c":{"y":2,"d":1}}}"#,
+        ),
+        // Parenthesised and optional navigations.
+        (
+            r#"{"a":{"b":{"c":1}}} | with(.a; (.b) | .c = 3)"#,
+            r#"{"a":{"b":{"c":3}}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"c":1}}} | with(.a; .b? | .c = 3)"#,
+            r#"{"a":{"b":{"c":3}}}"#,
+        ),
+        (
+            r#"{"a":{"b":{"c":1}}} | with(.a; (.b | .c) | .d = 3)"#,
+            r#"{"a":{"b":{"c":1}}}"#,
+        ),
+        // A value-producing stage ahead of an assignment discards the assignment too.
+        (r#"{"a":1} | with(.a; . + 1 | .c = 3)"#, r#"{"a":1}"#),
         (r#"{"a":1} | with(.a; select(false) | . = 5)"#, r#"{"a":1}"#),
         (r#"{"a":1} | with(.a; . = null)"#, r#"{"a":null}"#),
         (". as $x | with(.a; . = 1)", r#"{"a":1}"#),
@@ -62611,8 +62678,26 @@ fn test_with_applies_only_the_assignments_of_its_update_4206() -> Result<()> {
         stderr.contains("with must be given a block (;), got UNION instead"),
         "{stderr}"
     );
+    // A wrong arity is a parse error in yq mode.
+    for filter in ["with", "with(.a)", "with(.a; . = 1; 2)"] {
+        let (_out, code) = run_yq_stdin(filter, "", args)?;
+        assert_ne!(code, 0, "{filter} must fail");
+    }
     // `with`, `to_number` and the decoders are yq names, so jq mode may define them.
     let (out, code) = run_jq_stdin("def with(a; b): 42; with(1; 2)", "null", &["-c"])?;
     assert_eq!((out.trim(), code), ("42", 0));
+    // Any other arity is jq's own "not defined" in jq mode, not a raw parse error.
+    for (filter, name) in [
+        ("with", "with/0"),
+        ("with(1; 2; 3)", "with/3"),
+        ("with(1)", "with/1"),
+    ] {
+        let (_out, stderr, code) = run_jq_stdin_with_stderr(filter, "null", &["-c"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(
+            stderr.contains(&format!("{name} is not defined")),
+            "{filter}: {stderr}"
+        );
+    }
     Ok(())
 }

@@ -22171,7 +22171,7 @@ fn builtin_from_yaml<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     let text = match &value {
         StandardJson::String(s) => match s.as_str() {
             Ok(cow) => cow.into_owned(),
-            Err(e) => return QueryResult::Error(EvalError::decode_failure(e.message())),
+            Err(e) => return QueryResult::Error(EvalError::decode_failure(e.message())), // patchcov: coverage tolerate-line reason="unreachable: a string that does not decode fails where the cursor materializes it, before this builtin sees a value (#4206)"
         },
         StandardJson::Array(_) | StandardJson::Object(_) => {
             return suppress_or_raise(EvalError::new("EOF"), optional);
@@ -22192,9 +22192,15 @@ fn builtin_from_yaml<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     let first = match root.value() {
         crate::yaml::YamlValue::Sequence(docs) => match docs.uncons_cursor() {
             Some((doc, _)) => doc,
-            None => return QueryResult::Owned(OwnedValue::Null),
+            // A stream with no document at all (a lone `...`) is a parse error, not an empty one.
+            None => {
+                return suppress_or_raise(
+                    EvalError::new("yaml: did not find expected node content"),
+                    optional,
+                );
+            }
         },
-        _ => root,
+        _ => root, // patchcov: coverage tolerate-line reason="unreachable: a YAML index's root is always the document sequence (#4206)"
     };
     match super::eval_generic::to_owned_yaml_cursor::<S, _>(&first) {
         Ok(v) => QueryResult::Owned(v),

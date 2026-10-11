@@ -414,7 +414,7 @@ fn with_update_effect(update: &Expr) -> Expr {
 /// [`with_update_effect`] for the stages of a pipe: the first decides what the rest runs on.
 fn with_update_pipe_effect(stages: &[Expr]) -> Expr {
     let Some((head, rest)) = stages.split_first() else {
-        return Expr::Identity;
+        return Expr::Identity; // patchcov: coverage tolerate-line reason="unreachable: a parsed Pipe always has at least two stages (#4206)"
     };
     if rest.is_empty() {
         return with_update_effect(head);
@@ -430,9 +430,10 @@ fn with_update_pipe_effect(stages: &[Expr]) -> Expr {
             stages.extend_from_slice(rest);
             with_update_pipe_effect(&stages)
         }
-        head if is_assignment_expr(head) => {
-            Expr::pipe(vec![head.clone(), with_update_pipe_effect(rest)])
-        }
+        head if is_assignment_expr(head) => Expr::pipe(vec![
+            with_update_effect(head),
+            with_update_pipe_effect(rest),
+        ]),
         head if is_navigation_expr(head) => Expr::Update {
             path: Box::new(head.clone()),
             filter: Box::new(with_update_pipe_effect(rest)),
@@ -446,6 +447,7 @@ fn is_navigation_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Field(_) | Expr::Index { .. } | Expr::Iterate => true,
         Expr::Paren(inner) | Expr::Optional(inner) => is_navigation_expr(inner),
+        Expr::Comma(items) => !items.is_empty() && items.iter().all(is_navigation_expr),
         Expr::Pipe(stages) => !stages.is_empty() && stages.iter().all(is_navigation_expr),
         _ => false,
     }
