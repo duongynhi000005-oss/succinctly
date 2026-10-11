@@ -481,7 +481,8 @@ OPERANDS = [
     "(foreach ((if true then . else . end) | . as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; f | . as {a:$a} | .) as $k (.; .; .))",
     # ...and the second review's: a name two chain alternatives bind, a `$x` behind `first` or a
-    # comma, a `$x` bound outside the source, and a run of calls to one pass-through `def`.
+    # comma, a `$x` bound outside the source (still accepted, #4320), and a run of calls to one
+    # pass-through `def`.
     "(foreach (. as $a ?// {a:$a} | $a as {a:$b} | .) as $k (.; .; .))",
     "(foreach (. as $x ?// [$x] | $x as {a:$a} | .) as $k (.; .; .))",
     "(foreach (. as $x | first($x) as {a:$a} | .) as $k (.; .; .))",

@@ -48342,10 +48342,10 @@ fn bind_hands_on_the_register(e: &Expr) -> bool {
 /// nested `foreach`'s own chain over the register ([`routes_destructuring_chain`], #3948).
 ///
 /// The bound expression is a bare `.`, a `select(literal)` that hands it on (#4128), a comma of
-/// those (#4150), or a variable that may hold the register (#4278: bound to it on the spine, or
-/// bound outside the source), also behind `first`/`last`/`limit`/`?`/`label`
-/// ([`RegisterSpine::binds_register`]). A `(.|.)` bind stays out, since the resolver reads it as
-/// a computed value. The other [`source_destructures_register`] mode, through a nested
+/// those (#4150), or a variable the spine bound to the register (#4278), also behind
+/// `first`/`last`/`limit`/`?`/`label` ([`RegisterSpine::binds_register`]). A `(.|.)` bind stays
+/// out, since the resolver reads it as a computed value, and so does a variable bound outside
+/// the source or any other computed bound expression (#4320). The other [`source_destructures_register`] mode, through a nested
 /// `reduce`, is only for the places the register is not known to be at `.`.
 fn foreach_source_destructures_register(source: &Expr) -> bool {
     source_destructures_register(source, false)
@@ -48369,6 +48369,7 @@ fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
         defs: Vec::new(),
         memo: Vec::new(),
         calls: SPINE_CALL_BUDGET,
+        depth: 0,
     };
     walk.reach(source) == Reach::Destructures
 }
@@ -48400,6 +48401,10 @@ fn visit_pattern_names<'e>(pattern: &'e Pattern, visit: &mut impl FnMut(&'e str)
 /// explores, not the calls to them. What a call past it reads as is
 /// [`RegisterSpine::past_budget`].
 const SPINE_CALL_BUDGET: u32 = 16;
+
+/// How deep one [`source_destructures_register`] walk nests before it stops
+/// ([`RegisterSpine::reach`]): far past any written spine, well short of the native stack.
+const SPINE_DEPTH_LIMIT: u32 = 256;
 
 /// `e` with the wrappers that hand their operand's value on peeled: parens and closure
 /// arguments ([`unwrap_bind_source`]), [`peel_register_transparent`]'s, `last(f)` and `label`.
@@ -48467,6 +48472,8 @@ struct RegisterSpine<'e> {
     memo: Vec<(*const Expr, Reach)>,
     /// What is left of [`SPINE_CALL_BUDGET`].
     calls: u32,
+    /// How deep [`reach`](Self::reach) is nested.
+    depth: u32,
 }
 
 impl<'e> RegisterSpine<'e> {
@@ -48572,8 +48579,36 @@ impl<'e> RegisterSpine<'e> {
         }
     }
 
-    /// What `e` does with the register as a fold source, or a stage of one.
+    /// The reach of alternatives that each meet the register where their parent did (a comma's
+    /// branches, an `if`'s): any that destructures, else hands-on only if all do.
+    fn reach_any<I: IntoIterator<Item = &'e Expr>>(&mut self, branches: I) -> Reach {
+        let mut reach = Reach::HandsOn;
+        for branch in branches {
+            match self.reach(branch) {
+                Reach::Destructures => return Reach::Destructures,
+                Reach::Opaque => reach = Reach::Opaque,
+                Reach::HandsOn => {}
+            }
+        }
+        reach
+    }
+
+    /// What `e` does with the register as a fold source, or a stage of one. Past
+    /// [`SPINE_DEPTH_LIMIT`] nested nodes the walk stops as it does past the call budget, so a
+    /// closure argument nested arbitrarily deep by a recursive `def` cannot exhaust the native
+    /// stack (ADR-0025).
     fn reach(&mut self, e: &'e Expr) -> Reach {
+        if self.depth >= SPINE_DEPTH_LIMIT {
+            return self.past_budget();
+        }
+        self.depth += 1;
+        let reach = self.reach_node(e);
+        self.depth -= 1;
+        reach
+    }
+
+    /// [`reach`](Self::reach) for one node.
+    fn reach_node(&mut self, e: &'e Expr) -> Reach {
         // `unwrap_bind_source` also peels a closure argument substituted into a body
         // (`Expr::Shared`, #3149), which is the argument's own expression.
         match unwrap_bind_source(e) {
@@ -48635,17 +48670,7 @@ impl<'e> RegisterSpine<'e> {
                     _ => Reach::Opaque,
                 }
             }
-            Expr::Comma(branches) => {
-                let mut reach = Reach::HandsOn;
-                for branch in branches {
-                    match self.reach(branch) {
-                        Reach::Destructures => return Reach::Destructures,
-                        Reach::Opaque => reach = Reach::Opaque,
-                        Reach::HandsOn => {}
-                    }
-                }
-                reach
-            }
+            Expr::Comma(branches) => self.reach_any(branches),
             // #3940: a stage that only hands the register on (`.`, `(.|.)`, `(., .)`) moves
             // nothing, so the stage after it is the one that meets the register. #4278: so does
             // any stage [`reach`](Self::reach) reads as handing it on (a plain bind, an `if`, a
@@ -48665,11 +48690,7 @@ impl<'e> RegisterSpine<'e> {
                 then_branch,
                 else_branch,
                 ..
-            } => match (self.reach(then_branch), self.reach(else_branch)) {
-                (Reach::Destructures, _) | (_, Reach::Destructures) => Reach::Destructures,
-                (Reach::HandsOn, Reach::HandsOn) => Reach::HandsOn,
-                _ => Reach::Opaque,
-            },
+            } => self.reach_any([&**then_branch, &**else_branch]),
             // #4278: a call with no arguments runs its body where the call is, in the scope the
             // definition was written in. Only such a call: a closure or `$param` binds code the
             // walk would have to substitute. A definition with parameters is another arity: it

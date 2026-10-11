@@ -2007,10 +2007,14 @@ is the revert that established what the other one costs.
    . as {a:$a} | .`), an `if` branch, a no-argument `def` call (its body read once per walk in the scope the `def` was
    written in; an installed call's body with no spine scope; past 16 distinct bodies the source is routed), and a
    variable that may hold the register as the bound expression (`. as $x | $x as {a:$a}`, also from inside a `def`
-   body, behind `first`/`last`/`limit`/`?`/a comma, or bound outside the source). `source_destructures_register` is one
+   body, or behind `first`/`last`/`limit`/`?`/a comma). `source_destructures_register` is one
    walk (`RegisterSpine::reach`) that says whether a node destructures the register, hands it on, or may move it, so
    the pipe walk and the destructure test cannot drift apart. Still accepted besides the two shapes above (#4320): a `$x`
-   returned through a call (`def f: $x; f as {a:$a}`). Pinned by
+   bound outside the `foreach` (`. as $x | del(foreach ($x as {a:$a} | .) ...)`; reading it as the register refused
+   `reduce .[] as $it (.; reduce ($it as {a:$a} | .) ...)` inside a fold body, which jq answers), and a bound expression
+   that hands the register on through a call, a pipe, an `if` or `//` (`def f: .; f as {a:$a}`, `($x | .) as {a:$a}`),
+   which `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
+   too. Pinned by
    `test_foreach_source_destructure_behind_a_chain_bind_if_or_def_refuses_4278`. Over the 29 register-sweep operands
    it adds (374,787 rows), 4,829 wrong accepts and 807 wrong answers go to 972 and 151 (the 972 are all the `(.|.)` and
    later-bare-alternative operands), 2,908 refusals become matches, and 457 matches are lost to a refusal: 161 inside
