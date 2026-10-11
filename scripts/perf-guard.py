@@ -442,15 +442,16 @@ DEFAULT_THRESHOLD = 5.0
 # (#4228) once the four rows read -0.0% / -0.0% / -0.0% / +0.0% on x86_64 and
 # -0.0% / +0.0% / -0.0% / +0.0% on ARM64-Linux against a merge-base that
 # already included them (PR #4222's perf-guard logs).
+#
+# `arrays_map_iterate` (#4217, PR #4246) carried one of the same kind: a scalar
+# crossing the owned-evaluator bridge reuses its index buffers instead of
+# allocating and freeing three per scalar, and `map(length) | .[]` bridges one
+# scalar per array element (-7.0% ARM64-Linux / -5.3% x86_64 against the PR's
+# own merge-base, outputs byte-identical). Now in `main`; the entry was removed
+# (#4279) once the row read ~0% again against a merge-base that already
+# included it.
 QUERY_THRESHOLDS = {
     "wide_keys_unsorted": 10.0,
-    # #4217: a scalar crossing the owned-evaluator bridge reuses its index
-    # buffers instead of allocating and freeing three per scalar, and
-    # `map(length) | .[]` bridges one scalar per array element (-7.0%
-    # ARM64-Linux / -5.3% x86_64 against the PR's own merge-base, outputs
-    # byte-identical). Remove once main carries #4217 and the row reads ~0%
-    # against a merge-base that already includes it.
-    "arrays_map_iterate": 10.0,
 }
 
 # argparse wants a plain string for `epilog`; keeping it as a real constant
