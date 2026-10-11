@@ -125539,6 +125539,31 @@ fn test_fused_slice_read_does_not_convert_siblings_4195() -> Result<()> {
             assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}");
         }
     }
+    // #4286: `key` of the element reads the slice index, not the slice. Only where the read is the
+    // pipe that reaches the fusion: under `. as $d` the document is frozen whole, and a read
+    // that sits inside a larger path-context pipe (a comma, or a stage after it) is walked by that
+    // pipe, slice included, so neither skips the siblings.
+    for (read, expected) in [
+        ("0 as $i | .[$i:][0] | key", "0\n"),
+        ("0 as $i | .[$i:][2] | key", "2\n"),
+        ("0 as $i | .[$i:][2] | tostring | key", "2\n"),
+        ("0 as $i | .[$i:][2] | key | tostring", "\"2\"\n"),
+        ("0 as $i | .[$i:][2] | tostring | key | tostring", "\"2\"\n"),
+    ] {
+        for context in [
+            "{}",
+            "{a: {}} | .a",
+            "{} as $x | $x",
+            "if true then {} else 0 end",
+            "try {} catch \"caught\"",
+            "def f: {}; f",
+            "label $out | {}",
+        ] {
+            let filter = context.replace("{}", &format!("({read})"));
+            let (stdout, code) = run_jq_stdin(&filter, doc, &["-c"])?;
+            assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}");
+        }
+    }
     // A read per element of `.[]`, and in a `map` body, reaches the fusion through both drivers.
     for (filter, expected) in [
         ("0 as $i | .[] | .[$i:][0]", "1\n4\n"),
@@ -125563,6 +125588,193 @@ fn test_fused_slice_read_does_not_convert_siblings_4195() -> Result<()> {
     // The unfused spelling converts the whole range.
     let (stdout, code) = run_jq_stdin("0 as $i | (.[$i:]) | .[0]", doc, &["-c"])?;
     assert_eq!((stdout.as_str(), code), ("", 5), "slice built first");
+    // #4286: and so does the `key` read's, which the walk builds.
+    let (stdout, code) = run_jq_stdin("0 as $i | (.[$i:])[0] | key", doc, &["-c"])?;
+    assert_eq!((stdout.as_str(), code), ("", 5), "slice built first");
+    Ok(())
+}
+
+/// #4286: `E[a:b][k] | key` (with a `tostring` before or after the `key`) answers `k` without
+/// building the slice, and must answer what the walk does -- values, errors and exit codes alike.
+/// The unfused spelling puts the slice in parentheses, which the fusion does not look through.
+/// The declines are the shapes the fused read leaves to the walk: an index outside the slice (jq
+/// keeps the index as written), a negative index, a target that is not a readable array, a
+/// bound that fans out, and every tail that reads more of the path than the index.
+#[test]
+fn test_fused_slice_key_equals_the_unfused_spelling_4286() -> Result<()> {
+    let docs = [
+        "[]",
+        "[1,2,3,4,5,6,7]",
+        r#"[null,false,{"a":1},"s",[],[2,3]]"#,
+        "null",
+        r#"{"a":[1,2,3]}"#,
+    ];
+    let bounds = [
+        "$i:",
+        ":$j",
+        "$neg:",
+        "length-1:",
+        "$z:",
+        "$s:",
+        "(1,2):",
+        "(empty):",
+    ];
+    let reads = ["[0]", "[2]", "[9]", "[-1]"];
+    let tails = [
+        "key",
+        "tostring | key",
+        "key | tostring",
+        "key | key",
+        "key, 1",
+        "parent",
+        "key | . + 1",
+    ];
+    for doc in docs {
+        for bound in bounds {
+            for read in reads {
+                for tail in tails {
+                    let fused = format!("{SLICE_READ_PRELUDE}.[{bound}]{read} | {tail}");
+                    let unfused = format!("{SLICE_READ_PRELUDE}(.[{bound}]){read} | {tail}");
+                    assert_eq!(
+                        run_jq_stdin(&fused, doc, &["-c"])?,
+                        run_jq_stdin(&unfused, doc, &["-c"])?,
+                        "{doc}: {fused}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #4286: the values the fused `key` read answers, pinned as literals so a regression in the
+/// unfused spelling it is compared against cannot hide one in both.
+#[test]
+fn test_fused_slice_key_values_4286() -> Result<()> {
+    let doc = "[10,20,30,40]";
+    for (filter, expected) in [
+        ("1 as $i | .[$i:][0] | key", "0\n"),
+        ("1 as $i | .[$i:][2] | key", "2\n"),
+        ("1 as $i | .[$i:][2] | tostring | key", "2\n"),
+        ("1 as $i | .[$i:][2] | key | tostring", "\"2\"\n"),
+        ("1 as $i | .[$i:3][1] | key", "1\n"),
+        // Outside the slice: jq keeps the index as written, so this is the walk's answer.
+        ("1 as $i | .[$i:][3] | key", "3\n"),
+        ("1 as $i | .[$i:][-1] | key", "-1\n"),
+        (
+            "1 as $i | [(.[$i:][0] | key), (.[$i:][1] | key)]",
+            "[0,1]\n",
+        ),
+        ("[range(3) as $i | .[$i:][0] | key]", "[0,0,0]\n"),
+        ("[range(3) as $i | .[$i:][0] | tostring | key]", "[0,0,0]\n"),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (expected.to_string(), 0),
+            "{filter}"
+        );
+    }
+    Ok(())
+}
+
+/// #4286: a read of a computed slice over an owned array (a constructed or `map(...)` result,
+/// not the document) answers what the slice-then-read evaluation does, with the unfused
+/// spelling as the oracle. Several spellings reach the owned doors: the bare read, a read that
+/// continues into more stages, a `map` body and a variable holding the array.
+#[test]
+fn test_owned_array_slice_read_equals_the_unfused_spelling_4286() -> Result<()> {
+    let docs = [
+        "[]",
+        r#"[null,false,{"a":{"b":1}},"s",[],[2,3],1.5]"#,
+        r#"{"xs":[{"a":{"b":0}},{"a":{"b":1}},{"a":{"b":2}}]}"#,
+        "null",
+    ];
+    let bounds = ["$i:", ":$j", "$neg:", "$z:", "$s:", "(1,2):"];
+    let reads = [
+        ("[0]", "| .[0]"),
+        ("[-1]", "| .[-1]"),
+        ("[9]", "| .[9]"),
+        ("| length", "| length"),
+        ("| first", "| first"),
+        ("[0] | tostring", "| .[0] | tostring"),
+    ];
+    for doc in docs {
+        for bound in bounds {
+            for (read, unfused_read) in reads {
+                for head in ["[.[]?]", "(.xs // . | map(.))"] {
+                    // The slice as written, and the same slice in parentheses, which the
+                    // fusion does not look through.
+                    let slice = format!(".[{bound}]{read}");
+                    let unfused_slice = format!("(.[{bound}]) {unfused_read}");
+                    let cases = [
+                        (
+                            format!("{head} | {slice}"),
+                            format!("{head} | {unfused_slice}"),
+                        ),
+                        (
+                            format!("{head} as $a | $a | {slice}"),
+                            format!("{head} as $a | $a | {unfused_slice}"),
+                        ),
+                        (
+                            format!("{head} as $a | [$a | {slice}]"),
+                            format!("{head} as $a | [$a | {unfused_slice}]"),
+                        ),
+                        (
+                            format!("{head} | map({slice})"),
+                            format!("{head} | map({unfused_slice})"),
+                        ),
+                        // `$a[B][k]`: the variable is the slice's target.
+                        (
+                            format!("{head} as $a | $a{}", &slice[1..]),
+                            format!("{head} as $a | ($a[{bound}]) {unfused_read}"),
+                        ),
+                    ];
+                    for (fused, unfused) in cases {
+                        let fused = format!("{SLICE_READ_PRELUDE}{fused}");
+                        let unfused = format!("{SLICE_READ_PRELUDE}{unfused}");
+                        assert_eq!(
+                            run_jq_stdin(&fused, doc, &["-c"])?,
+                            run_jq_stdin(&unfused, doc, &["-c"])?,
+                            "{doc}: {fused}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #4286: a loop over a computed-slice read must not grow like the slice does. Each of the four
+/// reads below converted the whole tail of the array per read, so 6,000 reads over a 6,000-element
+/// array cost seconds in a release build and many times that in a debug one; fused they cost
+/// milliseconds.
+/// The bound is far above the fused time and far below the unfused one, so it fails on the
+/// regression and not on a loaded machine.
+#[test]
+fn test_computed_slice_read_loop_does_not_grow_with_the_slice_4286() -> Result<()> {
+    let doc = format!(
+        r#"{{"xs":[{}]}}"#,
+        (0..6000)
+            .map(|i| format!(r#"{{"a":{{"b":{i}}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for filter in [
+        ".xs | [range(length-1;-1;-1) as $i | .[$i:][0] | key] | length",
+        ".xs | [range(length-1;-1;-1) as $i | .[$i:][0] | tostring | key] | length",
+        ".xs as $a | [range($a|length) as $i | $a[$i:][0] | .a.b] | length",
+        ".xs | map(.) as $a | [range($a|length) as $i | $a | .[$i:][0] | .a.b] | length",
+    ] {
+        let started = std::time::Instant::now();
+        let (stdout, code) = run_jq_stdin(filter, &doc, &["-c"])?;
+        let elapsed = started.elapsed();
+        assert_eq!((stdout.as_str(), code), ("6000\n", 0), "{filter}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "{filter} took {elapsed:?}: the loop is quadratic again"
+        );
+    }
     Ok(())
 }
 

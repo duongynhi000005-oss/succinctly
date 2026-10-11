@@ -1041,9 +1041,11 @@ anywhere is rejected outright. succinctly indexes lazily and checks the values a
 answers, `E[a:b][k]` with an integer-literal `k`, `E[a:b] | length` and, since
 [#4288](https://github.com/rust-works/succinctly/issues/4288), `E[a:b] | first` and `| last` (jq mode
 only; they are `.[0]` and `.[-1]`), each with a postfix `?` on the slice or on the read looked
-through, and since [#4317](https://github.com/rust-works/succinctly/issues/4317) `E[a:b][$k]` for a
-computed index that is one integer-valued number, converts only the element it names, so a malformed
-value elsewhere in the range no longer raises:
+through, since [#4317](https://github.com/rust-works/succinctly/issues/4317) `E[a:b][$k]` for a
+computed index that is one integer-valued number, and since
+[#4286](https://github.com/rust-works/succinctly/issues/4286) `.[a:b][k] | key` (with a `tostring`
+before or after the `key`; jq mode, a non-negative `k` inside the slice), converts only the element it
+names (the `key` read none at all), so a malformed value elsewhere in the range no longer raises:
 
 | Filter                         | Input         | jq                      | succinctly                         |
 |--------------------------------|---------------|-------------------------|------------------------------------|
@@ -1053,16 +1055,27 @@ value elsewhere in the range no longer raises:
 | `0 as $i \| (.[$i:]) \| .[0]`  | `[1,1.2.3,3]` | rejects the document    | raises (the slice is built whole)  |
 | `.[0:3][0]`                    | `[1,1.2.3,3]` | rejects the document    | raises (a literal slice, unfused)  |
 | `0 as $i \| .[$i:] \| last`    | `[1,1.2.3,3]` | rejects the document    | `3`                                |
+| `0 as $i \| .[$i:][0] \| key`  | `[1,1.2.3,3]` | no `key` builtin        | `0`                                |
 
 This is the posture `.[0]` and `length` already have: neither looks inside a sibling element.
 The unfused spellings above are what a read of the whole slice does, and they still convert
 every element. The cost of the other choice is the point of the fusion: validating the range
 means touching all of it, which is the O(tail) per read that made a loop over `.[$i:][0]`
-quadratic. Pinned by `test_fused_slice_read_does_not_convert_siblings_4195`. Still unfused, and so
-still O(tail) per read: a literal-bound slice (`.[2:][0]`, which validates the whole range and would
-stop doing so), a computed index that is fractional, a string, `null` or fans out (the ordinary route
-answers or raises it), and the `| key`/`| path` reads of
-[#4286](https://github.com/rust-works/succinctly/issues/4286).
+quadratic. Pinned by `test_fused_slice_read_does_not_convert_siblings_4195`.
+
+Two more routes read the same range, and answer from the owned array rather than from a cursor
+(#4286). A variable bound to a value of the document (`.xs as $a | $a[$i:][0]`) is read as a pure
+operand like any other, so the same fused read answers it. An owned array (a constructed or
+`map(...)` result) is read in place by `$a | .[$i:][0]`, `| length`, `| first` and `| last`, with
+closed bounds only, instead of being written out and indexed again for each read; an owned array has
+no malformed element to skip, so that route adds no row to the table above.
+
+Still unfused, and so still O(tail) per read: a literal-bound slice (`.[2:][0]`, which validates the
+whole range and would stop doing so), a computed index that is fractional, a string, `null` or fans
+out (the ordinary route answers or raises it), a `key` read with a negative or out-of-range index,
+with a `parent` or any other stage after it, or nested inside a larger path-context pipe (a comma,
+or a stage after it, walks the slice itself), `key` in yq mode, whose slice keeps the position, and
+the `| path` read of [#4356](https://github.com/rust-works/succinctly/issues/4356).
 
 ## Where succinctly errors and jq does not
 
