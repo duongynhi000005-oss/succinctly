@@ -483,6 +483,21 @@ fn test_classify_cargo_run_exit_reports_signal_death_1516() {
     );
 }
 
+/// #4399 guard: `succinctly yq` reads exactly a `key` and a `value` per entry, but jq's alias
+/// chain and defaults are jq's own and stay in `succinctly jq` (verified against jq 1.7.1).
+#[test]
+fn test_jq_from_entries_keeps_its_aliases_and_defaults_4399() -> Result<()> {
+    for (filter, expected) in [
+        (r#"[{"name":"n","value":2}] | from_entries"#, "{\"n\":2}\n"),
+        (r#"[{"Key":"a","Value":1}] | from_entries"#, "{\"a\":1}\n"),
+        (r#"[{"key":"a"}] | from_entries"#, "{\"a\":null}\n"),
+    ] {
+        let (out, code) = run_jq_stdin(filter, "null", &["-c"])?;
+        assert_eq!((out.as_str(), code), (expected, 0), "{filter}");
+    }
+    Ok(())
+}
+
 /// Helper to run jq command with input from stdin
 fn run_jq_stdin(filter: &str, input: &str, extra_args: &[&str]) -> Result<(String, i32)> {
     let (stdout, _, code) = run_jq_stdin_streams(filter, input, extra_args)?;

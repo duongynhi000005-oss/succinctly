@@ -925,6 +925,16 @@ impl EvalError {
         Self::new("from entries only runs against arrays")
     }
 
+    /// `expected to find one 'key' entry but found 0 in position 3` (#4399).
+    ///
+    /// Real yq's `from_entries` traverses exactly a `key` and a `value` child of each entry
+    /// and refuses an entry that lacks one, naming the entry's position in the array.
+    pub fn yq_entry_field_missing(field: &str, found: usize, position: usize) -> Self {
+        Self::new(format!(
+            "expected to find one '{field}' entry but found {found} in position {position}"
+        ))
+    }
+
     /// `index [N] out of range, array size is M` (#2254).
     ///
     /// Real yq's own wording for a negative array index whose magnitude
