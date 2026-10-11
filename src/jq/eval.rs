@@ -44226,7 +44226,10 @@ fn stage_leaves_register_in_place<S: EvalSemantics>(expr: &Expr) -> bool {
 /// ([`handler_navigates_nothing`]: [`cannot_move_register`], or a compound of
 /// `select` stages and constants read branch by branch, #4151) leaves it alone,
 /// and one that navigates raises when it runs, in jq as here, so it is not
-/// admitted. Captured against
+/// admitted -- unless the body can raise only a fresh message string
+/// ([`body_raises_only_fresh_messages`]) and the handler takes its steps from its
+/// own input ([`handler_navigates_only_its_input`], #4309): it then runs on a string
+/// that is nobody's node, or never runs. Captured against
 /// jq 1.7.1, `path(. as $x | W | $x)` on `{"a":{"b":1},"k":2}`: `try last(.a)
 /// catch .` is `[]`, `try (last(.a), error("e")) catch .` is `[]` twice, and
 /// `try last(.a) catch .a` is `[]` too (the handler never ran) while `try
@@ -44236,7 +44239,12 @@ fn stage_is_register_keeping<S: EvalSemantics>(expr: &Expr) -> bool {
         Expr::Try {
             expr: inner,
             catch: Some(handler),
-        } => stage_is_register_keeping::<S>(inner) && handler_navigates_nothing(handler),
+        } => {
+            stage_is_register_keeping::<S>(inner)
+                && (handler_navigates_nothing(handler)
+                    || (body_raises_only_fresh_messages(inner)
+                        && handler_navigates_only_its_input(handler)))
+        }
         // #3767: a compound stage whose every branch leaves the register alone. jq
         // backtracks to the fork each alternative of a `,`, `//` or `if` starts from, so
         // each begins at the entry register; a pipe threads the register from one stage
@@ -44285,8 +44293,9 @@ fn stage_is_register_keeping<S: EvalSemantics>(expr: &Expr) -> bool {
 /// ([`is_select_stage`], a stage-level fact it has no admission for): `catch (select(.), 7)`
 /// is read branch by branch, through `,` `//` `if` and a pipe, each branch either
 /// navigating nothing or a `select`/type filter. A handler that navigates (`.a`,
-/// `last(.a)`) is not admitted, whether or not it runs: it raises when it does, in jq as
-/// here.
+/// `last(.a)`) is not admitted here, whether or not it runs: it raises when it does, in jq
+/// as here. ([`stage_is_register_keeping`] admits one over a body that raises only message
+/// strings, #4309.)
 fn handler_navigates_nothing(handler: &Expr) -> bool {
     cannot_move_register(handler)
         || match peel_register_transparent(handler) {
@@ -44302,6 +44311,47 @@ fn handler_navigates_nothing(handler: &Expr) -> bool {
             } => handler_navigates_nothing(then_branch) && handler_navigates_nothing(else_branch),
             stage => is_select_stage(stage),
         }
+}
+
+/// Whether `body` can raise nothing but a fresh message string (#4309): a type error from
+/// a navigation step, which carries text jq builds, never a value the document holds. Its
+/// `catch` handler then runs on a string that is nobody's node, so a handler that navigates
+/// it raises, in jq as here, and the register is back where the `try` entered it.
+///
+/// A grammar and not a search: `.`, a literal, a field, index, slice or iteration step,
+/// `last(f)`, `select(f)` and the type filters, and a pipe or `,` of them. An `error(..)`,
+/// which raises whatever value it is handed (`error($x)` raises the register's own node), a
+/// call, a binding or any builtin outside the list is not in it.
+fn body_raises_only_fresh_messages(body: &Expr) -> bool {
+    match unwrap_paren(body) {
+        Expr::Identity
+        | Expr::Literal(_)
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate => true,
+        Expr::Pipe(items) => items.iter().all(body_raises_only_fresh_messages),
+        Expr::Comma(items) => items.iter().all(body_raises_only_fresh_messages),
+        Expr::LastExpr(inner)
+        | Expr::Builtin(Builtin::LastStream(inner) | Builtin::Select(inner)) => {
+            body_raises_only_fresh_messages(inner)
+        }
+        Expr::Builtin(builtin) => is_type_filter(builtin),
+        _ => false,
+    }
+}
+
+/// Whether a `catch` handler takes only steps from its own input (#4309): a field, index,
+/// slice or iteration step, or a pipe of them. On a payload that is nobody's node
+/// ([`body_raises_only_fresh_messages`]) every such step raises, so the handler never leaves a
+/// result behind. A handler that navigates from anything else (`$x | .a`, whose `$x` can be
+/// the register's own node) is not read, and neither is one that does more than navigate.
+fn handler_navigates_only_its_input(handler: &Expr) -> bool {
+    match unwrap_paren(handler) {
+        Expr::Field(_) | Expr::Index { .. } | Expr::Slice { .. } | Expr::Iterate => true,
+        Expr::Pipe(items) => items.iter().all(handler_navigates_only_its_input),
+        _ => false,
+    }
 }
 
 /// The static half of "this stage leaves jq's register where it entered", the one
@@ -93516,6 +93566,10 @@ mod tests {
             "first(try select(.) catch .)",
             "limit(1; try last(.a) catch .)",
             "try (try last(.a) catch 1) catch .",
+            // #4309: a handler that navigates, over a body that raises only messages.
+            "try last(.a) catch .a",
+            "try select(.) catch (.a | .b)",
+            "try (try last(.a) catch .a) catch 2",
         ] {
             let expr = stage(admitted);
             assert!(
@@ -93528,10 +93582,8 @@ mod tests {
             );
         }
         for refused in [
-            // a handler that navigates (it raises when it runs), and an `E` that moves
-            "try last(.a) catch .a",
-            "try select(.) catch (.a | .b)",
-            "try (try last(.a) catch .a) catch 2",
+            // a handler that navigates over a body that can raise a value, and an `E` that moves
+            "try error(.) catch .a",
             "try .a catch .",
             "try first(.a) catch 7",
             "first(.a)",
@@ -93707,6 +93759,60 @@ mod tests {
         for refused in [
             "try .a catch (select(.), 7)",
             "try (select(.), error(\"e\")) catch (select(.), .a)",
+        ] {
+            let expr = parse(refused).unwrap();
+            assert!(
+                !stage_leaves_register_in_place::<JqSemantics>(&expr),
+                "{refused}"
+            );
+        }
+    }
+
+    /// #4309: a navigating `catch` handler is read as leaving the register alone only over a
+    /// body that can raise nothing but a fresh message string, and only when it takes its steps
+    /// from its own input.
+    #[test]
+    fn a_navigating_catch_handler_over_a_message_only_body_keeps_the_register_4309() {
+        for admitted in [
+            "try last(.a) catch .a",
+            "try last(.a) catch .a.b",
+            "try last(.a) catch .[0]",
+            "try last(.a) catch .[]",
+            "try last(.a) catch .[1:]",
+            "try last(.a) catch (.a | .b)",
+            "try select(.a) catch .a",
+            "try numbers catch .a",
+            "try (select(.), last(.a)) catch .a",
+            "try last(.a[]) catch .a",
+            "try select(.) catch .a",
+        ] {
+            let expr = parse(admitted).unwrap();
+            assert!(
+                stage_leaves_register_in_place::<JqSemantics>(&expr),
+                "{admitted}"
+            );
+            assert!(
+                !stage_leaves_register_in_place::<YqSemantics>(&expr),
+                "{admitted}"
+            );
+        }
+        for refused in [
+            // The body can raise a value: its handler may be handed the register's own node.
+            "try error(.) catch .a",
+            "try error($x) catch .a",
+            "try (last(.a), error(.)) catch .a",
+            "try last(error(.)) catch .a",
+            "try last(.a | error) catch .a",
+            // The body navigates, so the stage does not leave the register where it entered.
+            "try (.a | last(.b)) catch .a",
+            "try first(.a) catch .a",
+            // The handler takes a step from somewhere other than its own input, or does more.
+            "try last(.a) catch ($x | .a)",
+            "try last(.a) catch (.a, 7)",
+            "try last(.a) catch (.a // 5)",
+            "try last(.a) catch .a?",
+            "try last(.a) catch last(.a)",
+            "try last(.a) catch (try .a catch 7)",
         ] {
             let expr = parse(refused).unwrap();
             assert!(
