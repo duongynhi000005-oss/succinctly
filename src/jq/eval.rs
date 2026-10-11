@@ -44911,7 +44911,7 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
         return forward_drained_result(
             flow,
             answer,
-            drained_register_after::<S>(trackable, value, decided),
+            drained_register_at_entry::<S>(trackable, value, frame, decided),
             delivery.sink,
         );
     }
@@ -44923,7 +44923,7 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
         // backtracked and jq's register is back where this entered, exactly as for a
         // generator that emitted nothing. `emitted` is that restoration, not whether
         // `gen` produced outputs: passing `true` would re-break #3858.
-        drained_register_after::<S>(trackable, value, false),
+        drained_register_at_entry::<S>(trackable, value, frame, false),
     )
 }
 
@@ -44977,22 +44977,11 @@ fn resolve_isempty_sink<'a, S: EvalSemantics>(
         return forward_drained_result(
             flow,
             OwnedValue::Bool(true),
-            drained_register_after::<S>(trackable, value, false),
+            drained_register_at_entry::<S>(trackable, value, frame, false),
             delivery.sink,
         );
     }
-    // The identity element `true`, once `g` ran to its end after a swallowed answer,
-    // is at the register jq's retry backtracked to: where this entered. A trackable
-    // entry's is `value`; an untracked one's is the frame's carried register, which
-    // `and`/`or` must be told or they refuse the `true` the base accepted as a single
-    // answer (`1 | (isempty(g) or true)`, #4114 review).
-    let at_entry = if trackable {
-        drained_register_after::<S>(trackable, value, false)
-    } else {
-        frame.register().map_or(BranchRegister::None, |register| {
-            BranchRegister::Unmoved(Cow::Owned(register.clone()))
-        })
-    };
+    let at_entry = drained_register_at_entry::<S>(trackable, value, frame, false);
     finish_any_all_answers(delivery, flow, None, at_entry)
 }
 
@@ -45142,6 +45131,29 @@ fn drained_register_after<S: EvalSemantics>(
     } else {
         drained_register::<S>(trackable, value)
     }
+}
+
+/// [`drained_register_after`] for the drain arms that state the identity element
+/// of a generator that ran to its end (`any`, `all`, `isempty`: #3858, #4114,
+/// #4341), with the frame at hand. Every fork of the generator was backtracked, so
+/// jq's register is where the arm entered: `value` on a trackable entry, and on an
+/// untracked one the register the frame carries (never `value`, which is not it --
+/// see [`drained_register_after`]). Without it an `and`/`or` around the arm, or a
+/// `foreach` extract that navigates the computed boolean, refuses the identity where
+/// jq accepts it (`1 | (isempty(empty) or true)`). Jq mode only, like every
+/// admission here (ADR-0018): yq keeps [`drained_register_after`].
+fn drained_register_at_entry<'a, S: EvalSemantics>(
+    trackable: bool,
+    value: &'a OwnedValue,
+    frame: &Frame,
+    emitted: bool,
+) -> BranchRegister<'a> {
+    if S::TAG == EvalTag::Jq && !trackable && !emitted {
+        return frame.register().map_or(BranchRegister::None, |register| {
+            BranchRegister::Unmoved(Cow::Owned(register.clone()))
+        });
+    }
+    drained_register_after::<S>(trackable, value, emitted)
 }
 
 /// Whether `and`/`or`/unary minus `expr` resolves its operands live in path
