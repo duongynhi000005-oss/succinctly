@@ -1603,6 +1603,103 @@ fn test_i0_multifile_yaml_separator() -> Result<()> {
     Ok(())
 }
 
+/// #4367: a literal `-` file argument reads stdin, as yq's help says ("use '-' as a filename to
+/// pipe from STDIN"); only the no-argument form read it here, so `-` failed as a file named `-`.
+/// Stdin is read once: a second `-` finds it drained and contributes no document, as in yq.
+/// Every expected value captured from yq v4.53.3.
+#[test]
+fn test_yq_dash_file_argument_reads_stdin_4367() -> Result<()> {
+    let mut f1 = NamedTempFile::new()?;
+    f1.write_all(b"a: 1\n")?;
+    let mut f3 = NamedTempFile::new()?;
+    f3.write_all(b"c: 3\n")?;
+    let (f1_path, f3_path) = (f1.path().to_str().unwrap(), f3.path().to_str().unwrap());
+    let flags = ["-o=json", "-I=0"];
+    let run = |filter: &str, files: &[&str], extra: &[&str]| -> Result<(String, String, i32)> {
+        let (output, code) = spawn_with_signal_retry(
+            || {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_succinctly"));
+                command
+                    .arg("yq")
+                    .args(flags)
+                    .args(extra)
+                    .arg(filter)
+                    .args(files);
+                command
+            },
+            Some(b"b: 2\n"),
+        )?;
+        Ok((
+            String::from_utf8(output.stdout)?,
+            String::from_utf8(output.stderr)?,
+            code,
+        ))
+    };
+    // `-` alone, mixed with files on either side, and the file index it carries.
+    for (filter, files, extra, expected) in [
+        (".", vec!["-"], vec![], "{\"b\":2}\n"),
+        (
+            ".",
+            vec![f1_path, "-", f3_path],
+            vec![],
+            "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n",
+        ),
+        (
+            "file_index",
+            vec![f1_path, "-", f3_path],
+            vec![],
+            "0\n1\n2\n",
+        ),
+        // A second `-` is drained and adds nothing, wherever it sits.
+        (".", vec!["-", "-"], vec![], "{\"b\":2}\n"),
+        (
+            ".",
+            vec![f1_path, "-", "-", f3_path],
+            vec![],
+            "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n",
+        ),
+        // The files after a skipped `-` keep their command-line position (`0`, `1`, `3`).
+        (
+            "file_index",
+            vec![f1_path, "-", "-", f3_path],
+            vec![],
+            "0\n1\n3\n",
+        ),
+        (
+            "[., file_index]",
+            vec![f1_path, "-", "-", f3_path],
+            vec!["--eval-all"],
+            "[{\"a\":1},0,{\"b\":2},1,{\"c\":3},3]\n",
+        ),
+        // The slurping and evaluate-all routes read it the same way.
+        (
+            "[.]",
+            vec![f1_path, "-"],
+            vec!["--eval-all"],
+            "[{\"a\":1},{\"b\":2}]\n",
+        ),
+        ("[.]", vec!["-", "-"], vec!["--eval-all"], "[{\"b\":2}]\n"),
+    ] {
+        let (out, err, code) = run(filter, &files, &extra)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (expected, 0),
+            "`{filter}` {files:?} {extra:?}: stderr {err:?}"
+        );
+    }
+    // `--inplace` has no file to write back to for a `-`: refused, never written to a file named `-`.
+    let dir = TempDir::new()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .current_dir(dir.path())
+        .args(["yq", "-i", ".r = 1", "-"])
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8(output.stderr)?.contains("write in place flag only applicable"));
+    assert!(!dir.path().join("-").exists());
+    Ok(())
+}
+
 // ============================================================================
 // File Input Tests
 // ============================================================================

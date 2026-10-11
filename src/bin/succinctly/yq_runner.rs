@@ -889,8 +889,61 @@ fn read_stdin_string() -> Result<String> {
     Ok(buffer)
 }
 
-/// Read input from a file.
+/// Whether a `-` file argument has already read stdin (#4367).
+static STDIN_FILE_ARGUMENT_READ: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `path` is the `-` file argument, which real yq reads from stdin (its help: "use '-'
+/// as a filename to pipe from STDIN", #4367).
+fn is_stdin_file_argument(path: &Path) -> bool {
+    path == Path::new("-")
+}
+
+/// Whether `path` is a `-` file argument that stdin has already been read for (#4367): yq reads
+/// the stream for the first and finds it drained for a second, which contributes no document
+/// (`yq '.' - -` prints one), so the per-file loops skip it.
+fn is_drained_stdin_file_argument(path: &Path) -> bool {
+    is_stdin_file_argument(path)
+        && STDIN_FILE_ARGUMENT_READ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The position in `input_files` of each gathered source (#4367): a repeated `-` is skipped by
+/// [`gather_input_sources`], and yq numbers the files that follow it by their position on the
+/// command line (`yq file_index f1 - - f3` is `0`, `1`, `3`), which the M2 loop already does by
+/// walking `input_files`. The routes that walk the gathered sources map back through this.
+fn gathered_file_indices(input_files: &[String]) -> Vec<usize> {
+    if input_files.is_empty() {
+        return vec![0];
+    }
+    let mut seen_stdin = false;
+    let mut indices = Vec::with_capacity(input_files.len());
+    for (index, file) in input_files.iter().enumerate() {
+        if is_stdin_file_argument(Path::new(file)) {
+            if seen_stdin {
+                continue;
+            }
+            seen_stdin = true;
+        }
+        indices.push(index);
+    }
+    indices
+}
+
+/// Read stdin as the contents of a `-` file argument (#4367). Stdin is read once: yq reads the
+/// stream for the first `-` and a second one finds it drained, so it contributes an empty
+/// source (`yq '.' - -` prints one document).
+fn read_stdin_file_argument() -> Result<Vec<u8>> {
+    if STDIN_FILE_ARGUMENT_READ.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(Vec::new());
+    }
+    read_stdin()
+}
+
+/// Read input from a file; a `-` argument reads stdin like yq's (#4367).
 fn read_file(path: &Path) -> Result<Vec<u8>> {
+    if is_stdin_file_argument(path) {
+        return read_stdin_file_argument();
+    }
     std::fs::read(path).with_context(|| format!("failed to read file: {}", path.display()))
 }
 
@@ -1064,6 +1117,9 @@ fn gather_input_sources(
     } else {
         for file_path in input_files {
             let path = Path::new(file_path);
+            if is_drained_stdin_file_argument(path) {
+                continue;
+            }
             let raw_bytes = read_file(path)?;
             let resolved_format = resolve_input_format(input_format, Some(path));
             let (input_bytes, format, body) =
@@ -8709,6 +8765,9 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
                 // on both binaries because of it.
                 let _file_index_scope = jq::enter_file_index_scope(file_index);
                 let path = Path::new(file_path);
+                if is_drained_stdin_file_argument(path) {
+                    continue;
+                }
                 // A later file's read failure can fire after `writer`
                 // already buffered real output from earlier files in this
                 // same loop (review of #1673, same class as the
@@ -8948,7 +9007,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         // origin, which is what `file_index`/`document_index` read back.
         let mut all_docs: Vec<(OwnedValue, usize, usize)> = Vec::new();
         let mut global_doc_index: usize = 0;
-        for (file_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+        let source_file_indices = gathered_file_indices(&input_files);
+        for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let file_idx = source_file_indices
+                .get(source_idx)
+                .copied()
+                .unwrap_or(source_idx);
             // #2282: `to_owned_canonicalizing_numbers_at_depth` (reached via
             // plain `parse_input` for JSON-sourced input) now reports its
             // own nesting-depth violations as a catchable error rather than
@@ -9076,7 +9140,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
             deferred_validate_exit_code = validate_exit_code;
 
             let mut global_doc_index: usize = 0;
-            'files: for (file_index, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let source_file_indices = gathered_file_indices(&input_files);
+            'files: for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+                let file_index = source_file_indices
+                    .get(source_idx)
+                    .copied()
+                    .unwrap_or(source_idx);
                 // #2427: `file_index` is a per-file constant on this path -- each
                 // file is evaluated independently, so there is no combined
                 // array whose top-level index could stand in for it. Real yq
@@ -9184,8 +9253,13 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         } else {
             let mut content = String::new();
             for file_path in &input_files {
-                let file_content = std::fs::read_to_string(file_path)
-                    .with_context(|| format!("failed to read file: {file_path}"))?;
+                let file_content = if is_stdin_file_argument(Path::new(file_path)) {
+                    String::from_utf8(read_stdin_file_argument()?)
+                        .context("failed to read from stdin")?
+                } else {
+                    std::fs::read_to_string(file_path)
+                        .with_context(|| format!("failed to read file: {file_path}"))?
+                };
                 content.push_str(&file_content);
             }
             content
@@ -9443,6 +9517,17 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         if input_files.is_empty() {
             anyhow::bail!("--inplace requires at least one file argument");
         }
+        // #4367: yq reads `-` as stdin, which has no file to write back to; it does not count as
+        // one (`yq -i . -`: "write in place flag only applicable when giving an expression and
+        // at least one file"). Refusing it also stops the result being written to a file named `-`.
+        if input_files
+            .iter()
+            .any(|file| is_stdin_file_argument(Path::new(file)))
+        {
+            anyhow::bail!(
+                "write in place flag only applicable when giving an expression and at least one file"
+            );
+        }
 
         let mut global_doc_index: usize = 0;
         'inplace_files: for (file_index, file_path) in input_files.iter().enumerate() {
@@ -9456,6 +9541,9 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
             let _file_index_scope = jq::enter_file_index_scope(file_index);
 
             let path = Path::new(file_path);
+            if is_drained_stdin_file_argument(path) {
+                continue;
+            }
             let raw_bytes = read_file(path)?;
             let resolved_format = resolve_input_format(args.input_format, Some(path));
             let (input_bytes, format, front_matter_body) =
@@ -9968,7 +10056,12 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
         // gate below.
         let mut all_results: Vec<Vec<Vec<ResultWithComments>>> = Vec::new();
         let mut global_doc_index: usize = 0;
-        'collect: for (file_index, (bytes, format, _)) in input_sources.iter().enumerate() {
+        let source_file_indices = gathered_file_indices(&input_files);
+        'collect: for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+            let file_index = source_file_indices
+                .get(source_idx)
+                .copied()
+                .unwrap_or(source_idx);
             // #2427: `file_index` is a per-file constant on this path -- each
             // file is evaluated independently, so there is no combined
             // array whose top-level index could stand in for it. Real yq
