@@ -7137,10 +7137,8 @@ fn token_runs_to_end(tail: &[u8]) -> bool {
             }
             !closed
         }
-        // jq's literal boundary: whitespace and `"[{,:]}`.
-        Some(_) => !tail.iter().any(|&b| {
-            b.is_ascii_whitespace() || matches!(b, b'"' | b'[' | b'{' | b',' | b':' | b']' | b'}')
-        }),
+        // jq's literal boundary ([`is_jq_token_boundary`]).
+        Some(_) => !tail.iter().any(|&b| is_jq_token_boundary(b)),
         None => false,
     }
 }
@@ -7228,9 +7226,11 @@ fn split_json_values(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
 
         match scan_one_json_token(bytes, pos) {
             // jq's lexer takes the whole run of bytes up to a boundary as one token, so a
-            // number or keyword directly followed by another token byte (`23null`, `1true`,
-            // `0x`) is one malformed token, not two values (#4358). A container or string
-            // needs no boundary after it (`[1]2`, `"a"2` are two values).
+            // number directly followed by another token byte (`23null`, `1true`, `0x`) is one
+            // malformed token, not two values (#4358). (A keyword is already whole-run:
+            // `find_literal_end`.) A container or string needs no boundary after it (`[1]2`,
+            // `"a"2` are two values). `--seq`'s scanner shares `scan_one_json_token` and keeps the
+            // old splitting; its records are RS-delimited.
             Some(end)
                 if !matches!(bytes[start], b'{' | b'[' | b'"')
                     && bytes.get(end).is_some_and(|&b| !is_jq_token_boundary(b)) =>
@@ -7248,9 +7248,14 @@ fn split_json_values(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
     (values, None)
 }
 
-/// Whether `b` ends a bare token in jq's lexer: whitespace and `"[{,:]}` (`jv_parse.c`).
+/// Whether `b` ends a bare token in jq's lexer: space, tab, CR, LF and `"[{,:]}` (`jv_parse.c`;
+/// a form feed is part of the run, not whitespace). The one definition the splitter and the
+/// open-tail search ([`token_runs_to_end`]) share.
 fn is_jq_token_boundary(b: u8) -> bool {
-    b.is_ascii_whitespace() || matches!(b, b'"' | b'[' | b'{' | b',' | b':' | b']' | b'}')
+    matches!(
+        b,
+        b' ' | b'\t' | b'\r' | b'\n' | b'"' | b'[' | b'{' | b',' | b':' | b']' | b'}'
+    )
 }
 
 /// Where the JSON token starting at `pos` ends, or `None` if no token can

@@ -41673,15 +41673,15 @@ fn test_jq_open_tail_starts_after_a_malformed_closed_container_4352() -> Result<
 #[test]
 fn test_jq_bare_token_run_is_one_malformed_token_4358() -> Result<()> {
     for (input, want_out, want_code) in [
-        ("23null", "", 2),
-        ("1true", "", 2),
-        ("1e5true", "", 2),
-        ("-1null", "", 2),
-        ("1.5null", "", 2),
-        ("0x", "", 2),
-        ("1@", "", 2),
-        ("[1,2]3null", "[1,2]\n", 2),
-        ("1 2null 3", "1\n", 2),
+        ("23null", "", 5),
+        ("1true", "", 5),
+        ("1e5true", "", 5),
+        ("-1null", "", 5),
+        ("1.5null", "", 5),
+        ("0x", "", 5),
+        ("1@", "", 5),
+        ("[1,2]3null", "[1,2]\n", 5),
+        ("1 2null 3", "1\n", 5),
         // Boundaries: whitespace, quotes and brackets end a bare token.
         ("23 null", "23\nnull\n", 0),
         ("2\"a\"", "2\n\"a\"\n", 0),
@@ -41689,10 +41689,27 @@ fn test_jq_bare_token_run_is_one_malformed_token_4358() -> Result<()> {
         ("\"a\"2", "\"a\"\n2\n", 0),
         ("nan 1", "null\n1\n", 0),
     ] {
-        let (stdout, _stderr, code) = run_jq_full(&["-c", "."], Some(input))?;
+        let (stdout, stderr, code) = run_jq_full(&["-c", "."], Some(input))?;
         assert_eq!(stdout, want_out, "stdout for {input:?}");
-        assert_eq!(code != 0, want_code != 0, "failure for {input:?}");
+        assert_eq!(code, want_code, "exit code for {input:?}");
+        assert!(!stderr.contains("internal error"), "{input:?}: {stderr}");
     }
+    // A form feed is part of the run, not whitespace.
+    let (stdout, stderr, code) = run_jq_full(&["-c", "."], Some("1\x0c2"))?;
+    assert_eq!((stdout.as_str(), code), ("", 5), "{stderr}");
+    // A number at the end of a file with the rest of its keyword at the start of the next is one
+    // malformed token too, whichever route reads them.
+    let (stdout, stderr, code, _paths) = run_jq_over_files(&["-c", "."], &["23n", "ull"])?;
+    assert_eq!((stdout.as_str(), code), ("", 5), "{stderr}");
+    let (stdout, stderr, code, _paths) = run_jq_over_files(
+        &["-nc", r#"[limit(3; repeat(try input catch "E"))]"#],
+        &["23n", "ull"],
+    )?;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("[\"E\",\"E\",\"E\"]\n", 0),
+        "{stderr}"
+    );
     Ok(())
 }
 
