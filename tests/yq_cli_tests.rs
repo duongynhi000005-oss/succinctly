@@ -7909,26 +7909,19 @@ fn test_raw_output_json_inplace_strips_quotes_1715() -> Result<()> {
     Ok(())
 }
 
-/// `--join-output` suppresses the terminator entirely -- verified against the pinned jq
-/// 1.7.1 oracle (`echo '["hello","world"]' | jq -j '.[]'` -> `helloworld`) -- and unwraps
-/// a JSON string only with an explicit `-r`: since #1996 it no longer implies it (real
-/// yq's `-0` never does, and its `-j` is `--tojson`), so the quotes stay without one.
+/// `--join-output` also sets `raw_output` (`OutputConfig::from_args`) and
+/// suppresses the terminator entirely -- verified against the pinned jq
+/// 1.7.1 oracle (`echo '["hello","world"]' | jq -j '.[]'` -> `helloworld`).
+/// (`-0` no longer sets `raw_output`, #1996; `-j`'s own reshaping is #1731.)
 #[test]
-fn test_join_output_json_strips_quotes_only_with_raw_1715() -> Result<()> {
-    let (output, code) = run_yq_stdin(
-        ".[]",
-        "[\"hello\", \"world\"]\n",
-        &["-o", "json", "-r", "--join-output"],
-    )?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "helloworld");
+fn test_join_output_json_strips_quotes_1715() -> Result<()> {
     let (output, code) = run_yq_stdin(
         ".[]",
         "[\"hello\", \"world\"]\n",
         &["-o", "json", "--join-output"],
     )?;
     assert_eq!(code, 0);
-    assert_eq!(output, "\"hello\"\"world\"");
+    assert_eq!(output, "helloworld");
     Ok(())
 }
 

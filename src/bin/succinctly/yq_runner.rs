@@ -639,7 +639,10 @@ impl OutputConfig {
         Self {
             output_format: args.output_format,
             compact,
-            raw_output: args.raw_output,
+            // `-0` does not imply `-r` (#1996): JSON output keeps its quotes and escapes unless
+            // `-r` is explicit. `-j` still does until #1731 reshapes the flag, since this
+            // repo documents it as "like -r".
+            raw_output: args.raw_output || args.join_output,
             join_output: args.join_output,
             nul_output: args.nul_output,
             ascii_output: args.ascii_output,
@@ -8051,8 +8054,8 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
     // `can_slurp_fast_path` originally diverged from this exact predicate
     // because #1577 copied it by hand instead of sharing it.
     // `!output_config.raw_output` (#1715): none of the M2 JSON streamers
-    // consult `raw_output` at all, so `-r` (which sets it, see
-    // `OutputConfig::from_args`; `-0`/`--join-output` did too until #1996) fails to strip JSON string
+    // consult `raw_output` at all, so `-r`/`--join-output` (which set it, see
+    // `OutputConfig::from_args`; `-0` did too until #1996) fail to strip JSON string
     // quoting on this path -- unlike the DOM path's `output_value`, whose
     // `if config.raw_output { if let OwnedValue::String(s) = value ... }`
     // arm handles it correctly. Excluded from fast-path eligibility here

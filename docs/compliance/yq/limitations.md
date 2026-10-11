@@ -438,8 +438,9 @@ Two interactions remain open, neither closed by #1709 itself:
    unwrap a JSON scalar). succinctly's `raw_output` used to OR in `-0`/`-j` regardless of
    output format, so this one combination unwrapped (bypassing JSON's own escaping) and
    tripped the NUL check on the raw byte; since
-   [#1996](https://github.com/rust-works/succinctly/issues/1996) `raw_output` is the explicit
-   `-r` alone, and `-o=json -r -0` still raises, as yq does.
+   [#1996](https://github.com/rust-works/succinctly/issues/1996) `-0` no longer implies it,
+   and `-o=json -r -0` still raises, as yq does. (`-j` still implies `-r`; see the `-j`
+   collision entry below and #1731.)
 
 2. **`--color`/`--colors` combined with `-0` loses the flush-then-error atomicity described
    above.** Real yq's own `--colors -0` still flushes earlier valid results before erroring
