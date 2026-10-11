@@ -2035,9 +2035,19 @@ is the revert that established what the other one costs.
    the pipe walk and the destructure test cannot drift apart. Still accepted besides the two shapes above (#4320): a `$x`
    bound outside the `foreach` (`. as $x | del(foreach ($x as {a:$a} | .) ...)`; reading it as the register refused
    `reduce .[] as $it (.; reduce ($it as {a:$a} | .) ...)` inside a fold body, which jq answers), and a bound expression
-   that hands the register on through a call, a pipe, an `if` or `//` (`def f: .; f as {a:$a}`, `($x | .) as {a:$a}`),
-   which `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
-   too. Pinned by
+   that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
+   `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
+   too. A bound expression that is a call with no arguments is read since
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s first part: `def f: .; f as {a:$a}`, also through a
+   second `def`, a comma body, or a `$x` bound around the definition, is the register as `. as {a:$a}` is
+   (`RegisterSpine::binds_register` reads the body in the scope the `def` was written in, and `resolves_to_register`
+   reads an installed call the same way, so the resolver places the head). `del(foreach (def f: .; f as {a:$a} | .)
+   as $y (.; .; .))` raises as jq does instead of deleting the document. Over the 12 call operands the sweep gained
+   (`--stage-only`, 10,683 rows), 410 wrong accepts and 32 wrong answers go to 0, and 59 matches are lost to a
+   refusal, all inside a `reduce` UPDATE (`path(reduce 1 as $k (.; foreach (def f: .; f as {a:$a} | .) as $k (.; .;
+   .)))` is `[]` in jq): `update_returns_its_input` vets a nested `foreach` source by a closed grammar that has no
+   `def`, as it had none for #4278's shapes. Pinned by
+   `test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320`, and the earlier shapes by
    `test_foreach_source_destructure_behind_a_chain_bind_if_or_def_refuses_4278`. Over the 29 register-sweep operands
    it adds (374,787 rows), 4,829 wrong accepts and 807 wrong answers go to 972 and 151 (the 972 are all the `(.|.)` and
    later-bare-alternative operands), 2,908 refusals become matches, and 457 matches are lost to a refusal: 161 inside

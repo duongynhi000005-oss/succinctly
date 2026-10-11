@@ -47678,6 +47678,18 @@ fn resolves_to_register<S: EvalSemantics>(
             resolves_to_register::<S>(then_branch, trackable, reg, frame)
                 && resolves_to_register::<S>(else_branch, trackable, reg, frame)
         }
+        // #4320: a call with no arguments returns what its body does, so a body that is the
+        // register (`def f: .; f as {a:$a}`) makes the call the register. The depth guard of
+        // `probe_def_call` ends a recursive definition.
+        Expr::DefCall {
+            def,
+            args,
+            frames,
+            bound,
+        } if args.is_empty() => match probe_def_call(def, args, *frames, bound) {
+            Ok(body) => resolves_to_register::<S>(&body, trackable, reg, frame),
+            Err(_) => false,
+        },
         // #3279 review: the narrow (pre-#3279) grammar, deliberately. This
         // is an immediate certification with no later value check, and
         // proving a `?//` head identical here lets a pattern's first step
@@ -48618,7 +48630,8 @@ fn bind_hands_on_the_register(e: &Expr) -> bool {
 /// nested `foreach`'s own chain over the register ([`routes_destructuring_chain`], #3948).
 ///
 /// The bound expression is a bare `.`, a `select(literal)` that hands it on (#4128), a comma of
-/// those (#4150), or a variable the spine bound to the register (#4278), also behind
+/// those (#4150), a variable the spine bound to the register (#4278), or a call with no
+/// arguments whose body is one of these (#4320), also behind
 /// `first`/`last`/`limit`/`?`/`label` ([`RegisterSpine::binds_register`]). A `(.|.)` bind stays
 /// out, since the resolver reads it as a computed value, and so does a variable bound outside
 /// the source or any other computed bound expression (#4320). The other [`source_destructures_register`] mode, through a nested
@@ -48646,6 +48659,7 @@ fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
         memo: Vec::new(),
         calls: SPINE_CALL_BUDGET,
         depth: 0,
+        binding: Vec::new(),
     };
     walk.reach(source) == Reach::Destructures
 }
@@ -48750,6 +48764,9 @@ struct RegisterSpine<'e> {
     calls: u32,
     /// How deep [`reach`](Self::reach) is nested.
     depth: u32,
+    /// The `def` bodies [`binds_register`](Self::binds_register) is reading the result of
+    /// right now, so a recursive definition is read once (#4320).
+    binding: Vec<*const Expr>,
 }
 
 impl<'e> RegisterSpine<'e> {
@@ -48766,19 +48783,54 @@ impl<'e> RegisterSpine<'e> {
     /// [`bind_hands_on_the_register`] (or, through a `reduce`, [`yields_only_the_register`])
     /// accepts, or a variable the spine bound to the register (#4278), also behind the
     /// wrappers that hand their operand's value on ([`peel_value_wrappers`]) and as a comma of
-    /// them. A variable bound outside the source, and a call returning one, are not read
-    /// (#4320).
-    fn binds_register(&self, e: &Expr) -> bool {
+    /// them, or a call with no arguments whose body is any of these ([`body_binds_register`],
+    /// #4320). A variable bound outside the source is not read (#4320).
+    ///
+    /// [`body_binds_register`]: Self::body_binds_register
+    fn binds_register(&mut self, e: &'e Expr) -> bool {
         match peel_value_wrappers(e) {
             Expr::Var(name) => self.holds_register(name),
             Expr::Comma(items) if items.iter().any(binds_variable) => {
                 items.iter().all(|item| self.binds_register(item))
+            }
+            // #4320: a call with no arguments returns what its body does, read in the scope
+            // the definition was written in.
+            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+                match self.defs.iter().rposition(|def| def.name == name) {
+                    Some(at) => {
+                        let SpineDef { body, vars, .. } = self.defs[at];
+                        self.body_binds_register(body, vars, at + 1)
+                    }
+                    None => false,
+                }
+            }
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let body: &'e Expr = &def.body;
+                self.body_binds_register(body, 0, 0)
             }
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
             _ if self.through_reduce => yields_only_the_register(unwrap_bind_source(e)),
             _ => bind_hands_on_the_register(unwrap_bind_source(e)),
         }
+    }
+
+    /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
+    /// variables and `defs` definitions in scope ([`read_body`](Self::read_body)'s scoping).
+    fn body_binds_register(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
+        let key: *const Expr = body;
+        if self.calls == 0 || self.binding.contains(&key) {
+            return false;
+        }
+        self.calls -= 1;
+        self.binding.push(key);
+        let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
+        let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
+        let register = self.binds_register(body);
+        self.vars.extend(vars_tail);
+        self.defs.extend(defs_tail);
+        self.binding.pop();
+        register
     }
 
     /// The names a bind of `expr` to `patterns` binds, each with whether it may hold the
@@ -48790,7 +48842,7 @@ impl<'e> RegisterSpine<'e> {
     /// {a:$a} | $a as {a:$b}`).
     ///
     /// [`binds_register`]: Self::binds_register
-    fn chain_names(&self, expr: &Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
+    fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
         let mut register = self.binds_register(expr);
         let mut names: Vec<(&'e str, bool)> = Vec::new();
         let mut bind =
