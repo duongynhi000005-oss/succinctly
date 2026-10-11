@@ -1059,9 +1059,7 @@ mod tests {
         ] {
             let index = JsonIndex::build(doc.as_bytes());
             let root = index.root(doc.as_bytes());
-            let Some(elements) = root.value().as_array() else {
-                continue;
-            };
+            let elements = root.value().as_array().expect("an array document");
             let walked = elements.len_checked().map_err(|e| format!("{e:?}"));
             for (start, end) in [
                 (None, None),
@@ -1076,14 +1074,14 @@ mod tests {
                     }
                     _ => None,
                 };
-                let sliced = slice_cursors(&elements, window, |len| bounds.resolve(len)).map(
-                    |(cursors, range)| {
+                let sliced = slice_cursors(&elements, window, |len| bounds.resolve(len))
+                    .map(|(cursors, range)| {
                         cursors[range]
                             .iter()
                             .map(DocumentCursor::value)
                             .collect::<Vec<_>>()
-                    },
-                );
+                    })
+                    .map_err(|e| format!("{e:?}"));
                 match (&walked, sliced) {
                     (Ok(len), Ok(values)) => {
                         let collected = elements.collect_values();
@@ -1098,11 +1096,9 @@ mod tests {
                             "{doc} {start:?}:{end:?}"
                         );
                     }
-                    (Err(walk), Err(slice)) => assert_eq!(walk, &format!("{slice:?}"), "{doc}"),
-                    (walk, slice) => panic!(
-                        "{doc}: the walk said {walk:?}, the slice {:?}",
-                        slice.map(|v| v.len())
-                    ),
+                    // Both raise, the same error; a walk that succeeds where the
+                    // slice raises (or the reverse) is `Some` against `None`.
+                    (walk, slice) => assert_eq!(walk.as_ref().err(), slice.err().as_ref(), "{doc}"),
                 }
             }
         }
@@ -1309,6 +1305,43 @@ mod tests {
             // One hit per non-empty range: the walk is gone.
             let read = ranges.iter().filter(|r| !r.is_empty()).count();
             assert_eq!(hits_after - hits, read, "every range came from the index");
+        }
+
+        /// #4287: a range of an array the memo has registered but not indexed,
+        /// or of a list it holds no entry for, is walked: the memo answers a
+        /// range only from an index, and builds nothing.
+        #[test]
+        fn a_range_without_an_index_is_walked_and_builds_nothing_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let owned = |values: &[_]| to_owned_all::<JqSemantics, _>(values).unwrap();
+            let values_of = |cursors: Vec<_>| {
+                cursors
+                    .iter()
+                    .map(DocumentCursor::value)
+                    .collect::<Vec<_>>()
+            };
+            // One length lookup registers the array; it is not yet indexed.
+            assert_eq!(len_checked_memoized(&elements).ok(), Some(n));
+            let work = memo::work();
+            assert_eq!(
+                owned(&values_of(cursors_in_range(&elements, 3..9))),
+                owned(&collected[3..9])
+            );
+            // The tail has another head than the registered array.
+            let (_, rest) = elements.uncons().expect("a first element");
+            assert_eq!(
+                owned(&values_of(cursors_in_range(&rest, 0..4))),
+                owned(&collected[1..5])
+            );
+            assert_eq!(memo::work(), work, "neither range built or hit an index");
         }
 
         /// #4287: a slice's single walk registers a wide array as a length walk
