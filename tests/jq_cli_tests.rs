@@ -41372,12 +41372,11 @@ fn test_jq_input_files_are_one_byte_stream_4305() -> Result<()> {
         );
     }
 
-    // Recorded residual (limitations.md): the moved tail keeps its newline, so the value is on
-    // line 2 here and on line 1 in jq, which counts the later file's own lines.
+    // The moved tail keeps its newline, but jq counts the later file's own lines (#4316).
     let (stdout, stderr, code, _paths) =
         run_jq_over_files(&["-c", "[., input_line_number]"], &["{\"a\":\n", "1}\n"])?;
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout, "[{\"a\":1},2]\n");
+    assert_eq!(stdout, "[{\"a\":1},1]\n");
 
     // The other input modes already read the whole list at once and are not stitched again: `-R`
     // joins `1` and `2` into the one line `12` as jq does, and `--validate` is strict per file, so
@@ -41394,6 +41393,118 @@ fn test_jq_input_files_are_one_byte_stream_4305() -> Result<()> {
     let (stdout, _stderr, code, _paths) = run_jq_over_files(&["-c", "."], &["true", "false\n"])?;
     assert_eq!(code, 5);
     assert_eq!(stdout, "");
+    Ok(())
+}
+
+/// #4316: a value that spans two files is on the line of the file it completes in, counted
+/// over that file alone, and the value before a spanning one still sees the newline its read
+/// takes from the part that moved on. `input_line_number` and `(at <file>:<line>)` both read it.
+/// Every expectation is jq 1.7.1's own output.
+#[test]
+fn test_jq_value_spanning_two_files_counts_each_files_own_lines_4316() -> Result<()> {
+    // `input_line_number` per value: the first row is the issue's own repro.
+    let long_blank = " ".repeat(4094);
+    let rows: &[(&[&str], &str)] = &[
+        (&["[1,\n", "2]\n"], "[1]\n"),
+        (&["{\"a\":\n", "1}\n"], "[1]\n"),
+        (&["[1,\n2,\n", "3]\n"], "[1]\n"),
+        (&["[1,\n", "\n\n2]\n"], "[3]\n"),
+        (&["1\n", "[2,\n", "3]\n4\n"], "[1,1,2]\n"),
+        // A value in the earlier file still reads through the newline in the part that
+        // moved on, which jq's read of that file takes with it.
+        (
+            &[
+                "[1,[2,\n3],\"x\"]\t[1,[2,\n3],",
+                "\"x\"]  12.5\ntrue\tnull [\n]\n",
+            ],
+            "[2,1,1,2,2,3]\n",
+        ),
+        (&["1\t{}\t[\n", "]\t", ""], "[1,1,0]\n"),
+        // No newline in the part that moved: the earlier file's last read ends at its end.
+        (&["1\t[2,", "3]\n"], "[0,1]\n"),
+        (&["1\t[2,\n3,", "4]\n"], "[1,1]\n"),
+        // A moved tail inside a file that is itself a middle of the stream.
+        (&["[1,\n", "2,\n", "3]\n"], "[1]\n"),
+    ];
+    for (files, expected) in rows {
+        let (stdout, stderr, code, _paths) =
+            run_jq_over_files(&["-nc", "[inputs | input_line_number]"], files)?;
+        assert_eq!(code, 0, "{files:?}: {stderr}");
+        assert_eq!(&stdout, expected, "{files:?}");
+    }
+
+    // The same line in a diagnostic, per value, once input runs out, and for `--slurp`.
+    let (_, stderr, code, paths) = run_jq_over_files(&["-c", "error"], &["[1,\n", "2]\n"])?;
+    assert_eq!(code, 5, "{stderr}");
+    assert!(
+        stderr.contains(&format!("(at {}:1) (not a string): [1,2]", paths[1])),
+        "{stderr}"
+    );
+    for filter in ["[inputs] | error", "error"] {
+        let args: &[&str] = if filter == "error" {
+            &["-sc", filter]
+        } else {
+            &["-nc", filter]
+        };
+        let (_, stderr, code, paths) = run_jq_over_files(args, &["[1,\n", "2]\n"])?;
+        assert_eq!(code, 5, "{filter}: {stderr}");
+        assert!(
+            stderr.contains(&format!("(at {}:1)", paths[1])),
+            "{filter}: {stderr}"
+        );
+    }
+
+    // The slurped value of the route that reads `input` too: the last file's own line count.
+    let (stdout, stderr, code, _paths) = run_jq_over_files(
+        &["-sc", "[input_line_number, (try input catch .)]"],
+        &["[1,\n", "2]\n"],
+    )?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "[1,\"break\"]\n");
+
+    // A parse error's line, seen through `input_line_number` after a caught `input`: the fault
+    // follows a value that spans the two files.
+    let catching = "[limit(4; repeat(try (input | input_line_number) catch \
+                    (input_line_number | tostring | \"E\" + .)))]";
+    for (files, expected) in [
+        (&["[1,\n", "2 }\n"], "[\"E1\",\"E1\",\"E0\",\"E0\"]\n"),
+        (&["0\n[1,\n", "2,\n3 }\n"], "[1,\"E2\",\"E2\",\"E0\"]\n"),
+    ] {
+        let (stdout, stderr, code, _paths) = run_jq_over_files(&["-nc", catching], files)?;
+        assert_eq!(code, 0, "{files:?}: {stderr}");
+        assert_eq!(stdout, expected, "{files:?}");
+    }
+
+    // An invalid byte in the moved token is rewritten to a three-byte U+FFFD after the
+    // stitch; the first file's newline is still not the later file's.
+    let mut first = NamedTempFile::new()?;
+    first.write_all(b"[\"\xff\",\n")?;
+    let mut second = NamedTempFile::new()?;
+    second.write_all(b"1]\n")?;
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-nc",
+            "[inputs | input_line_number]",
+            &first.path().to_string_lossy(),
+            &second.path().to_string_lossy(),
+        ],
+        None,
+    )
+    .expect("runs");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "[1]\n");
+
+    // `<unknown>` is decided by jq's reads of the last file alone: the `1` moved onto it makes
+    // it 4095 bytes here, but jq reads it as 4094, whose first read completes the `1`.
+    let (_, stderr, code, _paths) = run_jq_over_files(
+        &["-nc", "[inputs] | length | error"],
+        &["1\n\n1", &long_blank],
+    )?;
+    assert_eq!(code, 5, "{stderr}");
+    assert!(
+        stderr.contains("(at <unknown>) (not a string): 2"),
+        "{stderr}"
+    );
     Ok(())
 }
 

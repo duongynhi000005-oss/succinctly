@@ -6441,12 +6441,17 @@ too), so it reads the files as written and rejects a value that spans two. The v
 jq's `input_filename` and a diagnostic name for it, and where the tail now sits. Pinned by
 `test_jq_input_files_are_one_byte_stream_4305`.
 
-**Recorded residual:** the moved tail keeps its newlines, so `input_line_number` for a value that began in
-an earlier file and has a newline inside it (a pretty-printed object cut across two files) counts those
-lines in the later file as well, where jq counts the later file's own lines: `{"a":\n` then `1}\n` is line
-2 here and 1 in jq. Parse errors in the same shape name their line the same way. A parse error mid-file
-(`1 } 2` then `3\n`) still lets the next file's values through where jq stops reading at the error
-(unchanged by this section).
+**Lines are counted over each file as it was on disk (#4316).** The moved tail keeps its newlines, but jq
+counts a value's line in the file it completes in, over that file alone, and chunks that file's 4095-byte
+reads from its own start: `{"a":\n` then `1}\n` is line 1, `[1,\n` then `2]\n` is line 1, and `[1,\n2,\n` then
+`3]\n` is line 1. The value before a spanning one still reads through the newline in the part that moved on
+(`1\t[2,\n3,` then `4]\n` puts the `1` on line 1, where the file as written has no newline after it). So
+the stitch records per file how many bytes it moved onto the front and off the end of it (`Seam`), and every
+line counter for the file (`LineCounter::at_seam`: the per-value lines, a parse error's line, the `-s` and
+end-of-input lines, `EofTail`) starts after the first and reads on into the second. Pinned by
+`test_jq_value_spanning_two_files_counts_each_files_own_lines_4316`. A parse error mid-file (`1 } 2` then
+`3\n`) still lets the next file's values through where jq stops reading at the error (unchanged by this
+section).
 
 ## `input`/`inputs` residuals after #1309
 
