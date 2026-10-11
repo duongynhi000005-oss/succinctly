@@ -63173,6 +63173,74 @@ fn test_yq_sort_and_sort_by_reorder_a_mappings_entries_2064() -> Result<()> {
     Ok(())
 }
 
+/// #4274: yq reads a string key against an array as the integer it spells (`parseInt64`: a sign,
+/// leading zeros, `0x`/`0o` prefixes, `_` separators), so `.["1"]` is `.[1]`, a negative one wraps
+/// and an out-of-range one is `null`; jq refuses a string key on an array. Only the *read* side:
+/// the write side (`.["1"] = 9`, `del(.["1"])`) is not covered. Rows captured from yq v4.53.3
+/// (`-p=json -o=json -I=0`, input `[10,20,30]` unless noted).
+#[test]
+fn test_yq_reads_an_array_by_a_string_key_that_spells_an_index_4274() -> Result<()> {
+    let args = &["-p=json", "-o=json", "-I=0"];
+    for (input, filter, expected) in [
+        ("[10,20,30]", r#".["0"]"#, "10"),
+        ("[10,20,30]", r#".["1"]"#, "20"),
+        ("[10,20,30]", r#".["-1"]"#, "30"),
+        ("[10,20,30]", r#".["01"]"#, "20"),
+        ("[10,20,30]", r#".["+1"]"#, "20"),
+        ("[10,20,30]", r#".["0x1"]"#, "20"),
+        ("[10,20,30]", r#".["0o1"]"#, "20"),
+        // `1_0` is index 10 and `5` is past the end: both read `null`.
+        ("[10,20,30]", r#".["1_0"]"#, "null"),
+        ("[10,20,30]", r#".["5"]"#, "null"),
+        ("[10,20,30]", r#".[("1")]"#, "20"),
+        ("[10,20,30]", r#""1" as $k | .[$k]"#, "20"),
+        ("[10,20,30]", r#""-1" as $k | .[$k]"#, "30"),
+        ("[10,20,30]", r#"[.["0","1"]]"#, "[10,20]"),
+        ("[10,20,30]", r#".["1"]?"#, "20"),
+        // A computed array and the slice of one are indexed the same way.
+        ("[10,20,30]", r#""1" as $k | (. + [])[$k]"#, "20"),
+        ("[10,20,30]", r#""-1" as $k | (. + [])[$k]"#, "30"),
+        ("[10,20,30]", r#".[1:]["0"]"#, "20"),
+        ("[[1,2],[3]]", r#".["0"]"#, "[1,2]"),
+        ("[[1,2],[3]]", r#".[]["0"]"#, "1\n3"),
+        ("[[1,2],[3]]", r#".["0"]["1"]"#, "2"),
+        ("{\"a\":[1,2]}", r#".a["1"]"#, "2"),
+        // An object keeps its string-key lookup.
+        ("{\"a\":{\"1\":\"x\"}}", r#".a["1"]"#, "\"x\""),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, input, args)?,
+            (format!("{expected}\n"), String::new(), 0),
+            "{input} | {filter}"
+        );
+    }
+    // A YAML sequence reads the same.
+    assert_eq!(
+        run_yq_stdin_with_stderr(r#".a["1"]"#, "a: [x, y]\n", &[])?,
+        ("y\n".to_string(), String::new(), 0)
+    );
+    // A string yq does not read as an integer is still refused, and `?` still suppresses it.
+    for key in [" 1", "x", "1.0", "9223372036854775808"] {
+        let filter = format!(r#".["{key}"]"#);
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(&filter, "[10,20,30]", args)?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{filter}: {stderr}");
+        assert!(stderr.contains("Cannot index array"), "{filter}: {stderr}");
+        assert_eq!(
+            run_yq_stdin_with_stderr(&format!("{filter}?"), "[10,20,30]", args)?,
+            (String::new(), String::new(), 0),
+            "{filter}?"
+        );
+    }
+    // jq mode keeps refusing a string key on an array.
+    let (stdout, stderr, code) = run_jq_stdin_with_stderr(r#".["1"]"#, "[10,20,30]", &[])?;
+    assert_eq!((stdout.as_str(), code), ("", 5));
+    assert!(
+        stderr.contains("Cannot index array with string"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.

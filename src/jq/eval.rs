@@ -26858,6 +26858,11 @@ fn index_object_by_name<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // jq returns null for field access on null
         StandardJson::Null if absent_is_empty => QueryResult::None,
         StandardJson::Null => QueryResult::One(StandardJson::Null),
+        // #4274 (yq): a name an array reads as the integer it spells.
+        StandardJson::Array(_) if S::TAG == EvalTag::Yq && yq_parse_int64(name).is_some() => {
+            let index = yq_parse_int64(name).unwrap_or_default();
+            index_array_by_position::<W, S>(value, index, optional)
+        }
         // #2482 (yq mode): a scalar (string/number/boolean) has no fields at
         // all in real yq's model, but that reads as an *empty* result, not
         // jq's structural error -- see `yq_field_index_on_scalar_is_empty`.
@@ -27159,6 +27164,12 @@ fn index_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             Err(e) => return QueryResult::Error(e),
         }
     }
+    // #4274: an array read by a string key spells its index.
+    if matches!(target, StandardJson::Array(_)) {
+        if let Some(index) = yq_array_string_key_index::<S>(key) {
+            return index_one::<W, S>(target, &index, optional);
+        }
+    }
     let indexable_by_string = matches!(target, StandardJson::Object(_) | StandardJson::Null);
     // #2459: yq mode also indexes a mapping by number (into `null`, via
     // `index_array_by_position`'s own `Object` arm) -- see
@@ -27391,6 +27402,20 @@ pub(crate) fn index_one_owned<S: EvalSemantics>(
     }
 }
 
+/// yq reads a string key against an array as the integer it spells (#4274): `.["1"]` is `.[1]`,
+/// `.["-1"]` the last element, `.["0x1"]`, `.["01"]`, `.["+1"]` and `.["1_0"]` follow
+/// [`yq_parse_int64`]. `None` outside yq mode, for a key that is not a string, and for a string
+/// yq refuses (`" 1"`, `"x"`, `"1.0"`), which keeps the ordinary error.
+pub(crate) fn yq_array_string_key_index<S: EvalSemantics>(key: &OwnedValue) -> Option<OwnedValue> {
+    if S::TAG != EvalTag::Yq {
+        return None;
+    }
+    match key {
+        OwnedValue::String(text) => yq_parse_int64(text).map(OwnedValue::Int),
+        _ => None,
+    }
+}
+
 /// [`index_one_owned`] for a *read*: yq answers nothing, not jq's `Cannot index <type> with
 /// <key>`, when the owned target is a scalar (#4319).
 ///
@@ -27412,6 +27437,15 @@ pub(crate) fn index_one_owned_read<S: EvalSemantics>(
         )
     {
         return Ok(None);
+    }
+    // #4274: an array read by a string key spells its index.
+    if matches!(target, OwnedValue::Array(_)) {
+        if let Some(index) = yq_array_string_key_index::<S>(key) {
+            if let Some(e) = yq_negative_index_error::<S>(target, &index) {
+                return Err(e);
+            }
+            return index_one_owned::<S>(target, &index, optional);
+        }
     }
     index_one_owned::<S>(target, key, optional)
 }
