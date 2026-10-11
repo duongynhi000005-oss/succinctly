@@ -1993,10 +1993,38 @@ is the revert that established what the other one costs.
    yield, the loud direction. A `foreach` whose INIT navigated and then computed no longer runs its SOURCE as if the
    register were still at the entry. 20 contrived rows in the sampled sweeps that jq answers (a `?//` bind under `try`/`?`
    whose later alternative yields and whose result jq's check then passes) are refused, in the safe direction. Still
-   accepted where jq raises, identical on `main` (#4187, residuals in
-   [#4278](https://github.com/rust-works/succinctly/issues/4278)): a `(.|.) as {...}` source, a destructure of a
-   bound `$x` (`. as $x | $x as {a:$a} | .`) in a fold source, a destructure behind a mixed `?//` chain, a nested
-   bind (a later pipe stage, `if`, a `def` call), and `reduce . as {a:$a} ?// $a (0; .a?)`.
+   accepted where jq raises, identical on `main` ([#4320](https://github.com/rust-works/succinctly/issues/4320)): a `(.|.) as {...}` source (`del(foreach ((.|.) as {a:$a} | .) as
+   $y (.; .; .))` deletes the document; routing it first needs `resolve_as_pattern` to read `(.|.)` as the register,
+   since #4128's attempt regressed `del(try (... and true))`), and a destructure of a later bare alternative of a
+   `?//` chain (`. as $x ?// $y | $y as {a:$a} | .`: `$y` is bound only when the body raises and jq retries;
+   routing it made a `try` around a `reduce` UPDATE swallow the resolver's refusal, 26 new wrong accepts, so it is
+   left as it was). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit
+   5) with a different message, on `main` too.
+   [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
+   behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
+   {a:$a}`, whose bare alternative holds the register when it matches; a name two alternatives bind may hold it if
+   either binding does), a pass-through stage before it (a plain bind, an `if`, a no-argument call: `(. as $x | .) |
+   . as {a:$a} | .`), an `if` branch, a no-argument `def` call (its body read once per walk in the scope the `def` was
+   written in; an installed call's body with no spine scope; past 16 distinct bodies the source is routed), and a
+   variable that may hold the register as the bound expression (`. as $x | $x as {a:$a}`, also from inside a `def`
+   body, or behind `first`/`last`/`limit`/`?`/a comma). `source_destructures_register` is one
+   walk (`RegisterSpine::reach`) that says whether a node destructures the register, hands it on, or may move it, so
+   the pipe walk and the destructure test cannot drift apart. Still accepted besides the two shapes above (#4320): a `$x`
+   bound outside the `foreach` (`. as $x | del(foreach ($x as {a:$a} | .) ...)`; reading it as the register refused
+   `reduce .[] as $it (.; reduce ($it as {a:$a} | .) ...)` inside a fold body, which jq answers), and a bound expression
+   that hands the register on through a call, a pipe, an `if` or `//` (`def f: .; f as {a:$a}`, `($x | .) as {a:$a}`),
+   which `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
+   too. Pinned by
+   `test_foreach_source_destructure_behind_a_chain_bind_if_or_def_refuses_4278`. Over the 29 register-sweep operands
+   it adds (374,787 rows), 4,829 wrong accepts and 807 wrong answers go to 972 and 151 (the 972 are all the `(.|.)` and
+   later-bare-alternative operands), 2,908 refusals become matches, and 457 matches are lost to a refusal: 161 inside
+   another fold's body (a `reduce` UPDATE or source), the price #4187 already pays; 142 the mixed chain `. as {a:$a}
+   ?// $z | . as {a:$b} | .` and 142 `. as $x | first($x) as {a:$a} | .` under `try`/`?`/`and`, where jq catches its
+   own error but the resolver's refusal is the uncatchable one (#4150; the `first($x)` operand also turns 203 wrong
+   accepts into matches); and 12 `. as $x ?// [$x] | $x as {a:$a}` (those full-shape counts are from the second review
+   round's build). On the final build, rebased on `main`: nothing that matched jq became a wrong accept on the 76
+   #3744/#4187/#4278 operands as bare stages (66,747 rows: wrong accepts 1,624 to 287, wrong answers 201 to 72, 225
+   matches lost to a refusal) or on a `--sample 6000 --seed 7` over the whole grid.
    [#4187](https://github.com/rust-works/succinctly/issues/4187) closes two of the families: a plain bind in front of
    the destructure (`. as $x | . as {a:$a} | .`, `source_destructures_register` stopped at the bind and never read its
    body: its source is a subexpression, so the body meets the register where the bind did) and a `?//` chain of
