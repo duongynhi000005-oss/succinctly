@@ -6532,10 +6532,12 @@ makes it differ, the raw fault is used as before. The open tail a later file con
 container that closes (#4352): `[1 2]\n"a` is a fault and an open string, not one container running to the end of
 the file, so the fault resumes at the right read; pinned by
 `test_jq_open_tail_starts_after_a_malformed_closed_container_4352`.
-**Recorded residual:** streams that stitch and resume over the shapes this does not model still differ from jq in
-about one run in six of a deliberately nasty differential (mismatched closers `[1}` and `{]`, strings ending
-in a backslash, adjacent bare tokens such as `23null`, #4358); the few attributed so far are #4358, the rest are
-not yet traced.
+A bare token is one run up to a boundary (#4358): a number or keyword directly followed by another token byte
+(`23null`, `1true`, `0x`) is one malformed token in jq's lexer, so nothing of it is read, where it used to
+read as two values; `23 null`, `2"a"`, `[1]2` and `"a"2` are still two values. Pinned by
+`test_jq_bare_token_run_is_one_malformed_token_4358`. **Recorded residual:** streams that stitch and resume
+over the shapes this does not model (mismatched closers `[1}` and `{]`, strings ending in a backslash) still
+differ from jq in about one run in forty of a deliberately nasty differential; not yet traced.
 
 ## `input`/`inputs` residuals after #1309
 
