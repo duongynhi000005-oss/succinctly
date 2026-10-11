@@ -1583,7 +1583,9 @@ is the revert that established what the other one costs.
    that can raise a value (`error(.)`, `error($x)`) hands its handler a node that may be the register's own,
    which navigates legitimately, so `try error(.) catch .a` stays as it was. Still refused where jq
    answers: a handler that navigates from elsewhere or does more than navigate (`catch ($x | .a)`,
-   `catch (.a, 7)`, `catch .a?`; jq prints `[]` for each because the handler never runs), a handler with an
+   `catch (.a, 7)`, `catch .a?`; jq prints `[]` for each because the handler never runs), a body outside
+   that grammar (a nested `try`, an `?`, a `def` call, `first(.a)`, any other builtin: `try (try last(.a) catch .a)
+   catch .[0]`, `def f: try last(.a) catch .a; f | $x`), a handler with an
    unreachable navigating branch behind a literal condition (`catch (if true then select(.) else .a end)`), and any `try ... catch`
    inside a `foreach` UPDATE, with the plain handler `catch .` as much as with this one
    (`path(foreach .a? as $k (0; try (try (select(.), error("e")) catch .); $k))` on `null`).

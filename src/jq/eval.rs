@@ -44323,6 +44323,11 @@ fn handler_navigates_nothing(handler: &Expr) -> bool {
 /// which raises whatever value it is handed (`error($x)` raises the register's own node), a
 /// call, a binding or any builtin outside the list is not in it.
 fn body_raises_only_fresh_messages(body: &Expr) -> bool {
+    // A pipe or `,` of nothing is not a body this reads (`all` of no stages is vacuously true).
+    fn all_raise_only_fresh_messages(items: &[Expr]) -> bool {
+        !items.is_empty() && items.iter().all(body_raises_only_fresh_messages)
+    }
+
     match unwrap_paren(body) {
         Expr::Identity
         | Expr::Literal(_)
@@ -44330,8 +44335,8 @@ fn body_raises_only_fresh_messages(body: &Expr) -> bool {
         | Expr::Index { .. }
         | Expr::Slice { .. }
         | Expr::Iterate => true,
-        Expr::Pipe(items) => items.iter().all(body_raises_only_fresh_messages),
-        Expr::Comma(items) => items.iter().all(body_raises_only_fresh_messages),
+        Expr::Pipe(items) => all_raise_only_fresh_messages(items),
+        Expr::Comma(items) => all_raise_only_fresh_messages(items),
         Expr::LastExpr(inner)
         | Expr::Builtin(Builtin::LastStream(inner) | Builtin::Select(inner)) => {
             body_raises_only_fresh_messages(inner)
@@ -44349,7 +44354,9 @@ fn body_raises_only_fresh_messages(body: &Expr) -> bool {
 fn handler_navigates_only_its_input(handler: &Expr) -> bool {
     match unwrap_paren(handler) {
         Expr::Field(_) | Expr::Index { .. } | Expr::Slice { .. } | Expr::Iterate => true,
-        Expr::Pipe(items) => items.iter().all(handler_navigates_only_its_input),
+        Expr::Pipe(items) => {
+            !items.is_empty() && items.iter().all(handler_navigates_only_its_input)
+        }
         _ => false,
     }
 }
