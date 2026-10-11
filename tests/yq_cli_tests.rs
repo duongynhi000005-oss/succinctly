@@ -2699,6 +2699,17 @@ fn test_line_and_column_of_a_property_bearing_node_2712() -> Result<()> {
                 (".y", "[15,4]"),
             ][..],
         ),
+        (
+            // Properties inside flow collections, on keys and on values.
+            "f: {!!str k: 1, &a j: 2}\ng: [!!str a, &b c, !!int 3]\n",
+            &[
+                (".f.k", "[1,14]"),
+                (".f.j", "[1,23]"),
+                (".g[0]", "[2,5]"),
+                (".g[1]", "[2,14]"),
+                (".g[2]", "[2,20]"),
+            ][..],
+        ),
     ] {
         for (path, expected) in rows {
             let filter = format!("[({path} | line), ({path} | column)]");
