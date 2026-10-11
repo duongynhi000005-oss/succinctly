@@ -12250,19 +12250,18 @@ fn eval_single_pipe<S: EvalSemantics, V: DocumentValue>(
     // pipe rather than once per dispatch.
     let needs_path = whole.needs_path_context(exprs);
     if needs_path {
-        // #2061: `key`/`path`/`parent` answer from the path the walk
-        // accumulates, so for a purely navigational pipe there is no
-        // reason to build an `OwnedValue` tree for the document
-        // first. `.[0] | key` cost 519 MiB on a 20 MB array to
-        // answer `0`. Anything the walk does not model returns
-        // `None` and falls through to the bridge below, unchanged.
-        //
         // #4286: `E[a:b][k] | key` reads the slice index, not the slice.
         if !optional && cursor.is_some() {
             if let Some(owned) = try_fused_slice_key::<S, V>(exprs, value.clone(), cursor) {
                 return GenericResult::Owned(owned);
             }
         }
+        // #2061: `key`/`path`/`parent` answer from the path the walk
+        // accumulates, so for a purely navigational pipe there is no
+        // reason to build an `OwnedValue` tree for the document
+        // first. `.[0] | key` cost 519 MiB on a 20 MB array to
+        // answer `0`. Anything the walk does not model returns
+        // `None` and falls through to the bridge below, unchanged.
         if let Some(root) = cursor {
             if let Some(result) = try_path_context_cursor_walk::<S, V>(exprs, root) {
                 return result;
@@ -17959,16 +17958,16 @@ fn eval_each_pipe_generic<S: EvalSemantics, V: DocumentValue>(
     // (#3886); a sub-slice is walked.
     let needs_path = needs_path.unwrap_or_else(|| exprs.iter().any(needs_path_context));
     if needs_path {
-        // #2416 phase 2: the cursor walk emits straight into `sink`, so a
-        // path-context pipe is as lazy as any other stage here. Anything the
-        // walk's static gate declines takes the absent route or the owned
-        // door below.
         // #4286: the sink route's twin of the fusion in `eval_single_pipe`.
         if !optional && cursor.is_some() {
             if let Some(owned) = try_fused_slice_key::<S, V>(exprs, value.clone(), cursor) {
                 return push_one_generic(GenericItem::Owned(owned), sink);
             }
         }
+        // #2416 phase 2: the cursor walk emits straight into `sink`, so a
+        // path-context pipe is as lazy as any other stage here. Anything the
+        // walk's static gate declines takes the absent route or the owned
+        // door below.
         if let Some(root) = cursor {
             if let Some(flow) = try_path_context_walk_sink::<S, V>(exprs, root, sink) {
                 return flow;
@@ -43754,7 +43753,6 @@ mod tests {
         assert!(pull(Some("error(\"x\")"), f64::floor).is_none());
     }
 
-    /// #4195: a target with no cursor of its own (a bare borrowed value) is read the same way.
     #[test]
     fn test_fusable_slice_key_gate_4286() {
         fn gate(src: &str) -> Option<(i64, usize)> {
@@ -43838,6 +43836,7 @@ mod tests {
         );
     }
 
+    /// #4195: a target with no cursor of its own (a bare borrowed value) is read the same way.
     #[test]
     fn test_fused_slice_read_of_a_target_without_a_cursor_4195() {
         let json = br"[10,20,30,40]";

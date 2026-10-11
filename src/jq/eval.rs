@@ -11673,13 +11673,21 @@ fn projection_peel<S: EvalSemantics>(
     if let Expr::Pipe(inner) = first {
         // The copy below is paid per re-entry, so a head that cannot peel
         // (`select(..)`, an empty pipe) is turned away before it.
-        if !skip_identity_stages(inner).first().is_some_and(|head| {
+        let skipped = skip_identity_stages(inner);
+        if !skipped.first().is_some_and(|head| {
             let head = unwrap_paren(head);
             is_peelable_head::<S>(head)
-                || matches!(
-                    head,
-                    Expr::Pipe(_) | Expr::Builtin(Builtin::Length) | Expr::SliceExpr { .. }
-                )
+                || matches!(head, Expr::Pipe(_) | Expr::Builtin(Builtin::Length))
+                // #4286: a computed slice, when the stage after it is a read the owned
+                // fusion answers (`eval_generic::fusable_slice_read` is the full gate).
+                || (matches!(head, Expr::SliceExpr { .. })
+                    && skipped.get(1).is_some_and(|read| {
+                        matches!(
+                            unwrap_paren(read),
+                            Expr::Index { key: None, .. }
+                                | Expr::Builtin(Builtin::Length | Builtin::First | Builtin::Last)
+                        )
+                    }))
         }) {
             return None;
         }

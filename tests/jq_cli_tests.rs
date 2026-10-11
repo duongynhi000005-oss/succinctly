@@ -125745,6 +125745,49 @@ fn test_owned_array_slice_read_equals_the_unfused_spelling_4286() -> Result<()> 
     Ok(())
 }
 
+/// #4286: the owned read hands back the element the input holds rather than a rebuilt copy, as
+/// `.[k]` on an owned array always has. A program that asks whether that element is a document
+/// node a variable holds (`path($x)`, `==`, an update through it) answers what the unfused
+/// spelling does, with the embed table both holding the node and not.
+#[test]
+fn test_owned_array_slice_read_keeps_node_identity_answers_4286() -> Result<()> {
+    let doc = r#"{"a":[1,2],"b":{"c":3}}"#;
+    for body in [
+        "[$x, 1] | {SLICE}[0] == $x",
+        "[$x] | path({SLICE}[0] | $x)",
+        "[$x, 1] | try ({SLICE}[0] | path($x)) catch \"e\"",
+        "[$x, 1] | [{SLICE}[0] | path($x)?]",
+        "[$x, 1] | {SLICE}[0] |= 5",
+        "[$x, 1] | del({SLICE}[0])",
+        "[$x] | {SLICE} | add",
+        "[$x] | {SLICE}[0] | $x == .",
+        "reduce range(3) as $n ([$x]; {SLICE}[0] |= .)",
+        "[$x, 2] | first({SLICE}[0], 9) | tojson",
+    ] {
+        let fused = body.replace("{SLICE}", ".[$i:]");
+        let unfused = body
+            .replace("{SLICE}[0]", "(.[$i:])[0]")
+            .replace("{SLICE}", "(.[$i:])");
+        for (fused, unfused) in [
+            (
+                format!(". as $x | 0 as $i | {fused}"),
+                format!(". as $x | 0 as $i | {unfused}"),
+            ),
+            (
+                format!(".b as $x | 0 as $i | {fused}"),
+                format!(".b as $x | 0 as $i | {unfused}"),
+            ),
+        ] {
+            assert_eq!(
+                run_jq_stdin(&fused, doc, &["-c"])?,
+                run_jq_stdin(&unfused, doc, &["-c"])?,
+                "{fused}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// #4286: a loop over a computed-slice read must not grow like the slice does. Each of the four
 /// reads below converted the whole tail of the array per read, so 6,000 reads over a 6,000-element
 /// array cost seconds in a release build and many times that in a debug one; fused they cost
