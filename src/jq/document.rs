@@ -4431,7 +4431,17 @@ pub trait DocumentElements: Sized + Copy + Clone {
     /// stand at a `-` wrapper that `uncons_cursor` resolves past); it need
     /// only be the same every time for the same list.
     fn head_id(&self) -> Option<(usize, usize)> {
-        None // patchcov: coverage tolerate-line reason="the default for a format without the element index; both shipped formats override it"
+        None
+    }
+
+    /// The list of this list's document that stands at the node `id`, where
+    /// `id` is a [`head_id`](Self::head_id) some list of the same array
+    /// reported: the same list, rebuilt, so walking it with
+    /// [`uncons_cursor`](Self::uncons_cursor) yields what walking the original
+    /// did (#4162). `None` when `self` is exhausted, `id` names no node, or the
+    /// format does not support the element index.
+    fn at_head_id(&self, _id: usize) -> Option<Self> {
+        None
     }
 
     /// Count the number of elements.
@@ -6011,5 +6021,58 @@ mod node_id_reindex_tests {
             from_reindexed.document_token(),
             "the token is the only thing that separates them"
         );
+    }
+}
+
+#[cfg(test)]
+mod element_index_defaults_tests {
+    use super::{DocumentElements, DocumentValue};
+    use crate::json::light::{JsonCursor, JsonElements, StandardJson};
+    use crate::json::JsonIndex;
+
+    /// A format that implements only the required [`DocumentElements`]
+    /// methods: delegates to JSON's and leaves `head_id`/`at_head_id` at
+    /// their trait defaults.
+    #[derive(Clone, Copy)]
+    struct NoElementIndex<'a>(JsonElements<'a, Vec<u64>>);
+
+    impl<'a> DocumentElements for NoElementIndex<'a> {
+        type Value = StandardJson<'a, Vec<u64>>;
+        type Cursor = JsonCursor<'a, Vec<u64>>;
+
+        fn uncons(&self) -> Option<(Self::Value, Self)> {
+            self.0.uncons().map(|(v, rest)| (v, Self(rest)))
+        }
+
+        fn uncons_cursor(&self) -> Option<(Self::Cursor, Self)> {
+            self.0.uncons_cursor().map(|(c, rest)| (c, Self(rest)))
+        }
+
+        fn get(&self, index: usize) -> Option<Self::Value> {
+            self.0.get(index)
+        }
+
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    /// A format without the element index answers no id and rebuilds no
+    /// list, so the path-context element read (#4162) always walks for it.
+    #[test]
+    fn a_format_without_the_element_index_has_no_head_id_4162() {
+        let json = br"[1, 2, 3]";
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        let elements = NoElementIndex(root.value().as_array().expect("an array"));
+        assert!(!elements.is_empty());
+        assert_eq!(elements.head_id(), None);
+        assert!(elements.at_head_id(0).is_none());
+        // The wrapper still reads the list it wraps: only the index is missing.
+        let (first, rest) = elements.uncons().expect("a first element");
+        assert_eq!(first.as_i64(), Some(1));
+        assert_eq!(rest.get(0).and_then(|v| v.as_i64()), Some(2));
+        let (cursor, _) = rest.uncons_cursor().expect("a second element");
+        assert_eq!(cursor.value().as_i64(), Some(2));
     }
 }
