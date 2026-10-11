@@ -7227,6 +7227,16 @@ fn split_json_values(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
         let start = pos;
 
         match scan_one_json_token(bytes, pos) {
+            // jq's lexer takes the whole run of bytes up to a boundary as one token, so a
+            // number or keyword directly followed by another token byte (`23null`, `1true`,
+            // `0x`) is one malformed token, not two values (#4358). A container or string
+            // needs no boundary after it (`[1]2`, `"a"2` are two values).
+            Some(end)
+                if !matches!(bytes[start], b'{' | b'[' | b'"')
+                    && bytes.get(end).is_some_and(|&b| !is_jq_token_boundary(b)) =>
+            {
+                return (values, Some(start));
+            }
             Some(end) => {
                 values.push((start, end));
                 pos = end;
@@ -7236,6 +7246,11 @@ fn split_json_values(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
     }
 
     (values, None)
+}
+
+/// Whether `b` ends a bare token in jq's lexer: whitespace and `"[{,:]}` (`jv_parse.c`).
+fn is_jq_token_boundary(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b'"' | b'[' | b'{' | b',' | b':' | b']' | b'}')
 }
 
 /// Where the JSON token starting at `pos` ends, or `None` if no token can

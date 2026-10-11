@@ -41666,6 +41666,36 @@ fn test_jq_open_tail_starts_after_a_malformed_closed_container_4352() -> Result<
     Ok(())
 }
 
+/// #4358: jq's lexer takes the whole run of bytes up to a boundary (whitespace and `"[{,:]}`) as one
+/// bare token, so a number or keyword directly followed by another token byte (`23null`, `1true`,
+/// `0x`) is one malformed token, not two values, and nothing of it is read. A container or string
+/// needs no boundary after it. Every expectation is jq 1.7.1's own output (exit code and stdout).
+#[test]
+fn test_jq_bare_token_run_is_one_malformed_token_4358() -> Result<()> {
+    for (input, want_out, want_code) in [
+        ("23null", "", 2),
+        ("1true", "", 2),
+        ("1e5true", "", 2),
+        ("-1null", "", 2),
+        ("1.5null", "", 2),
+        ("0x", "", 2),
+        ("1@", "", 2),
+        ("[1,2]3null", "[1,2]\n", 2),
+        ("1 2null 3", "1\n", 2),
+        // Boundaries: whitespace, quotes and brackets end a bare token.
+        ("23 null", "23\nnull\n", 0),
+        ("2\"a\"", "2\n\"a\"\n", 0),
+        ("[1]2", "[1]\n2\n", 0),
+        ("\"a\"2", "\"a\"\n2\n", 0),
+        ("nan 1", "null\n1\n", 0),
+    ] {
+        let (stdout, _stderr, code) = run_jq_full(&["-c", "."], Some(input))?;
+        assert_eq!(stdout, want_out, "stdout for {input:?}");
+        assert_eq!(code != 0, want_code != 0, "failure for {input:?}");
+    }
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently
@@ -98723,9 +98753,9 @@ fn test_canonical_compact_echo_declines_non_canonical_spans_2608() -> Result<()>
 /// was captured live from the pre-#2608 binary (`b1e1a90df`, no gate at
 /// all) and cross-checked against `/usr/bin/jq` 1.7.1, which agrees on all
 /// but the two `Invalid JSON text` shapes -- there succinctly's splitter
-/// already diverged from jq's parser long before #2608 (jq reports a
-/// numeric-literal parse error, and on `12xyz` prints nothing at all), and
-/// this test pins succinctly's own unchanged behaviour.
+/// diverged from jq's parser long before #2608 (jq reports a numeric-literal
+/// parse error). `12xyz` was one of the two and prints nothing at all in jq,
+/// as it does here since #4358; `{"a":1}xyz` still differs in the message only.
 #[test]
 fn test_canonical_echo_stops_at_the_root_value_2608() -> Result<()> {
     for (input, want_out, want_code) in [
@@ -98741,7 +98771,8 @@ fn test_canonical_echo_stops_at_the_root_value_2608() -> Result<()> {
         // Trailing garbage: the value is still echoed, then the document is
         // rejected -- exit 5, exactly as before the gate existed.
         ("{\"a\":1}xyz", "{\"a\":1}\n", 5),
-        ("12xyz", "12\n", 5),
+        // `12xyz` is one malformed token to jq's lexer (#4358), so nothing is echoed.
+        ("12xyz", "", 5),
     ] {
         let (stdout, _stderr, code) = run_jq_full(&["-c", "."], Some(input))?;
         assert_eq!(stdout, want_out, "stdout for {input:?}");
