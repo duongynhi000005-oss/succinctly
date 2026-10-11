@@ -1378,6 +1378,26 @@ OPERANDS = [
     "(. as [$q] ?// $z | (.a?, $z))",
     "(. as [$q] ?// $z | (.a?, $q))",
     "(. as [$q] ?// $z | (empty, true))",
+    # (#4114) `isempty(g)` is `first((g | false), true)`: the `first`'s break is the
+    # error a `?//` inside `g` swallows and retries past, so each retried
+    # alternative answers `false` again and a retry that comes up dry leaves `g`
+    # running to its end, which fires the trailing `true`. The by-value
+    # `true`/`false` body is the case where the `false` is, or is not, identical
+    # to the register the answer is checked against.
+    "isempty(. as $q ?// $z | if $q then true else empty end)",
+    "isempty(. as $q ?// $z | if $q then empty else false end)",
+    "isempty(. as $q ?// $z | empty)",
+    "isempty(. as $q ?// $z | $q)",
+    "isempty(. as [$q] ?// $z | if $q then true else empty end)",
+    "isempty(. as [$q] ?// $z | (.a?, true))",
+    "isempty(. as [$q] ?// $z | (empty, true))",
+    "isempty(. as {a:$q} ?// $z | if $q then true else empty end)",
+    "isempty(. as [$q] ?// {a:$z} ?// $y | if $z then true else empty end)",
+    "isempty(. as $q ?// $z | (if $q then true else empty end, .))",
+    "isempty(. as $q ?// $z | (if $q then true else empty end | .a?))",
+    "isempty(first(. as $q ?// $z | if $q then true else empty end))",
+    "isempty(limit(2; . as $q ?// $z | if $q then true else empty end))",
+    "isempty(isempty(. as $q ?// $z | if $q then true else empty end))",
     "(. as [$q] ?// $z | (.[]?, true))",
     "(. as [$q] ?// $z | ({a:1}, true))",
 ]
