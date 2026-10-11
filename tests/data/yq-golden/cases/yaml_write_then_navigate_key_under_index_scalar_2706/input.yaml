@@ -1,0 +1,15 @@
+items:
+  # first
+  - name: a # na
+    # lead tags
+    tags: [x, y] # tg
+    # lead k
+    k:
+      m: 1
+  # second
+  - name: b
+    # lead k2
+    k: {m: 2} # kc
+  # last
+  - plain
+z: 1

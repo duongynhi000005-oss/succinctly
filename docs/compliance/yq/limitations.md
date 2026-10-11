@@ -5020,7 +5020,11 @@ Four known gaps this write shares with every other write form, none specific to 
   tail (`.a`, `.a.b`, `.a[0]`, `.a?`) is then walked over the result and its tree. A
   navigation that is *not* the tail still drops every comment, style and anchor, because the
   result's `CommentTree` is lost once the pipe stops being shape-preserving: `.a.b = "y" |
-  .a | .f = 2` prints `b: y` where yq prints `b: y # c`.
+  .a | .f = 2` prints `b: y` where yq prints `b: y # c`. A tail that lands on an alias
+  prints the resolved value, as a root `*name` is never emitted (`.c = 2 | .b` on `a: &x
+  [1, 2]` / `b: *x` is `*x` in yq), and one that lands on a `<<: *base` mapping prints the
+  merged members where yq prints the `!!merge <<: *base` key: both are the write routes'
+  existing alias and merge-key behaviour, not specific to the tail.
 - **A multi-result filter carries no `CommentTree` at all** (`.a line_comment = "y" | .,
   .` prints two uncommented copies) — #1349's `GenericResult::Many` limitation, above.
 - **A preceding stage outside the shapes `is_alias_sensitive_assign` admits silently drops

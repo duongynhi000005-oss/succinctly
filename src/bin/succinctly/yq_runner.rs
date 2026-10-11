@@ -4733,10 +4733,10 @@ fn meta_path_of(steps: &[TreeStep<'_>]) -> Vec<MetaPathStep> {
 /// The core builds its presentation snapshot and reconciles it only for a *whole-document*
 /// write, so a trailing navigation used to leave the result with an empty tree: no comment,
 /// anchor or style survived. Here the write prefix runs through the core unchanged, and each of
-/// its documents is then navigated -- the value by the same evaluator the pipe would have fed
-/// the stage through (so an absent key is still `null` and a key under a scalar still yields
-/// nothing), the tree by the same steps. A tree is attached only when the evaluator's answer is
-/// the node those steps reach; anything else keeps the empty tree it had before.
+/// its documents is then navigated by the tail's static steps, value and tree together. A path
+/// the document lacks falls back to the evaluator the pipe would have fed the stage through (so
+/// an absent key is still `null` and a key under a scalar still yields nothing) with the empty
+/// tree it had before.
 fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     cursor: YamlCursor<'_, W>,
     expr: &Expr,
@@ -4766,21 +4766,23 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     let path = meta_path_of(&steps);
     let mut out = Vec::with_capacity(docs.len());
     for (value, tree) in docs {
-        let navigated = evaluate_input(&value, &nav, sink)?;
-        let reached = navigated.len() == 1
-            && owned_value_at(&value, &path).is_some_and(|v| *v == navigated[0]);
-        for nv in navigated {
-            let mut sub = if reached {
-                steps
-                    .iter()
-                    .fold(&tree, |node, step| match step {
-                        TreeStep::Key(k) => node.field(k),
-                        TreeStep::Index(i) => node.at_index(*i),
-                    })
-                    .clone()
-            } else {
-                CommentTree::empty()
-            };
+        // A path the written document has is answered by walking it, without the serialize and
+        // re-index pass the evaluator costs; a path it lacks (`null` for an absent key, nothing
+        // for a key under a scalar, ...) is the evaluator's to answer, with no tree to attach.
+        let navigated: Vec<(OwnedValue, CommentTree)> = match owned_value_at(&value, &path) {
+            Some(node) => {
+                let sub = steps.iter().fold(&tree, |node, step| match step {
+                    TreeStep::Key(k) => node.field(k),
+                    TreeStep::Index(i) => node.at_index(*i),
+                });
+                vec![(node.clone(), sub.clone())]
+            }
+            None => evaluate_input(&value, &nav, sink)?
+                .into_iter()
+                .map(|nv| (nv, CommentTree::empty()))
+                .collect(),
+        };
+        for (nv, mut sub) in navigated {
             // A standalone comment above or below a mapping value is printed with its *key*, so
             // reading the value on its own (`.a.f`) shows neither, as yq does; a sequence item
             // keeps its own.
