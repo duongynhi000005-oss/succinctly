@@ -6506,9 +6506,10 @@ The place where jq detects a fault in a malformed value that also holds an inval
 and mapped back to the original byte, so the read jq resumes at is the right one, pinned by
 `test_jq_fault_detection_skips_an_invalid_utf8_byte_4349`. The mapping applies only when the copy is the
 original with one U+FFFD per invalid run; where jq's collapse-or-drop of a run or a re-spelled escape
-makes it differ, the raw fault is used as before. **Recorded residual (#4352):** a resume whose discarded
-read ends inside a multi-byte character, with a truncated sequence at the end of a stitched file
-(`[1`, then ` 2]` and `"<0xc3>`, then `" [1 2] null`), still reads an extra or a missing value against jq.
+makes it differ, the raw fault is used as before. The open tail a later file continues starts after a malformed
+container that closes (#4352): `[1 2]\n"a` is a fault and an open string, not one container running to the end of
+the file, so the fault resumes at the right read; pinned by
+`test_jq_open_tail_starts_after_a_malformed_closed_container_4352`.
 
 ## `input`/`inputs` residuals after #1309
 
