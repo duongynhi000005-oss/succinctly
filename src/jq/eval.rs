@@ -29271,14 +29271,32 @@ fn classify_yq_assign_prefix(
                 None => PathAssignOutcome::NeedsRhs,
             }
         }
-        Expr::Index { idx, .. } => match current {
-            OwnedValue::Array(arr) => match resolve_read_index(&OwnedValue::Int(*idx), arr.len()) {
-                Some(i) => classify_yq_assign_prefix(&arr[i], rest, terminal),
-                None => PathAssignOutcome::NeedsRhs,
-            },
-            _ if is_yq_field_index_noop_scalar(current) => PathAssignOutcome::TotalNoop,
-            _ => PathAssignOutcome::NeedsRhs,
-        },
+        Expr::Index { idx, .. } => {
+            // Past the end of an array, or into `null`, yq pads / autovivifies and steps into the
+            // new `null` slot, as it does for an absent key -- so something after the index (or
+            // a terminal `Iterate`) still gets its "nothing to write into" answer (#1921):
+            // `.a[3][] = error("boom")` on `a: []` is `{"a":[null,null,null,[]]}` with the RHS
+            // never run. A negative index past the start raises instead (#1922) and still needs
+            // the RHS.
+            let steps_into_null =
+                *idx >= 0 && (!rest.is_empty() || matches!(terminal, Expr::Iterate));
+            match current {
+                OwnedValue::Array(arr) => {
+                    match resolve_read_index(&OwnedValue::Int(*idx), arr.len()) {
+                        Some(i) => classify_yq_assign_prefix(&arr[i], rest, terminal),
+                        None if steps_into_null => {
+                            classify_yq_assign_prefix(NULL_VALUE, rest, terminal)
+                        }
+                        None => PathAssignOutcome::NeedsRhs,
+                    }
+                }
+                OwnedValue::Null if steps_into_null => {
+                    classify_yq_assign_prefix(NULL_VALUE, rest, terminal)
+                }
+                _ if is_yq_field_index_noop_scalar(current) => PathAssignOutcome::TotalNoop,
+                _ => PathAssignOutcome::NeedsRhs,
+            }
+        }
         Expr::Iterate => match current {
             OwnedValue::Array(arr) => classify_yq_assign_fanout(arr.iter(), rest, terminal),
             OwnedValue::Object(map) => classify_yq_assign_fanout(map.values(), rest, terminal),
@@ -29309,7 +29327,7 @@ fn classify_yq_assign_prefix(
 /// The base case of [`classify_yq_assign_prefix`]: `current` is the terminal component's
 /// parent, and `terminal` is that component (#1921).
 ///
-/// A `Field` or non-negative `Index` terminal is a no-op against a scalar parent and needs the
+/// A `Field` or `Index` terminal is a no-op against a scalar parent and needs the
 /// RHS against anything else, as it always was. A terminal `Iterate` (`.a[] = v`) writes into
 /// every element of `current`, so it needs the RHS exactly when there is one to write into: real
 /// yq evaluates the RHS inside the per-candidate loop (`resultsForRHS`), so zero candidates

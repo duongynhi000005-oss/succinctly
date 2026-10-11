@@ -33773,6 +33773,18 @@ fn test_yq_terminal_iterate_with_nothing_to_write_skips_rhs_1921() -> Result<()>
         ("a: [[]]\n", ".a[][] = error(\"boom\")", "{\"a\":[[]]}"),
         ("a: [null]\n", ".a[][] = error(\"boom\")", "{\"a\":[[]]}"),
         ("a: 5\n", ".a[] = error(\"boom\")", "{\"a\":5}"),
+        // Past the end of an array, or into `null`, yq pads and steps into the new slot.
+        ("a: []\n", ".a[0][] = error(\"boom\")", "{\"a\":[[]]}"),
+        (
+            "a: []\n",
+            ".a[3][] = error(\"boom\")",
+            "{\"a\":[null,null,null,[]]}",
+        ),
+        (
+            "a: null\n",
+            ".a[2][] = error(\"boom\")",
+            "{\"a\":[null,null,[]]}",
+        ),
         ("a: []\n", ".a[] += error(\"boom\")", "{\"a\":[]}"),
         ("a: []\n", ".a[] -= error(\"boom\")", "{\"a\":[]}"),
         ("a: []\n", ".a[] *= error(\"boom\")", "{\"a\":[]}"),
@@ -33794,12 +33806,25 @@ fn test_yq_terminal_iterate_with_nothing_to_write_skips_rhs_1921() -> Result<()>
         );
     }
     // A non-empty target still needs the RHS.
-    for filter in [".a[] = error(\"boom\")", ".a[] += error(\"boom\")"] {
-        let (out, err, code) =
-            run_yq_stdin_with_stderr(filter, "a: [1, 2]\n", &["-o=json", "-I=0"])?;
-        assert_eq!((out.as_str(), code), ("", 1), "{filter}");
+    for (doc, filter) in [
+        ("a: [1, 2]\n", ".a[] = error(\"boom\")"),
+        ("a: [1, 2]\n", ".a[] += error(\"boom\")"),
+        // One element with something to write into is enough, wherever it sits.
+        ("a: [[], [1]]\n", ".a[][] = error(\"boom\")"),
+        ("a: [[1], []]\n", ".a[][] = error(\"boom\")"),
+        ("a: {x: 1}\n", ".a[] = error(\"boom\")"),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!((out.as_str(), code), ("", 1), "{filter} on {doc:?}");
         assert!(err.contains("boom"), "{filter}: {err}");
     }
+    // A null *value* is still an element to overwrite.
+    let (out, _err, code) = run_yq_stdin_with_stderr(
+        ".a[] = error(\"boom\")",
+        "a: {x: null}\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!((out.as_str(), code), ("", 1));
     Ok(())
 }
 
