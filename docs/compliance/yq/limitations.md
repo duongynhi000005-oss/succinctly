@@ -5596,3 +5596,11 @@ v4.53.3, which counts runes, not grapheme clusters); bytes that are not valid UT
 reads the byte column, with no scan of the line); `YamlIndex::to_line_column`, `to_offset` and
 `yq-locate` stay in bytes, which an editor offset round-trips. The JSON cursor's `column`
 (a succinctly extension with no jq oracle) stays in bytes.
+
+`line` and `column` of a node read from **JSON input** are `0`, as in yq
+([#4382](https://github.com/rust-works/succinctly/issues/4382)): yq decodes JSON without keeping
+positions, so `echo '{"a":1}' | yq -p json '.a | [line,column]'` and the same over a `.json` file are
+`[0,0]`, where the text read as YAML (no `-p json`, or a `.yaml` file) keeps `[1,6]`. A YAML index marked
+JSON-sourced (`YamlIndex::mark_json_sourced`) answers `0` from `YamlCursor::line`/`column`. Not done: yq picks
+the decoder from the *first* file's extension for every file (`yq '.a | line' t.json t.yaml` is `[0,0]` twice),
+where this picks it per file ([#4394](https://github.com/rust-works/succinctly/issues/4394)).

@@ -12586,6 +12586,69 @@ fn test_column_counts_characters_not_bytes_4364() -> Result<()> {
     Ok(())
 }
 
+/// #4382: yq decodes JSON input without keeping positions, so `line` and `column` of any node read
+/// from it are `0`; the same text read as YAML (a stdin document with no `-p json`, or a `.yaml`
+/// file) keeps them. Every row is a live yq v4.53.3 capture (`yq -o json -I=0 '<filter>'`).
+#[test]
+fn test_line_and_column_of_json_input_are_zero_4382() -> Result<()> {
+    // (input, extra args, filter, expected)
+    let rows: &[(&str, &[&str], &str, &str)] = &[
+        (
+            "{\"a\":1}\n",
+            &["-p", "json"],
+            ".a | [line,column]",
+            "[0,0]",
+        ),
+        ("{\"a\":1}\n", &["-p", "json"], "[line,column]", "[0,0]"),
+        (
+            "{\n \"a\": [1,\n  2]}\n",
+            &["-p", "json"],
+            ".a[1] | [line,column]",
+            "[0,0]",
+        ),
+        (
+            "{\"\u{e9}\": [1]}\n",
+            &["-p", "json"],
+            ".\u{e9} | [line,column]",
+            "[0,0]",
+        ),
+        ("{\"a\":1}\n", &["-p=j"], ".a | [line,column]", "[0,0]"),
+        // The same text with no `-p json` is YAML and keeps its positions.
+        ("{\"a\":1}\n", &[], ".a | [line,column]", "[1,6]"),
+        ("a: 1\n", &[], ".a | [line,column]", "[1,4]"),
+    ];
+    for (input, args, filter, expected) in rows {
+        let mut argv = vec!["-o", "json", "-I", "0"];
+        argv.extend_from_slice(args);
+        let (stdout, code) = run_yq_stdin(filter, input, &argv)?;
+        assert_eq!(
+            (stdout.trim(), code),
+            (*expected, 0),
+            "{filter} on {input:?} {args:?}"
+        );
+    }
+    // Two documents: one `[0,0]` each.
+    let (stdout, code) = run_yq_stdin(
+        ".a | [line,column]",
+        "{\"a\":1}\n{\"a\":2}\n",
+        &["-o", "json", "-I", "0", "-p", "json"],
+    )?;
+    assert_eq!((stdout.as_str(), code), ("[0,0]\n[0,0]\n", 0));
+    // By extension: a `.json` file is JSON, a `.yaml` file with the same text is YAML.
+    let dir = TempDir::new()?;
+    for (name, expected) in [("t.json", "[0,0]"), ("t.yaml", "[1,6]")] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, "{\"a\":1}\n")?;
+        let (stdout, code) = run_yq_file(
+            ".a | [line,column]",
+            path.to_str().expect("utf-8 temp path"),
+            &["-o", "json", "-I", "0"],
+        )?;
+        assert_eq!((stdout.trim(), code), (expected, 0), "{name}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_line_column_object_construction_is_a_known_limitation() -> Result<()> {
     // Object construction used to round-trip through OwnedValue, which has
