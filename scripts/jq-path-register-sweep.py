@@ -220,6 +220,9 @@ OPERANDS = [
     "setpath([]; .)",
     "setpath([]; 1)",
     "setpath([\"a\"]; .)",
+    "del((empty))",
+    "delpaths(([]))",
+    "setpath(([]); (.))",
     # by-value operands jq navigates inside (#3428)
     "first",
     "last",

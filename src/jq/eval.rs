@@ -40358,13 +40358,13 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         }
         // #4295: `delpaths([])` and `setpath([]; .)` return their input itself.
         Expr::Builtin(Builtin::DelPaths(paths))
-            if S::TAG == EvalTag::Jq && is_empty_array_literal(paths) =>
+            if S::TAG == EvalTag::Jq && is_empty_array_literal(unwrap_paren(paths)) =>
         {
             emit_passthrough(value, trackable, snapshot, sink)
         }
         Expr::Builtin(Builtin::SetPath(path, new_value))
             if S::TAG == EvalTag::Jq
-                && is_empty_array_literal(path)
+                && is_empty_array_literal(unwrap_paren(path))
                 && is_identity_stage(new_value) =>
         {
             emit_passthrough(value, trackable, snapshot, sink)
@@ -56108,11 +56108,18 @@ fn is_empty_array_literal(expr: &Expr) -> bool {
 /// target with a side effect would fire it twice. A resolution that raises
 /// answers no as well, leaving the error to the ordinary path.
 fn del_resolves_no_path<S: EvalSemantics>(target: &Expr, value: &OwnedValue) -> bool {
-    del_target_is_effect_free(target)
-        && matches!(
-            resolve_terminal::<S>(target, value, false, Untracked::Refuse),
-            Ok(branches) if branches.is_empty()
-        )
+    if !del_target_is_effect_free(target) {
+        return false;
+    }
+    // Stops at the first path: a non-empty set is refused by the caller's
+    // ordinary route, which resolves it again, so resolving it all here would
+    // double the work of every refusal.
+    let mut found = false;
+    let flow = resolve_terminal_sink::<S>(target, value, false, Untracked::Refuse, &mut |_| {
+        found = true;
+        Demand::Stop
+    });
+    flow.is_ok() && !found
 }
 
 /// [`is_pure_navigation`]'s grammar plus `empty`, the one non-navigating node

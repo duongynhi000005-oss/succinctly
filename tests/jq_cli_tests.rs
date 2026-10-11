@@ -60450,6 +60450,8 @@ fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
             "",
             5,
         ),
+        (r"5", r"[path(delpaths(([])))]", "[[]]\n", 0),
+        (r"5", r"[path(setpath(([]); (.)))]", "[[]]\n", 0),
         (r"5", r"del(empty)", "5\n", 0),
         (r"[1,2]", r"delpaths([])", "[1,2]\n", 0),
     ];
