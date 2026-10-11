@@ -2548,7 +2548,7 @@ pub fn number_literal_end(text: &[u8], start: usize) -> Option<usize> {
 ///
 /// Companion to [`number_literal_end`], and used by the same **top-level
 /// document splitting** caller (`find_json_values` /
-/// `scan_one_json_token` / `find_matching_close`, in
+/// `scan_one_json_token` / [`container_end`], in
 /// `src/bin/succinctly/jq_runner.rs`), for the same reason: one validated
 /// implementation instead of independently-maintained copies. It lives in
 /// the library rather than beside its caller because `crate::util` is
@@ -2669,6 +2669,153 @@ fn next_string_special<const PREFIX: usize>(bytes: &[u8], i: usize) -> usize {
         return crate::util::simd::escape::find_json_escape(bytes, at);
     }
     crate::util::simd::escape::find_json_escape(bytes, i)
+}
+
+/// Find the end of the object or array that opens at `bytes[start]`.
+///
+/// Returns the index one past its matching close, or `None` for a `start` that
+/// is not a `{` or `[` in `bytes`, or a container that is not closed before the end of `bytes` or holds a string with a raw
+/// `U+0000`-`U+001F` byte.
+///
+/// This is the top-level document splitter's container walk
+/// (`find_json_values`, `src/bin/succinctly/jq_runner.rs`). It is structural,
+/// not a validator: only this container's own `open`/`close` pair moves the
+/// depth (a `]` inside `{...}` is ignored), and string contents are skipped by
+/// exactly [`string_literal_end`]'s rule -- the string ends at the first
+/// unescaped `"`, a `\` skips the byte after it whatever it is, and a raw
+/// control character rejects the whole string (#2878) -- so the two agree on
+/// every input, which the tests sweep against the byte-at-a-time walk this
+/// replaced.
+///
+/// **The walk is over a 64-byte mask, not bytes (#4177).** The byte loop paid a
+/// three-way compare per byte plus a string-scan entry per string; on a wide or
+/// record-shaped document that was ~10 `Ir` per input byte, 15-19% of a `jq -c .`
+/// run once #4172 had removed the line counter. Here one block of `"`, `\`,
+/// controls and the two brackets is classified once and every hit in it is
+/// answered with a `trailing_zeros`; the bytes between hits are never visited,
+/// and a short string costs a bit scan of a mask its neighbours already paid
+/// for (the `SpecialMask` regime of #3340, extended to the brackets). The state
+/// is `in_string`: outside a string `"` opens one and the brackets move `depth`
+/// (a stray `\` or whitespace control is ignored, as the byte loop's `_ => {}`
+/// did); inside one `"` closes it, `\` moves the cursor past the next byte
+/// (carrying into the next block when the `\` is the block's last byte), a
+/// control byte returns `None`, and a bracket is content.
+///
+/// A bracket inside a string is a hit the mask cannot tell apart from one
+/// outside, and a string made of the container's own brackets is one loop
+/// iteration per byte where `string_literal_end` skipped it in one call (+24%
+/// on a 7950X, +60% on an M4 Pro against the byte loop). So the first bracket
+/// seen inside a string swaps the block's mask for one without the brackets
+/// (`classify_string_64`) until that string ends: ordinary strings never pay for
+/// it, a bracket-dense one pays one more classification per block it spans, not
+/// one hit per byte. Splitting the mask by state eagerly was measured and
+/// rejected: it halved the gain on records, and a lazily narrowed mask kept as
+/// a per-hit `cursor` shift (instead of clearing the lowest set bit) made short
+/// plain strings 4-6% slower on the M4 Pro.
+///
+/// A partial final block is copied into a space-padded buffer with its high
+/// bits masked off, so nothing past `bytes.len()` is read or reported.
+/// `#[inline(never)]` keeps the loop out of its caller's register allocation
+/// (#3350); the call is paid once per top-level container, never per byte.
+#[inline(never)]
+pub fn container_end(bytes: &[u8], start: usize) -> Option<usize> {
+    // `start` must hold an opener; anything else (or a `start` past the end)
+    // is not a container, so there is no end to report.
+    let open = *bytes.get(start)?;
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut depth = 1usize;
+    let mut in_string = false;
+    // The previous block ended on the `\` of an escape: this block's first
+    // byte is the escaped one.
+    let mut skip_first = false;
+    let mut base = start + 1;
+    while base < bytes.len() {
+        let tail;
+        let (block, len): (&[u8; 64], usize) = match bytes
+            .get(base..base + 64)
+            .and_then(|s| <&[u8; 64]>::try_from(s).ok())
+        {
+            Some(block) => (block, 64),
+            None => {
+                // Fewer than 64 bytes left (and at least one, by the loop guard).
+                let rest = &bytes[base..];
+                let mut buf = [b' '; 64];
+                buf[..rest.len()].copy_from_slice(rest);
+                tail = buf;
+                (&tail, rest.len())
+            }
+        };
+        let live = if len < 64 {
+            (1u64 << len) - 1
+        } else {
+            u64::MAX
+        };
+        let all = crate::util::simd::specials::classify_container_64(block, open, close) & live;
+        let mut mask = all;
+        // `mask` holds `all` minus the brackets for the rest of a string that
+        // held one (see below); `all` is restored when that string ends.
+        let mut narrowed = false;
+        if skip_first {
+            mask &= !1;
+            skip_first = false;
+        }
+        while mask != 0 {
+            let k = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let b = block[k];
+            if in_string {
+                match b {
+                    b'"' => {
+                        in_string = false;
+                        if narrowed {
+                            narrowed = false;
+                            mask = all & high_bits_from(k + 1);
+                        }
+                    }
+                    b'\\' => {
+                        if k == 63 {
+                            skip_first = true;
+                        } else {
+                            mask &= !(1u64 << (k + 1));
+                        }
+                    }
+                    // This container's bracket inside a string: content, not a
+                    // decision. Drop the brackets from the rest of the string
+                    // so a bracket-dense one costs a hit per byte no more.
+                    _ if b >= 0x20 => {
+                        narrowed = true;
+                        mask = crate::util::simd::specials::classify_string_64(block)
+                            & live
+                            & high_bits_from(k + 1);
+                    }
+                    // A raw control character: the whole string is rejected.
+                    _ => return None,
+                }
+            } else if b == b'"' {
+                in_string = true;
+            } else if b == open {
+                depth += 1;
+            } else if b == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(base + k + 1);
+                }
+            }
+            // else: a stray `\` or a whitespace control byte outside a string.
+        }
+        base += len;
+    }
+    None
+}
+
+/// A mask of bits `from..64` (empty for `from >= 64`).
+#[inline(always)]
+fn high_bits_from(from: usize) -> u64 {
+    u64::MAX.checked_shl(from as u32).unwrap_or(0)
 }
 
 /// A mask whose *lowest* set bit is the high bit of the first byte of
@@ -9688,6 +9835,208 @@ mod tests {
                 assert_eq!(scan(&doc, lead), want, "{label}: {doc:?} from {lead}");
             });
         }
+    }
+
+    /// The byte-at-a-time container walk `container_end` replaced (#4177),
+    /// verbatim apart from the call it makes: the independent oracle the block
+    /// walk is swept against.
+    fn container_end_bytewise_reference(bytes: &[u8], pos: usize) -> Option<usize> {
+        let open = bytes[pos];
+        let close = if open == b'{' { b'}' } else { b']' };
+        let mut depth = 1;
+        let mut i = pos + 1;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'"' => {
+                    i = string_literal_end(bytes, i)?;
+                    continue;
+                }
+                c if c == open => depth += 1,
+                c if c == close => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth == 0 {
+            Some(i)
+        } else {
+            None
+        }
+    }
+
+    /// A string made of the container's own brackets (every byte a hit in the
+    /// first single-mask version, #4177) ends where its closing quote does.
+    #[test]
+    fn test_container_end_ignores_brackets_inside_strings_4177() {
+        for n in [1usize, 31, 32, 33, 63, 64, 65, 200] {
+            let obj = format!("{{\"a\":\"{}\"}}", "{}".repeat(n));
+            let arr = format!("[\"{}\", \"]\"]", "[]".repeat(n));
+            for doc in [obj, arr] {
+                let end = doc.len();
+                let mut padded = doc.clone().into_bytes();
+                padded.extend_from_slice(b"}]}]");
+                assert_eq!(container_end(&padded, 0), Some(end), "{doc}");
+                assert_eq!(container_end_bytewise_reference(&padded, 0), Some(end));
+            }
+        }
+    }
+
+    #[test]
+    fn test_container_end_refuses_a_start_that_is_not_an_opener_4177() {
+        assert_eq!(container_end(b"", 0), None);
+        assert_eq!(container_end(b"{}", 2), None);
+        assert_eq!(container_end(b"a]", 0), None);
+        assert_eq!(container_end(b"\"{}\"", 0), None);
+    }
+
+    #[test]
+    fn test_container_end_known_shapes_4177() {
+        let cases: &[(&[u8], Option<usize>)] = &[
+            (b"{}", Some(2)),
+            (b"[]", Some(2)),
+            (b"{} trailing", Some(2)),
+            (br#"{"a":1}"#, Some(7)),
+            (br#"{"a":{"b":[1,2]}}x"#, Some(17)),
+            // Only this container's own pair moves the depth.
+            (b"{]}", Some(3)),
+            (b"[}]", Some(3)),
+            (b"{{}", None),
+            (b"[[]", None),
+            // Brackets inside a string do not count.
+            (br#"{"a":"}"}"#, Some(9)),
+            (br#"["]"]"#, Some(5)),
+            // An escaped quote does not end the string; an escaped backslash does not escape.
+            (br#"{"a":"\"}"}"#, Some(11)),
+            (br#"{"a":"\\"}"#, Some(10)),
+            // A byte after `\` is skipped whatever it is -- even a control byte.
+            (b"{\"a\":\"\\\t\"}", Some(10)),
+            // A raw control character rejects the string, and so the container.
+            (b"{\"a\":\"\t\"}", None),
+            (b"{\"a\":\"\n\"}", None),
+            // DEL is accepted, a control byte outside a string is whitespace.
+            (b"{\"a\":\"\x7f\"}", Some(9)),
+            (b"{\n\t\r\"a\" :\n 1}", Some(13)),
+            (b"{\"a\":1\x00}", Some(8)),
+            // Unterminated string / container / dangling backslash.
+            (br#"{"a":"b"#, None),
+            (br#"{"a":1"#, None),
+            (br#"{"a":"b\"#, None),
+            (b"{", None),
+        ];
+        for (doc, want) in cases {
+            assert_eq!(
+                container_end(doc, 0),
+                *want,
+                "{:?}",
+                String::from_utf8_lossy(doc)
+            );
+            assert_eq!(
+                container_end_bytewise_reference(doc, 0),
+                *want,
+                "reference disagrees with the pinned answer for {:?}",
+                String::from_utf8_lossy(doc)
+            );
+        }
+    }
+
+    /// The block edges are the off-by-one sites: a `\` as the last byte of a
+    /// block (its skip carries into the next), a string spanning blocks, a close
+    /// on the last byte of a block and on the first of the next, and a partial
+    /// tail.
+    #[test]
+    fn test_container_end_block_edges_4177() {
+        for pad in 0..140usize {
+            for body in [
+                &br#"{"k":"v"}"#[..],
+                br#"{"k":"a\"b"}"#,
+                br#"{"k":"\\"}"#,
+                br#"{"k":"}\\}"}"#,
+                b"{\"k\":\"\t\"}",
+                br#"{"k":[1,{"a":"]"}]}"#,
+                b"[]",
+                br#"["\\"]"#,
+            ] {
+                // Leading filler is whitespace inside a container so the walk
+                // starts at byte 0 and the interesting bytes land at `pad`.
+                let open = body[0];
+                let mut doc = vec![open];
+                doc.extend(core::iter::repeat_n(b' ', pad));
+                doc.extend_from_slice(&body[1..]);
+                for extra in [0usize, 1, 63, 64, 65] {
+                    let mut d = doc.clone();
+                    d.extend(core::iter::repeat_n(b'x', extra));
+                    assert_eq!(
+                        container_end(&d, 0),
+                        container_end_bytewise_reference(&d, 0),
+                        "pad {pad} extra {extra} body {:?}",
+                        String::from_utf8_lossy(body)
+                    );
+                    // Truncated at every length near the container's end and
+                    // inside the filler after it: the unterminated and
+                    // partial-tail answers.
+                    for cut in doc.len().saturating_sub(3).max(1)..=d.len() {
+                        assert_eq!(
+                            container_end(&d[..cut], 0),
+                            container_end_bytewise_reference(&d[..cut], 0),
+                            "cut {cut} pad {pad} extra {extra} body {:?}",
+                            String::from_utf8_lossy(body)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Seeded random documents over an alphabet made of the walk's own
+    /// decision bytes, started at a random offset (so containers begin at every
+    /// alignment) and inside a prefix that is itself arbitrary.
+    #[test]
+    fn test_container_end_matches_bytewise_reference_randomised_4177() {
+        const ALPHABET: &[u8] = b"{}[]\"\\ab :,\t\n\x7f\x01\xc3\xa9";
+        let mut state = 0x4177_4177_4177_4177u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..40_000 {
+            let lead = (next() % 70) as usize;
+            let len = (next() % 220) as usize;
+            let mut doc: Vec<u8> = (0..lead).map(|_| b'a' + (next() % 26) as u8).collect();
+            doc.push(if next() % 2 == 0 { b'{' } else { b'[' });
+            // Sparse rounds are mostly plain bytes (long runs between hits),
+            // dense ones are all decision bytes.
+            let sparse = round % 2 == 0;
+            for _ in 0..len {
+                let r = next();
+                doc.push(if sparse && r % 6 != 0 {
+                    b'a'
+                } else {
+                    ALPHABET[(r >> 8) as usize % ALPHABET.len()]
+                });
+            }
+            assert_eq!(
+                container_end(&doc, lead),
+                container_end_bytewise_reference(&doc, lead),
+                "round {round}: {doc:?} from {lead}"
+            );
+        }
+    }
+
+    /// A well-formed nested document with a long tail after it: the walk must
+    /// stop at the matching close, not scan on, and report the same end the
+    /// byte loop did.
+    #[test]
+    fn test_container_end_stops_at_the_matching_close_4177() {
+        let mut doc =
+            br#"{"users":[{"name":"a\"b","tags":["x","}"],"n":1.5},{"name":"c"}],"ok":true}"#
+                .to_vec();
+        let end = doc.len();
+        doc.extend_from_slice(br#"{"next":"}}}}"}"#);
+        assert_eq!(container_end(&doc, 0), Some(end));
+        assert_eq!(container_end_bytewise_reference(&doc, 0), Some(end));
+        assert_eq!(container_end(&doc, end), Some(doc.len()));
     }
 
     /// Companion to the test above: `nested_number_span` -- unlike

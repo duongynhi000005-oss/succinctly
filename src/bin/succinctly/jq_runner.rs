@@ -7169,7 +7169,11 @@ fn split_json_values(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
 fn scan_one_json_token(bytes: &[u8], pos: usize) -> Option<usize> {
     match bytes[pos] {
         // Object or array - find matching close
-        b'{' | b'[' => find_matching_close(bytes, pos),
+        // Object or array. The walk (`container_end`, #4177) is
+        // `#[inline(never)]` in the library for the reason this call site
+        // once had its own wrapper (#3350): inlined here, LLVM's ARM64
+        // allocator spilled its state to the stack inside the splitter.
+        b'{' | b'[' => succinctly::json::light::container_end(bytes, pos),
         // String. `string_literal_end` (shared with `light.rs`, same
         // one-validated-implementation reasoning as `number_literal_end`
         // below) both finds the end of and validates the token: it rejects
@@ -7281,46 +7285,6 @@ fn slurp_documents(
         last_source: last,
         eof_line,
     })
-}
-
-/// Find the end of an object or array starting at `pos`.
-///
-/// `#[inline(never)]` keeps this per-byte loop out of `split_json_values`'s
-/// register allocation (#3350). Once #3035 grew `scan_one_json_token`'s
-/// keyword arm, LLVM's ARM64 allocator spilled this loop's `close` byte and
-/// `depth` to the stack inside the inlined copy: two reloads and a move per
-/// input byte (+6.3M `Ir` on `perf-guard`'s 2 MiB `arrays` fixture, +5.9% on
-/// `arrays_first_map_iterate`, whose total is small). x86_64 was unaffected.
-/// The call is paid once per top-level container, never per byte.
-#[inline(never)]
-fn find_matching_close(bytes: &[u8], pos: usize) -> Option<usize> {
-    let open = bytes[pos];
-    let close = if open == b'{' { b'}' } else { b']' };
-    let mut depth = 1;
-    let mut i = pos + 1;
-
-    while i < bytes.len() && depth > 0 {
-        match bytes[i] {
-            b'"' => {
-                // Skip string. Same scanner as the top-level arm, so a raw
-                // control character is rejected just as readily nested
-                // inside a container -- in a key as well as a value (#2878).
-                let end = succinctly::json::light::string_literal_end(bytes, i)?;
-                i = end;
-                continue;
-            }
-            c if c == open => depth += 1,
-            c if c == close => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-
-    if depth == 0 {
-        Some(i)
-    } else {
-        None
-    }
 }
 
 /// Find the end of a literal (true, false, null) starting at `pos`.
