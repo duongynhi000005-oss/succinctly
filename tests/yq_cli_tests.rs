@@ -62727,3 +62727,51 @@ fn test_to_unix_answers_an_int_4203() -> Result<()> {
     assert_eq!((out.trim(), code), ("1705276800", 0));
     Ok(())
 }
+
+/// #4287: a slice reads only its range -- by index once the sequence has proved wide (#4035), where
+/// the walk reads each element's value and the index each element's (resolved) cursor -- and must
+/// hold the elements the per-position reads name, for sequences that carry anchors, aliases, line
+/// comments, a bare `-` whose value starts on the next line and a `- # comment` wrapper. Every row
+/// slices one sequence 150 times, so the later slices are answered from the index. yq v4.53.3
+/// answers the same for each row.
+#[test]
+fn test_slice_of_a_wide_sequence_equals_its_per_position_reads_4287() -> Result<()> {
+    let (mut inline, mut deferred) = (String::new(), String::new());
+    for i in 0..150 {
+        inline.push_str(&match i % 5 {
+            0 => format!("- &a{i} {{k: {i}}}\n"),
+            1 => format!("- *a{}\n", i - 1),
+            2 => format!("- s{i}\n"),
+            3 => format!("- [x, {i}] # c{i}\n"),
+            _ => format!("- {i}\n"),
+        });
+        deferred.push_str(&match i % 4 {
+            0 => format!("-\n  k: {i}\n"),
+            1 => format!("- # note{i}\n  k: {i}\n"),
+            2 => format!("- &a{i}\n  k: {i}\n"),
+            _ => format!("- *a{}\n", i - 1),
+        });
+    }
+    for doc in [inline, deferred] {
+        for (sliced, read) in [
+            (
+                "[keys[] as $i | ($i+3) as $j | .[$i:$j]]",
+                "[keys[] as $i | [.[$i], .[$i+1], .[$i+2]] | map(select(. != null))]",
+            ),
+            (
+                "[keys[] as $i | .[$i:] | length]",
+                "[keys[] as $i | length - $i]",
+            ),
+            ("[keys[] as $i | ($i+1) as $j | .[:$j] | .[-1]]", "[.[]]"),
+        ] {
+            let (stdout, code) = run_yq_stdin(sliced, &doc, &["-o", "json", "-I", "0"])?;
+            assert_eq!(code, 0, "{sliced}");
+            assert_eq!(
+                (stdout, code),
+                run_yq_stdin(read, &doc, &["-o", "json", "-I", "0"])?,
+                "{sliced}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -84,6 +84,8 @@
 #[cfg(not(test))]
 use alloc::vec::Vec;
 
+use core::ops::Range;
+
 use super::document::{trailing_element_gap_ok, DocumentCursor, DocumentElements};
 use super::error::EvalError;
 
@@ -143,6 +145,16 @@ impl ElementIndex {
 
     pub(crate) fn len(&self) -> usize {
         self.ids.len()
+    }
+
+    /// The cursors of elements `range`, or `None` when the range runs past the
+    /// end or an id does not resolve (the caller then walks).
+    fn range<C: DocumentCursor>(&self, head: &C, range: Range<usize>) -> Option<Vec<C>> {
+        self.ids
+            .get(range)?
+            .iter()
+            .map(|id| head.at_node_id(*id))
+            .collect()
     }
 
     /// The cursor of element `index`, or [`Element::Past`] past the end;
@@ -304,6 +316,115 @@ pub(crate) enum Read<C> {
     /// Walk, and the read is wide but the array is not registered: register
     /// it if the walk finds the element.
     Unregistered,
+}
+
+/// The cursors of elements `range` of `elements`, in order: the elements
+/// `collect_values()[range]` holds, without visiting an element past the range
+/// or collecting the array (#4287). `range` must lie within the length
+/// [`len_checked_memoized`] found for this list.
+///
+/// From an [`ElementIndex`] when one exists, in one lookup; otherwise one walk
+/// that steps over the elements before `range.start`. Never builds, and
+/// decodes nothing: the caller decodes what it converts.
+pub(crate) fn cursors_in_range<E: DocumentElements>(
+    elements: &E,
+    range: Range<usize>,
+) -> Vec<E::Cursor> {
+    if range.is_empty() {
+        return Vec::new();
+    }
+    if let Some(cursors) = memo::range(elements, range.clone()) {
+        return cursors;
+    }
+    let mut cursors = Vec::with_capacity(range.len());
+    let mut elems = *elements;
+    for _ in 0..range.start {
+        let Some((_, rest)) = elems.uncons_cursor() else {
+            return cursors; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
+        };
+        elems = rest;
+    }
+    while cursors.len() < range.len() {
+        let Some((cursor, rest)) = elems.uncons_cursor() else {
+            break; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
+        };
+        cursors.push(cursor);
+        elems = rest;
+    }
+    cursors
+}
+
+/// The elements a slice of `elements` holds (#4287), as a buffer of cursors
+/// and the range of it that is the slice: `resolve` turns the length into the
+/// slice's range, and `window`, when the bounds name one without the length
+/// (both non-negative), is a range the slice lies within.
+///
+/// [`len_checked_memoized`] and [`cursors_in_range`] in one: an indexed array
+/// is answered from its index, and any other is walked **once**, with
+/// `len_checked`'s checks (and its error), keeping the cursors of `window` (of
+/// every element when there is none) and registering a wide array as that
+/// walk would. Measured on a million-element array, a length walk and then a
+/// second walk to the range cost a one-shot `.[:-1]` 5% over the single
+/// collecting walk it replaced, and decoding every kept element cost `.[-2:]`
+/// 5%; so nothing is decoded here, and the range is handed back rather than
+/// copied out.
+pub(crate) fn slice_cursors<E: DocumentElements>(
+    elements: &E,
+    window: Option<Range<usize>>,
+    resolve: impl FnOnce(usize) -> Range<usize>,
+) -> Result<(Vec<E::Cursor>, Range<usize>), EvalError> {
+    let whole = |cursors: Vec<E::Cursor>| {
+        let all = 0..cursors.len();
+        (cursors, all)
+    };
+    if let Some(len) = memo::len(elements) {
+        return Ok(whole(cursors_in_range(elements, resolve(len))));
+    }
+    let keep = window.unwrap_or(0..usize::MAX);
+    let mut kept = Vec::new();
+    let mut count = 0usize;
+    let mut elems = *elements;
+    let mut last = None;
+    while let Some((cursor, rest)) = elems.uncons_cursor() {
+        if !cursor.element_gap_ok(count == 0) {
+            return Err(elements.malformed_element_error());
+        }
+        if keep.contains(&count) {
+            kept.push(cursor);
+        }
+        count += 1;
+        last = Some(cursor);
+        elems = rest;
+    }
+    if let Some(last) = last {
+        if !trailing_element_gap_ok(&last, b']') {
+            return Err(elements.malformed_element_error());
+        }
+    }
+    if count >= WIDE_ELEMENTS {
+        memo::note_wide(elements, count);
+    }
+    let range = resolve(count);
+    if range.is_empty() {
+        return Ok(whole(Vec::new()));
+    }
+    let kept_range = range
+        .start
+        .checked_sub(keep.start)
+        .zip(range.end.checked_sub(keep.start))
+        .map(|(from, to)| from..to)
+        .filter(|local| local.end <= kept.len());
+    match kept_range {
+        Some(local) => Ok((kept, local)),
+        // A window names a range its bounds resolve within, so the kept cursors
+        // cover it; a miss is a bug the tests must see, and a release build
+        // still answers it by walking.
+        // patchcov: coverage tolerate reason="unreachable: a window names a range its bounds resolve within, so the kept cursors always cover it"
+        None => {
+            debug_assert!(false, "the window {keep:?} does not cover {range:?}");
+            Ok(whole(cursors_in_range(elements, range)))
+        } // patchcov: coverage end
+    }
 }
 
 #[cfg(feature = "std")]
@@ -471,6 +592,52 @@ pub(crate) mod memo {
         } else {
             Read::Walk
         }
+    }
+
+    /// The cursors of elements `range` of the list `elements`, when an
+    /// existing index can say, else `None` to walk. Never builds.
+    #[inline]
+    pub(crate) fn range<E: DocumentElements>(
+        elements: &E,
+        range: core::ops::Range<usize>,
+    ) -> Option<Vec<E::Cursor>> {
+        let bloom = BLOOM.with(Cell::get);
+        if bloom == 0 {
+            return None;
+        }
+        indexed_range(elements, bloom, range)
+    }
+
+    #[inline(never)]
+    fn indexed_range<E: DocumentElements>(
+        elements: &E,
+        bloom: u64,
+        range: core::ops::Range<usize>,
+    ) -> Option<Vec<E::Cursor>> {
+        let (id, document) = elements.head_id()?;
+        if bloom & bit(id) == 0 {
+            return None;
+        }
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            let state = m.as_mut().filter(|s| s.document == document)?;
+            let at = state.entries.iter().position(|e| e.head == id)?;
+            let entry = state.entries.remove(at);
+            let found = match &entry.kind {
+                Kind::Indexed(index) => match elements.uncons_cursor() {
+                    Some((head, _)) => index.range(&head, range),
+                    None => None, // patchcov: coverage tolerate-line reason="defensive: a list with a head id has a first element"
+                },
+                // Only an index answers a range: a prefix is a run of reads a
+                // walk is serving, and a slice must not start or extend one.
+                Kind::Seen { .. } | Kind::Prefix(_) | Kind::Refused => None,
+            };
+            state.entries.push(entry);
+            if found.is_some() {
+                note_hit();
+            }
+            found
+        })
     }
 
     #[inline(never)]
@@ -728,6 +895,13 @@ pub(crate) mod memo {
 
     pub(crate) fn note_wide_read<E: DocumentElements>(_elements: &E) {}
 
+    pub(crate) fn range<E: DocumentElements>(
+        _elements: &E,
+        _range: core::ops::Range<usize>,
+    ) -> Option<alloc::vec::Vec<E::Cursor>> {
+        None
+    }
+
     pub(crate) fn note_wide<E: DocumentElements>(_elements: &E, _len: usize) {}
 }
 
@@ -860,6 +1034,74 @@ mod tests {
                 Some(5)
             );
         });
+    }
+
+    /// #4287: the slice's one walk makes `len_checked`'s checks: it raises
+    /// exactly where that walk does, and otherwise holds what
+    /// `collect_values()[range]` holds, with a window and without one.
+    #[test]
+    fn slice_cursors_raises_exactly_when_len_checked_does_4287() {
+        use crate::jq::slice::SliceBounds;
+        for doc in [
+            "[]",
+            "[1]",
+            "[1,2,3]",
+            "[,]",
+            "[,1]",
+            "[1,]",
+            "[1,,2]",
+            "[1 2]",
+            "[1,2,",
+            "[1,2 ,]",
+            "[tru,1]",
+            "[[1 2],3]",
+            "[1,{\"k\":1},[]]",
+        ] {
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let elements = root.value().as_array().expect("an array document");
+            let walked = elements.len_checked().map_err(|e| format!("{e:?}"));
+            for (start, end) in [
+                (None, None),
+                (Some(1), Some(2)),
+                (Some(0), Some(9)),
+                (Some(-1), None),
+            ] {
+                let bounds = SliceBounds::from_literals(start, end);
+                let window = match (start.unwrap_or(0), end) {
+                    (from, Some(to)) if from >= 0 && to >= 0 => {
+                        Some(from as usize..to.max(from) as usize)
+                    }
+                    _ => None,
+                };
+                let sliced = slice_cursors(&elements, window, |len| bounds.resolve(len))
+                    .map(|(cursors, range)| {
+                        cursors[range]
+                            .iter()
+                            .map(DocumentCursor::value)
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|e| format!("{e:?}"));
+                match (&walked, sliced) {
+                    (Ok(len), Ok(values)) => {
+                        let collected = elements.collect_values();
+                        assert_eq!(
+                            values.len(),
+                            bounds.resolve(*len).len(),
+                            "{doc} {start:?}:{end:?}"
+                        );
+                        assert_eq!(
+                            format!("{values:?}"),
+                            format!("{:?}", &collected[bounds.resolve(collected.len())]),
+                            "{doc} {start:?}:{end:?}"
+                        );
+                    }
+                    // Both raise, the same error; a walk that succeeds where the
+                    // slice raises (or the reverse) is `Some` against `None`.
+                    (walk, slice) => assert_eq!(walk.as_ref().err(), slice.err().as_ref(), "{doc}"),
+                }
+            }
+        }
     }
 
     #[cfg(feature = "std")]
@@ -1015,6 +1257,140 @@ mod tests {
             }
             check(0, 9);
             check(19, 9);
+        }
+
+        /// #4287: a slice's range read holds what `collect_values()[range]`
+        /// holds, for ranges at the head, the tail, the middle, one element
+        /// wide and empty, while the array is walked and once it is indexed;
+        /// it reads from the index once there is one, and never builds one.
+        #[test]
+        fn cursors_in_range_agrees_with_the_collected_slice_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let owned = |values: &[_]| to_owned_all::<JqSemantics, _>(values).unwrap();
+            let ranges = [0..n, 0..1, 0..8, n - 8..n, n - 1..n, 40..48, 5..5, n..n];
+            let check = |phase: &str| {
+                for range in ranges.clone() {
+                    assert_eq!(
+                        owned(
+                            &cursors_in_range(&elements, range.clone())
+                                .iter()
+                                .map(DocumentCursor::value)
+                                .collect::<Vec<_>>()
+                        ),
+                        owned(&collected[range.clone()]),
+                        "{phase}: {range:?}"
+                    );
+                }
+            };
+            let before = memo::work();
+            check("walked");
+            assert_eq!(memo::work(), before, "a range read builds nothing");
+            // Three length lookups build the index (the length the slice reads).
+            for _ in 0..3 {
+                assert_eq!(len_checked_memoized(&elements).ok(), Some(n));
+            }
+            let (builds, hits) = memo::work();
+            assert_eq!(builds - before.0, 1);
+            check("indexed");
+            let (builds_after, hits_after) = memo::work();
+            assert_eq!(builds_after, builds, "a range read builds nothing");
+            // One hit per non-empty range: the walk is gone.
+            let read = ranges.iter().filter(|r| !r.is_empty()).count();
+            assert_eq!(hits_after - hits, read, "every range came from the index");
+        }
+
+        /// #4287: a range of an array the memo has registered but not indexed,
+        /// or of a list it holds no entry for, is walked: the memo answers a
+        /// range only from an index, and builds nothing.
+        #[test]
+        fn a_range_without_an_index_is_walked_and_builds_nothing_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let owned = |values: &[_]| to_owned_all::<JqSemantics, _>(values).unwrap();
+            let values_of = |cursors: Vec<_>| {
+                cursors
+                    .iter()
+                    .map(DocumentCursor::value)
+                    .collect::<Vec<_>>()
+            };
+            // One length lookup registers the array; it is not yet indexed.
+            assert_eq!(len_checked_memoized(&elements).ok(), Some(n));
+            let work = memo::work();
+            assert_eq!(
+                owned(&values_of(cursors_in_range(&elements, 3..9))),
+                owned(&collected[3..9])
+            );
+            // The tail has another head than the registered array.
+            let (_, rest) = elements.uncons().expect("a first element");
+            assert_eq!(
+                owned(&values_of(cursors_in_range(&rest, 0..4))),
+                owned(&collected[1..5])
+            );
+            assert_eq!(memo::work(), work, "neither range built or hit an index");
+        }
+
+        /// #4287: a slice's single walk registers a wide array as a length walk
+        /// does, so the third slice of one array builds its index and every
+        /// later one reads from it; the answers never change.
+        #[test]
+        fn slices_build_the_index_on_the_third_and_read_from_it_after_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::slice::SliceBounds;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let before = memo::work();
+            let mut slices = 0;
+            for round in 0..6 {
+                for (start, end, window) in [
+                    (Some(40), Some(48), Some(40..48)),
+                    (Some(-3), None, None),
+                    (None, Some(-120), None),
+                    (Some(5), Some(2), Some(5..5)),
+                ] {
+                    let bounds = SliceBounds::from_literals(start, end);
+                    let (cursors, range) =
+                        slice_cursors(&elements, window, |len| bounds.resolve(len)).unwrap();
+                    let values: Vec<_> = cursors[range].iter().map(DocumentCursor::value).collect();
+                    let values = &values[..];
+                    assert_eq!(
+                        to_owned_all::<JqSemantics, _>(values).unwrap(),
+                        to_owned_all::<JqSemantics, _>(&collected[bounds.resolve(n)]).unwrap(),
+                        "round {round}: {start:?}:{end:?}"
+                    );
+                    slices += 1;
+                    let (builds, _) = memo::work();
+                    assert_eq!(
+                        builds - before.0,
+                        usize::from(slices >= 3),
+                        "slice {slices}"
+                    );
+                }
+            }
+            assert!(
+                memo::work().1 - before.1 >= 15,
+                "the later slices read the index"
+            );
         }
 
         #[test]

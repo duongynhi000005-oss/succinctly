@@ -22373,8 +22373,6 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
     }
     // patchcov: coverage end
     if let Some(elements) = target.as_array() {
-        let items = elements.collect_values();
-        let range = SliceBounds::from_literals(start, end).resolve(items.len());
         // #2001 (code review): a #1194 malformed-member error nested
         // inside a sliced element respects `optional` here too -- this is
         // the `eval_generic` twin of `eval.rs`'s own `eval_single`
@@ -22387,7 +22385,7 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
         // `optional && !e.is_decode_failure()` to drift (the exact drift
         // `suppresses`'s own doc comment records happening twice already,
         // #1902 and #1934).
-        return match to_owned_all::<S, _>(items[range].iter()) {
+        return match to_owned_array_slice::<S, V>(&elements, start, end) {
             Ok(v) => GenericResult::Owned(OwnedValue::array_from(v)),
             Err(e) if suppresses(&e, optional) => GenericResult::None,
             Err(e) => GenericResult::Error(e),
@@ -22445,6 +22443,35 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
             target.type_name(),
             "object",
         ))
+    }
+}
+
+/// The owned elements of `elements[start:end]` (#4287), converted in order so
+/// the first malformed member in the range raises what it always raised.
+///
+/// Only the range is read -- by index once the array has proved wide (#4035),
+/// else in one walk that also counts it -- so a narrow slice of a wide array is
+/// O(range), not O(length). A delimiter that walk raises on keeps the
+/// collecting read: the slice never ran its checks, and still does not.
+fn to_owned_array_slice<S: EvalSemantics, V: DocumentValue>(
+    elements: &V::Elements,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Vec<OwnedValue>, EvalError> {
+    let bounds = SliceBounds::from_literals(start, end);
+    let window = match (start.unwrap_or(0), end) {
+        (from, Some(to)) if from >= 0 && to >= 0 => Some(from as usize..to.max(from) as usize),
+        _ => None,
+    };
+    match crate::jq::array_index::slice_cursors(elements, window, |len| bounds.resolve(len)) {
+        Ok((cursors, range)) => cursors[range]
+            .iter()
+            .map(|cursor| to_owned::<S, _>(&cursor.value()))
+            .collect(),
+        Err(_) => {
+            let items = elements.collect_values();
+            to_owned_all::<S, _>(items[bounds.resolve(items.len())].iter())
+        }
     }
 }
 
