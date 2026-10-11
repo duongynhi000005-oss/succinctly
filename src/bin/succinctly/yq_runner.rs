@@ -4673,6 +4673,139 @@ fn clear_head_foot(node: &mut CommentTree, head: bool, foot: bool) {
     *node.meta_mut() = meta.with_head_foot(kept_head, kept_foot);
 }
 
+/// `expr` as a write followed by a *static navigation* tail (`.a.b = "y" | .a`), split into the
+/// write prefix, the tail, and the [`TreeStep`] path the tail walks (#2706); `None` for any other
+/// shape.
+///
+/// Only a top-level pipe qualifies, and only when the longest tail of stages that
+/// [`static_nav_steps`] accepts is non-empty and what remains is itself a presentation-preserving
+/// write ([`is_alias_sensitive_assign`]): a tail with no write in front of it is a plain read,
+/// which the cursor path already answers with the source's presentation, and a navigation in the
+/// *middle* of the pipe (`.a.b = "y" | .a | .f = 2`) stays on today's route.
+fn split_trailing_static_nav(expr: &Expr) -> Option<(Expr, Expr, Vec<TreeStep<'_>>)> {
+    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match expr {
+            Expr::Pipe(stages) => stages.iter().for_each(|s| flatten(s, out)),
+            Expr::Paren(inner) if matches!(**inner, Expr::Pipe(_)) => flatten(inner, out),
+            other => out.push(other),
+        }
+    }
+    let mut stages = Vec::new();
+    flatten(expr, &mut stages);
+    let split = stages
+        .iter()
+        .rposition(|stage| static_nav_steps(stage).is_none())?
+        + 1;
+    if split == stages.len() {
+        return None;
+    }
+    let (head, tail) = stages.split_at(split);
+    let pipe_of = |parts: &[&Expr]| match parts {
+        [one] => (*one).clone(),
+        many => Expr::Pipe(many.iter().map(|e| (*e).clone()).collect()),
+    };
+    let prefix = pipe_of(head);
+    if !is_alias_sensitive_assign(&prefix) {
+        return None;
+    }
+    let steps = tail
+        .iter()
+        .map(|stage| static_nav_steps(stage))
+        .collect::<Option<Vec<_>>>()?
+        .concat();
+    Some((prefix, pipe_of(tail), steps))
+}
+
+/// `steps` as the owned [`MetaPathStep`] path [`owned_value_at`] walks.
+fn meta_path_of(steps: &[TreeStep<'_>]) -> Vec<MetaPathStep> {
+    steps
+        .iter()
+        .map(|step| match step {
+            TreeStep::Key(k) => MetaPathStep::Key((*k).to_string()),
+            TreeStep::Index(i) => MetaPathStep::Index(*i),
+        })
+        .collect()
+}
+
+/// [`evaluate_yaml_cursor_core`], except that a write followed by a static navigation
+/// (`.a.b = "y" | .a`) keeps the presentation the write did not touch (#2706).
+///
+/// The core builds its presentation snapshot and reconciles it only for a *whole-document*
+/// write, so a trailing navigation used to leave the result with an empty tree: no comment,
+/// anchor or style survived. Here the write prefix runs through the core unchanged, and each of
+/// its documents is then navigated by the tail's static steps, value and tree together. A path
+/// the document lacks falls back to the evaluator the pipe would have fed the stage through (so
+/// an absent key is still `null` and a key under a scalar still yields nothing) with the empty
+/// tree it had before.
+fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
+    cursor: YamlCursor<'_, W>,
+    expr: &Expr,
+    sink: &mut ErrorSink,
+    need_comments: bool,
+    strip_style: bool,
+    sort_keys: bool,
+) -> Result<Vec<ResultWithComments>> {
+    let split = if need_comments {
+        split_trailing_static_nav(expr)
+    } else {
+        None
+    };
+    let Some((prefix, nav, steps)) = split else {
+        return evaluate_yaml_cursor_core(
+            cursor,
+            expr,
+            sink,
+            need_comments,
+            strip_style,
+            sort_keys,
+        );
+    };
+    let has_aliases = cursor.index().has_aliases();
+    let docs =
+        evaluate_yaml_cursor_core(cursor, &prefix, sink, need_comments, strip_style, sort_keys)?;
+    let path = meta_path_of(&steps);
+    let mut out = Vec::with_capacity(docs.len());
+    for (value, tree) in docs {
+        // A path the written document has is answered by walking it, without the serialize and
+        // re-index pass the evaluator costs; a path it lacks (`null` for an absent key, nothing
+        // for a key under a scalar, ...) is the evaluator's to answer, with no tree to attach.
+        let navigated: Vec<(OwnedValue, CommentTree)> = match owned_value_at(&value, &path) {
+            Some(node) => {
+                let sub = steps.iter().fold(&tree, |node, step| match step {
+                    TreeStep::Key(k) => node.field(k),
+                    TreeStep::Index(i) => node.at_index(*i),
+                });
+                vec![(node.clone(), sub.clone())]
+            }
+            None => evaluate_input(&value, &nav, sink)?
+                .into_iter()
+                .map(|nv| (nv, CommentTree::empty()))
+                .collect(),
+        };
+        for (nv, mut sub) in navigated {
+            // A standalone comment above or below a mapping value is printed with its *key*, so
+            // reading the value on its own (`.a.f`) shows neither, as yq does; a sequence item
+            // keeps its own.
+            if matches!(steps.last(), Some(TreeStep::Key(_))) {
+                *sub.meta_mut() = sub.meta().with_head_foot(Vec::new(), Vec::new());
+            }
+            // A navigated-away scalar keeps only its own trailing comment (#852): no style, no
+            // anchor, and none of the standalone head/foot comments around it.
+            if !matches!(nv, OwnedValue::Object(_) | OwnedValue::Array(_)) {
+                sub = CommentTree::Leaf(NodeMeta::from_comment_and_style(
+                    sub.own().map(str::to_string),
+                    "",
+                ));
+            }
+            if has_aliases {
+                enforce_anchor_soundness(&nv, &mut sub, sort_keys);
+            }
+            out.push((nv, sub));
+        }
+    }
+    Ok(out)
+}
+
 /// Evaluate a jq expression directly on a YAML cursor.
 ///
 /// This uses the generic evaluator to preserve position metadata (line/column).
@@ -4685,7 +4818,7 @@ fn clear_head_foot(node: &mut CommentTree, head: bool, foot: bool) {
 /// (`need_comments`). Supported pure reshapes instead get a traced side-tree
 /// (#3615); other computed values get [`CommentTree::empty`]. See
 /// [`CommentTree`]'s own doc comment for the provenance boundary.
-fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
+fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     cursor: YamlCursor<'_, W>,
     expr: &Expr,
     sink: &mut ErrorSink,
@@ -10075,6 +10208,54 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2706: a write followed by a *static* navigation is split into the write and the steps
+    /// the tail walks; every other shape keeps the route it had.
+    #[test]
+    fn test_split_trailing_static_nav_2706() {
+        let split = |filter: &str| {
+            let expr = jq::parse_with_mode(filter, jq::ParserMode::Yq).unwrap();
+            split_trailing_static_nav(&expr).map(|(prefix, _nav, steps)| {
+                let steps: Vec<String> = steps
+                    .iter()
+                    .map(|s| match s {
+                        TreeStep::Key(k) => (*k).to_string(),
+                        TreeStep::Index(i) => format!("[{i}]"),
+                    })
+                    .collect();
+                (is_alias_sensitive_assign(&prefix), steps.join("/"))
+            })
+        };
+        for (filter, steps) in [
+            (".a.b = \"y\" | .a", "a"),
+            (".a.b = \"y\" | .a.e", "a/e"),
+            (".a.b |= \"y\" | .a.e[1]", "a/e/[1]"),
+            ("del(.a.b) | .a?", "a"),
+            (".a = 1 | .b = 2 | .a.c", "a/c"),
+            ("(.a.b = \"y\" | .a)", "a"),
+        ] {
+            assert_eq!(split(filter), Some((true, steps.to_string())), "{filter}");
+        }
+        for filter in [
+            // No navigation tail, so nothing to split off.
+            ".a.b = \"y\"",
+            ".a.b = \"y\" | .",
+            // No write in front of the tail: a plain read, already answered by the cursor.
+            ".a.b",
+            ".a | .b",
+            // A tail the static walk cannot follow.
+            ".a.b = \"y\" | .a[]",
+            ".a.b = \"y\" | .a[-1]",
+            ".a.b = \"y\" | .[(.i)]",
+            // Navigation in the middle of the pipe stays on today's route.
+            ".a.b = \"y\" | .a | .f = 2",
+            // A prefix that is not a presentation-preserving write.
+            ".a.b = \"y\" | map(.) | .a",
+            "[.a.b = \"y\"] | .[0]",
+        ] {
+            assert_eq!(split(filter), None, "{filter}");
+        }
+    }
 
     /// `Builtin::FirstStream`/`LastStream` (the "Phase 13" builtin-table
     /// spelling of `first(expr)`/`last(expr)`, distinct from the

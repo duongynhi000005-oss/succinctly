@@ -5015,10 +5015,17 @@ Four known gaps this write shares with every other write form, none specific to 
   root `line_comment` never renders in either tool, but on succinctly's side that is the
   block-container rule below at work (`. line_comment = "q"` on `[1, 2]`, a flow root,
   does render `[1, 2] # q` in both).
-- **Navigation after the write drops the presentation** (`.a.b style = "double" | .a`
-  prints `b: x`; yq prints `b: "x"`) — the same hole `.a.b = "y" | .a` already falls into
-  for every comment, style and anchor, since the result's `CommentTree` is lost once the
-  pipe stops being shape-preserving.
+- **Only a trailing static navigation keeps the presentation after the write** (#2706).
+  `.a.b style = "double" | .a`, `.a.b = "y" | .a.e` and the like print what the same
+  navigation prints on the written document, as yq does: the write runs as before and the
+  tail (`.a`, `.a.b`, `.a[0]`, `.a?`) is then walked over the result and its tree. A
+  navigation that is *not* the tail still drops every comment, style and anchor, because the
+  result's `CommentTree` is lost once the pipe stops being shape-preserving: `.a.b = "y" |
+  .a | .f = 2` prints `b: y` where yq prints `b: y # c`. A tail that lands on an alias
+  prints the resolved value, as a root `*name` is never emitted (`.c = 2 | .b` on `a: &x
+  [1, 2]` / `b: *x` is `*x` in yq), and one that lands on a `<<: *base` mapping prints the
+  merged members where yq prints the `!!merge <<: *base` key: both are the write routes'
+  existing alias and merge-key behaviour, not specific to the tail.
 - **A multi-result filter carries no `CommentTree` at all** (`.a line_comment = "y" | .,
   .` prints two uncommented copies) — #1349's `GenericResult::Many` limitation, above.
 - **A preceding stage outside the shapes `is_alias_sensitive_assign` admits silently drops
