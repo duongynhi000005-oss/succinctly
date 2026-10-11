@@ -2051,17 +2051,20 @@ is the revert that established what the other one costs.
    (.; foreach (def f: .; f as {a:$a} | .) as $k (.; .; .)))` is `[]` in jq and answers here (the nested `foreach` is
    vetted by `foreach_source_is_path_checked`, which reads a `def` whose body is `.`), but the same with a comma body,
    a nested `def`, a `$x` captured by the `def`, a `try` or a `reduce` source is refused. A `$x` bound outside the
-   `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part, when it is the
-   register at the fold: `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does.
-   `drive_fold_source_with` certifies each `$x` marker in the source with `marker_identical` against the register in
-   hand (outside every fold body, or in the one `fold_body::acc_is_register` marked), so a fold-body `$it` that is a
-   different node stays by value (`path(reduce .[] as $it (.; foreach ($it as {a:$a} | .) as $k (.; .; .)))` is `[[]]`
-   in jq). Only the bare marker, or a comma of them: behind `first`/`limit`/`?` the resolver cannot place the head and
-   its refusal is the kind a `try` does not catch where jq's is (the `first($x)` rows of the #4278 table above). Still
-   accepted: those wrapped markers, an outer `$x` bound to a member of the register (`.a as $x | del(foreach ($x as
-   {b:$b} | .) ...)`, which jq refuses with `near attempt to access element`), and an outer `$x` returned by a call
-   whose `def` is written outside the source. Over every fold operand that binds a `$x`/`$it`/`$y` (`--stage-only`,
-   75,339 rows) wrong accepts go from 534 to 343 and wrong answers from 52 to 32, no match lost. Pinned by `test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320`, and the earlier shapes by
+   `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
+   `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does, and so does a `$x` that is some other
+   node (`.a as $x | del(foreach ($x as {b:$b} | .) ...)` raises at the pattern's first step in jq too). Outside every
+   fold body `.` is jq's register and `drive_fold_source_with` reads every such marker in a source that destructures
+   something; in the one body `fold_body::acc_is_register` marked it certifies each with `marker_identical`, so a
+   fold-body `$it` that is a different node stays by value (`path(reduce .[] as $it (.; foreach ($it as {a:$a} | .) as
+   $k (.; .; .)))` is `[[]]` in jq). A nested fold's source is read the same way. Only the bare marker, or a comma of
+   them: behind `first`/`limit`/`?` the resolver cannot place the head and its refusal is the kind a `try` does not
+   catch where jq's is (the `first($x)` rows of the #4278 table above). Still accepted: those wrapped markers; an outer
+   `$x` destructured inside a `foreach` UPDATE/EXTRACT or another fold's body, where `.` is not known to be the
+   register (`path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))` raises in jq); a
+   register an INIT moved; and an outer `$x` returned by a call whose `def` is written outside the source. Over every
+   fold operand that binds a `$x`/`$it`/`$y` (`--stage-only`, 75,339 rows) wrong accepts go from 534 to 343 and wrong
+   answers from 52 to 32, no match lost. Pinned by `test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320`, and the earlier shapes by
    `test_foreach_source_destructure_behind_a_chain_bind_if_or_def_refuses_4278`. Over the 29 register-sweep operands
    it adds (374,787 rows), 4,829 wrong accepts and 807 wrong answers go to 972 and 151 (the 972 are all the `(.|.)` and
    later-bare-alternative operands), 2,908 refusals become matches, and 457 matches are lost to a refusal: 161 inside

@@ -530,7 +530,7 @@ OPERANDS = [
     "(. as $x | foreach (. as {a:$x} | $x as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach ($x | .a) as $k (.; .; .))",
     # ...and the second review's: a name two chain alternatives bind, a `$x` behind `first` or a
-    # comma, a `$x` bound outside the source (still accepted, #4320), and a run of calls to one
+    # comma, a `$x` bound outside the source (read since #4320's second part when it is the register), and a run of calls to one
     # pass-through `def`.
     "(foreach (. as $a ?// {a:$a} | $a as {a:$b} | .) as $k (.; .; .))",
     "(foreach (. as $x ?// [$x] | $x as {a:$a} | .) as $k (.; .; .))",
