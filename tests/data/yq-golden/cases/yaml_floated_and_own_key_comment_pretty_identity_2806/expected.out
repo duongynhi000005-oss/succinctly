@@ -1,0 +1,5 @@
+a: &anc
+  b: # deferred comment
+  # b own comment
+    c: 1
+  d: 2

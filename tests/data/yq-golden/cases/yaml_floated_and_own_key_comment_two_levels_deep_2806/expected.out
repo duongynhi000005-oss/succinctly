@@ -1,0 +1,5 @@
+x:
+  a: &anc
+    b: # floated
+    # own
+      c: 1
