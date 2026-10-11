@@ -355,6 +355,74 @@ where
     values
 }
 
+/// The values a slice of `elements` holds (#4287): `resolve` turns the length
+/// into the slice's range, and `window`, when the bounds name one without the
+/// length (both non-negative), is a range the result lies within.
+///
+/// [`len_checked_memoized`] and [`values_in_range`] in one: an indexed array
+/// is answered from its index, and any other is walked **once**, with
+/// `len_checked`'s checks (and its error), keeping the cursors of `window`
+/// (of every element when there is none) and registering a wide array as
+/// that walk would. A length walk and then a second walk to the range cost a
+/// one-shot slice of most of a million-element array 5% over the single
+/// collecting walk it replaced.
+pub(crate) fn slice_values<E>(
+    elements: &E,
+    window: Option<Range<usize>>,
+    resolve: impl FnOnce(usize) -> Range<usize>,
+) -> Result<Vec<E::Value>, EvalError>
+where
+    E: DocumentElements,
+    E::Cursor: DocumentCursor<Value = E::Value>,
+{
+    if let Some(len) = memo::len(elements) {
+        return Ok(values_in_range(elements, resolve(len)));
+    }
+    let keep = window.unwrap_or(0..usize::MAX);
+    let mut kept = Vec::new();
+    let mut count = 0usize;
+    let mut elems = *elements;
+    let mut last = None;
+    while let Some((cursor, rest)) = elems.uncons_cursor() {
+        if !cursor.element_gap_ok(count == 0) {
+            return Err(elements.malformed_element_error());
+        }
+        if keep.contains(&count) {
+            kept.push(cursor);
+        }
+        count += 1;
+        last = Some(cursor);
+        elems = rest;
+    }
+    if let Some(last) = last {
+        if !trailing_element_gap_ok(&last, b']') {
+            return Err(elements.malformed_element_error());
+        }
+    }
+    if count >= WIDE_ELEMENTS {
+        memo::note_wide(elements, count);
+    }
+    let range = resolve(count);
+    if range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let kept_range = range
+        .start
+        .checked_sub(keep.start)
+        .zip(range.end.checked_sub(keep.start));
+    match kept_range.and_then(|(from, to)| kept.get(from..to)) {
+        Some(cursors) => Ok(cursors.iter().map(DocumentCursor::value).collect()),
+        // A window names a range its bounds resolve within, so the kept cursors
+        // cover it; a miss is a bug the tests must see, and a release build
+        // still answers it by walking.
+        // patchcov: coverage tolerate reason="unreachable: a window names a range its bounds resolve within, so the kept cursors always cover it"
+        None => {
+            debug_assert!(false, "the window {keep:?} does not cover {range:?}");
+            Ok(values_in_range(elements, range))
+        } // patchcov: coverage end
+    }
+}
+
 #[cfg(feature = "std")]
 pub(crate) mod memo {
     use std::cell::{Cell, RefCell};
@@ -964,6 +1032,71 @@ mod tests {
         });
     }
 
+    /// #4287: the slice's one walk makes `len_checked`'s checks: it raises
+    /// exactly where that walk does, and otherwise holds what
+    /// `collect_values()[range]` holds, with a window and without one.
+    #[test]
+    fn slice_values_raises_exactly_when_len_checked_does_4287() {
+        use crate::jq::slice::SliceBounds;
+        for doc in [
+            "[]",
+            "[1]",
+            "[1,2,3]",
+            "[,]",
+            "[,1]",
+            "[1,]",
+            "[1,,2]",
+            "[1 2]",
+            "[1,2,",
+            "[1,2 ,]",
+            "[tru,1]",
+            "[[1 2],3]",
+            "[1,{\"k\":1},[]]",
+        ] {
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let Some(elements) = root.value().as_array() else {
+                continue;
+            };
+            let walked = elements.len_checked().map_err(|e| format!("{e:?}"));
+            for (start, end) in [
+                (None, None),
+                (Some(1), Some(2)),
+                (Some(0), Some(9)),
+                (Some(-1), None),
+            ] {
+                let bounds = SliceBounds::from_literals(start, end);
+                let window = match (start.unwrap_or(0), end) {
+                    (from, Some(to)) if from >= 0 && to >= 0 => {
+                        Some(from as usize..to.max(from) as usize)
+                    }
+                    _ => None,
+                };
+                let sliced = slice_values(&elements, window, |len| bounds.resolve(len));
+                match (&walked, sliced) {
+                    (Ok(len), Ok(values)) => {
+                        let collected = elements.collect_values();
+                        assert_eq!(
+                            values.len(),
+                            bounds.resolve(*len).len(),
+                            "{doc} {start:?}:{end:?}"
+                        );
+                        assert_eq!(
+                            format!("{values:?}"),
+                            format!("{:?}", &collected[bounds.resolve(collected.len())]),
+                            "{doc} {start:?}:{end:?}"
+                        );
+                    }
+                    (Err(walk), Err(slice)) => assert_eq!(walk, &format!("{slice:?}"), "{doc}"),
+                    (walk, slice) => panic!(
+                        "{doc}: the walk said {walk:?}, the slice {:?}",
+                        slice.map(|v| v.len())
+                    ),
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "std")]
     mod memo_flow {
         use super::*;
@@ -1160,6 +1293,53 @@ mod tests {
             // One hit per non-empty range: the walk is gone.
             let read = ranges.iter().filter(|r| !r.is_empty()).count();
             assert_eq!(hits_after - hits, read, "every range came from the index");
+        }
+
+        /// #4287: a slice's single walk registers a wide array as a length walk
+        /// does, so the third slice of one array builds its index and every
+        /// later one reads from it; the answers never change.
+        #[test]
+        fn slices_build_the_index_on_the_third_and_read_from_it_after_4287() {
+            use crate::jq::eval_generic::to_owned_all;
+            use crate::jq::slice::SliceBounds;
+            use crate::jq::JqSemantics;
+            let n = WIDE_ELEMENTS * 2;
+            let doc = wide_array(n);
+            let index = JsonIndex::build(doc.as_bytes());
+            let root = index.root(doc.as_bytes());
+            let _scope = memo::enter(root.document_token());
+            let elements = root.value().as_array().expect("an array document");
+            let collected = elements.collect_values();
+            let before = memo::work();
+            let mut slices = 0;
+            for round in 0..6 {
+                for (start, end, window) in [
+                    (Some(40), Some(48), Some(40..48)),
+                    (Some(-3), None, None),
+                    (None, Some(-120), None),
+                    (Some(5), Some(2), Some(5..5)),
+                ] {
+                    let bounds = SliceBounds::from_literals(start, end);
+                    let values =
+                        slice_values(&elements, window, |len| bounds.resolve(len)).unwrap();
+                    assert_eq!(
+                        to_owned_all::<JqSemantics, _>(&values).unwrap(),
+                        to_owned_all::<JqSemantics, _>(&collected[bounds.resolve(n)]).unwrap(),
+                        "round {round}: {start:?}:{end:?}"
+                    );
+                    slices += 1;
+                    let (builds, _) = memo::work();
+                    assert_eq!(
+                        builds - before.0,
+                        usize::from(slices >= 3),
+                        "slice {slices}"
+                    );
+                }
+            }
+            assert!(
+                memo::work().1 - before.1 >= 15,
+                "the later slices read the index"
+            );
         }
 
         #[test]

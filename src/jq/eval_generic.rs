@@ -22373,15 +22373,20 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
     }
     // patchcov: coverage end
     if let Some(elements) = target.as_array() {
-        // #4287: the range is resolved from the memoized length and only its
-        // elements are read -- by index once the array has proved wide (#4035)
-        // -- so a narrow slice of a wide array is O(range), not O(length). A
-        // delimiter the length walk raises on keeps the collecting read: the
-        // slice never ran that walk's checks, and still does not.
-        let (items, range) = match crate::jq::array_index::len_checked_memoized(&elements) {
-            Ok(len) => {
-                let range = SliceBounds::from_literals(start, end).resolve(len);
-                let items = crate::jq::array_index::values_in_range(&elements, range);
+        // #4287: only the range's elements are read -- by index once the array
+        // has proved wide (#4035), else in one walk that also counts it -- so
+        // a narrow slice of a wide array is O(range), not O(length). A
+        // delimiter that walk raises on keeps the collecting read: the slice
+        // never ran its checks, and still does not.
+        let bounds = SliceBounds::from_literals(start, end);
+        let window = match (start.unwrap_or(0), end) {
+            (from, Some(to)) if from >= 0 && to >= 0 => Some(from as usize..to.max(from) as usize),
+            _ => None,
+        };
+        let slice =
+            crate::jq::array_index::slice_values(&elements, window, |len| bounds.resolve(len));
+        let (items, range) = match slice {
+            Ok(items) => {
                 let all = 0..items.len();
                 (items, all)
             }
