@@ -11580,10 +11580,14 @@ that fires once `g` ran to its end, after a swallowed answer or when it emitted 
 register the call entered with, which on an untracked entry is the frame's carried one (#4114,
 #4341), so an `and`/`or` around it accepts as jq does
 (`test_isempty_path_identity_answer_on_an_untracked_entry_4114`,
-`test_any_all_isempty_identity_answer_states_the_frames_register_4341`). A *trackable* `foreach` whose UPDATE
-reaches that identity through an `or` whose right operand navigates (`foreach .[]? as $k (.;
-isempty(g ?// ..) or (.a)?; .)` on `[true]`) still refuses where jq answers `[0]`
-([#4354](https://github.com/rust-works/succinctly/issues/4354)). The sweep over the `isempty` operands (226,467 rows) went from 3,550
+`test_any_all_isempty_identity_answer_states_the_frames_register_4341`).
+A fold whose UPDATE is `isempty` over a `?//` bind keeps the register on the body's frame since
+#4354 (`fans_out` no longer reads the `?//` inside an `isempty` operand as a sibling that sees the
+register differently), so
+`path(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or (.a)?; .))`
+on `[true]` is `[0]` as in jq; an operand with any other fan-out, or one that reads a loop variable,
+still withholds it (`test_fold_update_isempty_with_a_pattern_bind_keeps_the_register_4354`).
+The sweep over the `isempty` operands (226,467 rows) went from 3,550
 to 536 ACCEPT_WRONG and from 1,912 to 348 DIFF with #4114.
 
 The identity element `any`/`all` answer once `gen` is exhausted after a swallowed answer

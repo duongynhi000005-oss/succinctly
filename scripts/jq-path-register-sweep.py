@@ -1464,6 +1464,28 @@ OPERANDS = [
     "isempty(first(. as $q ?// $z | if $q then true else empty end))",
     "isempty(limit(2; . as $q ?// $z | if $q then true else empty end))",
     "isempty(isempty(. as $q ?// $z | if $q then true else empty end))",
+    # (#4354) a fold whose UPDATE is such a call: the arm states its answers and its identity
+    # element itself, so the fold body keeps the register on its frame (`fans_out`). The
+    # operands below put the `?//` in every position that exemption must not widen: a navigating
+    # or loop-variable-reading body, a comma beside it, and `reduce` as well as `foreach`.
+    "(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end); .))",
+    "(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or (.a)?; .))",
+    "(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or true; .b?))",
+    "(foreach .[]? as $k (.; any(. as $q ?// $z | if $q then true else empty end; .); .))",
+    "(foreach .[]? as $k (.; all(. as $q ?// $z | if $q then false else empty end; .) and (.a)?; .))",
+    "(foreach .[]? as $k (.; isempty(. as [$q] ?// $z | ($k, .a?)); $k))",
+    "(foreach .[]? as $k (.; isempty(. as $q ?// $z | ($q, $k)); .))",
+    "(foreach .[]? as $k (.; isempty((. as $q ?// $z | .a), .b); .))",
+    "(foreach .a? as $k (.; isempty(. as {a:$q} ?// $z | $q.b?); .))",
+    "(foreach (1,2) as $k (.; isempty(. as $q ?// $z | if $q then true else empty end); $k))",
+    "(reduce .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end)))",
+    # `any`/`all` stay out of the exemption: a bind in their `cond` runs a live stage against the
+    # carried register (a debug-assertion panic when they were exempted).
+    "(foreach .[]? as $k (.; all(.; . as [$q] ?// $z | $z); .))",
+    "(foreach .[]? as $k (.; any(.; . as [$q] ?// $z | $z); .b?))",
+    "(foreach .[]? as $k (.; all(.; . as {a:$q} ?// $z | $q); .))",
+    "(foreach .[]? as $k (.; any(. as [$q] ?// $z | .a; .); .))",
+    "(reduce .[]? as $k (.; isempty(. as $q ?// $z | $k) or (.a)?))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
