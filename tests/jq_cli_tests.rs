@@ -65753,7 +65753,8 @@ fn test_fold_pattern_computed_key_is_not_run_twice_3743() -> Result<()> {
 /// safe-direction divergence. Since #3999 the `and` rows below no longer reach the walk's guess
 /// (the root is provably not the register `true`), so the chain retries; since #4048 a
 /// destructuring `reduce` also hands the register back, so those rows answer as jq does (`{}`,
-/// `[]`) where #3999 left them refusing at the result. `foreach` still refuses there, and
+/// `[]`) where #3999 left them refusing at the result, and since #4130 the `foreach` row does too
+/// (its bare `$a` alternative emits at the entry register).
 /// `test_fold_pattern_against_known_untracked_register_retries_3999` pins the guess that
 /// remains.
 #[test]
@@ -65783,9 +65784,9 @@ fn test_fold_guessed_pattern_refusal_is_not_catchable_3840() -> Result<()> {
         (
             r#"{"a":true}"#,
             r"del(try (.a and (foreach . as {a:$a} ?// $a (0; .; .))))",
+            "{}\n",
             "",
-            r"Invalid path expression with result true",
-            5,
+            0,
         ),
         (
             r#"{"a":true}"#,
@@ -66319,13 +66320,92 @@ fn test_fold_steps_from_known_untracked_register_4049() -> Result<()> {
             r#"Invalid path expression near attempt to access element "b" of null"#,
             5,
         ),
-        // Recorded residual (safe direction): jq answers `{}`; the `foreach` states no register
-        // at its emissions, so the `and` result is not recognised as the register.
+        // The `foreach` twin (#4130): the bare `$a` alternative reached after the destructure
+        // failed leaves jq's register at the entry, so the `and` result is the register.
         (
             r#"{"a":true}"#,
             r"del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))",
+            "{}\n",
             "",
-            r"Invalid path expression with result true",
+            0,
+        ),
+    ])
+}
+
+/// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
+/// emission carries is where the pattern walk and `UPDATE` left it. It is the entry's when the
+/// step took no walk step (a bare `$var`, or the bare alternative a failed destructure's
+/// restored fork reached) and nothing else in the body moves it: the emission's stage then
+/// re-establishes a `$x` frozen at the entry, and an `and`/`or` over it accepts the register
+/// by kind. Anything that may have moved it states a loss and keeps refusing, as jq does for
+/// a navigating source or a register moved by an earlier `.a`. Every jq side captured from
+/// jq 1.7.1.
+#[test]
+fn test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach . as {a:$q} ?// $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach . as {a:$q} ?// $a (0; .; $q)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach . as $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a (0; .+$a; .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        // A destructure that succeeds, a navigating source, UPDATE or EXTRACT, or a register an
+        // earlier `.a` moved, are not at the entry.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach . as {a:$q} (0; .; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | .a | 5 | (foreach (1,2) as $a (0; .+$a; .)) | $x)",
+            "",
+            r"Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (.a,2) as $a (0; .+1; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a (0; .a?; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
             5,
         ),
     ])

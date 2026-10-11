@@ -671,12 +671,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   the register it entered with: `del(try (.a and (reduce . as {a:$a} ?// $a (0; .))))` on
   `{"a":true}` is jq's `{}` (it refused "with result true"), and `path(.a | 5 | reduce null as
   {a:$q} (null; .))` on `{"a":null}` is `["a"]`; a `foreach` steps and extends the register's own
-  path (`["a","a"]`). Pinned by `test_fold_steps_from_known_untracked_register_4049`. **A
-  recorded divergence, in the safe direction**: a `foreach` states no register at its emissions
-  (they run inside the loop, after the pattern's steps and `UPDATE` moved jq's register), so
-  `del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))` on `{"a":true}` (jq `{}`) still refuses
-  at the result, as does a `reduce` whose `UPDATE` jq answers by navigating the accumulator
-  (`path(.a | 5 | reduce null as {a:$q} (null; .b))`, jq `["a"]`). The first
+  path (`["a","a"]`). Pinned by `test_fold_steps_from_known_untracked_register_4049`. Since
+  [#4130](https://github.com/rust-works/succinctly/issues/4130) a `foreach` on that untracked entry
+  states its register on every emission that navigated nothing: the register it entered with when the
+  step took no walk step (a bare `$var`, or the one a failed destructure's restored fork reached) and
+  nothing in the loop body can have moved it, a loss otherwise (the pattern's steps and `UPDATE` ran
+  before the emission, inside the loop). So `del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))` on
+  `{"a":true}` is jq's `{}` (it refused "with result true"), and so is
+  `path(. as $x | 5 | (foreach . as {a:$q} ?// $a (0; .; .)) | $x)` (`[]`), pinned by
+  `test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130`. **A recorded
+  divergence, in the safe direction**: a `reduce` whose `UPDATE` jq answers by navigating the
+  accumulator (`path(.a | 5 | reduce null as {a:$q} (null; .b))`, jq `["a"]`) still refuses at the
+  result. The first
   alternative's refusal on the untracked contexts where no register is carried (`var-rebind`,
   `untracked-*`) is unchanged. Over a seeded sample of 30,027 rows of the 20 `?//` fold operands
   (`--sample 30000 --seed 11`, `/usr/bin/jq` 1.7.1) #3999 moved REFUSE_WRONG 1,883 to 1,793 and
