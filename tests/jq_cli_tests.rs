@@ -41713,6 +41713,74 @@ fn test_jq_bare_token_run_is_one_malformed_token_4358() -> Result<()> {
     Ok(())
 }
 
+/// #4376: a fault met inside the bytes moved onto a file from the previous one is met in a read of
+/// that file, which ends at its next newline or at the file's end, and jq has counted that file's
+/// lines through it. The next file's first read is not part of it: it is parsed, and the error's
+/// `input_line_number` is the previous file's. Every expectation is jq 1.7.1's own output.
+#[test]
+fn test_jq_fault_in_the_moved_bytes_resumes_in_the_next_read_4376() -> Result<()> {
+    let plain = r#"[limit(8; repeat(try input catch "E"))]"#;
+    let lined = r#"[limit(8; repeat(try (input | [., input_line_number]) catch ["E", input_line_number]))]"#;
+    for (files, program, expected) in [
+        // A string holding a raw newline is a fault jq meets at its closing quote, in the
+        // previous file's second read; the string that follows is the next file's own.
+        (
+            &[&b"[ \"x\ny\" "[..], b"\"a\\nb\"\t"][..],
+            plain,
+            "[\"E\",\"a\\nb\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        (
+            &[&b"[ \"x\ny\" "[..], b"\"a\\nb\"\t"][..],
+            lined,
+            "[[\"E\",1],[\"a\\nb\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n",
+        ),
+        // A non-string key, with an invalid byte in the next file.
+        (
+            &[&b"{1:2"[..], b"} \"\xc3\"\n{} [1}\t"][..],
+            lined,
+            "[[\"E\",0],[\"E\",1],[{},1],[\"E\",1],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n",
+        ),
+        (
+            &[&b"{\"a\": \"\xff\" ["[..], b"1 2] [\n]"][..],
+            lined,
+            "[[\"E\",0],[1,1],[\"E\",1],[\"E\",1],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n",
+        ),
+        // Bytes that came from more than one file (`}` hands the open `[\n[1` on through its own
+        // read): the fault is met in the second file's read, not the first's.
+        (
+            &[&b"[\n[1"[..], b"}", b" "][..],
+            lined,
+            "[[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n",
+        ),
+        // A lone backslash is part of jq's token run, so the fault is met at the byte after it,
+        // in the next file's read.
+        (
+            &[&b"\"a \"\\"[..], b" \"\xff\"\n"][..],
+            plain,
+            "[\"a \",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+    ] {
+        let temp: Vec<NamedTempFile> = files
+            .iter()
+            .map(|body| -> Result<NamedTempFile> {
+                let mut f = NamedTempFile::new()?;
+                f.write_all(body)?;
+                Ok(f)
+            })
+            .collect::<Result<_>>()?;
+        let paths: Vec<String> = temp
+            .iter()
+            .map(|f| f.path().to_string_lossy().into_owned())
+            .collect();
+        let mut argv: Vec<&str> = vec!["-nc", program];
+        argv.extend(paths.iter().map(String::as_str));
+        let (stdout, stderr, code) = run_jq_full(&argv, None).expect("runs");
+        assert_eq!(code, 0, "{files:?}: {stderr}");
+        assert_eq!(stdout, expected, "{files:?}");
+    }
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently

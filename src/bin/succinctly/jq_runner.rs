@@ -6503,6 +6503,12 @@ struct Seam {
     /// Where the first newline among those moved bytes is, counted from the first of them
     /// (always before `moved_len`).
     moved_newline: Option<usize>,
+    /// The newlines in the previous file ahead of the `base` bytes moved off it: jq has counted
+    /// them when it meets a fault in those bytes (#4376).
+    prev_lines: usize,
+    /// The `base` bytes came from more than one file (an empty or all-tail file handed them
+    /// on), so no one file's reads and lines describe them (#4376).
+    chained: bool,
 }
 
 impl Seam {
@@ -6510,6 +6516,8 @@ impl Seam {
         base: 0,
         moved_len: 0,
         moved_newline: None,
+        prev_lines: 0,
+        chained: false,
     };
 
     /// The file's own bytes: `raw` without the ones moved onto its front.
@@ -6839,6 +6847,19 @@ fn parse_error_line(bytes: &[u8], start: usize, seam: Seam) -> usize {
 /// first byte per fault.
 fn meet_fault(counter: &mut LineCounter<'_>, bytes: &[u8], start: usize) -> (usize, usize, usize) {
     let detected = parse_error_detection(bytes, start);
+    let base = counter.seam.base.min(bytes.len());
+    if detected < base && !counter.seam.chained {
+        // The fault is met inside the bytes moved onto this file from the previous one
+        // (#4316), so the read holding it is that file's: it ends at the next newline or at
+        // that file's end, the seam, and jq has counted that file's lines through it. The
+        // counter's own reads start after the seam.
+        let resume = bytes[detected..base]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(base, |newline| detected + newline + 1);
+        let line = counter.seam.prev_lines + count_newlines(&bytes[..resume]);
+        return (detected, line, resume);
+    }
     let line = counter.line_at_read_of(detected);
     let resume = if detected >= bytes.len() {
         bytes.len()
@@ -6955,22 +6976,18 @@ fn fault_past_invalid_utf8(
 }
 
 /// Where jq's lexer completes the token at `at`: a string's closing quote, the
-/// delimiter after a run of literal or number bytes, or `at` itself for a
-/// structural byte (#4308).
+/// delimiter after a run of literal or number bytes (every byte up to a boundary,
+/// whatever it is: `\` is part of the run, #4376), or `at` itself for a structural byte
+/// (#4308).
 fn token_end(bytes: &[u8], at: usize) -> usize {
     match bytes.get(at) {
         Some(b'"') => string_close_from(bytes, at + 1),
-        Some(&b) if is_bare_token_byte(b) => bytes[at..]
+        Some(&b) if !is_jq_token_boundary(b) => bytes[at..]
             .iter()
-            .position(|&b| !is_bare_token_byte(b))
+            .position(|&b| is_jq_token_boundary(b))
             .map_or(bytes.len(), |offset| at + offset),
         _ => at,
     }
-}
-
-/// A byte jq's lexer reads as part of a literal or number token.
-fn is_bare_token_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'+' | b'.')
 }
 
 /// The closing quote of the string `at` is inside (past backslash escapes),
@@ -7018,16 +7035,27 @@ fn stitch_json_file_seams<'a>(
         return seams;
     };
     let mut carry: Vec<u8> = Vec::new();
+    // The newlines in the file ahead of the tail `carry` was split from.
+    let mut carry_lines = 0;
+    let mut carry_chained = false;
     for (index, raw) in raws.iter_mut().enumerate() {
         if !carry.is_empty() {
             seams[index].base = carry.len();
+            seams[index].prev_lines = carry_lines;
+            seams[index].chained = carry_chained;
+            carry_lines = 0;
+            carry_chained = false;
             // Exact, not amortized: a doubled capacity on a multi-gigabyte file is the cost.
             raw.reserve_exact(carry.len());
             raw.splice(0..0, std::mem::take(&mut carry));
         }
         if index < last {
             if let Some(start) = open_tail_start(raw, resumes, seams[index].base) {
+                // A tail that starts inside what was moved onto this file takes bytes of the
+                // file before it along.
+                carry_chained = start < seams[index].base;
                 carry = raw.split_off(start);
+                carry_lines = count_newlines(seams[index].own(raw));
                 // The part of it that is this file's own, which jq's reads of the file go on
                 // into (a tail that began in an earlier file is that file's).
                 let own = carry
@@ -12203,6 +12231,7 @@ mod tests {
             base,
             moved_len,
             moved_newline,
+            ..Seam::NONE
         };
         // Nothing open: nothing moved.
         assert_eq!(seams(&[b"1\n", b"2\n"]), vec![Seam::NONE, Seam::NONE]);
@@ -12221,11 +12250,26 @@ mod tests {
         // file's, so only its own bytes count as moved off it.
         assert_eq!(
             seams(&[b"[1,", b"\n", b"2]\n"]),
-            vec![moved(0, 3, None), moved(3, 1, Some(0)), moved(4, 0, None)]
+            vec![
+                moved(0, 3, None),
+                moved(3, 1, Some(0)),
+                // ... which makes the bytes it hands on more than one file's (#4376).
+                Seam {
+                    chained: true,
+                    ..moved(4, 0, None)
+                }
+            ]
         );
         assert_eq!(
             seams(&[b"1", b"", b"2\n"]),
-            vec![moved(0, 1, None), moved(1, 0, None), moved(1, 0, None)]
+            vec![
+                moved(0, 1, None),
+                moved(1, 0, None),
+                Seam {
+                    chained: true,
+                    ..moved(1, 0, None)
+                }
+            ]
         );
     }
 
@@ -12236,6 +12280,30 @@ mod tests {
         let stitched = b"[1,\n2 }\n";
         assert_eq!(parse_error_line(stitched, 6, Seam::NONE), 2);
         assert_eq!(parse_error_line(stitched, 6, Seam::base(4)), 1);
+    }
+
+    /// #4376: what the stitch records about where a file's moved bytes came from, and a bare run
+    /// as jq's lexer takes it.
+    #[test]
+    fn seams_record_the_previous_files_lines_and_a_chained_prefix_4376() {
+        let seams = |files: &[&[u8]]| -> Vec<Seam> {
+            let mut raws: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
+            stitch_json_file_seams(raws.iter_mut(), false)
+        };
+        // Two newlines ahead of the tail `[1,` in the first file: jq has counted them.
+        let one = seams(&[b"1\n2\n[1,", b"2]\n"]);
+        assert_eq!(
+            (one[1].base, one[1].prev_lines, one[1].chained),
+            (3, 2, false)
+        );
+        // A file that is only the tail hands the bytes on, so no one file describes them.
+        let chain = seams(&[b"1\n[1,", b"2,", b"3]\n"]);
+        assert_eq!((chain[1].base, chain[1].chained), (3, false));
+        assert_eq!((chain[2].base, chain[2].chained), (5, true));
+        // `\` is part of the run up to a boundary, and so is every byte after it.
+        assert_eq!(token_end(b"\\ x", 0), 1);
+        assert_eq!(token_end(b"a@b,c", 0), 3);
+        assert_eq!(token_end(b"{x", 0), 0);
     }
 
     /// #4316: a counter for a stitched file counts the file as it was on disk.
@@ -12251,6 +12319,7 @@ mod tests {
             base: 0,
             moved_len: 4,
             moved_newline: Some(3),
+            ..Seam::NONE
         };
         assert_eq!(LineCounter::at_seam(kept, moved).read_end_line(1), 1);
         assert_eq!(LineCounter::new(kept).read_end_line(1), 0);
@@ -12267,6 +12336,7 @@ mod tests {
             base: 0,
             moved_len: JQ_READ_CHUNK + 4,
             moved_newline: Some(JQ_READ_CHUNK + 2),
+            ..Seam::NONE
         };
         assert_eq!(LineCounter::at_seam(value, far).read_end_line(1), 0);
     }
