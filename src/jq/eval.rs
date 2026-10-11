@@ -36740,6 +36740,21 @@ fn eval_owned_multi_first<S: EvalSemantics>(
     input: &OwnedValue,
     reentry: Reentry,
 ) -> Result<Option<OwnedValue>, EvalEscape> {
+    // yq mode (#1779): the whole filter is evaluated before its first output is taken
+    // (`assignUpdateOperator` reads `GetMatchingNodes`, then the front of the list), so a
+    // trailing error aborts the command with no document -- `.x |= (1, error("boom"))` raises
+    // `boom` in yq where jq's `_modify` never looks past the `1`.
+    if S::TAG == EvalTag::Yq {
+        let mut first: Option<OwnedValue> = None;
+        let flow = eval_each_owned::<S>(expr, input, false, reentry, &mut |v| {
+            first.get_or_insert(v);
+            Demand::Continue
+        });
+        return match flow {
+            Flow::Escaped(control) => Err(control.into()),
+            _ => Ok(first),
+        };
+    }
     // Demand-driven (#3448): the sink stops the generator at its first
     // output, so a later output -- and any `input`/`debug`/`stderr` inside it
     // -- never runs, as in jq's `label $out | (f | ., break $out)`. That also

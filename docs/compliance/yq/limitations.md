@@ -2480,14 +2480,13 @@ Fixed in `eval_assign` (`src/jq/eval.rs`) by collapsing `rhs_values` to its last
 before the fan-out loop, gated on `S::TAG == EvalTag::Yq` — the loop itself, and every other
 mode, is untouched.
 
-**Deliberately still open:** the collapse only applies when the RHS stream completes
-cleanly (`terminal.is_none()`). A RHS that *itself* errors partway through
-(`.x = (1, error("boom"), 3)`) still uses jq's pre-existing partial-fan-out behavior in yq
-mode too, which has not been verified against real yq (live-checked only that real yq
-raises the error with no document printed at all — not the shape needed to characterize
-what succinctly should do instead). Not folded into this fix, since redefining an
-unverified error-interaction shape risked a second, differently-wrong divergence rather than
-fixing one — filed as [#1779](https://github.com/rust-works/succinctly/issues/1779).
+A RHS that *itself* errors partway through (`.x = (1, error("boom"), 3)`) aborts with the
+error and **no document**, as in yq, which materialises the whole RHS list before the first
+write (`resultsForRHS`) — captured across single and multiple LHS paths and every error
+position, and fixed for `=` and the compound forms. `|=` does the same
+([#1779](https://github.com/rust-works/succinctly/issues/1779)): yq evaluates the whole
+filter before taking its first output, so `.x |= (1, error("boom"))` raises `boom` here too,
+where jq's `_modify` never looks past the `1` (`jq` mode is unchanged).
 
 ### `+=`/`-=`/`*=`/`/=`/`%=`/`//=`'s multi-output RHS: same jq-forks/yq-takes-last split as `=`
 
@@ -2511,9 +2510,8 @@ predating #1430's yq-mode scope for `=`. Fixed in
 [#1778](https://github.com/rust-works/succinctly/issues/1778) by replacing
 `eval_rhs_once` with `collect_rhs_outputs`/`eval_update_multi`, mirroring `eval_assign`'s
 own #392/#1430 shape: jq mode forks, yq mode collapses to the last output on a clean
-completion, gated on `S::TAG == EvalTag::Yq` — the same "deliberately still open" carve-out
-above (an RHS that itself errors partway through) applies here too, for the same reason
-(#1779). `/=`/`%=`/`//=` have no real yq syntax at all (confirmed live, `'/'`/`'//'` expect
+completion, gated on `S::TAG == EvalTag::Yq` — and, as for `=` above, an RHS that itself
+errors partway through aborts with no document (#1779). `/=`/`%=`/`//=` have no real yq syntax at all (confirmed live, `'/'`/`'//'` expect
 2 args but there is 1), so their yq-mode "take the last value" answer is judged by internal
 consistency with `|=` rather than an external-compat claim.
 
