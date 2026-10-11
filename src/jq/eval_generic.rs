@@ -12790,7 +12790,7 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
         // serialises and re-indexes the whole document per evaluation.
         Expr::IndexExpr { target, key } => {
             // #4317: `E[a:b][$k]` reads the slice's resolved range, as the `[k]` pipe form does.
-            if matches!(**target, Expr::SliceExpr { .. }) {
+            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return GenericResult::Owned(owned);
                 }
@@ -14677,7 +14677,7 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // for why yq mode keeps the pre-existing eager fallback below.
         Expr::IndexExpr { target, key } if streams_escaped_generator_prefix::<S>() => {
             // #4317: the sink route's twin of the fusion in `eval_single`.
-            if matches!(**target, Expr::SliceExpr { .. }) {
+            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return push_one_generic(GenericItem::Owned(owned), sink);
                 }
@@ -22811,20 +22811,20 @@ fn is_pure_slice_operand(expr: &Expr) -> bool {
     }
 }
 
-/// Whether a pipe's first stage is a computed slice, bare or under a postfix `?` (#4288): the
-/// cheap check in front of [`fusable_slice_read`] on the two pipe drivers.
+/// Whether a pipe's first stage is a slice, computed or literal-bounded (#4323), bare or under a
+/// postfix `?` (#4288): the cheap check in front of [`fusable_slice_read`] on the two pipe drivers.
 fn is_slice_head(stage: &Expr) -> bool {
     match stage {
-        Expr::SliceExpr { .. } => true,
-        Expr::Optional(inner) => matches!(**inner, Expr::SliceExpr { .. }),
+        Expr::SliceExpr { .. } | Expr::Slice { .. } => true,
+        Expr::Optional(inner) => matches!(**inner, Expr::SliceExpr { .. } | Expr::Slice { .. }),
         _ => false,
     }
 }
 
 /// The leading `E[a:b]` stage and the read that follows it, when the pair can
-/// be fused (#4195): a computed slice over a pure target with pure bounds,
-/// followed by `[k]`, `length`, `first` or `last` (#4288). Static; nothing is
-/// evaluated here.
+/// be fused (#4195): a computed slice over a pure target with pure bounds, or a
+/// literal-bounded slice of the pipe's input (`.[2:]`, #4323), followed by `[k]`,
+/// `length`, `first` or `last` (#4288). Static; nothing is evaluated here.
 ///
 /// A postfix `?` on either stage (`E[a:b]?[0]`, `E[a:b][0]?`) is looked through: the
 /// fused read answers only a readable array with bounds that resolve, which neither
@@ -22838,8 +22838,18 @@ fn fusable_slice_read(stages: &[Expr]) -> Option<(&Expr, SliceRead)> {
         Expr::Optional(inner) => inner.as_ref(),
         other => other,
     };
-    let Expr::SliceExpr { target, start, end } = slice else {
-        return None;
+    // A literal-bounded slice has nothing to evaluate: its target is the input and its bounds
+    // are folded integers, so it is pure by construction.
+    let pure_slice = match slice {
+        Expr::SliceExpr { target, start, end } => {
+            // `map_or(true, ..)` rather than `is_none_or`: the crate's MSRV is 1.73 and
+            // `Option::is_none_or` is stable since 1.82.
+            let pure_bound =
+                |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
+            is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
+        }
+        Expr::Slice { .. } => true,
+        _ => return None,
     };
     let read = match read {
         Expr::Optional(inner) => inner.as_ref(),
@@ -22852,11 +22862,7 @@ fn fusable_slice_read(stages: &[Expr]) -> Option<(&Expr, SliceRead)> {
         Expr::Builtin(Builtin::Last) => SliceRead::Last,
         _ => return None,
     };
-    // `map_or(true, ..)` rather than `is_none_or`: the crate's MSRV is 1.73 and
-    // `Option::is_none_or` is stable since 1.82.
-    let pure_bound =
-        |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
-    (is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)).then_some((slice, read))
+    pure_slice.then_some((slice, read))
 }
 
 /// The one value `bound` produces, or `None` when it produces none, several, or
@@ -23012,20 +23018,33 @@ fn fused_slice_window<S: EvalSemantics, V: DocumentValue>(
         return None; // patchcov: coverage tolerate-line reason="unreachable: every caller takes the stage from a match on SliceExpr"
     };
     // The target first: it is the cheapest thing to rule out, so a string, `null`
-    // or object target declines before either bound is evaluated.
-    let target = match eval_single::<S, V>(target, value.clone(), false, cursor) {
-        GenericResult::One(v) => v,
-        GenericResult::OneCursor(c) => c.value(),
-        _ => return None,
+    // or object target declines before either bound is evaluated. A literal-bounded slice
+    // (#4323) slices the pipe's input itself.
+    let target = match slice {
+        Expr::SliceExpr { target, .. } => {
+            match eval_single::<S, V>(target, value.clone(), false, cursor) {
+                GenericResult::One(v) => v,
+                GenericResult::OneCursor(c) => c.value(),
+                _ => return None,
+            }
+        }
+        Expr::Slice { .. } => value.clone(),
+        _ => return None, // patchcov: coverage tolerate-line reason="unreachable: fusable_slice_read returns only a SliceExpr or Slice stage"
     };
     if unreadable_value_error(&target).is_some() {
         return None;
     }
     let elements = target.as_array()?;
-    let start = single_slice_bound::<S, V>(start, value.clone(), cursor, f64::floor)?;
-    let end = single_slice_bound::<S, V>(end, value, cursor, f64::ceil)?;
-    let (start, end) =
-        resolve_computed_slice_bounds::<S>(SliceTargetKind::Sliceable, &start, &end).ok()?;
+    let (start, end) = match slice {
+        Expr::SliceExpr { start, end, .. } => {
+            let start = single_slice_bound::<S, V>(start, value.clone(), cursor, f64::floor)?;
+            let end = single_slice_bound::<S, V>(end, value, cursor, f64::ceil)?;
+            resolve_computed_slice_bounds::<S>(SliceTargetKind::Sliceable, &start, &end).ok()?
+        }
+        // Folded at parse time: the same integers the unfused arm slices by.
+        Expr::Slice { start, end, .. } => (*start, *end),
+        _ => return None, // patchcov: coverage tolerate-line reason="unreachable: the target match above already returned for any other stage"
+    };
     let len = crate::jq::array_index::len_checked_memoized(&elements).ok()?;
     let range = SliceBounds::from_literals(start, end).resolve(len);
     Some((elements, range))
@@ -23066,16 +23085,17 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
     value: V,
     cursor: Option<V::Cursor>,
 ) -> Option<OwnedValue> {
-    let Expr::SliceExpr { target, start, end } = slice else {
-        return None; // patchcov: coverage tolerate-line reason="unreachable: both call sites match a SliceExpr target first"
+    let pure_slice = match slice {
+        Expr::SliceExpr { target, start, end } => {
+            let pure_bound =
+                |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
+            is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
+        }
+        // #4323: a literal-bounded slice of the input has nothing to evaluate.
+        Expr::Slice { .. } => true,
+        _ => return None, // patchcov: coverage tolerate-line reason="unreachable: both call sites match a SliceExpr or Slice target first"
     };
-    let pure_bound =
-        |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
-    if !(is_pure_slice_operand(target)
-        && pure_bound(start)
-        && pure_bound(end)
-        && is_pure_slice_operand(key))
-    {
+    if !(pure_slice && is_pure_slice_operand(key)) {
         return None;
     }
     let key = match eval_single::<S, V>(key, value.clone(), false, cursor) {
@@ -43915,9 +43935,20 @@ mod tests {
         assert_eq!(gate(".[$i:] | first(.)"), None);
         assert_eq!(gate(".[$i:] | nth(1)"), None);
         assert_eq!(gate(".[$i:] | keys"), None);
-        // Not a computed slice at the head of the pipe.
-        assert_eq!(gate(".[1:][0]"), None);
+        // #4323: a literal-bounded slice of the input, on every read and under `?`.
+        assert_eq!(gate(".[1:][0]"), Some(SliceRead::Index(0)));
+        assert_eq!(gate(".[2:][-1]"), Some(SliceRead::Index(-1)));
+        assert_eq!(gate(".[:-2][0]"), Some(SliceRead::Index(0)));
+        assert_eq!(gate(".[1:3] | length"), Some(SliceRead::Length));
+        assert_eq!(gate(".[1:] | first"), Some(SliceRead::First));
+        assert_eq!(gate(".[1:] | last"), Some(SliceRead::Last));
+        assert_eq!(gate(".[1:]?[0]"), Some(SliceRead::Index(0)));
+        assert_eq!(gate(".[1:][0]?"), Some(SliceRead::Index(0)));
+        assert_eq!(gate(".[1:][$k]"), None);
+        assert_eq!(gate(".[1:][0:1]"), None);
+        // Not a slice at the head of the pipe.
         assert_eq!(gate("(.[$i:])[0]"), None);
+        assert_eq!(gate("(.[1:])[0]"), None);
         assert_eq!(gate("length | .[$i:][0]"), None);
         assert_eq!(gate(".[$i:]"), None);
     }
@@ -44044,6 +44075,86 @@ mod tests {
         assert_eq!(
             try_fused_slice_read::<JqSemantics, _>(slice, SliceRead::Length, root.value(), None),
             Some(OwnedValue::Int(3))
+        );
+    }
+
+    /// #4323: a literal-bounded slice reads the pipe's input directly, with or without a cursor,
+    /// and a target that is not an array is left to the ordinary route.
+    #[test]
+    fn test_fused_literal_slice_read_4323() {
+        let a_json = br"[10,20,30,40]";
+        let a_index = JsonIndex::build(a_json);
+        let a_root = a_index.root(a_json);
+        let fused = |src: &str, read: Option<SliceRead>, with_cursor: bool| {
+            let Expr::Pipe(pair) = crate::jq::parse(src).unwrap() else {
+                panic!("a pipe of slice and read: {src}"); // patchcov: coverage tolerate-line reason="unreachable: every source below parses to a pipe; this is the test's own malformed-fixture message (#4323)"
+            };
+            let (slice, parsed) = fusable_slice_read(pair.as_slice()).unwrap();
+            try_fused_slice_read::<JqSemantics, _>(
+                slice,
+                read.unwrap_or(parsed),
+                a_root.value(),
+                with_cursor.then_some(a_root),
+            )
+        };
+        for with_cursor in [true, false] {
+            assert_eq!(
+                fused(".[1:][0]", None, with_cursor),
+                Some(OwnedValue::Int(20))
+            );
+            assert_eq!(
+                fused(".[1:][-1]", None, with_cursor),
+                Some(OwnedValue::Int(40))
+            );
+            assert_eq!(
+                fused(".[:-1][-1]", None, with_cursor),
+                Some(OwnedValue::Int(30))
+            );
+            assert_eq!(
+                fused(".[1:3][2]", None, with_cursor),
+                Some(OwnedValue::Null)
+            );
+            assert_eq!(
+                fused(".[1:3][-3]", None, with_cursor),
+                Some(OwnedValue::Null)
+            );
+            assert_eq!(fused(".[9:][0]", None, with_cursor), Some(OwnedValue::Null));
+            assert_eq!(
+                fused(".[1:] | length", None, with_cursor),
+                Some(OwnedValue::Int(3))
+            );
+            assert_eq!(
+                fused(".[3:1] | length", None, with_cursor),
+                Some(OwnedValue::Int(0))
+            );
+        }
+        // A target that is not an array is declined, not answered.
+        for doc in [&br#"{"a":1}"#[..], br#""hello""#, b"null", b"7"] {
+            let index = JsonIndex::build(doc);
+            let root = index.root(doc);
+            for src in [".[1:][0]", ".[1:] | length"] {
+                let Expr::Pipe(pair) = crate::jq::parse(src).unwrap() else {
+                    panic!("a pipe"); // patchcov: coverage tolerate-line reason="unreachable: the sources parse to pipes; the test's own malformed-fixture message (#4323)"
+                };
+                let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
+                assert_eq!(
+                    try_fused_slice_read::<JqSemantics, _>(slice, read, root.value(), Some(root)),
+                    None
+                );
+            }
+        }
+        // yq's `first`/`last` are other builtins, so the jq-mode gate declines them there.
+        let Expr::Pipe(pair) = crate::jq::parse(".[1:] | first").unwrap() else {
+            panic!("a pipe"); // patchcov: coverage tolerate-line reason="unreachable: the source parses to a pipe; the test's own malformed-fixture message (#4323)"
+        };
+        let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
+        assert_eq!(
+            try_fused_slice_read::<YqSemantics, _>(slice, read, a_root.value(), Some(a_root)),
+            None
+        );
+        assert_eq!(
+            try_fused_slice_read::<JqSemantics, _>(slice, read, a_root.value(), Some(a_root)),
+            Some(OwnedValue::Int(20))
         );
     }
 
