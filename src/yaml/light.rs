@@ -3167,6 +3167,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// `&anchor`/`!tag` starts when it has one (#2712), as yq does. Line numbers
     /// are 1-based to match common editor conventions and yq's `line` function.
     ///
+    /// `0` on an index [`YamlIndex::mark_json_sourced`] marked (#4382): yq decodes JSON input
+    /// without keeping positions, so `line` and `column` of any node read from it are `0`.
+    ///
     /// # Example
     ///
     /// ```
@@ -3181,6 +3184,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// ```
     #[inline]
     pub fn line(&self) -> usize {
+        if self.index.canonicalize_numbers() {
+            return 0;
+        }
         let offset = self.metadata_position();
         let (line, _column) = self.index.to_line_column(offset, self.text);
         line
@@ -3207,6 +3213,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// ```
     #[inline]
     pub fn column(&self) -> usize {
+        if self.index.canonicalize_numbers() {
+            return 0;
+        }
         let offset = self.metadata_position();
         let (_line, column) = self.index.to_line_char_column(offset, self.text);
         column
