@@ -67845,6 +67845,132 @@ pub fn tostream_events(value: &OwnedValue) -> Vec<OwnedValue> {
     events
 }
 
+/// [`tostream_events`], one event at a time (#4397).
+///
+/// The same events in the same order, holding the walk's stack and the current path instead of
+/// every event of the document at once. What `jq --stream` reads when the program does not need the
+/// events kept.
+#[must_use]
+pub fn tostream_events_iter(value: &OwnedValue) -> ToStreamEvents<'_> {
+    ToStreamEvents {
+        root: Some(value),
+        stack: Vec::new(),
+        path: Vec::new(),
+    }
+}
+
+/// The iterator [`tostream_events_iter`] returns.
+pub struct ToStreamEvents<'a> {
+    root: Option<&'a OwnedValue>,
+    stack: Vec<StreamFrame<'a>>,
+    path: Vec<OwnedValue>,
+}
+
+/// A non-empty container being walked: its children left, and how long the path was above it.
+enum StreamFrame<'a> {
+    Array {
+        items: &'a [OwnedValue],
+        next: usize,
+        base: usize,
+    },
+    Object {
+        entries: indexmap::map::Iter<'a, String, OwnedValue>,
+        last_key: &'a str,
+        base: usize,
+    },
+}
+
+impl<'a> ToStreamEvents<'a> {
+    /// The event for a leaf, or the frame to walk for a non-empty container.
+    fn enter(&mut self, value: &'a OwnedValue) -> Option<OwnedValue> {
+        assert_value_tree_depth(self.path.len());
+        let base = self.path.len();
+        match value {
+            OwnedValue::Object(entries) if !entries.is_empty() => {
+                let last_key = entries.last().map_or("", |(key, _)| key.as_str());
+                self.stack.push(StreamFrame::Object {
+                    entries: entries.into_iter(),
+                    last_key,
+                    base,
+                });
+                None
+            }
+            OwnedValue::Array(items) if !items.is_empty() => {
+                self.stack.push(StreamFrame::Array {
+                    items,
+                    next: 0,
+                    base,
+                });
+                None
+            }
+            leaf => Some(OwnedValue::Array(
+                vec![OwnedValue::Array(self.path.clone().into()), leaf.clone()].into(),
+            )),
+        }
+    }
+}
+
+impl Iterator for ToStreamEvents<'_> {
+    type Item = OwnedValue;
+
+    fn next(&mut self) -> Option<OwnedValue> {
+        loop {
+            if self.stack.is_empty() {
+                let root = self.root.take()?;
+                if let Some(event) = self.enter(root) {
+                    return Some(event);
+                }
+                continue;
+            }
+            let top = self.stack.len() - 1;
+            // The next child of the innermost container, or its closing event.
+            let child = match &mut self.stack[top] {
+                StreamFrame::Array { items, next, base } => {
+                    let base = *base;
+                    if *next < items.len() {
+                        let index = *next;
+                        *next += 1;
+                        Ok((base, OwnedValue::Int(index as i64), &items[index]))
+                    } else {
+                        Err((base, OwnedValue::Int(items.len() as i64 - 1)))
+                    }
+                }
+                StreamFrame::Object {
+                    entries,
+                    last_key,
+                    base,
+                } => {
+                    let base = *base;
+                    match entries.next() {
+                        Some((key, value)) => {
+                            Ok((base, OwnedValue::String(key.clone().into()), value))
+                        }
+                        None => Err((base, OwnedValue::String(String::from(*last_key).into()))),
+                    }
+                }
+            };
+            match child {
+                Ok((base, key, value)) => {
+                    self.path.truncate(base);
+                    self.path.push(key);
+                    if let Some(event) = self.enter(value) {
+                        return Some(event);
+                    }
+                }
+                Err((base, last)) => {
+                    self.stack.pop();
+                    self.path.truncate(base);
+                    self.path.push(last);
+                    let event =
+                        OwnedValue::Array(vec![OwnedValue::Array(self.path.clone().into())].into());
+                    self.path.truncate(base);
+                    return Some(event);
+                }
+            }
+        }
+    }
+}
+
 /// Helper to collect `tostream`-style events: `[path, value]` for every leaf
 /// (scalar, or an empty array/object), plus a closing `[path]` marker after
 /// every *non-empty* container, whose path is the container's own path with
@@ -126982,6 +127108,34 @@ mod tests {
             result.is_err(),
             "collect_paths should panic at MAX_VALUE_TREE_DEPTH"
         );
+    }
+
+    /// #4397: the incremental walk yields exactly the events `tostream` collects, for every shape:
+    /// scalars, empty containers, nested containers, object keys that are not in sorted order.
+    #[test]
+    fn tostream_events_iter_matches_the_collected_events_4397() {
+        for source in [
+            "1",
+            "null",
+            "[]",
+            "{}",
+            "[1]",
+            "[[]]",
+            "[{}]",
+            "{\"a\":{}}",
+            "[1,[2,[3,[]]],{\"b\":[4,{\"c\":5}],\"a\":6}]",
+            "{\"z\":1,\"a\":[{\"k\":[]},{}],\"m\":null}",
+            "\"str\"",
+        ] {
+            let index = JsonIndex::build(source.as_bytes());
+            let expr = parse(".").expect("parse failed");
+            let value = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(source.as_bytes()))
+                .collect_owned::<JqSemantics>()
+                .remove(0);
+            let collected = tostream_events(&value);
+            let walked: Vec<_> = tostream_events_iter(&value).collect();
+            assert_eq!(walked, collected, "{source}");
+        }
     }
 
     /// #1021: `collect_tostream_events` (backs `tostream`) had no depth

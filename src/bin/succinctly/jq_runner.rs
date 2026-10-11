@@ -4952,7 +4952,12 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
                 }
             }
         } else {
-            for (idx, input) in inputs.iter().enumerate() {
+            let stream_events_lazily = args.stream
+                && !args.slurp
+                && args.input_dsv.is_none()
+                && !args.raw_input
+                && !args.seq;
+            for (idx, document) in inputs.iter().enumerate() {
                 // `UNKNOWN_LINE`, not just any missing entry, must clear the
                 // source too (#3202): `input_filename` can't otherwise tell
                 // "this value's file is genuinely stdin" apart from "no
@@ -4972,28 +4977,39 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
                 // to reach stdout before the *next* one is evaluated, or a
                 // mid-stream `debug`/`stderr`/`error` side effect lands ahead
                 // of output that logically preceded it.
-                evaluate_input_streaming(
-                    input,
-                    &expr,
-                    &context,
-                    &at,
-                    &mut sink,
-                    &output_config,
-                    &mut |sink, result| {
-                        had_output = true;
-                        last_output = Some(result.clone());
-                        let stop = route_write_error(
-                            sink,
-                            &mut out,
-                            || at.resolve(),
-                            |o| write_output_owned_value(o, &result, &output_config),
-                        )?;
-                        Ok(!stop)
-                    },
-                )?;
-                if let Some(code) = sink.halted() {
-                    out.flush()?;
-                    return Ok(code);
+                //
+                // #4397: under `--stream` the program reads one `tostream` event at a time,
+                // each walked out of its document as the program asks for it, not kept.
+                let events: Box<dyn Iterator<Item = std::borrow::Cow<'_, OwnedValue>> + '_> =
+                    if stream_events_lazily {
+                        Box::new(jq::tostream_events_iter(document).map(std::borrow::Cow::Owned))
+                    } else {
+                        Box::new(std::iter::once(std::borrow::Cow::Borrowed(document)))
+                    };
+                for input in events {
+                    evaluate_input_streaming(
+                        &input,
+                        &expr,
+                        &context,
+                        &at,
+                        &mut sink,
+                        &output_config,
+                        &mut |sink, result| {
+                            had_output = true;
+                            last_output = Some(result.clone());
+                            let stop = route_write_error(
+                                sink,
+                                &mut out,
+                                || at.resolve(),
+                                |o| write_output_owned_value(o, &result, &output_config),
+                            )?;
+                            Ok(!stop)
+                        },
+                    )?;
+                    if let Some(code) = sink.halted() {
+                        out.flush()?;
+                        return Ok(code);
+                    }
                 }
             }
             // The parse error the stream ended in, reported after the
@@ -5856,8 +5872,9 @@ fn get_inputs(
 
     // #4397: `--stream` feeds the program `tostream`'s events in place of each document, `-s`
     // slurping the events and `input`/`inputs` reading them. Each event keeps its document's
-    // location.
-    if args.stream && json_input_mode {
+    // location. Only those two need the events kept; a program that reads `.` walks each
+    // document's events one at a time in `run_jq`'s loop instead.
+    if args.stream && json_input_mode && (args.slurp || track_eof) {
         expand_into_stream_events(&mut values, &mut locations, &mut resumed_errors);
     }
 
