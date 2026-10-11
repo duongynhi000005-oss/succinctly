@@ -318,71 +318,67 @@ pub(crate) enum Read<C> {
     Unregistered,
 }
 
-/// The values of elements `range` of `elements`, in order: what
-/// `collect_values()[range]` holds, without visiting an element past the
-/// range or collecting the array (#4287). `range` must lie within the length
+/// The cursors of elements `range` of `elements`, in order: the elements
+/// `collect_values()[range]` holds, without visiting an element past the range
+/// or collecting the array (#4287). `range` must lie within the length
 /// [`len_checked_memoized`] found for this list.
 ///
 /// From an [`ElementIndex`] when one exists, in one lookup; otherwise one walk
-/// that steps over the elements before `range.start` without decoding them.
-/// Never builds.
-pub(crate) fn values_in_range<E>(elements: &E, range: Range<usize>) -> Vec<E::Value>
-where
-    E: DocumentElements,
-    E::Cursor: DocumentCursor<Value = E::Value>,
-{
+/// that steps over the elements before `range.start`. Never builds, and
+/// decodes nothing: the caller decodes what it converts.
+pub(crate) fn cursors_in_range<E: DocumentElements>(
+    elements: &E,
+    range: Range<usize>,
+) -> Vec<E::Cursor> {
     if range.is_empty() {
         return Vec::new();
     }
     if let Some(cursors) = memo::range(elements, range.clone()) {
-        return cursors.iter().map(DocumentCursor::value).collect();
+        return cursors;
     }
-    let mut values = Vec::with_capacity(range.len());
+    let mut cursors = Vec::with_capacity(range.len());
     let mut elems = *elements;
     for _ in 0..range.start {
         let Some((_, rest)) = elems.uncons_cursor() else {
-            return values; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
+            return cursors; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
         };
         elems = rest;
     }
-    while values.len() < range.len() {
-        let Some((value, rest)) = elems.uncons() else {
+    while cursors.len() < range.len() {
+        let Some((cursor, rest)) = elems.uncons_cursor() else {
             break; // patchcov: coverage tolerate-line reason="defensive: `range` lies within the length a walk of this list found"
         };
-        values.push(value);
+        cursors.push(cursor);
         elems = rest;
     }
-    values
+    cursors
 }
 
-/// The values a slice of `elements` holds (#4287), as a buffer and the range
-/// of it that is the slice: `resolve` turns the length into the slice's
-/// range, and `window`, when the bounds name one without the length (both
-/// non-negative), is a range the slice lies within.
+/// The elements a slice of `elements` holds (#4287), as a buffer of cursors
+/// and the range of it that is the slice: `resolve` turns the length into the
+/// slice's range, and `window`, when the bounds name one without the length
+/// (both non-negative), is a range the slice lies within.
 ///
-/// [`len_checked_memoized`] and [`values_in_range`] in one: an indexed array
+/// [`len_checked_memoized`] and [`cursors_in_range`] in one: an indexed array
 /// is answered from its index, and any other is walked **once**, with
-/// `len_checked`'s checks (and its error), keeping the values of `window` (of
+/// `len_checked`'s checks (and its error), keeping the cursors of `window` (of
 /// every element when there is none) and registering a wide array as that
-/// walk would. A length walk and then a second walk to the range cost a
-/// one-shot slice of most of a million-element array 5% over the single
-/// collecting walk it replaced; the range is handed back rather than copied
-/// out for the same reason.
-pub(crate) fn slice_values<E>(
+/// walk would. Measured on a million-element array, a length walk and then a
+/// second walk to the range cost a one-shot `.[:-1]` 5% over the single
+/// collecting walk it replaced, and decoding every kept element cost `.[-2:]`
+/// 5%; so nothing is decoded here, and the range is handed back rather than
+/// copied out.
+pub(crate) fn slice_cursors<E: DocumentElements>(
     elements: &E,
     window: Option<Range<usize>>,
     resolve: impl FnOnce(usize) -> Range<usize>,
-) -> Result<(Vec<E::Value>, Range<usize>), EvalError>
-where
-    E: DocumentElements,
-    E::Cursor: DocumentCursor<Value = E::Value>,
-{
-    let whole = |values: Vec<E::Value>| {
-        let all = 0..values.len();
-        (values, all)
+) -> Result<(Vec<E::Cursor>, Range<usize>), EvalError> {
+    let whole = |cursors: Vec<E::Cursor>| {
+        let all = 0..cursors.len();
+        (cursors, all)
     };
     if let Some(len) = memo::len(elements) {
-        return Ok(whole(values_in_range(elements, resolve(len))));
+        return Ok(whole(cursors_in_range(elements, resolve(len))));
     }
     let keep = window.unwrap_or(0..usize::MAX);
     let mut kept = Vec::new();
@@ -394,7 +390,7 @@ where
             return Err(elements.malformed_element_error());
         }
         if keep.contains(&count) {
-            kept.push(cursor.value());
+            kept.push(cursor);
         }
         count += 1;
         last = Some(cursor);
@@ -426,7 +422,7 @@ where
         // patchcov: coverage tolerate reason="unreachable: a window names a range its bounds resolve within, so the kept cursors always cover it"
         None => {
             debug_assert!(false, "the window {keep:?} does not cover {range:?}");
-            Ok(whole(values_in_range(elements, range)))
+            Ok(whole(cursors_in_range(elements, range)))
         } // patchcov: coverage end
     }
 }
@@ -1044,7 +1040,7 @@ mod tests {
     /// exactly where that walk does, and otherwise holds what
     /// `collect_values()[range]` holds, with a window and without one.
     #[test]
-    fn slice_values_raises_exactly_when_len_checked_does_4287() {
+    fn slice_cursors_raises_exactly_when_len_checked_does_4287() {
         use crate::jq::slice::SliceBounds;
         for doc in [
             "[]",
@@ -1080,8 +1076,9 @@ mod tests {
                     }
                     _ => None,
                 };
-                let sliced = slice_values(&elements, window, |len| bounds.resolve(len))
-                    .map(|(values, range)| values[range].to_vec());
+                let sliced = slice_cursors(&elements, window, |len| bounds.resolve(len)).map(
+                    |(cursors, range)| cursors[range].iter().map(|c| c.value()).collect::<Vec<_>>(),
+                );
                 match (&walked, sliced) {
                     (Ok(len), Ok(values)) => {
                         let collected = elements.collect_values();
@@ -1266,7 +1263,7 @@ mod tests {
         /// wide and empty, while the array is walked and once it is indexed;
         /// it reads from the index once there is one, and never builds one.
         #[test]
-        fn values_in_range_agrees_with_the_collected_slice_4287() {
+        fn cursors_in_range_agrees_with_the_collected_slice_4287() {
             use crate::jq::eval_generic::to_owned_all;
             use crate::jq::JqSemantics;
             let n = WIDE_ELEMENTS * 2;
@@ -1281,7 +1278,12 @@ mod tests {
             let check = |phase: &str| {
                 for range in ranges.clone() {
                     assert_eq!(
-                        owned(&values_in_range(&elements, range.clone())),
+                        owned(
+                            &cursors_in_range(&elements, range.clone())
+                                .iter()
+                                .map(|c| c.value())
+                                .collect::<Vec<_>>()
+                        ),
                         owned(&collected[range.clone()]),
                         "{phase}: {range:?}"
                     );
@@ -1329,9 +1331,10 @@ mod tests {
                     (Some(5), Some(2), Some(5..5)),
                 ] {
                     let bounds = SliceBounds::from_literals(start, end);
-                    let (values, range) =
-                        slice_values(&elements, window, |len| bounds.resolve(len)).unwrap();
-                    let values = &values[range];
+                    let (cursors, range) =
+                        slice_cursors(&elements, window, |len| bounds.resolve(len)).unwrap();
+                    let values: Vec<_> = cursors[range].iter().map(|c| c.value()).collect();
+                    let values = &values[..];
                     assert_eq!(
                         to_owned_all::<JqSemantics, _>(values).unwrap(),
                         to_owned_all::<JqSemantics, _>(&collected[bounds.resolve(n)]).unwrap(),

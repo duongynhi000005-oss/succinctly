@@ -22384,13 +22384,17 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
             _ => None,
         };
         let slice =
-            crate::jq::array_index::slice_values(&elements, window, |len| bounds.resolve(len));
-        let (items, range) = match slice {
-            Ok(slice) => slice,
+            crate::jq::array_index::slice_cursors(&elements, window, |len| bounds.resolve(len));
+        // Each element is decoded as it is converted, in order, so the first
+        // malformed member in the range raises what it raised before.
+        let converted = match slice {
+            Ok((cursors, range)) => cursors[range]
+                .iter()
+                .map(|cursor| to_owned::<S, _>(&cursor.value()))
+                .collect::<Result<Vec<_>, _>>(),
             Err(_) => {
                 let items = elements.collect_values();
-                let range = SliceBounds::from_literals(start, end).resolve(items.len());
-                (items, range)
+                to_owned_all::<S, _>(items[bounds.resolve(items.len())].iter())
             }
         };
         // #2001 (code review): a #1194 malformed-member error nested
@@ -22405,7 +22409,7 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
         // `optional && !e.is_decode_failure()` to drift (the exact drift
         // `suppresses`'s own doc comment records happening twice already,
         // #1902 and #1934).
-        return match to_owned_all::<S, _>(items[range].iter()) {
+        return match converted {
             Ok(v) => GenericResult::Owned(OwnedValue::array_from(v)),
             Err(e) if suppresses(&e, optional) => GenericResult::None,
             Err(e) => GenericResult::Error(e),
