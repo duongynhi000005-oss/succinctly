@@ -2,7 +2,7 @@
 # the `Coverage (x86_64)` / `Coverage (ARM64)` jobs in .github/workflows/ci.yml, via
 # the shared steps in .github/actions/coverage/action.yml).
 #
-# Requires patchcov >= 0.1.1, pinned in .github/actions/coverage/action.yml.
+# Requires the patchcov version pinned in .github/actions/coverage/action.yml.
 # Migrated from omni-dev coverage config (#3873); the diff ignore-list schema
 # and filtering semantics are unchanged.
 diff:
@@ -43,8 +43,8 @@ diff:
   #     understated the flap as "~1-2 lines"). Rather than excluding the whole
   #     ~230-line file, the flapping region is wrapped in a
   #     coverage `tolerate` marker directly in
-  #     src/util/simd/x86.rs (requires patchcov >= 0.1.1, see the version pin
-  #     comment in .github/actions/coverage/action.yml; rust-works/omni-dev#1593, succinctly#2467): the file
+  #     src/util/simd/x86.rs (needs the patchcov pinned in
+  #     .github/actions/coverage/action.yml; rust-works/omni-dev#1593, succinctly#2467): the file
   #     keeps contributing its real coverage to the total, and only the
   #     CPU-gated delta is masked.
   #

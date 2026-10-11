@@ -128,21 +128,25 @@ runs:
             ;;
         esac
 
-    - uses: action-works/patchcov-action@v1
+    - uses: action-works/patchcov-action@v2
       with:
-        # Pin patchcov itself (#3873, #3880). 0.1.1 carries the extracted
-        # coverage engine: `.patchcov/config.yaml` discovery and the symmetric
-        # ignore list mask popcount's CPU flap (#302); patience diff preserves
-        # patch attribution on repetitive evaluator refactors (#1554); source
-        # coverage `tolerate` / `tolerate-line` / `end` markers mask
-        # runtime CPU and unreachable-line variance (#2467).
-        # It also ships prebuilt Linux x86_64 + ARM64 binaries (#3750), avoiding
-        # cargo install on cache misses, and `patchcov merge` for future shards.
-        # Keep >= 0.1.1 for these capabilities. The migration from omni-dev's
-        # coverage engine was verified against omni-dev 0.46.0 with real main
-        # lcov artifacts and mutation checks;
-        # see docs/guides/developer.md "Patchcov migration verification".
-        version: 0.1.1
+        # Pin patchcov itself (#3873, #3880, #4324), deliberately and not through the
+        # action's own default, so a patchcov release cannot change measured coverage
+        # under an unrelated PR (0.4.0 is also the action's current default, but the default
+        # moves with the action's tag and this pin does not). 0.4.0 carries the extracted coverage engine:
+        # `.patchcov/config.yaml` discovery and the symmetric ignore list mask
+        # popcount's CPU flap (#302); patience diff preserves patch attribution on
+        # repetitive evaluator refactors (#1554); source coverage `tolerate` /
+        # `tolerate-line` / `end` markers mask runtime CPU and unreachable-line
+        # variance (#2467). It ships prebuilt Linux x86_64 + ARM64 binaries (#3750),
+        # avoiding cargo install on cache misses, and `patchcov merge` for future
+        # shards. Since 0.4.0 a nonempty report whose paths match no tracked file fails
+        # with exit 7 instead of diffing nothing; the lcov paths here are the checkout
+        # root, so no `strip-prefix` is set (#4324).
+        # Bump deliberately: re-run the verification in docs/guides/developer.md
+        # "Patchcov migration verification" (lint-markers, then a diff of two real
+        # main lcov artifacts) before moving this pin.
+        version: 0.4.0
         use-prebuilt-binary: ${{ inputs.use-prebuilt }}
         test-args: --features cli,simd,regex,serde --workspace
         # #3750: logs how many raw profile files the run left and how big they
