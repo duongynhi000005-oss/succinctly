@@ -62750,6 +62750,21 @@ fn test_yq_sort_and_sort_by_reorder_a_mappings_entries_2064() -> Result<()> {
         run_yq_stdin_with_stderr("sort", "b: 2\na: 1\nc: 0\n", &[])?,
         ("c: 0\na: 1\nb: 2\n".to_string(), String::new(), 0)
     );
+    // A repeated key is refused: yq lists every occurrence and the answer here holds a key once,
+    // so a sort written back with `-i` would lose an entry.
+    for (input, extra) in [
+        (r#"{"a":2,"b":1,"a":0}"#, &["-p=json", "-o=json"][..]),
+        ("a: 2\nb: 1\na: 0\n", &[][..]),
+    ] {
+        for filter in ["sort", "sort_by(.)"] {
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, input, extra)?;
+            assert_eq!((stdout.as_str(), code), ("", 1), "{input:?} | {filter}");
+            assert!(
+                stderr.contains("cannot sort a mapping with the repeated key \"a\""),
+                "{input:?} | {filter}: {stderr}"
+            );
+        }
+    }
     // jq mode keeps its pairing error.
     for filter in ["sort", "sort_by(.)"] {
         let (stdout, stderr, code) = run_jq_stdin_with_stderr(filter, r#"{"a":2,"b":1}"#, &[])?;

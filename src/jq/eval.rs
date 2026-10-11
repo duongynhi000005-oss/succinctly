@@ -19425,16 +19425,41 @@ fn builtin_unique_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     }
 }
 
+/// The error for sorting a mapping that repeats a key, or `None` (#2064). yq lists every
+/// occurrence of a repeated key in a sorted mapping; the sorted answer here is an owned map,
+/// which holds a key once, so answering would drop an entry that a sort written back with `-i`
+/// would then lose for good. A mapping the walk cannot read answers `None`: that failure is
+/// reported by the sort itself.
+pub(crate) fn yq_sort_repeated_key_error<F: DocumentFields>(fields: &F) -> Option<EvalError> {
+    let checked = effective_fields_checked(fields, false).ok()?;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for field in &checked {
+        let (key, _) = key_display_string_kind(&field.key)?;
+        if !seen.insert(key.clone().into_owned()) {
+            return Some(EvalError::new(format!(
+                "cannot sort a mapping with the repeated key {key:?}: its entries cannot be kept apart"
+            )));
+        }
+    }
+    None
+}
+
 /// yq mode only (#2064): `sort` and `sort_by(f)` on a mapping reorder its entries by the
 /// values (or by `[f]` of each value), keeping the keys, and answer a mapping. Stable, with
 /// yq's comparator ([`yq_sort_by`]). jq has no such reading and keeps its pairing error.
 ///
 /// `f` is `None` for `sort`, whose key is the value itself.
+///
+/// A mapping with a repeated key is refused ([`yq_sort_repeated_key_error`]) rather than
+/// collapsed (see the sort section of `docs/compliance/yq/limitations.md`).
 fn yq_sort_mapping<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     f: Option<&Expr>,
     fields: JsonFields<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    if let Some(err) = yq_sort_repeated_key_error(&fields) {
+        return QueryResult::Error(err);
+    }
     let checked = match effective_fields_checked(&fields, S::COLLAPSE_DUPLICATE_KEYS) {
         Ok(checked) => checked,
         Err(e) => return QueryResult::Error(e),
