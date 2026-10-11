@@ -118280,6 +118280,81 @@ const RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED: &[RetryRow3293] = &[
     ),
 ];
 
+/// #4341 rows over `{"a":1}`: the identity element of a generator that emitted
+/// nothing (`isempty(empty)` is `true`, `any(empty; .)` `false`, `all(empty; .)`
+/// `true`) is at the register the frame carries on an untracked entry, so an
+/// `and`/`or` around it accepts it as jq does. Captured from jq 1.7.1.
+const RETRY_ROWS_IDENTITY_REGISTER_4341_UNTRACKED: &[RetryRow3293] = &[
+    (
+        r"del(. as $x | 1 | (isempty(empty) or true) | $x.a?)",
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"del(. as $x | 1 | (any(empty; .) or true) | $x.a?)",
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"del(. as $x | 1 | (all(empty; .) and false) | $x.a?)",
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"del(. as $x | 1 | (any(. as $q ?// $z | if $q then true else empty end; .) or true) | $x.a?)",
+        "{}\n",
+        "",
+        "",
+        0,
+    ),
+];
+
+/// #4341 rows over `[true]`: the same identity under a `foreach` UPDATE whose
+/// extract navigates the computed boolean, and under an outer destructuring `?//`.
+const RETRY_ROWS_IDENTITY_REGISTER_4341_ARRAY: &[RetryRow3293] = &[
+    (
+        r"del(foreach .[]? as $k (.; (isempty(empty) or true); .b?))",
+        "[true]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"del(. as [$q] ?// $q | (any(. as [$q] ?// $z | if $q then true else empty end; .) or true))",
+        "[]\n",
+        "",
+        "",
+        0,
+    ),
+    (
+        r"del(. as [$q] ?// $q | (isempty(. as [$q] ?// $z | if $q then true else empty end) or true))",
+        "[]\n",
+        "",
+        "",
+        0,
+    ),
+];
+
+/// #4341: the identity element of `any`/`all`/`isempty` is at the frame's register
+/// on an untracked entry, on the cursor route and the owned one.
+#[test]
+fn test_any_all_isempty_identity_answer_states_the_frames_register_4341() -> Result<()> {
+    for (input, rows) in [
+        (r#"{"a":1}"#, RETRY_ROWS_IDENTITY_REGISTER_4341_UNTRACKED),
+        ("[true]", RETRY_ROWS_IDENTITY_REGISTER_4341_ARRAY),
+    ] {
+        assert_retry_rows_3293(None, &format!("{input} | "), rows)?;
+        assert_retry_rows_3293(Some(input), "", rows)?;
+    }
+    Ok(())
+}
+
 /// #4114: `isempty`'s identity `true` on an untracked entry, under `and`/`or`.
 #[test]
 fn test_isempty_path_identity_answer_on_an_untracked_entry_4114() -> Result<()> {

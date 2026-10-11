@@ -11519,16 +11519,16 @@ dry leaves `g` running to its end, which fires the trailing `true`
 (`path(.x | isempty(. as $q ?// $z | if $q then true else empty end))` on `{"x":true}` is
 `["x"]`, `test_isempty_path_answers_through_a_swallowed_break_retry_4114`,
 `test_isempty_path_answer_precedes_the_retrys_side_effects_4114`). yq mode keeps its single
-by-value answer (ADR-0018). The identity `true` that follows a swallowed answer rides the register
-the call entered with, which on an untracked entry is the frame's carried one, so an `and`/`or`
-around it accepts as jq does (`test_isempty_path_identity_answer_on_an_untracked_entry_4114`); the
-same identity element after `any`/`all` and the `true` of an `isempty(g)` whose `g` emitted nothing
-still state no register there (`1 | (isempty(empty) or true)` is `true` in jq, a refusal here). That
-residual is why 13 rows of the register sweep that `main` matched by accident now refuse (all
-`isempty(g ?// ...) or X` inside a `foreach` UPDATE whose extract navigates the computed `true`, or under an
-outer destructuring `?//`): `any(g ?// ...; .) or X` and `isempty(empty) or X` already refused them on
-`main`, so `isempty` joins its siblings rather than gaining a new gap. The sweep over the `isempty` operands
-(226,467 rows) went from 3,550 to 536 ACCEPT_WRONG and from 1,912 to 348 DIFF.
+by-value answer (ADR-0018). The identity element (`true` for `isempty`/`all`, `false` for `any`)
+that fires once `g` ran to its end, after a swallowed answer or when it emitted nothing, rides the
+register the call entered with, which on an untracked entry is the frame's carried one (#4114,
+#4341), so an `and`/`or` around it accepts as jq does
+(`test_isempty_path_identity_answer_on_an_untracked_entry_4114`,
+`test_any_all_isempty_identity_answer_states_the_frames_register_4341`). A `foreach` whose UPDATE
+reaches that identity through an `or` whose right operand navigates (`foreach .[]? as $k (.;
+isempty(g ?// ..) or (.a)?; .)` on `[true]`) still refuses where jq answers `[0]`: the register of a
+`foreach` emission is #4130's. The sweep over the `isempty` operands (226,467 rows) went from 3,550
+to 536 ACCEPT_WRONG and from 1,912 to 348 DIFF with #4114.
 
 The identity element `any`/`all` answer once `gen` is exhausted after a swallowed answer
 is compared with the register where the call entered, since backtracking through every fork
