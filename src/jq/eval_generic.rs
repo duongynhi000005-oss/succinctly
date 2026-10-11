@@ -7420,6 +7420,79 @@ mod file_origin {
     }
 }
 
+/// The name of each input file, indexed by file number, for the current
+/// thread (#2648): what `filename` reads back.
+///
+/// `file_index` is a number the node's origin already carries; the name is a
+/// property of the *run*, not of any one node, so the CLI installs the table
+/// once ([`enter_file_names`]) and `filename` maps the origin's file number
+/// through it. An empty table -- `-n`, a library caller, a `no_std` build --
+/// answers the empty string, the same value real yq gives a node that no file
+/// produced. `std` only, like its siblings: there is no thread-local without it.
+#[cfg(any(feature = "std", test))]
+mod file_names {
+    use alloc::rc::Rc;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CURRENT: RefCell<Option<Rc<[String]>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn name(file: usize) -> Option<String> {
+        CURRENT.with(|c| c.borrow().as_ref().and_then(|t| t.get(file).cloned()))
+    }
+
+    /// Restores the previous table when dropped.
+    pub struct Guard(Option<Rc<[String]>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+
+    pub(crate) fn enter(names: Vec<String>) -> Guard {
+        let installed: Rc<[String]> = Rc::from(names.into_boxed_slice());
+        Guard(CURRENT.with(|c| c.borrow_mut().replace(installed)))
+    }
+}
+
+#[cfg(not(any(feature = "std", test)))]
+mod file_names {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    pub(crate) fn name(_file: usize) -> Option<String> {
+        None
+    }
+
+    pub struct Guard;
+
+    pub(crate) fn enter(_names: Vec<String>) -> Guard {
+        Guard
+    }
+}
+
+/// Install `names` as the input-file name table until the returned guard is
+/// dropped (#2648).
+pub(crate) fn enter_file_names(names: Vec<String>) -> FileNamesGuard {
+    file_names::enter(names)
+}
+
+/// The RAII guard [`enter_file_names`] returns.
+pub(crate) type FileNamesGuard = file_names::Guard;
+
+/// The file name for file number `file`: the empty string when no table is
+/// installed or it has no such file.
+pub(crate) fn filename_of_file(file: i64) -> String {
+    usize::try_from(file)
+        .ok()
+        .and_then(file_names::name)
+        .unwrap_or_default()
+}
+
 /// The reindexed documents `succinctly yq`'s DOM route is evaluating, for the
 /// current thread (#3479).
 ///
@@ -9923,6 +9996,20 @@ fn file_index_for_path(path: &[OwnedValue]) -> i64 {
         .and_then(|i| table.get(i).copied())
         .and_then(|origin| i64::try_from(origin).ok())
         .unwrap_or(0)
+}
+
+/// `filename` for a node at `path`: the name of the file [`file_index_for_path`]
+/// resolves to (#2648).
+///
+/// With neither an ambient origin nor an `--eval-all` table installed there is
+/// no file to name, so `""` -- `file_index_for_path` would answer file `0`
+/// there, which is the right number for `file_index` but names a file the
+/// node did not come from (`-s`, which installs no per-file scope).
+fn filename_for_path(path: &[OwnedValue]) -> String {
+    if ambient_file_index().is_none() && file_origin::current().is_none() {
+        return String::new();
+    }
+    filename_of_file(file_index_for_path(path))
 }
 
 /// Evaluate an expression against a cursor.
@@ -28936,6 +29023,7 @@ fn path_context_single_native(expr: &Expr) -> bool {
             | Builtin::Parent
             | Builtin::PathNoArg
             | Builtin::FileIndex
+            | Builtin::Filename
             | Builtin::Empty,
         ) => true,
         // spine 2416 (walk residue): `eval_builtin`'s own `ParentN` arm
@@ -29393,7 +29481,9 @@ fn path_context_resolvable(expr: &Expr, admits: ResolveAdmits) -> bool {
     }
     let sub = |e: &Expr| path_context_resolvable(e, admits);
     match expr {
-        Expr::Builtin(Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex) => true,
+        Expr::Builtin(
+            Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex | Builtin::Filename,
+        ) => true,
         // #2472: a node, not a constant -- resolvable only where the caller
         // carries the identity to climb.
         Expr::Builtin(Builtin::Parent) => admits.parent,
@@ -29942,6 +30032,9 @@ fn path_context_resolve_constants<S: EvalSemantics>(
         // absolute, which is what `file_index_for_path` reads.
         Expr::Builtin(Builtin::FileIndex) => {
             Expr::Literal(Literal::Int(file_index_for_path(&path())))
+        }
+        Expr::Builtin(Builtin::Filename) => {
+            Expr::Literal(Literal::String(filename_for_path(&path())))
         }
         // #2472: `parent`/`parent(n)` inside a stage the owned identity
         // pipe evaluates as a whole (`[path, parent]`, `select(parent !=
@@ -32578,6 +32671,14 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 Err(e) => GenericResult::Error(e),
             }
         }
+        Builtin::Filename if cursor.is_some() => {
+            match cursor_path_and_ancestors(&cursor.expect("guarded")) {
+                Ok((path, _, _)) => {
+                    GenericResult::Owned(OwnedValue::String(filename_for_path(&path).into()))
+                }
+                Err(e) => GenericResult::Error(e),
+            }
+        }
 
         // #2476: both were falling to the `_` wildcard below, whose ambient
         // `to_owned_with_cursor` is `O(2^N)` on an alias fan-out.
@@ -33323,7 +33424,7 @@ fn owned_identity_rule(stage: &Expr) -> Option<OwnedIdentityRule> {
             // sending the whole pipe to the eager evaluator. `key` alone
             // carries the key-node flag; see `OwnedIdentityRule::KeyNode`.
             Builtin::Key => KeyNode,
-            Builtin::PathNoArg | Builtin::FileIndex => Keeps,
+            Builtin::PathNoArg | Builtin::FileIndex | Builtin::Filename => Keeps,
             Builtin::Map(_) => DetachesContainer,
             // `min_by`/`max_by` pick a child exactly as `min`/`max` do
             // (jq-only; the model is the captured `min`/`max` rule).
@@ -33552,7 +33653,9 @@ fn owned_identity_pipe_supported_at(stages: &[Expr], unfolded: u8) -> bool {
             // fresh scalar that stands where the node stood, so a later
             // path-context read is answered from the identity rather than
             // ending the pipe here.
-            Expr::Builtin(Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex) => {}
+            Expr::Builtin(
+                Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex | Builtin::Filename,
+            ) => {}
             Expr::Builtin(Builtin::Parent) => {}
             // spine 2416 (walk residue): `n` is a value read at this
             // position -- a constant, or a read the rewrite resolves here.
@@ -33934,7 +34037,7 @@ fn owned_identity_leaving_stage_supported(stage: &Expr) -> bool {
 fn owned_identity_emits_position(stage: &Expr) -> bool {
     matches!(
         strip_parens(stage),
-        Expr::Builtin(Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex)
+        Expr::Builtin(Builtin::Key | Builtin::PathNoArg | Builtin::FileIndex | Builtin::Filename)
     )
 }
 
@@ -36306,6 +36409,16 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
             Ok(path) => eval_owned_identity_stages::<S, V>(
                 rest,
                 Cow::Owned(OwnedValue::Int(file_index_for_path(&path))),
+                id,
+                optional,
+                tail,
+            ),
+            Err(e) => Flow::Escaped(Control::Error(e)),
+        },
+        Expr::Builtin(Builtin::Filename) => match id.path() {
+            Ok(path) => eval_owned_identity_stages::<S, V>(
+                rest,
+                Cow::Owned(OwnedValue::String(filename_for_path(&path).into())),
                 id,
                 optional,
                 tail,

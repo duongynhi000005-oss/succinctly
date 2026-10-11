@@ -7234,6 +7234,13 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::FileIndex));
         }
 
+        // filename - yq (#2648): the origin file's name. Real jq has no such
+        // builtin, so jq mode leaves it an undefined function.
+        if self.mode == ParserMode::Yq && self.matches_keyword("filename") {
+            self.consume_keyword("filename");
+            return Ok(Some(Builtin::Filename));
+        }
+
         // shuffle - yq: randomly shuffle array elements
         if self.matches_keyword("shuffle") {
             self.consume_keyword("shuffle");
@@ -9331,6 +9338,22 @@ mod tests {
         }
     }
     use super::*;
+
+    /// #2648: `filename` is real yq's builtin and not jq's, so only yq mode
+    /// parses it as one; jq mode leaves it an ordinary (undefined) call.
+    #[test]
+    fn filename_is_a_builtin_in_yq_mode_only_2648() {
+        let yq = parse_with_mode("filename", ParserMode::Yq).unwrap();
+        assert!(matches!(yq, Expr::Builtin(Builtin::Filename)), "{yq:?}");
+        let jq = parse_with_mode("filename", ParserMode::Jq).unwrap();
+        assert!(!matches!(jq, Expr::Builtin(Builtin::Filename)), "{jq:?}");
+        // A longer name that merely starts with it is not the builtin.
+        let longer = parse_with_mode("filenames", ParserMode::Yq).unwrap();
+        assert!(
+            !matches!(longer, Expr::Builtin(Builtin::Filename)),
+            "{longer:?}"
+        );
+    }
 
     #[test]
     fn test_identity() {

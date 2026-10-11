@@ -22657,6 +22657,142 @@ fn test_eval_all_file_index_bare() -> Result<()> {
     Ok(())
 }
 
+/// #2648: `filename` answers the path each node's file was given as, in both
+/// modes -- the per-file streaming loop and `--eval-all`'s combined list.
+///
+/// ```text
+/// $ yq    -o=json -I=0 'filename'                      t1 t2   # "t1" "t2"
+/// $ yq ea -o=json -I=0 'filename'                      t1 t2   # "t1" "t2"
+/// $ yq    -o=json -I=0 '.name | [., filename]'         t1 t2   # ["first","t1"] ["second","t2"]
+/// $ yq ea -o=json -I=0 'select(filename == "t2") | .name' t1 t2   # "second"
+/// $ yq    -o=json -I=0 'map(filename)' t1 t2 (ea)              # [t1,t1] [t2,t2]
+/// ```
+#[test]
+fn test_filename_names_each_input_file_2648() -> Result<()> {
+    let (f1, f2) = two_doc_fixtures()?;
+    // JSON-escaped, so a path with a backslash (Windows) reads as the printer writes it.
+    let json_path = |p: &std::path::Path| -> Result<String> {
+        let quoted = serde_json::to_string(&p.display().to_string())?;
+        Ok(quoted[1..quoted.len() - 1].to_string())
+    };
+    let (p1, p2) = (json_path(f1.path())?, json_path(f2.path())?);
+    for mode in [
+        &["-o", "json", "-I", "0"][..],
+        &["--eval-all", "-o", "json", "-I", "0"][..],
+    ] {
+        let (stdout, stderr, code) = run_yq_files("filename", &[f1.path(), f2.path()], mode)?;
+        assert_eq!(code, 0, "{mode:?}: {stderr}");
+        assert_eq!(stdout.trim(), format!("\"{p1}\"\n\"{p2}\""), "{mode:?}");
+
+        let (stdout, stderr, code) =
+            run_yq_files(".name | [., filename]", &[f1.path(), f2.path()], mode)?;
+        assert_eq!(code, 0, "{mode:?}: {stderr}");
+        assert_eq!(
+            stdout.trim(),
+            format!("[\"first\",\"{p1}\"]\n[\"second\",\"{p2}\"]"),
+            "{mode:?}"
+        );
+
+        let (stdout, stderr, code) = run_yq_files("map(filename)", &[f1.path(), f2.path()], mode)?;
+        assert_eq!(code, 0, "{mode:?}: {stderr}");
+        assert_eq!(
+            stdout.trim(),
+            format!("[\"{p1}\",\"{p1}\"]\n[\"{p2}\",\"{p2}\"]"),
+            "{mode:?}"
+        );
+
+        let filter = format!("select(filename == \"{p2}\") | .name");
+        let (stdout, stderr, code) = run_yq_files(&filter, &[f1.path(), f2.path()], mode)?;
+        assert_eq!(code, 0, "{mode:?}: {stderr}");
+        assert_eq!(stdout.trim(), "\"second\"", "{mode:?}");
+    }
+    Ok(())
+}
+
+/// #2648: a write sees the name too, and it is the argument as typed -- a
+/// relative path stays relative (`yq '.x = filename' t1.yaml` writes `t1.yaml`).
+#[test]
+fn test_filename_in_an_assignment_is_the_argument_as_given_2648() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("t1.yaml"), "a: 1\n")?;
+    std::fs::write(dir.path().join("t2.yaml"), "b: 2\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .current_dir(dir.path())
+        .args([
+            "yq",
+            "-o",
+            "json",
+            "-I",
+            "0",
+            ".x = filename",
+            "t1.yaml",
+            "./t2.yaml",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        "{\"a\":1,\"x\":\"t1.yaml\"}\n{\"b\":2,\"x\":\"./t2.yaml\"}"
+    );
+    Ok(())
+}
+
+/// #2648: the name reads `-` for stdin and is empty under `-n`, which reads
+/// nothing -- both live-verified against yq v4.53.3 (and goldens
+/// `filename_stdin` / `filename_detached_null_input` for the stdin-piped form).
+#[test]
+fn test_filename_for_stdin_and_null_input_2648() -> Result<()> {
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr("filename", "a: 1\n", &["--eval-all"])?;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "-\n");
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr("filename", "a: 1\n", &["-n"])?;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "\n");
+    Ok(())
+}
+
+/// #2648: `filename` is real yq surface, not real jq's -- `succinctly jq` keeps
+/// answering what jq 1.7.1 does, an undefined function.
+#[test]
+fn test_filename_stays_undefined_in_jq_mode_2648() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["jq", "filename"])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("filename/0 is not defined"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// #2648: a metadata assignment is resolved once, against the first document,
+/// so it refuses a `filename` the way it refuses `file_index` rather than
+/// stamping every file with the first one's name.
+#[test]
+fn test_filename_in_a_metadata_assignment_is_refused_2648() -> Result<()> {
+    let (f1, f2) = two_doc_fixtures()?;
+    let (stdout, stderr, code) = run_yq_files(
+        ".name line_comment = filename",
+        &[f1.path(), f2.path()],
+        &[],
+    )?;
+    assert_ne!(code, 0);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("cannot depend on document_index/file_index/filename"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// Spine 2416 step 5: `--eval-all` reaches the eager evaluator only through
 /// `path_context_needs_owned_position` now, and the file-origin table follows it there.
 ///

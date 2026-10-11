@@ -2943,7 +2943,8 @@ pub(crate) fn needs_path_context(expr: &Expr) -> bool {
         // `--eval-all`'s `file_index`/`fileIndex`/`fi` (#715) needs the same
         // path-context routing as `Key` above -- it resolves via
         // `current_path`, not a cursor.
-        Expr::Builtin(Builtin::FileIndex) => true,
+        // `filename` (#2648) reads the same origin, so it routes the same way.
+        Expr::Builtin(Builtin::FileIndex | Builtin::Filename) => true,
         // Neither `Compare` nor `Select` carries path context on its own,
         // but a `key`/`document_index`/`file_index` nested in one of their
         // operands does -- e.g. `select(file_index == 0)`, the headline
@@ -15956,6 +15957,22 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 super::eval_generic::ambient_file_index().unwrap_or(0),
             ))
         }
+        // #2648: the name of the file `file_index` above reads, from the
+        // run's name table; `""` without one, real yq's answer for a node no
+        // file produced. The ambient origin rather than `""` here: this arm is
+        // also reached by positioned shapes whose cursor was lost (`.x |=
+        // filename`, `.a = {"n": filename}`), which real yq answers with the
+        // file's name. A detached literal (`1 as $v | $v | filename`) is the
+        // one case that over-answers -- see docs/compliance/yq/limitations.md.
+        //
+        // No ambient origin at all (`-s`, which installs no per-file scope)
+        // is `""`, not file 0: yq names no file for a slurped array.
+        Builtin::Filename => QueryResult::Owned(OwnedValue::String(
+            super::eval_generic::ambient_file_index()
+                .map(super::eval_generic::filename_of_file)
+                .unwrap_or_default()
+                .into(),
+        )),
         Builtin::Shuffle => builtin_shuffle::<W, S>(value, optional),
         Builtin::Pivot => builtin_pivot::<W, S>(value, optional),
         Builtin::SplitDoc => {
@@ -30337,6 +30354,20 @@ pub fn enter_file_index_scope(file_index: usize) -> FileIndexScope {
     ))
 }
 
+/// Make `filename` answer `names[file_index]` for every evaluation until the
+/// returned guard is dropped (#2648).
+///
+/// Installed once per run, around the CLI's per-file loops: unlike
+/// [`enter_file_index_scope`]'s number, the table does not change per file --
+/// each file's own scope picks its entry out of it.
+#[must_use = "the scope ends when the guard is dropped"]
+pub fn enter_file_names_scope(names: Vec<String>) -> FileNamesScope {
+    FileNamesScope(super::eval_generic::enter_file_names(names))
+}
+
+/// The scope [`enter_file_names_scope`] opens; dropping it closes the scope.
+pub struct FileNamesScope(#[allow(dead_code)] super::eval_generic::FileNamesGuard);
+
 /// The scope [`enter_file_index_scope`] opens; dropping it closes the scope.
 pub struct FileIndexScope(#[allow(dead_code)] super::eval_generic::NodeOriginGuard);
 
@@ -32082,6 +32113,7 @@ fn builtin_yields_at_most_one_value(builtin: &Builtin) -> bool {
         | Builtin::Explode
         | Builtin::Fabs
         | Builtin::FileIndex
+        | Builtin::Filename
         | Builtin::Finites
         | Builtin::First
         | Builtin::FirstStream(_)
@@ -119484,6 +119516,67 @@ mod tests {
             eval_all_outputs(b"[10,20]", &[3, 4], "def f: file_index; .[] | f"),
             vec!["3", "4"]
         );
+    }
+
+    /// #2648: `filename` names the file `file_index` numbers, through the
+    /// run's name table -- by position under `--eval-all`'s origin table, by
+    /// the ambient per-file scope on the ordinary path, and `""` with neither.
+    #[test]
+    fn test_filename_reads_the_name_table_2648() {
+        let yq = |json: &[u8], origin: &[usize], filter: &str| -> Vec<String> {
+            let index = JsonIndex::build(json);
+            let input = to_owned_lossy::<JqSemantics, _>(&index.root(json).value());
+            let expr =
+                crate::jq::parser::parse_with_mode(filter, crate::jq::parser::ParserMode::Yq)
+                    .unwrap();
+            match eval_owned_with_file_index::<Vec<u64>, YqSemantics>(&expr, &input, origin) {
+                QueryResult::Owned(v) => vec![v.to_json()],
+                QueryResult::ManyOwned(vs) => vs.iter().map(OwnedValue::to_json).collect(),
+                other => panic!("expected outputs, got {other:?}"),
+            }
+        };
+        let names = enter_file_names_scope(vec!["a.yaml".into(), "./b.yaml".into()]);
+        // The origin table maps array element `i` to its file; the name follows.
+        assert_eq!(
+            yq(b"[10,20,30]", &[0, 1, 1], ".[] | filename"),
+            vec![r#""a.yaml""#, r#""./b.yaml""#, r#""./b.yaml""#]
+        );
+        assert_eq!(
+            yq(b"[10,20]", &[1, 0], ".[] | select(filename == \"a.yaml\")"),
+            vec!["20"]
+        );
+        // A file number past the table names nothing.
+        assert_eq!(yq(b"[1]", &[5], ".[] | filename"), vec![r#""""#]);
+        drop(names);
+        // No table at all: the empty string, not a panic and not file 0's name.
+        assert_eq!(yq(b"[1]", &[0], ".[] | filename"), vec![r#""""#]);
+    }
+
+    /// #2648: the ordinary multi-file path has no origin table, only the
+    /// per-file scope; and no scope at all (`-s`) names no file.
+    // The ambient per-file scope is a `std` thread-local; the `no_std` stub installs nothing.
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_filename_reads_the_ambient_file_scope_2648() {
+        let json = br#"{"x":1}"#;
+        let index = JsonIndex::build(json);
+        let run = |filter: &str| -> Vec<String> {
+            let expr =
+                crate::jq::parser::parse_with_mode(filter, crate::jq::parser::ParserMode::Yq)
+                    .unwrap();
+            eval::<Vec<u64>, YqSemantics>(&expr, index.root(json))
+                .collect_owned::<YqSemantics>()
+                .iter()
+                .map(OwnedValue::to_json)
+                .collect()
+        };
+        let _names = enter_file_names_scope(vec!["a.yaml".into(), "b.yaml".into()]);
+        {
+            let _scope = enter_file_index_scope(1);
+            assert_eq!(run("filename"), vec![r#""b.yaml""#]);
+            assert_eq!(run(".x | filename"), vec![r#""b.yaml""#]);
+        }
+        assert_eq!(run("filename"), vec![r#""""#], "no scope names no file");
     }
 
     #[test]

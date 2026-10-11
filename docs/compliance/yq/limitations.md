@@ -704,6 +704,36 @@ writes one between them. Closing this needs per-node file/document provenance th
 the evaluator to the printer, plus yq's own per-operator table for which operators set it —
 tracked on [#2427](https://github.com/rust-works/succinctly/issues/2427).
 
+### `filename` and `file_index` are read from the evaluation context, not from the node (#2648)
+
+Real yq stamps `filename` and `fileIndex` on every node as it decodes a file, and which operators
+keep that stamp is the same per-operator table the `---` section above describes: `.`, `.name`,
+`select`, `=` and `+` keep it, while `[...]`, `map`, `to_entries`, `tostring` and every literal
+start a fresh node whose `filename` is `""`. succinctly's values carry no such field, so
+`filename` answers the file the evaluation is currently in — the per-file scope the CLI installs
+around each file (and the origin each `--eval-all` document carries). That agrees with real yq
+for every shape that stays on the file's own nodes, including arithmetic and `tostring` results,
+which real yq also gives the file's name (live-verified against v4.53.3), and diverges where yq
+builds a node it does not stamp:
+
+```bash
+$ yq '1 as $v | $v | filename' f1.yaml             # (empty)
+$ succinctly yq '1 as $v | $v | filename' f1.yaml  # f1.yaml
+$ yq '[.x] | .[0] | filename' f1.yaml              # (empty)
+$ succinctly yq '[.x] | .[0] | filename' f1.yaml   # f1.yaml
+```
+
+A `load()`ed document is the same gap from the other side: yq stamps the *loaded* file's name on
+its nodes (`yq -n '[load("f1.yaml") | filename]'` is `f1.yaml`, and so is `yq '[load("f2.yaml") |
+filename]' f1.yaml`), where succinctly names the file being read, or `""` under `-n`.
+
+`file_index` has the same shape (`yq ea '1 | fileIndex'` is `0` for every file, succinctly's is the
+file's own). Closing it needs the per-node provenance the `---` section names, tracked on
+[#2427](https://github.com/rust-works/succinctly/issues/2427). A metadata assignment (`.x
+line_comment = filename`) is refused with the `document_index/file_index/filename` error rather
+than resolved once against the first document, so a multi-file run never stamps every file with
+the first one's name — yq answers each file's own name there.
+
 ### `. as $x | [$x]` under `--eval-all` collects one copy per document, not one per binding (#2427)
 
 `--eval-all` follows real yq's `EvaluateTogether` rules for `[E]` and for binary operators
