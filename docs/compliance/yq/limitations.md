@@ -435,15 +435,15 @@ the raw byte.
 Two interactions remain open, neither closed by #1709 itself:
 
 1. This check only fires on bytes that are genuinely unescaped in the rendered output.
-   `-o=json -0 '.a'` *without* an explicit `-r` should print a properly JSON-escaped
-   `"b\u0000c"` and succeed (live-verified against the pinned oracle, Homebrew yq
-   v4.53.3: JSON's default unwrap-scalar setting is `false`, unlike YAML's
-   `true` — real yq needs `-r` explicit to unwrap a JSON scalar), but succinctly's own
-   `raw_output` resolution unconditionally ORs in `-0`/`-j` regardless of output format, so
-   this one combination instead unwraps (bypassing JSON's own escaping) and correctly
-   triggers this same NUL check on the resulting raw byte. That's a distinct, pre-existing
-   root cause — [#1996](https://github.com/rust-works/succinctly/issues/1996) — not
-   something #1709 itself introduced or is scoped to fix.
+   `-o=json -0 '.a'` *without* an explicit `-r` prints a properly JSON-escaped `"b\u0000c"`
+   and succeeds, as real yq does (live-verified against Homebrew yq v4.53.3: JSON's default
+   unwrap-scalar setting is `false`, unlike YAML's `true` — real yq needs `-r` explicit to
+   unwrap a JSON scalar). succinctly's `raw_output` used to OR in `-0`/`-j` regardless of
+   output format, so this one combination unwrapped (bypassing JSON's own escaping) and
+   tripped the NUL check on the raw byte; since
+   [#1996](https://github.com/rust-works/succinctly/issues/1996) `-0` no longer implies it,
+   and `-o=json -r -0` still raises, as yq does. (`-j` still implies `-r`; see the `-j`
+   collision entry below and #1731.)
 
 2. **`--color`/`--colors` combined with `-0` loses the flush-then-error atomicity described
    above.** Real yq's own `--colors -0` still flushes earlier valid results before erroring

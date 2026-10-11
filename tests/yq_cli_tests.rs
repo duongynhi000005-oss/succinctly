@@ -8034,6 +8034,7 @@ fn test_raw_output_json_inplace_strips_quotes_1715() -> Result<()> {
 /// `--join-output` also sets `raw_output` (`OutputConfig::from_args`) and
 /// suppresses the terminator entirely -- verified against the pinned jq
 /// 1.7.1 oracle (`echo '["hello","world"]' | jq -j '.[]'` -> `helloworld`).
+/// (`-0` no longer sets `raw_output`, #1996; `-j`'s own reshaping is #1731.)
 #[test]
 fn test_join_output_json_strips_quotes_1715() -> Result<()> {
     let (output, code) = run_yq_stdin(
@@ -8043,6 +8044,30 @@ fn test_join_output_json_strips_quotes_1715() -> Result<()> {
     )?;
     assert_eq!(code, 0);
     assert_eq!(output, "helloworld");
+    Ok(())
+}
+
+/// #1996: `-0`/`--nul-output` does not imply `-r` for JSON output (JSON's default
+/// unwrap-scalar setting is false; only YAML's is true), so a JSON string keeps its quotes
+/// and its escapes. Every row was captured from yq v4.53.3 (`a: "b\0c"` is a real NUL).
+#[test]
+fn test_nul_output_json_keeps_quotes_1996() -> Result<()> {
+    let args = &["-o=json", "-0"];
+    let nul_doc = "a: \"b\\0c\"\nd: 1\n";
+    for (filter, doc, expected) in [
+        (".a", "a: hello\n", "\"hello\"\0"),
+        (".a", nul_doc, "\"b\\u0000c\"\0"),
+        (".d", nul_doc, "1\0"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, doc, args)?;
+        assert_eq!((out.as_str(), code), (expected, 0), "{filter} on {doc:?}");
+    }
+    // An explicit `-r` unwraps, so the NUL is raw and refused; so is YAML output, which
+    // always unwraps a scalar.
+    for extra in [&["-o=json", "-r", "-0"][..], &["-0"][..]] {
+        let (out, _err, code) = run_yq_stdin_with_stderr(".a", nul_doc, extra)?;
+        assert_eq!((out.as_str(), code), ("", 1), "{extra:?}");
+    }
     Ok(())
 }
 
