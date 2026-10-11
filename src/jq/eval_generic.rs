@@ -1769,6 +1769,19 @@ pub(crate) fn swallowing_boundary<S: EvalSemantics>(expr: &Expr, catch: Option<&
     crate::jq::eval::try_swallows_scalar_iteration(expr, catch) && S::TAG != EvalTag::Yq
 }
 
+/// Whether a `?`/`try` boundary over `expr` with this handler may settle a bare
+/// `.a`/`.[N]` lookup over a non-null scalar without stepping it (#4227): the body is
+/// a bare lookup ([`try_swallows_scalar_lookup`](crate::jq::eval::try_swallows_scalar_lookup))
+/// and the mode is not yq, where a scalar lookup is empty and builds no message. One
+/// definition for [`swallowed_path_leaf`] (the document walks) and the owned resolver's
+/// gate, so the mode rule cannot be changed in one and left behind in the other.
+pub(crate) fn swallowing_lookup_boundary<S: EvalSemantics>(
+    expr: &Expr,
+    catch: Option<&Expr>,
+) -> bool {
+    crate::jq::eval::try_swallows_scalar_lookup(expr, catch) && S::TAG != EvalTag::Yq
+}
+
 /// [`swallowing_boundary`] for a boundary at a *value* position, which also
 /// swallows `path(.[])` (#4157): [`swallowed_scalar_iteration`] and the owned
 /// front door. Not for the path walks -- [`swallowed_path_leaf`] keeps
@@ -1820,7 +1833,14 @@ fn scalar_leaf_iteration<S: EvalSemantics, V: DocumentValue>(
 /// An owned scalar needs no check: it was decoded when it was built, and a slice
 /// materializes its elements, so an undecodable one raised there, before the walk.
 ///
-/// A container with members is told from its cursor ([`DocumentCursor::is_container`])
+/// #4227: a bare `.a`/`.[N]` boundary (no handler or `catch empty`) over a non-null
+/// scalar settles the same way, `Some(Ok(()))`, so the `Cannot index ...` message `?`
+/// would drop is never built ([`swallowing_lookup_boundary`]). `null` indexes to
+/// `null`, a container has the lookup to answer, and a malformed value (typed `error`)
+/// raises a document fault `?` never swallows, so each of those takes the step. A lookup
+/// has no decode failure of its own to report, unlike `.[]` over an undecodable string.
+///
+/// /// A container with members is told from its cursor ([`DocumentCursor::is_container`])
 /// without resolving its value, so a container-heavy document does not pay a second
 /// resolve per member for a shortcut that cannot help it; only an empty container
 /// or a scalar is probed (the probe is free over JSON, an alias resolve over YAML,
@@ -1844,7 +1864,9 @@ fn swallowed_path_leaf<S: EvalSemantics, V: DocumentValue>(
     catch: Option<&Expr>,
     node: &PathNode<V>,
 ) -> Option<Result<(), EvalError>> {
-    if !swallowing_boundary::<S>(body, catch) {
+    let iterates = swallowing_boundary::<S>(body, catch);
+    // #4227: a bare `.a`/`.[N]` lookup over a non-null scalar is the same nothing.
+    if !iterates && !swallowing_lookup_boundary::<S>(body, catch) {
         return None;
     }
     match node {
@@ -1855,14 +1877,23 @@ fn swallowed_path_leaf<S: EvalSemantics, V: DocumentValue>(
         PathNode::At(cursor) if cursor.is_container() => None,
         PathNode::At(cursor) => {
             let value = cursor.value();
-            if value.as_object().is_none() && value.as_array().is_none() {
-                Some(scalar_leaf_iteration::<S, V>(&value, cursor))
-            } else {
+            if value.as_object().is_some() || value.as_array().is_some() {
                 None
+            } else if iterates {
+                Some(scalar_leaf_iteration::<S, V>(&value, cursor))
+            } else if cursor_is_null(&value, Some(cursor))
+                // A malformed value types as `error`; the step raises its document
+                // fault, which `?` never swallows, so it must run.
+                || tagged_type_name(&value, Some(*cursor)) == "error"
+            {
+                None
+            } else {
+                Some(Ok(()))
             }
         }
         PathNode::Owned(value)
-            if !matches!(**value, OwnedValue::Array(_) | OwnedValue::Object(_)) =>
+            if !matches!(**value, OwnedValue::Array(_) | OwnedValue::Object(_))
+                && (iterates || !matches!(**value, OwnedValue::Null)) =>
         {
             Some(Ok(()))
         }
@@ -51793,7 +51824,8 @@ mod tests {
         let parenthesised = Expr::Paren(Box::new(Expr::Iterate));
         let empty = parse("empty").unwrap();
         let handler = parse(r#""c""#).unwrap();
-        let field = parse(".a").unwrap();
+        // A chain is not a bare lookup (#4227 settles `.a`, not `.a.b`).
+        let field = parse(".a.b").unwrap();
 
         live(b"5", &|scalar| {
             for body in [&iterate, &parenthesised] {
@@ -51842,6 +51874,74 @@ mod tests {
         assert!(settle::<YqSemantics>(&owned_scalar, &iterate, None).is_none());
         assert!(settle::<JqSemantics>(&owned_container, &iterate, None).is_none());
         assert!(settle::<JqSemantics>(&absent, &iterate, None).is_none());
+    }
+
+    /// #4227: `swallowed_path_leaf`'s lookup half, which no output shows. A bare
+    /// `.a` or `.[N]` (under a `Paren` too) with no handler or `catch empty` settles
+    /// a non-null scalar node -- live or owned -- as nothing; it never settles
+    /// `null`, a container, a slice, an absent node, a malformed value (whose
+    /// document fault `?` never swallows), a handler that runs, or anything in yq
+    /// mode.
+    #[test]
+    fn swallowed_path_leaf_lookup_gate_4227() {
+        type Node<'a> = PathNode<crate::json::StandardJson<'a, Vec<u64>>>;
+        let settles = |node: &Node<'_>, source: &str, catch: Option<&Expr>| {
+            let body = parse(source).unwrap();
+            (
+                swallowed_path_leaf::<JqSemantics, _>(&body, catch, node).is_some(),
+                swallowed_path_leaf::<YqSemantics, _>(&body, catch, node).is_some(),
+            )
+        };
+        let empty = parse("empty").unwrap();
+        let handler = parse(r#""c""#).unwrap();
+        for json in [&b"5"[..], b"true", br#""abc""#, b"1.5"] {
+            let index = JsonIndex::build(json);
+            let scalar = PathNode::At(index.root(json));
+            for source in [".a", ".[0]", ".[-1]", "(.a)"] {
+                assert_eq!(settles(&scalar, source, None), (true, false), "{source}");
+                assert_eq!(
+                    settles(&scalar, source, Some(&empty)),
+                    (true, false),
+                    "{source}"
+                );
+            }
+            // A handler that runs, a chain, and a slice (`"abc" | .[1:2]` is a string).
+            assert_eq!(settles(&scalar, ".a", Some(&handler)), (false, false));
+            assert_eq!(settles(&scalar, ".a.b", None), (false, false));
+            assert_eq!(settles(&scalar, ".[0:1]", None), (false, false));
+        }
+        // `null | .a` is `null`, not an error.
+        let null_json: &[u8] = b"null";
+        let null_index = JsonIndex::build(null_json);
+        let null = PathNode::At(null_index.root(null_json));
+        assert_eq!(settles(&null, ".a", None), (false, false));
+        assert_eq!(settles(&null, ".[0]", None), (false, false));
+        // A container has the lookup to answer, empty or not.
+        for json in [&b"[1]"[..], b"[]", b"{}", br#"{"a":1}"#] {
+            let index = JsonIndex::build(json);
+            let container = PathNode::At(index.root(json));
+            assert_eq!(settles(&container, ".a", None), (false, false));
+            assert_eq!(settles(&container, ".[0]", None), (false, false));
+        }
+        // Owned: a non-null scalar settles, null and a container are stepped.
+        let owned = |value: OwnedValue| -> Node<'_> { PathNode::Owned(Rc::new(value)) };
+        assert_eq!(
+            settles(&owned(OwnedValue::Int(1)), ".a", None),
+            (true, false)
+        );
+        assert_eq!(
+            settles(&owned(OwnedValue::String("s".into())), ".[0]", None),
+            (true, false)
+        );
+        assert_eq!(
+            settles(&owned(OwnedValue::Null), ".a", None),
+            (false, false)
+        );
+        assert_eq!(
+            settles(&owned(OwnedValue::array()), ".a", None),
+            (false, false)
+        );
+        assert_eq!(settles(&PathNode::Absent, ".a", None), (false, false));
     }
 
     /// #2572: a walk step extends the position's trail rather than copying

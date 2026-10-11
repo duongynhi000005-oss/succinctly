@@ -5941,6 +5941,23 @@ pub(crate) fn try_swallows_scalar_iteration(expr: &Expr, catch: Option<&Expr>) -
     matches!(unwrap_bind_source(expr), Expr::Iterate) && catch.map_or(true, is_empty_handler)
 }
 
+/// Whether a `?`/`try` boundary over `expr` with this handler is a bare `.a` or `.[N]`
+/// lookup (not a slice) with no handler or `catch empty` (#4227).
+///
+/// Over a scalar that is not `null` such a lookup raises `Cannot index ... with ...`
+/// and nothing else, so the boundary has nothing to deliver and its message is not
+/// worth building. The shape half of the test, as [`try_swallows_scalar_iteration`]
+/// is for `.[]`; the callers add the value half (`null | .a` is `null`, and a
+/// container has the lookup to answer) and the mode. Operands are peeled by
+/// [`unwrap_bind_source`], so a closure argument (`def opt(f): f?;` called as
+/// `opt(.a)`) matches too.
+pub(crate) fn try_swallows_scalar_lookup(expr: &Expr, catch: Option<&Expr>) -> bool {
+    matches!(
+        unwrap_bind_source(expr),
+        Expr::Field(_) | Expr::Index { .. }
+    ) && catch.map_or(true, is_empty_handler)
+}
+
 /// [`try_swallows_scalar_iteration`] for a boundary at a *value* position (#4157):
 /// the body is a bare `.[]` or `path(.[])`, and the handler, if any, is `empty`.
 ///
@@ -6037,6 +6054,34 @@ fn owned_scalar_iteration_swallowed<S: EvalSemantics>(
     value: &OwnedValue,
 ) -> bool {
     crate::jq::eval_generic::swallowing_boundary::<S>(body, catch) && is_owned_scalar(value)
+}
+
+/// Whether the `?`/`try` boundary over `body` with this handler has nothing to do
+/// for the **owned** `value` in a path walk (#4227): a bare `.a` or `.[N]` (not a
+/// slice) with no handler or `catch empty`, in jq mode, over a scalar that is not
+/// `null`.
+///
+/// The lookup-shaped twin of [`owned_scalar_iteration_swallowed`]. Indexing a
+/// `Bool`, number or string raises `Cannot index ... with ...` and nothing else, and
+/// the boundary drops it, so the message (a preview and an owned copy of the
+/// scalar) is never worth building. `null` is left to step: `null | .a` is `null`,
+/// not an error, and `path(.a?)` over it is `["a"]`. A slice is left to step too
+/// (`"abc" | .[1:2]` is a string). An owned scalar was decoded when it was built, so
+/// unlike a cursor's it has no decode failure left to raise. yq mode never builds the
+/// message (a scalar lookup is empty there) and keeps its own route.
+///
+/// Only the resolver asks this, and only for a trackable value: an untracked lookup
+/// raises `Invalid path expression`, which `?` keeps. It is not a value-position
+/// boundary ([`owned_swallowing_boundary`] declines `.a?`), where the same lookup is
+/// evaluated by the ordinary route.
+fn owned_scalar_lookup_swallowed<S: EvalSemantics>(
+    body: &Expr,
+    catch: Option<&Expr>,
+    value: &OwnedValue,
+) -> bool {
+    crate::jq::eval_generic::swallowing_lookup_boundary::<S>(body, catch)
+        && is_owned_scalar(value)
+        && !matches!(value, OwnedValue::Null)
 }
 
 /// Whether an owned `value` has no members to list, so a swallowed `.[]` over it
@@ -40658,7 +40703,10 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         Expr::Try { expr, catch } => {
             // #3728: a bare `.[]` over a trackable scalar raises the `Cannot
             // iterate` error this boundary drops (see `resolve_optional_sink`).
-            if trackable && owned_scalar_iteration_swallowed::<S>(expr, catch.as_deref(), value) {
+            if trackable
+                && (owned_scalar_iteration_swallowed::<S>(expr, catch.as_deref(), value)
+                    || owned_scalar_lookup_swallowed::<S>(expr, catch.as_deref(), value))
+            {
                 return ResolveFlow::Exhausted;
             }
             // jq mode only, like every other register admission in this
@@ -41989,7 +42037,10 @@ fn resolve_optional_sink<'a, S: EvalSemantics>(
             // format first (a preview string and an owned copy of the scalar).
             // An untracked one raises a path error instead, which `?` keeps, so
             // it still evaluates. Nothing is delivered either way.
-            if trackable && owned_scalar_iteration_swallowed::<S>(inner, None, value) {
+            if trackable
+                && (owned_scalar_iteration_swallowed::<S>(inner, None, value)
+                    || owned_scalar_lookup_swallowed::<S>(inner, None, value))
+            {
                 return ResolveFlow::Exhausted;
             }
             let bare_navigation_primitive = matches!(
@@ -125813,6 +125864,73 @@ mod tests {
         let container = eval_owned_closed::<JqSemantics>(&array).unwrap();
         assert_eq!(boundary(".[]?", &container), (false, false));
         assert_eq!(boundary("try .[] catch empty", &container), (false, false));
+    }
+
+    /// #4227: the resolver's lookup gate, which no output can show. Taken for a `?`
+    /// or `try` over a bare `.a` or `.[N]` (under a `Paren` too) with no handler or
+    /// `catch empty`, over a non-null owned scalar, in jq mode. Not taken for `null`
+    /// (`null | .a` is `null`, not an error), a container, a slice, a chain, a handler
+    /// that runs, or in yq mode -- and never by the value-position front door, which
+    /// declines `.a?`.
+    #[test]
+    fn owned_scalar_lookup_gate_4227() {
+        let gate = |source: &str, value: &OwnedValue| {
+            let parsed = parse(source).unwrap();
+            let (body, catch) = match unwrap_paren(&parsed) {
+                Expr::Optional(inner) => ((**inner).clone(), None),
+                Expr::Try { expr, catch } => ((**expr).clone(), catch.as_deref().cloned()),
+                other => panic!("`{source}` is not a boundary: {other:?}"),
+            };
+            (
+                owned_scalar_lookup_swallowed::<JqSemantics>(&body, catch.as_ref(), value),
+                owned_scalar_lookup_swallowed::<YqSemantics>(&body, catch.as_ref(), value),
+            )
+        };
+        let scalars = [
+            OwnedValue::Bool(true),
+            OwnedValue::Int(5),
+            OwnedValue::Float(1.5),
+            OwnedValue::String("abc".into()),
+        ];
+        for scalar in &scalars {
+            for source in [
+                ".a?",
+                "(.a)?",
+                ".[0]?",
+                ".[-1]?",
+                "try .a",
+                "try .a catch empty",
+                "try .[0] catch empty",
+                "(try .a catch empty)",
+            ] {
+                assert_eq!(gate(source, scalar), (true, false), "{source}");
+            }
+            // A handler that runs, a body that is not a bare lookup, and a slice
+            // (`"abc" | .[1:2]` is a string) are all evaluated.
+            for source in [
+                r#"try .a catch "c""#,
+                "try .a catch .",
+                "(.a.b)?",
+                ".[]?",
+                ".[0:1]?",
+                "(.a | empty)?",
+            ] {
+                assert_eq!(gate(source, scalar), (false, false), "{source}");
+            }
+            // The value-position front door never settles a lookup.
+            for source in [".a?", "try .a catch empty"] {
+                let expr = parse(source).unwrap();
+                assert!(
+                    !owned_swallowing_boundary::<JqSemantics>(&expr, scalar),
+                    "{source}"
+                );
+            }
+        }
+        // `null` indexes to `null`; a container has the lookup to answer.
+        assert_eq!(gate(".a?", &OwnedValue::Null), (false, false));
+        assert_eq!(gate(".[0]?", &OwnedValue::Null), (false, false));
+        let container = eval_owned_closed::<JqSemantics>(&parse("[1]").unwrap()).unwrap();
+        assert_eq!(gate(".[0]?", &container), (false, false));
     }
 
     /// #4157: the value boundaries also settle `path(.[])` over a scalar, and the
