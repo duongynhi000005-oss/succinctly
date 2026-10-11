@@ -41564,6 +41564,49 @@ fn test_jq_stitch_under_input_judges_invalid_utf8_after_substitution_4335() -> R
     Ok(())
 }
 
+/// #4349: where jq detects a fault in a malformed value that also holds an invalid UTF-8 byte is
+/// found past the byte, as jq substitutes U+FFFD for it before it reads the string. The raw
+/// validation stopped on the byte, so the read jq resumes at was the wrong one and an extra value
+/// came out of the read jq discards. Every expectation is jq 1.7.1's own output.
+#[test]
+fn test_jq_fault_detection_skips_an_invalid_utf8_byte_4349() -> Result<()> {
+    let run = |files: &[&[u8]]| -> Result<(String, String, i32)> {
+        let temp: Vec<NamedTempFile> = files
+            .iter()
+            .map(|body| -> Result<NamedTempFile> {
+                let mut f = NamedTempFile::new()?;
+                f.write_all(body)?;
+                Ok(f)
+            })
+            .collect::<Result<_>>()?;
+        let paths: Vec<String> = temp
+            .iter()
+            .map(|f| f.path().to_string_lossy().into_owned())
+            .collect();
+        let mut argv: Vec<&str> = vec![
+            "-nc",
+            r#"[limit(6; repeat(try (input | [., input_line_number]) catch ["E", input_line_number]))]"#,
+        ];
+        argv.extend(paths.iter().map(String::as_str));
+        Ok(run_jq_full(&argv, None).expect("runs"))
+    };
+    // A string holding an invalid byte, a newline (a control character, jq's fault) and a
+    // truncated multi-byte character that the next file completes.
+    let (stdout, stderr, code) = run(&[b"\"\xff\nnull\n\"\xe2\x82", b"\xac\""])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout,
+        "[[\"E\",2],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n"
+    );
+    let (stdout, stderr, code) = run(&[b"\"\xff\n[1,", b"\xff\"] "])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout,
+        "[[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0],[\"E\",0]]\n"
+    );
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently
