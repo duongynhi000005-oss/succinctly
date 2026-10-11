@@ -7108,7 +7108,14 @@ fn token_runs_to_end(tail: &[u8]) -> bool {
                     match b {
                         b'"' => in_string = true,
                         b'{' | b'[' => depth += 1,
-                        b'}' | b']' => depth = depth.saturating_sub(1),
+                        b'}' | b']' => {
+                            depth = depth.saturating_sub(1);
+                            // The container closed: a complete value, however malformed
+                            // (`[1 2]`), and what follows it is another token's to judge.
+                            if depth == 0 {
+                                return false;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -12049,6 +12056,12 @@ mod tests {
             b"1,",
             b"-e5]",
             b"",
+            // #4352: a container that closes is complete, however malformed; what follows it
+            // is another token's to judge.
+            b"[1 2]\n\"a",
+            b"{1:2} [",
+            b"[1}\"a",
+            b"{]\n[",
         ] {
             assert!(!token_runs_to_end(whole));
         }

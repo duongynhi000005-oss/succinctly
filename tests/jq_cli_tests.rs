@@ -41614,6 +41614,58 @@ fn test_jq_fault_detection_skips_an_invalid_utf8_byte_4349() -> Result<()> {
     Ok(())
 }
 
+/// #4352: a malformed container that closes is a complete value, so the open tail a later file
+/// continues starts after it. The tail search read `[1 2]\n"a` as one container running to the end
+/// of the file and moved all of it, so the first read's fault was resumed from inside the moved
+/// prefix, and the read after it went missing. Every expectation is jq 1.7.1's own output.
+#[test]
+fn test_jq_open_tail_starts_after_a_malformed_closed_container_4352() -> Result<()> {
+    let catching = r#"[limit(8; repeat(try input catch "E"))]"#;
+    for (files, expected) in [
+        (
+            &[&b"[1 2]\n\"a"[..], b"\" [1 2] null\n23\n\n"][..],
+            "[\"E\",\"a\",\"E\",23,\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        // The issue's own shape: the string is cut inside a multi-byte character.
+        (
+            &[&b"[1"[..], b" 2]\n\"\xc3", b"\" [1 2] null\n23\n\n"][..],
+            "[\"E\",\"\u{fffd}\",\"E\",23,\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        // The same line: jq's fault discards the read that holds the string, so it never spans.
+        (
+            &[&b"{1:2}\"a"[..], b"\" 3\n"][..],
+            "[\"E\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        (
+            &[&b"[1 2]\n\"a"[..], b"\" 3\n"][..],
+            "[\"E\",\"a\",3,\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        (
+            &[&b"{1:2}\n["[..], b"3]\n"][..],
+            "[\"E\",[3],\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+    ] {
+        let temp: Vec<NamedTempFile> = files
+            .iter()
+            .map(|body| -> Result<NamedTempFile> {
+                let mut f = NamedTempFile::new()?;
+                f.write_all(body)?;
+                Ok(f)
+            })
+            .collect::<Result<_>>()?;
+        let paths: Vec<String> = temp
+            .iter()
+            .map(|f| f.path().to_string_lossy().into_owned())
+            .collect();
+        let mut argv: Vec<&str> = vec!["-nc", catching];
+        argv.extend(paths.iter().map(String::as_str));
+        let (stdout, stderr, code) = run_jq_full(&argv, None).expect("runs");
+        assert_eq!(code, 0, "{files:?}: {stderr}");
+        assert_eq!(stdout, expected, "{files:?}");
+    }
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently
