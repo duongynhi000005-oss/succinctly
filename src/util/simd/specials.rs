@@ -138,6 +138,169 @@ pub(crate) fn classify_64(block: &[u8; 64]) -> u64 {
     }
 }
 
+/// Whether `b` is a string-state byte: `"` (ends the string), `\` (skips the
+/// next byte) or a control byte `< 0x20` (rejects it). DEL is accepted, unlike
+/// [`is_special`] (#2878).
+#[inline(always)]
+const fn is_string_byte(b: u8) -> bool {
+    b == b'"' || b == b'\\' || b < 0x20
+}
+
+/// Whether `b` is a byte the container walk decides on in *some* state: a
+/// string-state byte, or this container's own `open`/`close` bracket.
+#[inline(always)]
+const fn is_container_byte(b: u8, open: u8, close: u8) -> bool {
+    is_string_byte(b) || b == open || b == close
+}
+
+/// Scalar reference for [`classify_container_64`]: bit `k` of the result is
+/// `is_container_byte(block[k], open, close)`.
+#[inline(always)]
+#[allow(dead_code)] // fallback/oracle; the SIMD kernel is used where one exists
+pub(crate) fn classify_container_64_scalar(block: &[u8; 64], open: u8, close: u8) -> u64 {
+    let mut mask = 0u64;
+    for (k, &b) in block.iter().enumerate() {
+        mask |= u64::from(is_container_byte(b, open, close)) << k;
+    }
+    mask
+}
+
+/// Scalar reference for [`classify_string_64`]: bit `k` of the result is
+/// `is_string_byte(block[k])`.
+#[inline(always)]
+#[allow(dead_code)] // fallback/oracle; the SIMD kernel is used where one exists
+pub(crate) fn classify_string_64_scalar(block: &[u8; 64]) -> u64 {
+    let mut mask = 0u64;
+    for (k, &b) in block.iter().enumerate() {
+        mask |= u64::from(is_string_byte(b)) << k;
+    }
+    mask
+}
+
+/// aarch64 NEON twin of [`classify_64_neon`] for the container walk. `BRACKETS`
+/// selects whether `open`/`close` are part of the mask.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn classify_container_64_neon<const BRACKETS: bool>(
+    block: &[u8; 64],
+    open: u8,
+    close: u8,
+) -> u64 {
+    let quote = vdupq_n_u8(b'"');
+    let backslash = vdupq_n_u8(b'\\');
+    let space = vdupq_n_u8(0x20);
+    let open = vdupq_n_u8(open);
+    let close = vdupq_n_u8(close);
+    let hit = |v: uint8x16_t| -> uint8x16_t {
+        let string = vorrq_u8(
+            vorrq_u8(vceqq_u8(v, quote), vceqq_u8(v, backslash)),
+            vcltq_u8(v, space),
+        );
+        if BRACKETS {
+            vorrq_u8(string, vorrq_u8(vceqq_u8(v, open), vceqq_u8(v, close)))
+        } else {
+            string
+        }
+    };
+    const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+    let w = vld1q_u8(WEIGHTS.as_ptr());
+    let p = block.as_ptr();
+    let m0 = vandq_u8(hit(vld1q_u8(p)), w);
+    let m1 = vandq_u8(hit(vld1q_u8(p.add(16))), w);
+    let m2 = vandq_u8(hit(vld1q_u8(p.add(32))), w);
+    let m3 = vandq_u8(hit(vld1q_u8(p.add(48))), w);
+    let s01 = vpaddq_u8(m0, m1);
+    let s23 = vpaddq_u8(m2, m3);
+    let s = vpaddq_u8(vpaddq_u8(s01, s23), vdupq_n_u8(0));
+    vget_lane_u64::<0>(vreinterpret_u64_u8(vget_low_u8(s)))
+}
+
+/// x86_64 SSE2 twin of [`classify_64_sse2`] for the container walk.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn classify_container_64_sse2<const BRACKETS: bool>(
+    block: &[u8; 64],
+    open: u8,
+    close: u8,
+) -> u64 {
+    let quote = _mm_set1_epi8(b'"' as i8);
+    let backslash = _mm_set1_epi8(b'\\' as i8);
+    let c0 = _mm_set1_epi8(0x1F);
+    let zero = _mm_setzero_si128();
+    let open = _mm_set1_epi8(open as i8);
+    let close = _mm_set1_epi8(close as i8);
+    let hit = |v: __m128i| -> u64 {
+        let string = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi8(v, quote), _mm_cmpeq_epi8(v, backslash)),
+            // byte < 0x20, unsigned: saturating-subtract 0x1F is zero.
+            _mm_cmpeq_epi8(_mm_subs_epu8(v, c0), zero),
+        );
+        let any = if BRACKETS {
+            _mm_or_si128(
+                string,
+                _mm_or_si128(_mm_cmpeq_epi8(v, open), _mm_cmpeq_epi8(v, close)),
+            )
+        } else {
+            string
+        };
+        u64::from(_mm_movemask_epi8(any) as u32)
+    };
+    let p = block.as_ptr().cast::<__m128i>();
+    let m0 = hit(_mm_loadu_si128(p));
+    let m1 = hit(_mm_loadu_si128(p.add(1)));
+    let m2 = hit(_mm_loadu_si128(p.add(2)));
+    let m3 = hit(_mm_loadu_si128(p.add(3)));
+    m0 | (m1 << 16) | (m2 << 32) | (m3 << 48)
+}
+
+/// Bit `k` of the result is set iff `block[k]` is `"`, `\`, a control byte
+/// `< 0x20`, `open` or `close`: every byte the splitter's container walk
+/// (`json::light::container_end`) can decide on, in either string state.
+/// Anything else, including DEL and every byte `>= 0x80`, is skipped without
+/// being visited.
+#[inline(always)]
+pub(crate) fn classify_container_64(block: &[u8; 64], open: u8, close: u8) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { classify_container_64_neon::<true>(block, open, close) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is the x86_64 baseline.
+        unsafe { classify_container_64_sse2::<true>(block, open, close) }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        classify_container_64_scalar(block, open, close)
+    }
+}
+
+/// [`classify_container_64`] without the brackets: bit `k` is set iff
+/// `block[k]` is `"`, `\` or a control byte `< 0x20`, the only bytes that
+/// matter *inside* a string. The container walk asks for it lazily, the first
+/// time a bracket turns up inside a string of the block (#4177): a string made
+/// of the container's own brackets is otherwise one hit per byte.
+#[inline(always)]
+pub(crate) fn classify_string_64(block: &[u8; 64]) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { classify_container_64_neon::<false>(block, 0, 0) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is the x86_64 baseline.
+        unsafe { classify_container_64_sse2::<false>(block, 0, 0) }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        classify_string_64_scalar(block)
+    }
+}
+
 /// A forward-only, lazily filled cache of one 64-byte specials block.
 ///
 /// `mask` bit `k` is set iff `bytes[base + k]` is a special; `mask == 0` with
@@ -309,6 +472,84 @@ mod tests {
             let expect = oracle_mask(&block);
             assert_eq!(classify_64(&block), expect);
             assert_eq!(classify_64_scalar(&block), expect);
+        }
+    }
+
+    /// Independent of `is_container_byte`/`is_string_byte` and of every kernel.
+    fn container_oracle(block: &[u8; 64], open: u8, close: u8) -> (u64, u64) {
+        let (mut all, mut string) = (0u64, 0u64);
+        for (k, b) in block.iter().enumerate() {
+            let in_string_state = *b == 0x22 || *b == 0x5C || *b <= 0x1F;
+            if in_string_state {
+                string |= 1 << k;
+            }
+            if in_string_state || *b == open || *b == close {
+                all |= 1 << k;
+            }
+        }
+        (all, string)
+    }
+
+    #[test]
+    fn container_predicates_exclude_del_and_the_other_bracket_kind() {
+        for (open, close) in [(b'{', b'}'), (b'[', b']')] {
+            for b in 0u16..=255 {
+                let b = b as u8;
+                let string = matches!(b, b'"' | b'\\') || b < 0x20;
+                assert_eq!(is_string_byte(b), string, "string {b:#04x}");
+                assert_eq!(
+                    is_container_byte(b, open, close),
+                    string || b == open || b == close,
+                    "container {b:#04x}"
+                );
+            }
+        }
+        assert!(!is_container_byte(0x7F, b'{', b'}'));
+        assert!(!is_container_byte(b'[', b'{', b'}'));
+        assert!(!is_string_byte(b'{') && !is_string_byte(b']'));
+    }
+
+    /// Every byte value in every lane for both bracket kinds: a lane
+    /// permutation bug in a kernel is a single wrong bit position here.
+    #[test]
+    fn classify_container_64_matches_oracle_for_every_byte_in_every_lane() {
+        for (open, close) in [(b'{', b'}'), (b'[', b']')] {
+            for lane in 0..64 {
+                for b in 0u16..=255 {
+                    let mut block = [b'a'; 64];
+                    block[lane] = b as u8;
+                    let (all, string) = container_oracle(&block, open, close);
+                    let at = format!("lane {lane} byte {b:#04x}");
+                    assert_eq!(classify_container_64(&block, open, close), all, "{at}");
+                    assert_eq!(classify_container_64_scalar(&block, open, close), all);
+                    assert_eq!(classify_string_64(&block), string, "{at}");
+                    assert_eq!(classify_string_64_scalar(&block), string);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classify_container_64_matches_oracle_on_random_blocks() {
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        for _ in 0..20_000 {
+            let mut block = [0u8; 64];
+            let sparse = rng(&mut seed) & 1 == 0;
+            for b in &mut block {
+                let r = rng(&mut seed);
+                *b = if sparse && r % 9 != 0 {
+                    b'a' + (r >> 8) as u8 % 26
+                } else {
+                    (r >> 16) as u8
+                };
+            }
+            for (open, close) in [(b'{', b'}'), (b'[', b']')] {
+                let (all, string) = container_oracle(&block, open, close);
+                assert_eq!(classify_container_64(&block, open, close), all);
+                assert_eq!(classify_container_64_scalar(&block, open, close), all);
+                assert_eq!(classify_string_64(&block), string);
+                assert_eq!(classify_string_64_scalar(&block), string);
+            }
         }
     }
 
