@@ -239,8 +239,11 @@ These functions access YAML-specific metadata not available in JSON:
 | `style`    | Scalar/collection style            | `"double"`, `"literal"`, `"flow"`       |
 | `kind`     | Node kind                          | `"scalar"`, `"seq"`, `"map"`, `"alias"` |
 | `key`      | Current key when iterating         | `"name"` or `0`                         |
-| `line`     | 1-based line number                | `5`                                     |
-| `column`   | 1-based column number              | `3`                                     |
+| `line`     | 1-based line number (*)            | `5`                                     |
+| `column`   | 1-based column number (*)          | `3`                                     |
+
+(*) A node that carries a property reports the position of its first `&anchor`/`!tag`
+token, not of its value: `b: &anc [1,2]` is column 4 (the `&`), as in yq (#2712).
 
 ```bash
 # Get line numbers of all items
