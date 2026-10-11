@@ -60385,6 +60385,85 @@ fn test_path_register_survives_non_matching_trim_4016() -> Result<()> {
     Ok(())
 }
 
+/// #4295: `del(f)` with an empty path set, `delpaths([])` and `setpath([]; .)` hand their
+/// input back as the same `jv`, so `path()` accepts them and a `$x` bound to the input still
+/// names it. A non-empty path set builds a fresh value and keeps raising, which the rows pin
+/// in the other direction (`[1]` under `.[]?`, `{"a":1}` under `.b?`). Every row is a live jq
+/// 1.7.1 capture: (input, filter, stdout, exit code).
+#[test]
+fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (r"5", r"[path(del(.[]?))]", "[[]]\n", 0),
+        (r#""s""#, r"[path(del(.[]?))]", "[[]]\n", 0),
+        (r"[]", r"[path(del(.[]?))]", "[[]]\n", 0),
+        (r"{}", r"[path(del(.[]?))]", "[[]]\n", 0),
+        (r"[1]", r"[path(del(.[]?))]", "", 5),
+        (r#"{"a":1}"#, r"[path(del(.[]?))]", "", 5),
+        (r"5", r"[path(del(empty))]", "[[]]\n", 0),
+        (r#"{"a":1}"#, r"[path(del(empty))]", "[[]]\n", 0),
+        (r"5", r"[path(del(.b?))]", "[[]]\n", 0),
+        (r"[1]", r"[path(del(.b?))]", "[[]]\n", 0),
+        (r#"{"a":1}"#, r"[path(del(.b?))]", "", 5),
+        (r#"{"b":1}"#, r"[path(del(.b?))]", "", 5),
+        (r"null", r"[path(del(.b?))]", "[[]]\n", 0),
+        (r"[1]", r"[path(del(.b))]", "", 5),
+        (r"5", r"[path(delpaths([]))]", "[[]]\n", 0),
+        (r#"{"a":1}"#, r"[path(delpaths([]))]", "[[]]\n", 0),
+        (r#"{"a":1}"#, r#"[path(delpaths([["a"]]))]"#, "", 5),
+        (r"5", r"[path(setpath([]; .))]", "[[]]\n", 0),
+        (r"5", r"[path(setpath([]; 3))]", "", 5),
+        (r#"{"a":1}"#, r#"[path(setpath(["a"]; .))]"#, "", 5),
+        (r#"{"a":5}"#, r"[path(.a | del(.[]?))]", "[[\"a\"]]\n", 0),
+        (
+            r#"{"a":1}"#,
+            r".a as $x | [$x | del(empty)] | .[0] | path($x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"[1.50,"a",null]"#,
+            r".[0] as $x | [$x|del(.[]?)] | .[0] | path($x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":"ab"}"#,
+            r".a as $x | [$x|delpaths([])] | .[0] | path($x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":"ab"}"#,
+            r".a as $x | [$x|setpath([]; .)] | .[0] | path($x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r".a as $x | [$x|del(.k?)] | .[0] | path($x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"k":1}}"#,
+            r".a as $x | [$x|del(.k?)] | .[0] | path($x)",
+            "",
+            5,
+        ),
+        (r"5", r"del(empty)", "5\n", 0),
+        (r"[1,2]", r"delpaths([])", "[1,2]\n", 0),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #3460, yq mode must-not-change: `(.b|tostring) = "z"` is a no-op in yq v4.53.3
 /// and stays one here.
 #[test]
