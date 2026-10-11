@@ -1,0 +1,10 @@
+# top
+a:
+  # lead f
+  f: {g: 1}
+  # lead s
+  s:
+    - 1
+  # foot-a
+# foot
+k: 5
