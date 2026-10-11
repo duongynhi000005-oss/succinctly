@@ -66632,6 +66632,53 @@ fn test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130() 
     ])
 }
 
+/// #4354: a fold whose UPDATE is `isempty(g)`/`any`/`all` with a `?//` bind in its operand keeps
+/// the register on the body's frame, because the arm states its answers and its identity element
+/// itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
+/// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
+/// state and the emission was refused where jq answers `[0]`. An operand with any other fan-out
+/// (a comma) still withholds it. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_fold_update_isempty_with_a_pattern_bind_keeps_the_register_4354() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[true]",
+            r"path(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end); .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or (.a)?; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or true; .))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"del(foreach .[]? as $k (.; isempty(. as $q ?// $z | if $q then true else empty end) or (.a)?; .b?))",
+            "[true]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(foreach .[]? as $k (.; any(. as $q ?// $z | if $q then true else empty end; .); .))",
+            "[0]\n",
+            "Invalid path expression with result false",
+            5,
+        ),
+    ])
+}
+
 /// #3984: a `reduce`/`foreach` that mentions a frozen `$v` inside a `try`, in a fold body or
 /// after a stage that leaves jq's register where it was (`length`, a literal), is judged
 /// against a register this resolver does not have: the fold's own register is untracked, so
