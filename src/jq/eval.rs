@@ -119331,6 +119331,8 @@ mod tests {
 
     /// #2648: the ordinary multi-file path has no origin table, only the
     /// per-file scope; and no scope at all (`-s`) names no file.
+    // The ambient per-file scope is a `std` thread-local; the `no_std` stub installs nothing.
+    #[cfg(feature = "std")]
     #[test]
     fn test_filename_reads_the_ambient_file_scope_2648() {
         let json = br#"{"x":1}"#;
