@@ -6510,6 +6510,10 @@ makes it differ, the raw fault is used as before. The open tail a later file con
 container that closes (#4352): `[1 2]\n"a` is a fault and an open string, not one container running to the end of
 the file, so the fault resumes at the right read; pinned by
 `test_jq_open_tail_starts_after_a_malformed_closed_container_4352`.
+**Recorded residual:** streams that stitch and resume over the shapes this does not model still differ from jq in
+about one run in six of a deliberately nasty differential (mismatched closers `[1}` and `{]`, strings ending
+in a backslash, adjacent bare tokens such as `23null`, #4358); the few attributed so far are #4358, the rest are
+not yet traced.
 
 ## `input`/`inputs` residuals after #1309
 

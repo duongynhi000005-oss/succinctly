@@ -12060,6 +12060,8 @@ mod tests {
             // is another token's to judge.
             b"[1 2]\n\"a",
             b"{1:2} [",
+            b"[1}\"a",
+            b"{]\n[",
         ] {
             assert!(!token_runs_to_end(whole));
         }

@@ -41631,6 +41631,15 @@ fn test_jq_open_tail_starts_after_a_malformed_closed_container_4352() -> Result<
             &[&b"[1"[..], b" 2]\n\"\xc3", b"\" [1 2] null\n23\n\n"][..],
             "[\"E\",\"\u{fffd}\",\"E\",23,\"E\",\"E\",\"E\",\"E\"]\n",
         ),
+        // The same line: jq's fault discards the read that holds the string, so it never spans.
+        (
+            &[&b"{1:2}\"a"[..], b"\" 3\n"][..],
+            "[\"E\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
+        (
+            &[&b"[1 2]\n\"a"[..], b"\" 3\n"][..],
+            "[\"E\",\"a\",3,\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
+        ),
         (
             &[&b"{1:2}\n["[..], b"3]\n"][..],
             "[\"E\",[3],\"E\",\"E\",\"E\",\"E\",\"E\",\"E\"]\n",
