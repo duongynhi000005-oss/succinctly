@@ -46445,9 +46445,16 @@ fn within_def_call_budget(question: impl FnOnce() -> bool) -> bool {
     }
     USED.with(|u| u.set(u.get() + 1));
     NESTED.with(|n| n.set(n.get() + 1));
-    let answer = question();
-    NESTED.with(|n| n.set(n.get() - 1));
-    answer
+    /// Closes the question on the way out, a panic caught by a harness included: a count left
+    /// open would stop the next outermost question resetting `USED`.
+    struct Close;
+    impl Drop for Close {
+        fn drop(&mut self) {
+            NESTED.with(|n| n.set(n.get() - 1));
+        }
+    }
+    let _close = Close;
+    question()
 }
 
 /// See the `std` half.

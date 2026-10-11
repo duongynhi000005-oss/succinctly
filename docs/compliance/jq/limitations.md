@@ -1567,7 +1567,11 @@ is the revert that established what the other one costs.
    `test_register_compound_stage_of_register_keeping_branches_3767`. A branch that navigates
    (`(select(.), .a)`) or a navigating tail (`(select(.) \| .a)`) keeps the whole refused, as in jq. Still
    refused where jq answers: a `def` call with an argument (`def g(f): last(f); g(.a) \| $x`: it binds
-   code the shape cannot see), a branch that is a `getpath` (admitted as a bare stage by the
+   code the shape cannot see) or a body that closes over one (`def f(x): def g: last(x); g; f(.a)`), a call
+   under an `[E]` collect (`[g]`) or nested through a `def` defined inside another's body (`def f: def g:
+   last(.a); g; f`), a call read past the 16-body budget (the budget is shared by the whole question, so
+   the same call can read differently when asked inside another call's body than at the top, always
+   toward refusing), a branch that is a `getpath` (admitted as a bare stage by the
    run's state, which a branch is not asked), and a compound `catch` handler that
    navigates (`try (select(.), error("e")) catch (select(.), .a)`). A handler that is a compound of
    `select` stages and constants navigates nothing at stage level and is read branch by branch

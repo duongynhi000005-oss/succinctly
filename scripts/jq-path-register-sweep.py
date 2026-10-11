@@ -966,6 +966,9 @@ OPERANDS = [
     "(select(.), (def g: .a; g))",
     "(def g: select(.); g)",
     # (#4109) a zero-arity `def` call is as register-keeping as its body (`def_call_keeps_register`).
+    # Known-refused where jq answers (the safe direction, listed in limitations.md): a call with
+    # an argument (`g(.a)`), a call under an `[E]` collect (`[g]`), and a call asked past the
+    # shared 16-body budget; a body that navigates (`.a`, `first(.a)`, `| .b`) raises as in jq.
     "(def g: last(.a); g)",
     "(def g: select(.a); g)",
     "(def g: numbers; g)",
