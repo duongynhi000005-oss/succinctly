@@ -4952,11 +4952,7 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
                 }
             }
         } else {
-            let stream_events_lazily = args.stream
-                && !args.slurp
-                && args.input_dsv.is_none()
-                && !args.raw_input
-                && !args.seq;
+            let stream_events_lazily = stream_mode(&args, uses_input_builtins) == StreamMode::Lazy;
             for (idx, document) in inputs.iter().enumerate() {
                 // `UNKNOWN_LINE`, not just any missing entry, must clear the
                 // source too (#3202): `input_filename` can't otherwise tell
@@ -4980,13 +4976,16 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
                 //
                 // #4397: under `--stream` the program reads one `tostream` event at a time,
                 // each walked out of its document as the program asks for it, not kept.
-                let events: Box<dyn Iterator<Item = std::borrow::Cow<'_, OwnedValue>> + '_> =
-                    if stream_events_lazily {
-                        Box::new(jq::tostream_events_iter(document).map(std::borrow::Cow::Owned))
-                    } else {
-                        Box::new(std::iter::once(std::borrow::Cow::Borrowed(document)))
+                let mut walk = stream_events_lazily.then(|| jq::tostream_events_iter(document));
+                let mut whole = Some(document);
+                loop {
+                    let input = match walk.as_mut() {
+                        Some(events) => events.next().map(std::borrow::Cow::Owned),
+                        None => whole.take().map(std::borrow::Cow::Borrowed),
                     };
-                for input in events {
+                    let Some(input) = input else {
+                        break;
+                    };
                     evaluate_input_streaming(
                         &input,
                         &expr,
@@ -5874,7 +5873,7 @@ fn get_inputs(
     // slurping the events and `input`/`inputs` reading them. Each event keeps its document's
     // location. Only those two need the events kept; a program that reads `.` walks each
     // document's events one at a time in `run_jq`'s loop instead.
-    if args.stream && json_input_mode && (args.slurp || track_eof) {
+    if stream_mode(args, track_eof) == StreamMode::Eager {
         expand_into_stream_events(&mut values, &mut locations, &mut resumed_errors);
     }
 
@@ -5898,6 +5897,31 @@ fn get_inputs(
         )))
     } else {
         Ok(Ok((values, locations, trailing_error, resumed_errors)))
+    }
+}
+
+/// How `--stream` hands the program its events (#4397): not at all, expanded up front in
+/// [`get_inputs`] (a program that slurps or reads `input`/`inputs` keeps them), or walked one at a
+/// time by `run_jq`'s loop. One definition for both sites, so they cannot disagree about who
+/// expands. The `-n` placeholder `null` is not a document, and `-R`, `--seq` and DSV input have
+/// no JSON documents to expand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamMode {
+    Off,
+    Eager,
+    Lazy,
+}
+
+fn stream_mode(args: &JqCommand, uses_input_builtins: bool) -> StreamMode {
+    let json_documents = args.input_dsv.is_none() && !args.raw_input && !args.seq;
+    if !args.stream || !json_documents {
+        StreamMode::Off
+    } else if args.slurp || uses_input_builtins {
+        StreamMode::Eager
+    } else if args.null_input {
+        StreamMode::Off
+    } else {
+        StreamMode::Lazy
     }
 }
 

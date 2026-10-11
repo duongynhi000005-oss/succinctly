@@ -41859,6 +41859,19 @@ fn test_jq_stream_flag_feeds_tostream_events_4397() -> Result<()> {
             "1 2\n",
             "[[[],1],1]\n[[[],2],1]\n",
         ),
+        // `-n` has no document: `.` is `null`, not the events of a placeholder.
+        (&["--stream", "-n", "-c", "."][..], "[1,2]\n", "null\n"),
+        (
+            &["--stream", "-n", "-c", "[inputs] | length"][..],
+            "[1,2]\n[3]\n",
+            "5\n",
+        ),
+        // A document per line: events carry their own document's line.
+        (
+            &["--stream", "-c", "[., input_line_number]"][..],
+            "[1]\n[2]\n",
+            "[[[0],1],1]\n[[[0]],1]\n[[[0],2],2]\n[[[0]],2]\n",
+        ),
         // `-R` reads lines, whatever the flag says.
         (
             &["--stream", "-R", "-c", "."][..],
