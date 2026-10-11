@@ -6538,8 +6538,10 @@ read as two values; `23 null`, `2"a"`, `[1]2` and `"a"2` are still two values. P
 `test_jq_bare_token_run_is_one_malformed_token_4358`. A fault met inside the bytes moved onto a file resumes in the next read, as jq's read holding it is the previous
 file's (#4376): it ends at that file's next newline or at its end, jq has counted that file's lines through it, and
 the next file's first read is parsed. Pinned by `test_jq_fault_in_the_moved_bytes_resumes_in_the_next_read_4376`.
-**Recorded residual:** a fault met in bytes that came from more than one file (an empty or all-tail file handed
-them on, `Seam::chained`) still resumes from the counter's own first read, and streams over shapes this does not
+A value that completes in those bytes after the resume is on that file's line too. **Recorded residual:** a fault met in
+bytes that came from more than one file (an empty or all-tail file handed them on, `Seam::chained`) still resumes from
+the counter's own first read; the read holding a fault in moved bytes ends at a newline or the seam but not at a
+4095-byte chunk, since where the previous file's line started is not known; and streams over shapes this does not
 model still differ from jq in about one run in forty of a deliberately nasty differential; not yet traced.
 
 ## `input`/`inputs` residuals after #1309

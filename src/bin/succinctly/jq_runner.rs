@@ -6045,7 +6045,10 @@ impl EofTail {
         let unknown = if raw {
             Self::raw_line_ends_at_eof(sources)
         } else {
-            Self::json_value_completes_in_final_read(sources, base)
+            Self::json_value_completes_in_final_read(
+                sources,
+                seams.last().copied().unwrap_or_default(),
+            )
         };
         Self {
             newlines: newlines as u32,
@@ -6069,10 +6072,11 @@ impl EofTail {
     /// JSON: whether the stream's last value completes in the read that
     /// reaches the end of input. The last source's first `base` bytes were moved there from
     /// an earlier file (#4316) and are not part of its reads.
-    fn json_value_completes_in_final_read(sources: &[&[u8]], base: usize) -> bool {
+    fn json_value_completes_in_final_read(sources: &[&[u8]], seam: Seam) -> bool {
         let Some((&last, earlier)) = sources.split_last() else {
             return false;
         };
+        let base = seam.base.min(last.len());
         // Where the final read starts: reads restart after each newline and
         // take at most `JQ_READ_CHUNK` bytes, so a last line that fills its
         // reads exactly leaves an empty final read.
@@ -6085,7 +6089,7 @@ impl EofTail {
         // The last thing jq completes in this source: a value, or a parse error
         // where its reads meet the fault. Past a fault jq resumes at its next
         // read (#4311), so the stream's last event may follow one.
-        let mut faults = LineCounter::at_seam(last, Seam::base(base));
+        let mut faults = LineCounter::at_seam(last, seam);
         let mut last_event = None;
         let mut offset = 0;
         loop {
@@ -6526,6 +6530,7 @@ impl Seam {
     }
 
     /// Only the front of the file was changed.
+    #[cfg(test)]
     fn base(base: usize) -> Self {
         Self { base, ..Self::NONE }
     }
@@ -6622,7 +6627,26 @@ impl<'a> LineCounter<'a> {
             Some(b'"' | b']' | b'}') => end - 1,
             _ => end,
         };
+        if let Some(line) = self.line_in_moved_prefix(completes_at) {
+            return line;
+        }
         self.line_at_read_of(completes_at)
+    }
+
+    /// The line of a value that completes at `at` inside the bytes moved onto this file from a
+    /// single previous one (#4376), which only a value after a resumed fault can: those bytes
+    /// are that file's, so the read holding `at` ends at its next newline or at the seam, and
+    /// jq has counted that file's lines through it. `None` outside such bytes.
+    fn line_in_moved_prefix(&self, at: usize) -> Option<usize> {
+        let base = self.seam.base.min(self.bytes.len());
+        if at >= base || self.seam.chained {
+            return None;
+        }
+        let read_end = self.bytes[at..base]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(base, |newline| at + newline + 1);
+        Some(self.seam.prev_lines + count_newlines(&self.bytes[..read_end]))
     }
 
     /// Where the read holding `at` ends, given that the last call was
@@ -6848,7 +6872,7 @@ fn parse_error_line(bytes: &[u8], start: usize, seam: Seam) -> usize {
 fn meet_fault(counter: &mut LineCounter<'_>, bytes: &[u8], start: usize) -> (usize, usize, usize) {
     let detected = parse_error_detection(bytes, start);
     let base = counter.seam.base.min(bytes.len());
-    if detected < base && !counter.seam.chained {
+    if let Some(line) = counter.line_in_moved_prefix(detected) {
         // The fault is met inside the bytes moved onto this file from the previous one
         // (#4316), so the read holding it is that file's: it ends at the next newline or at
         // that file's end, the seam, and jq has counted that file's lines through it. The
@@ -6857,7 +6881,6 @@ fn meet_fault(counter: &mut LineCounter<'_>, bytes: &[u8], start: usize) -> (usi
             .iter()
             .position(|&b| b == b'\n')
             .map_or(base, |newline| detected + newline + 1);
-        let line = counter.seam.prev_lines + count_newlines(&bytes[..resume]);
         return (detected, line, resume);
     }
     let line = counter.line_at_read_of(detected);
@@ -7050,12 +7073,17 @@ fn stitch_json_file_seams<'a>(
             raw.splice(0..0, std::mem::take(&mut carry));
         }
         if index < last {
-            if let Some(start) = open_tail_start(raw, resumes, seams[index].base) {
+            if let Some(start) = open_tail_start(raw, resumes, seams[index]) {
                 // A tail that starts inside what was moved onto this file takes bytes of the
                 // file before it along.
                 carry_chained = start < seams[index].base;
                 carry = raw.split_off(start);
-                carry_lines = count_newlines(seams[index].own(raw));
+                // Only a fault met in the moved bytes reads it, and only a resuming program meets one.
+                carry_lines = if resumes {
+                    count_newlines(seams[index].own(raw))
+                } else {
+                    0
+                };
                 // The part of it that is this file's own, which jq's reads of the file go on
                 // into (a tail that began in an earlier file is that file's).
                 let own = carry
@@ -7076,8 +7104,8 @@ fn stitch_json_file_seams<'a>(
 /// still continues in the next file. A malformed value is then found as `get_inputs` finds
 /// it ([`split_json_values_strict`]), since a fault the lenient splitter lets through moves
 /// where jq resumes. Without it, the first value the splitter refuses ends the search.
-fn open_tail_start(raw: &[u8], resumes: bool, base: usize) -> Option<usize> {
-    let mut faults = LineCounter::at_seam(raw, Seam::base(base));
+fn open_tail_start(raw: &[u8], resumes: bool, seam: Seam) -> Option<usize> {
+    let mut faults = LineCounter::at_seam(raw, seam);
     let mut offset = 0;
     loop {
         let split = if resumes {
@@ -12042,38 +12070,44 @@ mod tests {
     #[test]
     fn open_tail_start_finds_what_the_next_file_continues_4305() {
         // A bare number or keyword at the very end is only ended by the next byte.
-        assert_eq!(open_tail_start(b"1", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"[1]\n2", false, 0), Some(4));
-        assert_eq!(open_tail_start(b"true", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"1.", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"-", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"tr", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"1", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"[1]\n2", false, Seam::NONE), Some(4));
+        assert_eq!(open_tail_start(b"true", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"1.", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"-", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"tr", false, Seam::NONE), Some(0));
         // A truncated container or string, however much of it came before.
-        assert_eq!(open_tail_start(b"{\"a\":", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"1 [1, {\"a\": [2", false, 0), Some(2));
-        assert_eq!(open_tail_start(b"{\n  \"a\":\n", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"\"ab", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"\"a\\\"", false, 0), Some(0));
-        assert_eq!(open_tail_start(b"{\"a\":\"x}", false, 0), Some(0));
+        assert_eq!(open_tail_start(b"{\"a\":", false, Seam::NONE), Some(0));
+        assert_eq!(
+            open_tail_start(b"1 [1, {\"a\": [2", false, Seam::NONE),
+            Some(2)
+        );
+        assert_eq!(
+            open_tail_start(b"{\n  \"a\":\n", false, Seam::NONE),
+            Some(0)
+        );
+        assert_eq!(open_tail_start(b"\"ab", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"\"a\\\"", false, Seam::NONE), Some(0));
+        assert_eq!(open_tail_start(b"{\"a\":\"x}", false, Seam::NONE), Some(0));
         // A whole value is not: a string, container, or a scalar a byte follows.
-        assert_eq!(open_tail_start(b"\"ab\"", false, 0), None);
-        assert_eq!(open_tail_start(b"{\"a\":1}", false, 0), None);
-        assert_eq!(open_tail_start(b"[1]", false, 0), None);
-        assert_eq!(open_tail_start(b"1\n", false, 0), None);
-        assert_eq!(open_tail_start(b"1 ", false, 0), None);
-        assert_eq!(open_tail_start(b"", false, 0), None);
-        assert_eq!(open_tail_start(b"  \n", false, 0), None);
+        assert_eq!(open_tail_start(b"\"ab\"", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"{\"a\":1}", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"[1]", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"1\n", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"1 ", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"", false, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"  \n", false, Seam::NONE), None);
         // A malformed byte no later file can repair stays where it is.
-        assert_eq!(open_tail_start(b"1 } 2", false, 0), None);
+        assert_eq!(open_tail_start(b"1 } 2", false, Seam::NONE), None);
         // #4311: a program that resumes past a parse error searches on where jq
         // resumes, the read after the fault's, with the fault found by jq's
         // parser (`{1:2}` is one, though the splitter takes it).
-        assert_eq!(open_tail_start(b"1 } 2", true, 0), None);
-        assert_eq!(open_tail_start(b"}\n2", true, 0), Some(2));
-        assert_eq!(open_tail_start(b"}\n[1,", true, 0), Some(2));
-        assert_eq!(open_tail_start(b"}\n{1:2} 12", true, 0), None);
-        assert_eq!(open_tail_start(b"}\n{1:2}\n12", true, 0), Some(8));
-        assert_eq!(open_tail_start(b"1 ]\n", false, 0), None);
+        assert_eq!(open_tail_start(b"1 } 2", true, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"}\n2", true, Seam::NONE), Some(2));
+        assert_eq!(open_tail_start(b"}\n[1,", true, Seam::NONE), Some(2));
+        assert_eq!(open_tail_start(b"}\n{1:2} 12", true, Seam::NONE), None);
+        assert_eq!(open_tail_start(b"}\n{1:2}\n12", true, Seam::NONE), Some(8));
+        assert_eq!(open_tail_start(b"1 ]\n", false, Seam::NONE), None);
     }
 
     /// #4305: what [`token_runs_to_end`] calls cut off by the end of the file.
@@ -12282,13 +12316,47 @@ mod tests {
         assert_eq!(parse_error_line(stitched, 6, Seam::base(4)), 1);
     }
 
+    /// #4376: a fault met in the moved bytes resumes at the end of the previous file's read and
+    /// names that file's line; a chained or later fault is the counter's own.
+    #[test]
+    fn meet_fault_reads_the_moved_bytes_as_the_previous_files_4376() {
+        // `[ "x\ny" ` (a raw newline in a string: met at its closing quote, offset 6) is the
+        // previous file's, after two newlines of its own; `"a"` is this file's.
+        let stitched = b"[ \"x\ny\" \"a\"\n";
+        let seam = Seam {
+            base: 8,
+            prev_lines: 2,
+            ..Seam::NONE
+        };
+        let mut counter = LineCounter::at_seam(stitched, seam);
+        // The read holding the closing quote ends at the seam (no newline after it): line 2 + the
+        // one newline inside the moved bytes.
+        assert_eq!(meet_fault(&mut counter, stitched, 0), (6, 3, 8));
+        // Chained, the counter's own rule stands: the read from the seam on.
+        let chained = Seam {
+            chained: true,
+            ..seam
+        };
+        let mut counter = LineCounter::at_seam(stitched, chained);
+        let (detected, _, resume) = meet_fault(&mut counter, stitched, 0);
+        assert_eq!((detected, resume), (6, 12));
+        // A value that completes in the moved bytes after a resume is on the previous file's line.
+        let moved = Seam {
+            base: 5,
+            prev_lines: 2,
+            ..Seam::NONE
+        };
+        let mut counter = LineCounter::at_seam(b"1\n2 [3", moved);
+        assert_eq!(counter.read_end_line(1), 3);
+    }
+
     /// #4376: what the stitch records about where a file's moved bytes came from, and a bare run
     /// as jq's lexer takes it.
     #[test]
     fn seams_record_the_previous_files_lines_and_a_chained_prefix_4376() {
         let seams = |files: &[&[u8]]| -> Vec<Seam> {
             let mut raws: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
-            stitch_json_file_seams(raws.iter_mut(), false)
+            stitch_json_file_seams(raws.iter_mut(), true)
         };
         // Two newlines ahead of the tail `[1,` in the first file: jq has counted them.
         let one = seams(&[b"1\n2\n[1,", b"2]\n"]);
