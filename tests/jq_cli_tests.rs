@@ -123621,6 +123621,88 @@ fn test_def_call_with_a_literal_body_keeps_the_register_4124() -> Result<()> {
     Ok(())
 }
 
+/// #4109: a zero-arity `def` call is as register-keeping as its body, so a body that is itself
+/// `last(f)`, `select(f)` or a type filter, a `try` over one, or a compound of them leaves jq's
+/// register where the call entered it: `def g: last(.a); g | $x` is `[]` as `last(.a) | $x` is.
+/// It used to read as a stage that may have moved the register, and refused. A body that navigates
+/// (`.a`, `first(.a)`, `last(.a) | .b`) still moves it and raises, as in jq; a call with an
+/// argument binds code the shape cannot see and stays refused (jq answers `[]` for it). Every
+/// expectation is jq 1.7.1's own output for `-c` on `{"a":{"b":1},"k":2}`.
+#[test]
+fn test_def_call_over_a_register_keeping_body_keeps_the_register_4109() -> Result<()> {
+    let doc = r#"{"a":{"b":1},"k":2}"#;
+    for (filter, expected) in [
+        ("path(. as $x | def g: last(.a); g | $x)", "[]\n"),
+        ("path(. as $x | def g: select(.a); g | $x)", "[]\n"),
+        ("path(. as $x | def g: numbers; g | $x)", ""),
+        (
+            "path(. as $x | def g: try last(.a) catch .; g | $x)",
+            "[]\n",
+        ),
+        (
+            "path(. as $x | def g: (last(.a), select(.)); g | $x)",
+            "[]\n[]\n",
+        ),
+        ("path(. as $x | def g: last(.a); def h: g; h | $x)", "[]\n"),
+        ("path(. as $x | def g: last(.a); first(g) | $x)", "[]\n"),
+        ("path(. as $x | def g: last(.a); (g, 7) | $x)", "[]\n[]\n"),
+        ("path(. as $x | def g: last(.a); g | $x | .k)", "[\"k\"]\n"),
+        (
+            "del(. as $x | def g: last(.a); g | $x.k)",
+            "{\"a\":{\"b\":1}}\n",
+        ),
+        (
+            "(. as $x | def g: last(.a); g | $x.k) |= 9",
+            "{\"a\":{\"b\":1},\"k\":9}\n",
+        ),
+    ] {
+        let (out, err, code) = run_jq_full(&["-c", "--", filter], Some(doc))?;
+        assert_eq!((out.as_str(), code), (expected, 0), "`{filter}`: {err:?}");
+    }
+    // A body that navigates moves the register, and the call with it
+    for (filter, message) in [
+        (
+            "path(. as $x | def g: .a; g | $x)",
+            "Invalid path expression with result",
+        ),
+        (
+            "path(. as $x | def g: first(.a); g | $x)",
+            "Invalid path expression with result",
+        ),
+        (
+            "path(. as $x | def g: last(.a); g | g | $x)",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+        ),
+        (
+            "path(. as $x | def g: last(.a) | .b; g | $x)",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":1}",
+        ),
+        (
+            "path(. as $x | def g: last(.a); def h: g | .a; h | $x)",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+        ),
+        (
+            "path(. as $x | def g: last(.a); (def g: .a; g) | $x)",
+            "Invalid path expression with result",
+        ),
+    ] {
+        let (out, err, code) = run_jq_full(&["-c", "--", filter], Some(doc))?;
+        assert_eq!(code, 5, "`{filter}`: stdout {out:?} stderr {err:?}");
+        assert!(err.contains(message), "`{filter}`: {err:?}");
+    }
+    // Still refused where jq answers `[]`: a call with an argument
+    let (out, err, code) = run_jq_full(
+        &["-c", "--", "path(. as $x | def g(f): last(f); g(.a) | $x)"],
+        Some(doc),
+    )?;
+    assert_eq!(code, 5, "stdout {out:?} stderr {err:?}");
+    assert!(
+        err.contains("Invalid path expression with result"),
+        "{err:?}"
+    );
+    Ok(())
+}
+
 /// #4124 review: the zero-arity `def` call arm shares one budget across the whole question, so a
 /// chain whose every def calls the one below it several times in a pipe ends at once, as it did
 /// before the arm (a depth cap alone made the analysis fanout^16 long: minutes at a fanout of 5).

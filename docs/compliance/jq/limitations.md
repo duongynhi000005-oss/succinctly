@@ -1566,14 +1566,21 @@ is the revert that established what the other one costs.
    (select(.), select(.)))` all leave `$x` at the root (`[]` per output), pinned by
    `test_register_compound_stage_of_register_keeping_branches_3767`. A branch that navigates
    (`(select(.), .a)`) or a navigating tail (`(select(.) \| .a)`) keeps the whole refused, as in jq. Still
-   refused where jq answers: a `def` call (`def g: last(.a); g \| $x`, which `cannot_move_register`
-   never admits: a name is not a body), a branch that is a `getpath` (admitted as a bare stage by the
+   refused where jq answers: a `def` call with an argument (`def g(f): last(f); g(.a) \| $x`: it binds
+   code the shape cannot see), a branch that is a `getpath` (admitted as a bare stage by the
    run's state, which a branch is not asked), and a compound `catch` handler that
    navigates (`try (select(.), error("e")) catch (select(.), .a)`). A handler that is a compound of
    `select` stages and constants navigates nothing at stage level and is read branch by branch
    (#4151): `try (select(.), error("e")) catch (select(.), 7)`, `catch (numbers // 7)` and `catch (if .
    then select(.) else 7 end)` leave `$x` at the root, pinned by
-   `test_register_catch_handler_compound_of_select_stages_4151`. A handler that navigates is read too when
+   `test_register_catch_handler_compound_of_select_stages_4151`. A zero-argument `def` call is as
+   register-keeping as its body (#4109, `def_call_keeps_register`, beside the literal body #4124 reads):
+   `def g: last(.a); g | $x`, `def g: select(.a); g | $x`, `def g: try last(.a) catch .; g | $x`, a call
+   inside `first(g)` or a comma, and a chain of calls leave `$x` at the root (`[]`), pinned by
+   `test_def_call_over_a_register_keeping_body_keeps_the_register_4109`; a body that navigates
+   (`def g: .a`, `first(.a)`, `last(.a) \| .b`) still moves it and raises, as in jq. One shared budget of
+   16 bodies bounds the whole question, past which a call reads as it did before (a stage that moves the
+   register). A handler that navigates is read too when
    its body can raise only a fresh message string (#4309, `body_raises_only_fresh_messages`: `.`, a
    literal, a field, index, slice or iteration step, `last(f)`, `select(f)`, the type filters, and a pipe or
    `,` of them) and the handler takes its steps from its own input (`handler_navigates_only_its_input`:
