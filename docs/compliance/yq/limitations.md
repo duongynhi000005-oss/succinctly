@@ -2511,8 +2511,8 @@ predating #1430's yq-mode scope for `=`. Fixed in
 `eval_rhs_once` with `collect_rhs_outputs`/`eval_update_multi`, mirroring `eval_assign`'s
 own #392/#1430 shape: jq mode forks, yq mode collapses to the last output on a clean
 completion, gated on `S::TAG == EvalTag::Yq` — and, as for `=` above, an RHS that itself
-errors partway through aborts with no document (#1779). `/=`/`%=`/`//=` have no real yq syntax at all (confirmed live, `'/'`/`'//'` expect
-2 args but there is 1), so their yq-mode "take the last value" answer is judged by internal
+errors partway through aborts with no document (#1779). `/=`/`%=`/`//=` have no real yq
+syntax at all (confirmed live, `'/'`/`'//'` expect 2 args but there is 1), so their yq-mode "take the last value" answer is judged by internal
 consistency with `|=` rather than an external-compat claim.
 
 ### `-o=auto` on a genuinely mixed-format multi-source run doesn't match per-element

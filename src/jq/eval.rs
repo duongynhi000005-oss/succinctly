@@ -31607,13 +31607,11 @@ fn collect_rhs_outputs<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ///   confirmed live (v4.53.3): `.x = (1,2,3)` on `{"x":0}` is `{"x":3}`,
 ///   one document, not three; `.a[] = .a[] + 1` on `{"a":[1,2]}` is
 ///   `{"a":[3,3]}`, not two documents (#1430's own claimed expected
-///   output, `{"a":[2,3]}`, does not match live yq at all). Only collapsed
-///   on a *clean* completion (`terminal.is_none()`): a mid-stream error/
-///   break/halt keeps jq's existing partial-prefix fan-out, since real
-///   yq's error-interaction behavior here hasn't been verified and this
-///   fix doesn't attempt to redefine it (#1430 was filed as, and this
-///   stays scoped to, the successful-completion case -- the error-
-///   interaction shape is tracked separately as #1779).
+///   output, `{"a":[2,3]}`, does not match live yq at all). Collapsed to
+///   the last output on a *clean* completion (`terminal.is_none()`); a
+///   mid-stream error/break/halt in yq mode aborts with no document at all,
+///   as real yq does (#1779, 085d9d7ae) -- jq mode keeps its partial-prefix
+///   fan-out.
 fn normalize_rhs_values_for_fork<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     mut rhs_values: Vec<OwnedValue>,
     terminal: Option<Control>,
@@ -35191,7 +35189,8 @@ fn update_path_with_deletes<S: EvalSemantics>(
             // `_modify` only ever observes the update filter's first
             // output, so a trailing `error(...)`/`break` after it must not
             // surface -- `.a |= (1, error("x"))` is `{"a":1}` in jq 1.7.1,
-            // not an error.
+            // not an error. yq reads the whole filter first, so there the
+            // same shape raises (#1779; see `eval_owned_multi_first`).
             //
             // A zero-output jq filter writes `Null` for the direct
             // single-path route. The enclosing `Field`/`Index`/`Iterate`
@@ -36725,7 +36724,10 @@ fn eval_owned_multi<S: EvalSemantics>(
 }
 
 /// `|=`'s own first-output read of its update filter (#694, #3448): the
-/// filter's first output, or nothing, evaluated *no further than that output*.
+/// filter's first output, or nothing. jq mode evaluates *no further than that
+/// output*; yq mode evaluates the whole filter and surfaces a trailing
+/// error/break/halt (#1779), because yq reads its `GetMatchingNodes` list before
+/// taking the front. The rest of this comment describes the jq rule.
 ///
 /// The only correct caller is `update_path`'s `Expr::Identity` arm (`|=`'s
 /// own update-filter evaluation): jq's `_modify` wraps each per-path update
@@ -91860,6 +91862,29 @@ mod tests {
         let expr = parse("1, break $foo").unwrap();
         let err = eval_owned_multi::<JqSemantics>(&expr, &OwnedValue::Null).unwrap_err();
         assert_eq!(err, EvalEscape::Break("foo".to_string()));
+    }
+
+    #[test]
+    fn eval_owned_multi_first_in_yq_mode_surfaces_an_error_after_the_first_output_1779() {
+        // The yq-mode twin of the jq tests around it: the whole filter is read, so an error
+        // after the first output escapes, while a clean filter still yields its first output.
+        let input = OwnedValue::Null;
+        for (filter, expected) in [
+            (r#"1, error("boom")"#, None),
+            (r#"error("boom"), 1"#, None),
+            ("1, 2", Some(Some(OwnedValue::Int(1)))),
+            ("empty", Some(None)),
+        ] {
+            let expr = parse(filter).unwrap();
+            let got = eval_owned_multi_first::<YqSemantics>(&expr, &input, Reentry::REBUILT);
+            match expected {
+                None => assert!(
+                    matches!(got, Err(EvalEscape::Error(_))),
+                    "{filter}: {got:?}"
+                ),
+                Some(value) => assert_eq!(got.unwrap(), value, "{filter}"),
+            }
+        }
     }
 
     #[test]
