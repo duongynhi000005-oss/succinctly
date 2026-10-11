@@ -49676,6 +49676,11 @@ mod tests {
         // A guarded group holding a computed branch or followed by one.
         assert_eq!(split("[(., 1)? | .a]"), None);
         assert_eq!(split("[(., .)? | length]"), None);
+        // A pipe with nothing after its `,` head: the parser never builds one,
+        // but the split must not hand the route an empty tail as if it were
+        // the plain `,` body.
+        let head_only = Expr::Pipe(vec![body("[., .]")].into());
+        assert!(split_comma_head(&head_only).is_none());
     }
 
     /// #3922: only a sequence of nodes with nothing left to compute is handed
