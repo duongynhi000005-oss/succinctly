@@ -62409,11 +62409,6 @@ fn test_fused_slice_read_matches_the_slice_then_read_spelling_4195() -> Result<(
         for target in [".", ".k"] {
             for bound in bounds {
                 for (fused_read, unfused_read) in reads {
-                    // A computed index on the slice of a string raises where yq answers
-                    // nothing (#4319, unchanged by #4317): skipped until that is fixed.
-                    if doc == "scalar" && target == "." && fused_read.starts_with("[$") {
-                        continue;
-                    }
                     let fused = format!("{prelude}{target}[{bound}]{fused_read}");
                     let unfused = format!("{prelude}({target}[{bound}]) {unfused_read}");
                     assert_eq!(
@@ -62424,6 +62419,65 @@ fn test_fused_slice_read_matches_the_slice_then_read_spelling_4195() -> Result<(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// #4319: a computed key on a scalar the read itself computed (the slice of a string, a
+/// concatenation, a sum) answers nothing in yq whatever the key's kind, as it does for a scalar
+/// the document holds; jq raises. Every yq row is yq v4.53.3's (`-p=json -o=json -I=0`, input
+/// `"abc"`); the last column is the exit code both tools gave.
+#[test]
+fn test_computed_key_on_a_computed_scalar_answers_nothing_in_yq_4319() -> Result<()> {
+    let args = &["-p=json", "-o=json", "-I=0"];
+    for (filter, expected) in [
+        // The slice of a string, indexed by every kind of key.
+        ("1 as $i | .[$i:][$i]", ""),
+        ("1 as $k | .[1:][$k]", ""),
+        ("1.5 as $k | .[1:][$k]", ""),
+        ("(-1) as $k | .[1:][$k]", ""),
+        (r#""1" as $k | .[1:][$k]"#, ""),
+        ("null as $k | .[1:][$k]", ""),
+        ("true as $k | .[1:][$k]", ""),
+        ("[1] as $k | .[1:][$k]", ""),
+        ("1 as $k | .[:3][$k]", ""),
+        ("1 as $k | (.[1:])[$k]", ""),
+        ("(0, 1) as $k | .[1:][$k]", ""),
+        ("1 as $k | .[$k:][$k:][$k]", ""),
+        // Any other computed scalar.
+        (r#"1 as $k | (. + "x")[$k]"#, ""),
+        ("1 as $k | (. | tostring)[$k]", ""),
+        ("1 as $k | (1 + 2)[$k]", ""),
+        ("1 as $k | (true and false)[$k]", ""),
+        ("1 as $k | (. | length)[$k]", ""),
+        // The empty read still collects, defaults and pipes like any other.
+        ("1 as $k | [.[1:][$k]]", "[]\n"),
+        (r#"1 as $k | (. + "x")[$k] // "d""#, "\"d\"\n"),
+        ("1 as $k | .[1:][$k]?", ""),
+        // Unchanged: a computed array, object or `null` is still indexed.
+        ("[[1, 2], 3] | 1 as $k | (. + [])[$k]", "3\n"),
+        (r#""a" as $k | ({} + {"a": 1})[$k]"#, "1\n"),
+        ("1 as $k | (null + null)[$k]", "null\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, r#""abc""#, args)?,
+            (expected.into(), String::new(), 0),
+            "{filter}"
+        );
+    }
+    // The same rule over a YAML document and a nested scalar.
+    assert_eq!(
+        run_yq_stdin_with_stderr("1 as $k | .a[1:][$k]", "a: scalar\n", &[])?,
+        (String::new(), String::new(), 0)
+    );
+    // jq mode keeps raising, as jq does.
+    for filter in ["1 as $k | .[1:][$k]", r#"1 as $k | (. + "x")[$k]"#] {
+        let (stdout, stderr, code) = run_jq_stdin_with_stderr(filter, r#""abc""#, &[])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+        assert!(
+            stderr.contains("Cannot index string with number"),
+            "{filter}: {stderr}"
+        );
     }
     Ok(())
 }

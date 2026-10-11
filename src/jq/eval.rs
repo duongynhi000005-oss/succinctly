@@ -27258,6 +27258,31 @@ pub(crate) fn index_one_owned<S: EvalSemantics>(
     }
 }
 
+/// [`index_one_owned`] for a *read*: yq answers nothing, not jq's `Cannot index <type> with
+/// <key>`, when the owned target is a scalar (#4319).
+///
+/// The borrowed route has the rule already ([`yq_field_index_on_scalar_is_empty`], #2482);
+/// this is the same rule for a target the read computed (`.[1:][$k]` on a string,
+/// `(. + "x")[$k]`, `(1 + 2)[$k]`), whatever the key's kind. It is a wrapper rather than an
+/// arm of [`index_one_owned`] because that function's write-path callers pass
+/// `optional: false` and treat `Ok(None)` as unreachable (`Computed`'s `unreachable!`), so a
+/// scalar there must keep raising.
+pub(crate) fn index_one_owned_read<S: EvalSemantics>(
+    target: &OwnedValue,
+    key: &OwnedValue,
+    optional: bool,
+) -> Result<Option<OwnedValue>, EvalError> {
+    if yq_field_index_on_scalar_is_empty::<S>()
+        && !matches!(
+            target,
+            OwnedValue::Null | OwnedValue::Array(_) | OwnedValue::Object(_)
+        )
+    {
+        return Ok(None);
+    }
+    index_one_owned::<S>(target, key, optional)
+}
+
 /// Reserve capacity for a `Vec<T>` sized as the product of `factors`,
 /// without risking the unconditional panic/abort `Vec::with_capacity`
 /// gives an unrepresentable or unallocatable length (#1634, same
@@ -27724,7 +27749,7 @@ fn eval_index_expr<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                                 }
                             },
                             accumulator: owned.as_mut().expect("promoted by the block above"),
-                            fold: |t| index_one_owned::<S>(t, k, optional),
+                            fold: |t| index_one_owned_read::<S>(t, k, optional),
                         }
                     }
                 };
@@ -27877,7 +27902,7 @@ fn eval_index_expr<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                             if let Some(e) = yq_negative_index_error::<S>(t, k) {
                                 escape_with_prefix!(Control::Error(e));
                             }
-                            match index_one_owned::<S>(t, k, optional) {
+                            match index_one_owned_read::<S>(t, k, optional) {
                                 Ok(Some(v)) => owned.as_mut().expect("still Some").push(v),
                                 Ok(None) => {}
                                 // Same reasoning as the `Borrowed` arm above: a
