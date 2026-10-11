@@ -484,8 +484,28 @@ DEFAULT_THRESHOLD = 5.0
 # own merge-base, outputs byte-identical). Now in `main`; the entry was removed
 # (#4279) once the row read ~0% again against a merge-base that already
 # included it.
+#
+# Seven rows carry the same kind for #4177 (PR #4338): the top-level document
+# splitter finds a container's end over a 64-byte mask instead of byte by
+# byte (`json::light::container_end`), and every row below spends its time in
+# that walk over one large top-level container. Measured against the PR's own
+# merge-base (x86_64 / ARM64-Linux, outputs byte-identical; every drift is an
+# improvement): `wide_escaped_keys_unsorted` -6.0% / within threshold,
+# `users_keys_unsorted` -16.6% / -18.4%, `arrays_identity` -6.2% / -5.3%,
+# `arrays_first_map_iterate` -30.4% / -27.8%, `users_compact_identity` -11.6% /
+# -11.3%, `wide_length` -9.2% / -8.1%, `mid512_map_length_add` -9.6% / -8.3%.
+# Each threshold sits about 4-5 points above its larger drift, so a further
+# change on top of this one still fails. Remove them once `main` carries the
+# change and the rows read ~0% again against a merge-base that includes it.
 QUERY_THRESHOLDS = {
     "wide_keys_unsorted": 10.0,
+    "wide_escaped_keys_unsorted": 10.0,
+    "users_keys_unsorted": 23.0,
+    "arrays_identity": 10.0,
+    "arrays_first_map_iterate": 35.0,
+    "users_compact_identity": 16.0,
+    "wide_length": 14.0,
+    "mid512_map_length_add": 14.0,
 }
 
 # argparse wants a plain string for `epilog`; keeping it as a real constant
