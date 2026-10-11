@@ -4715,6 +4715,12 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   same way. A separate difference, unchanged by this entry ([#4054](https://github.com/rust-works/succinctly/issues/4054)).
 - **Spellings `OwnedValue` cannot keep** ([#2802](https://github.com/rust-works/succinctly/issues/2802)):
   a leading-zero, hex or underscored integer sorts by its resolved value here.
+- **A mapping** (#2064). yq's `sort` and `sort_by(f)` reorder a mapping's entries by their
+  values and answer a mapping, as `sort_by` does an array; so does this build, with the same
+  comparator and the same stable sort. The result is an owned mapping, so its comments and its
+  flow or block style are not kept on YAML output (`k: {z: 1}` prints as a block mapping where
+  yq keeps `{z: 1}`; an array's per-item comments do survive), and a repeated key collapses
+  where yq lists every occurrence (`b: 1, a: 2, b: 3` is one `b` here).
 
 Cost. Interleaved A/B against `main`, release builds, minimum of 9 runs, 1M-element arrays on
 5-10 MB documents (outputs identical; `sort_by` on 250k records):

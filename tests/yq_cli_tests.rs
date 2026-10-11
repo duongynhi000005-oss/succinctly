@@ -62693,6 +62693,72 @@ fn test_yq_split_by_a_non_string_separator_4263() -> Result<()> {
     Ok(())
 }
 
+/// #2064: yq's `sort` and `sort_by(f)` on a mapping reorder its entries by the values (or by
+/// `[f]` of each value), stably, and answer a mapping; jq raises its pairing error. Rows captured
+/// from yq v4.53.3 (`-p=json -o=json -I=0`).
+#[test]
+fn test_yq_sort_and_sort_by_reorder_a_mappings_entries_2064() -> Result<()> {
+    let args = &["-p=json", "-o=json", "-I=0"];
+    for (input, filter, expected) in [
+        (r#"{"a":2,"b":1}"#, "sort", r#"{"b":1,"a":2}"#),
+        (r#"{"a":2,"b":1}"#, "sort_by(.)", r#"{"b":1,"a":2}"#),
+        (r#"{"a":2,"b":1}"#, "sort | keys", r#"["b","a"]"#),
+        (
+            r#"{"a":"z","b":"y","c":"x"}"#,
+            "sort",
+            r#"{"c":"x","b":"y","a":"z"}"#,
+        ),
+        // yq's cross-type order (it is the order `sort` gives an array).
+        (
+            r#"{"a":3,"b":null,"c":1,"d":"s","e":true,"f":[1]}"#,
+            "sort",
+            r#"{"b":null,"e":true,"f":[1],"c":1,"a":3,"d":"s"}"#,
+        ),
+        // A key that no value has leaves the order alone (the sort is stable).
+        (r#"{"a":2,"b":1}"#, "sort_by(.x)", r#"{"a":2,"b":1}"#),
+        (
+            r#"{"a":{"x":2},"b":{"x":1},"c":{"y":9}}"#,
+            "sort_by(.x)",
+            r#"{"c":{"y":9},"b":{"x":1},"a":{"x":2}}"#,
+        ),
+        (
+            r#"{"a":{"x":2},"b":{"x":1},"c":{"y":9}}"#,
+            "sort",
+            r#"{"a":{"x":2},"b":{"x":1},"c":{"y":9}}"#,
+        ),
+        (
+            r#"{"a":[3],"b":[1,2],"c":[]}"#,
+            "sort_by(length)",
+            r#"{"c":[],"a":[3],"b":[1,2]}"#,
+        ),
+        (
+            r#"{"a":1.5,"b":1,"c":"1"}"#,
+            "sort",
+            r#"{"b":1,"c":"1","a":1.5}"#,
+        ),
+        ("{}", "sort", "{}"),
+        ("{}", "sort_by(.x)", "{}"),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, input, args)?,
+            (format!("{expected}\n"), String::new(), 0),
+            "{input} | {filter}"
+        );
+    }
+    // A YAML mapping sorts the same way.
+    assert_eq!(
+        run_yq_stdin_with_stderr("sort", "b: 2\na: 1\nc: 0\n", &[])?,
+        ("c: 0\na: 1\nb: 2\n".to_string(), String::new(), 0)
+    );
+    // jq mode keeps its pairing error.
+    for filter in ["sort", "sort_by(.)"] {
+        let (stdout, stderr, code) = run_jq_stdin_with_stderr(filter, r#"{"a":2,"b":1}"#, &[])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+        assert!(stderr.contains("cannot be sorted"), "{filter}: {stderr}");
+    }
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.
