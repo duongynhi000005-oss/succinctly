@@ -29138,10 +29138,9 @@ impl PathAssignOutcome {
 /// `Expr::Field`. Treated identically to a terminal `Field`/`Index` here,
 /// matching `set_path`'s own `Expr::Iterate` arm, which applies the
 /// identical `is_yq_field_index_noop_scalar` check for exactly this case
-/// -- and, per [`classify_yq_assign_prefix`]'s own scope, only for a
-/// *mid-chain* `Iterate`: `last` itself is stripped off into `prefix`
-/// below before that function ever runs, so a *terminal* `Iterate` never
-/// reaches this classification at all (#1921).
+/// -- and a *terminal* `Iterate` is classified by what it would write into
+/// (#1921): `last` is passed to [`classify_yq_assign_prefix`] beside the
+/// `prefix` it is stripped from.
 ///
 /// Applies every gate needed before delegating to
 /// [`classify_yq_assign_prefix`] for the actual walk: the empty-flattened-
@@ -29196,7 +29195,7 @@ fn yq_assign_classify(path: &Expr, root: &OwnedValue) -> PathAssignOutcome {
     ) {
         return PathAssignOutcome::NeedsRhs;
     }
-    classify_yq_assign_prefix(root, prefix)
+    classify_yq_assign_prefix(root, prefix, unwrap_path_component(last).0)
 }
 
 /// Whether writing through `steps` (a `yq_assign_classify` prefix -- its
@@ -29222,28 +29221,24 @@ fn yq_assign_classify(path: &Expr, root: &OwnedValue) -> PathAssignOutcome {
 /// `yq '.a[].b = 5'` on `a: null`, already produces `a: []` here exactly
 /// like the oracle) -- so the document does change, but the RHS this
 /// autovivify-only write receives is never actually read (#1857, zero
-/// elements to write into). `NeedsRhs` for a *terminal* `Iterate` (`.a[] =
-/// v`, no further steps) reaching an already-empty container or `Null` is
-/// a separate, still-open gap this walk doesn't attempt: a terminal
-/// `Iterate`'s own semantics (overwrite every real element, regardless of
-/// its type) genuinely differ from a mid-chain one's, and the terminal
-/// step is stripped into `yq_assign_classify`'s own `prefix` before this
-/// function ever sees it -- filed as #1921. Live-verified against yq
+/// elements to write into). A *terminal* `Iterate` (`.a[] = v`, no further
+/// steps) is decided by [`classify_yq_assign_terminal`] once `steps` runs out
+/// (#1921): its semantics (overwrite every real element, regardless of its
+/// type) differ from a mid-chain one's, so the terminal component travels
+/// beside the prefix instead of being stripped from it. Live-verified against yq
 /// v4.53.3 for every other case: `a: []`/`a: {}` (empty), `a: [1, 2]`/`a:
 /// {x: 1, y: 1}` (all-scalar), `a: null` under a mid-chain `Iterate`, and a
 /// nested `a: [[1,2],[3]]` under `.a[][].b` all agree with the oracle in
 /// both directions (RHS discarded and the final document byte-identical to
 /// a safe, always-evaluated RHS), while a single non-scalar element
 /// anywhere in the fan-out (`a: [1, {}]`) still correctly needs the RHS.
-fn classify_yq_assign_prefix(current: &OwnedValue, steps: &[Expr]) -> PathAssignOutcome {
+fn classify_yq_assign_prefix(
+    current: &OwnedValue,
+    steps: &[Expr],
+    terminal: &Expr,
+) -> PathAssignOutcome {
     let (step, rest) = match steps.split_first() {
-        None => {
-            return if is_yq_field_index_noop_scalar(current) {
-                PathAssignOutcome::TotalNoop
-            } else {
-                PathAssignOutcome::NeedsRhs
-            };
-        }
+        None => return classify_yq_assign_terminal(current, terminal),
         Some(pair) => pair,
     };
     let (step, _optional) = unwrap_path_component(step);
@@ -29268,7 +29263,7 @@ fn classify_yq_assign_prefix(current: &OwnedValue, steps: &[Expr]) -> PathAssign
                 _ => None,
             };
             match child {
-                Some(v) => classify_yq_assign_prefix(v, rest),
+                Some(v) => classify_yq_assign_prefix(v, rest, terminal),
                 // Reached only for a genuine type mismatch (e.g. `Field`
                 // against an `Array`), or a real scalar -- not `Null`,
                 // which is always routed through the `child` match above.
@@ -29278,15 +29273,15 @@ fn classify_yq_assign_prefix(current: &OwnedValue, steps: &[Expr]) -> PathAssign
         }
         Expr::Index { idx, .. } => match current {
             OwnedValue::Array(arr) => match resolve_read_index(&OwnedValue::Int(*idx), arr.len()) {
-                Some(i) => classify_yq_assign_prefix(&arr[i], rest),
+                Some(i) => classify_yq_assign_prefix(&arr[i], rest, terminal),
                 None => PathAssignOutcome::NeedsRhs,
             },
             _ if is_yq_field_index_noop_scalar(current) => PathAssignOutcome::TotalNoop,
             _ => PathAssignOutcome::NeedsRhs,
         },
         Expr::Iterate => match current {
-            OwnedValue::Array(arr) => classify_yq_assign_fanout(arr.iter(), rest),
-            OwnedValue::Object(map) => classify_yq_assign_fanout(map.values(), rest),
+            OwnedValue::Array(arr) => classify_yq_assign_fanout(arr.iter(), rest, terminal),
+            OwnedValue::Object(map) => classify_yq_assign_fanout(map.values(), rest, terminal),
             // Autovivifies to `[]` -- zero elements, so `rest` is never
             // actually applied to anything, whatever it still contains.
             // Changes the document (`Null` -> `[]`), so not `TotalNoop`,
@@ -29311,6 +29306,34 @@ fn classify_yq_assign_prefix(current: &OwnedValue, steps: &[Expr]) -> PathAssign
     }
 }
 
+/// The base case of [`classify_yq_assign_prefix`]: `current` is the terminal component's
+/// parent, and `terminal` is that component (#1921).
+///
+/// A `Field` or non-negative `Index` terminal is a no-op against a scalar parent and needs the
+/// RHS against anything else, as it always was. A terminal `Iterate` (`.a[] = v`) writes into
+/// every element of `current`, so it needs the RHS exactly when there is one to write into: real
+/// yq evaluates the RHS inside the per-candidate loop (`resultsForRHS`), so zero candidates
+/// never run it -- an empty array or mapping is a `TotalNoop`, a scalar parent too, and `Null`
+/// autovivifies to `[]` (the document changes, the RHS is never read). Captured against yq
+/// v4.53.3: `.a[] = error("boom")` is `{"a":[]}` on `a: []` and `a: null`, `{"a":{}}` on `a: {}`,
+/// and `boom` on a non-empty target.
+fn classify_yq_assign_terminal(current: &OwnedValue, terminal: &Expr) -> PathAssignOutcome {
+    if matches!(terminal, Expr::Iterate) {
+        return match current {
+            OwnedValue::Array(arr) if arr.is_empty() => PathAssignOutcome::TotalNoop,
+            OwnedValue::Object(map) if map.is_empty() => PathAssignOutcome::TotalNoop,
+            OwnedValue::Array(_) | OwnedValue::Object(_) => PathAssignOutcome::NeedsRhs,
+            OwnedValue::Null => PathAssignOutcome::RhsUnusedButChanges,
+            _ => PathAssignOutcome::TotalNoop,
+        };
+    }
+    if is_yq_field_index_noop_scalar(current) {
+        PathAssignOutcome::TotalNoop
+    } else {
+        PathAssignOutcome::NeedsRhs
+    }
+}
+
 /// The `Expr::Iterate` fan-out shared by both `Array`/`Object` arms of
 /// [`classify_yq_assign_prefix`]: walks every element once, short-circuits
 /// the instant any one needs the RHS for real (matching the old
@@ -29322,10 +29345,11 @@ fn classify_yq_assign_prefix(current: &OwnedValue, steps: &[Expr]) -> PathAssign
 fn classify_yq_assign_fanout<'a>(
     elements: impl Iterator<Item = &'a OwnedValue>,
     rest: &[Expr],
+    terminal: &Expr,
 ) -> PathAssignOutcome {
     let mut any_change = false;
     for elem in elements {
-        match classify_yq_assign_prefix(elem, rest) {
+        match classify_yq_assign_prefix(elem, rest, terminal) {
             PathAssignOutcome::TotalNoop => {}
             PathAssignOutcome::RhsUnusedButChanges => any_change = true,
             PathAssignOutcome::NeedsRhs => return PathAssignOutcome::NeedsRhs,

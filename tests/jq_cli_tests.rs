@@ -503,6 +503,17 @@ fn test_jq_from_entries_keeps_its_aliases_and_defaults_4399() -> Result<()> {
     Ok(())
 }
 
+/// #1921 guard: jq evaluates `=`'s right side before looking at the target's paths
+/// (`_assign(paths; $value)`), so `.a[] = error("boom")` raises even over an empty array -- the
+/// yq-mode skip of an unused RHS must not leak into `succinctly jq` (verified against jq 1.7.1).
+#[test]
+fn test_jq_terminal_iterate_assign_still_evaluates_the_rhs_1921() -> Result<()> {
+    let (_out, stderr, code) = run_jq_full(&["-c", ".a[] = error(\"boom\")"], Some("{\"a\":[]}"))?;
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
+    Ok(())
+}
+
 /// Helper to run jq command with input from stdin
 fn run_jq_stdin(filter: &str, input: &str, extra_args: &[&str]) -> Result<(String, i32)> {
     let (stdout, _, code) = run_jq_stdin_streams(filter, input, extra_args)?;
