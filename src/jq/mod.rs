@@ -99,6 +99,7 @@ mod value;
 pub mod walk;
 
 pub use error::{BinOp, Control, ErrorKind, EvalError, EvalErrorPayload};
+pub use eval::tostream_events;
 pub use eval::{
     alias_identity, bound_def, enter_file_index_scope, eval, eval_documents_together, eval_lenient,
     eval_owned_with_file_index, expr_key, is_alias_sensitive_assign, nonfinite_display_string,

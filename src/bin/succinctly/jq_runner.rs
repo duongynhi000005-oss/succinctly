@@ -4282,6 +4282,7 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
     let can_use_lazy_path = !args.raw_input
         && args.input_dsv.is_none()
         && !args.seq // seq input mode parses differently
+        && !args.stream // the program reads tostream events, not documents (#4397)
         && !uses_input_builtins;
 
     if can_use_lazy_path && !args.null_input {
@@ -5853,6 +5854,13 @@ fn get_inputs(
         }
     }
 
+    // #4397: `--stream` feeds the program `tostream`'s events in place of each document, `-s`
+    // slurping the events and `input`/`inputs` reading them. Each event keeps its document's
+    // location.
+    if args.stream && json_input_mode {
+        expand_into_stream_events(&mut values, &mut locations, &mut resumed_errors);
+    }
+
     // Slurp mode: wrap all inputs in an array
     if args.slurp {
         let at = match locations.slurp_eof(slurp_eof_line) {
@@ -5873,6 +5881,32 @@ fn get_inputs(
         )))
     } else {
         Ok(Ok((values, locations, trailing_error, resumed_errors)))
+    }
+}
+
+/// Replace each of `values` with its `tostream` events (#4397), repeating its location for every
+/// event and moving each resumed error to the same place in the longer stream.
+fn expand_into_stream_events(
+    values: &mut Vec<OwnedValue>,
+    locations: &mut InputLocations,
+    resumed_errors: &mut [(usize, TrailingParseError)],
+) {
+    let documents = std::mem::take(values);
+    let located = locations.per_value.len() == documents.len();
+    let old_locations = std::mem::take(&mut locations.per_value);
+    let mut starts = Vec::with_capacity(documents.len() + 1);
+    for (index, document) in documents.iter().enumerate() {
+        starts.push(values.len());
+        let events = succinctly::jq::tostream_events(document);
+        if located {
+            let target = locations.per_value.len() + events.len();
+            locations.per_value.resize(target, old_locations[index]);
+        }
+        values.extend(events);
+    }
+    starts.push(values.len());
+    for (position, _) in resumed_errors.iter_mut() {
+        *position = starts[(*position).min(documents.len())];
     }
 }
 

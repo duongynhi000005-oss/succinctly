@@ -41781,6 +41781,103 @@ fn test_jq_fault_in_the_moved_bytes_resumes_in_the_next_read_4376() -> Result<()
     Ok(())
 }
 
+/// #4397: `--stream` feeds the program `tostream`'s events in place of each input document: `.`
+/// sees one event at a time, `-s` slurps the events into one array, and `input`/`inputs` read them,
+/// so `fromstream` and `truncate_stream` fold them back. `-R` ignores the flag. Every expectation is
+/// jq 1.7.1's own output.
+#[test]
+fn test_jq_stream_flag_feeds_tostream_events_4397() -> Result<()> {
+    for (args, input, expected) in [
+        (
+            &["--stream", "-c", "."][..],
+            "[1,[2]] 3 {\"a\":{}}\n",
+            "[[0],1]\n[[1,0],2]\n[[1,0]]\n[[1]]\n[[],3]\n[[\"a\"],{}]\n[[\"a\"]]\n",
+        ),
+        (
+            &["--stream", "-s", "-c", "."][..],
+            "[1,[2]] 3 {\"a\":{}}\n",
+            "[[[0],1],[[1,0],2],[[1,0]],[[1]],[[],3],[[\"a\"],{}],[[\"a\"]]]\n",
+        ),
+        (
+            &["--stream", "-s", "-c", "."][..],
+            "1 2\n",
+            "[[[],1],[[],2]]\n",
+        ),
+        (&["--stream", "-s", "-c", "."][..], "[]\n", "[[[],[]]]\n"),
+        (
+            &["--stream", "-n", "-c", "[inputs]"][..],
+            "[1,[2]] 3\n",
+            "[[[0],1],[[1,0],2],[[1,0]],[[1]],[[],3]]\n",
+        ),
+        (
+            &["--stream", "-n", "-c", "input"][..],
+            "[1,[2]] 3\n",
+            "[[0],1]\n",
+        ),
+        (
+            &["--stream", "-n", "-c", "fromstream(inputs)"][..],
+            "{\"a\":[1,2]} [3]\n",
+            "{\"a\":[1,2]}\n[3]\n",
+        ),
+        (
+            &["--stream", "-c", "select(length==2)|.[1]"][..],
+            "[1,[2]] 3\n",
+            "1\n2\n3\n",
+        ),
+        (
+            &["--stream", "-n", "-c", "1|truncate_stream(inputs)"][..],
+            "[1,[2]]\n",
+            "[[0],2]\n[[0]]\n",
+        ),
+        (
+            &["--stream", "-n", "-c", "reduce inputs as $e (0; .+1)"][..],
+            "[1,[2]] 3\n",
+            "5\n",
+        ),
+        (
+            &["--stream", "-c", "[., input_line_number]"][..],
+            "1 2\n",
+            "[[[],1],1]\n[[[],2],1]\n",
+        ),
+        // `-R` reads lines, whatever the flag says.
+        (
+            &["--stream", "-R", "-c", "."][..],
+            "\"x\"\n",
+            "\"\\\"x\\\"\"\n",
+        ),
+        // Without the flag nothing changes.
+        (&["-c", "."][..], "[1,[2]]\n", "[1,[2]]\n"),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(args, Some(input))?;
+        assert_eq!(code, 0, "{args:?} on {input:?}: {stderr}");
+        assert_eq!(stdout, expected, "{args:?} on {input:?}");
+    }
+    // A caught parse error stays between the events of the documents either side of it.
+    for input in ["[1]\n}\n[2]\n", "[1]\n]\n[2]\n"] {
+        let (stdout, stderr, code) = run_jq_full(
+            &[
+                "--stream",
+                "-n",
+                "-c",
+                r#"[limit(8; repeat(try input catch "E"))]"#,
+            ],
+            Some(input),
+        )?;
+        assert_eq!(code, 0, "{input:?}: {stderr}");
+        assert_eq!(
+            stdout, "[[[0],1],[[0]],\"E\",[[0],2],[[0]],\"E\",\"E\",\"E\"]\n",
+            "{input:?}"
+        );
+    }
+    // A document that fails to parse is reported after the events of the documents before it. (jq
+    // emits events as it parses, so it also prints `[[0],2]` for the failed `[2,`: recorded in
+    // limitations.md.)
+    let (stdout, stderr, code) = run_jq_full(&["--stream", "-c", "."], Some("[1] [2,\n"))?;
+    assert_eq!(stdout, "[[0],1]\n[[0]]\n");
+    assert_eq!(code, 5, "{stderr}");
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently
