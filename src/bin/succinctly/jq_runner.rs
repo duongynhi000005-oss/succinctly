@@ -7075,15 +7075,22 @@ fn token_runs_to_end(tail: &[u8]) -> bool {
 /// Whether jq's parser refuses the value `span`. An invalid UTF-8 byte inside a string is not
 /// a refusal: jq substitutes U+FFFD for it before the string is read (#1743), so a span that
 /// only fails on one is judged after the same substitution (#4335). The raw check comes first
-/// and settles every document that is valid UTF-8, which is nearly all of them.
+/// and settles every span that fails for another reason, or none: only a span whose first error
+/// is the invalid byte pays for the substitution.
+///
+/// Recorded residual: the sibling that places where jq detects a fault ([`parse_error_detection`])
+/// still reads the raw bytes, so a malformed value that also holds an invalid byte resumes at
+/// the wrong read (limitations.md).
 fn span_is_refused_by_jq(span: &[u8]) -> bool {
-    use succinctly::json::validate::validate_jq_lenient;
-    validate_jq_lenient(span).is_err()
-        && (succinctly::text::utf8::validate_utf8(span).is_ok()
-            || validate_jq_lenient(
-                succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(span).as_bytes(),
-            )
-            .is_err())
+    use succinctly::json::validate::{validate_jq_lenient, ValidationErrorKind as Kind};
+    match validate_jq_lenient(span) {
+        Ok(()) => false,
+        Err(error) if matches!(error.kind, Kind::InvalidUtf8) => validate_jq_lenient(
+            succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(span).as_bytes(),
+        )
+        .is_err(),
+        Err(_) => true,
+    }
 }
 
 /// [`split_json_values`], with a value the splitter accepts but jq's parser refuses (`[1 2]`,
@@ -11635,9 +11642,7 @@ mod tests {
             let (spans, split_error) = split_json_values(bytes);
             let start = spans
                 .iter()
-                .find(|&&(start, end)| {
-                    succinctly::json::validate::validate_jq_lenient(&bytes[start..end]).is_err()
-                })
+                .find(|&&(start, end)| span_is_refused_by_jq(&bytes[start..end]))
                 .map(|&(start, _)| start)
                 .or(split_error)
                 .expect("a malformed value");
