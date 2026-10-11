@@ -53794,6 +53794,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
     let step_cannot_move =
         cannot_move_register(update) && extract.map_or(true, cannot_move_register);
+    // #4130: everything in the loop body but the pattern walk, judged once: an untracked
+    // entry's emission is at the entry register when this holds and the step walked nothing.
+    let entry_stays_at_register = states_untracked
+        && init_keeps_register
+        && !mentions_frozen_var
+        && cannot_move_register(input)
+        && step_cannot_move;
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
     // own trailing escape, which jq never reaches once a consumer has
@@ -53981,14 +53988,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // step took no walk step (a bare `$var`, or the one a failed
                         // destructure's restored fork reached) and nothing else in the loop
                         // body can have moved it. Read by the sink above, per emission.
-                        step_at_entry.set(
-                            states_untracked
-                                && walked.is_none()
-                                && init_keeps_register
-                                && !mentions_frozen_var
-                                && cannot_move_register(input)
-                                && step_cannot_move,
-                        );
+                        step_at_entry.set(entry_stays_at_register && walked.is_none());
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "foreach")
                         {
@@ -58748,9 +58748,10 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         !stage_preserves_register && entry_marker_stage::<S>(element, branch_trackable);
     // #3758: read once per stage, applied per result inside `place_step`.
     // #3580: a `foreach` states its register per emission too -- the UPDATE
-    // output's -- but only on a trackable entry, where the statement is `Unmoved`;
-    // an untracked entry reads an absent statement as the carried copy standing
-    // (#3826), which is wrong for an emission whose UPDATE navigated.
+    // output's -- on a trackable entry, where the statement is `Unmoved`. An untracked
+    // entry reads an absent statement as the carried copy standing (#3826), which is
+    // wrong for an emission whose UPDATE navigated, so there `resolve_foreach` states
+    // every depth-0 emission itself (`Unmoved` or a loss, #4130) before the stage reads it.
     let stages_per_result_register = stage_states_register_per_result::<S>(element)
         || (branch_trackable && foreach_states_register_per_emission::<S>(element))
         || (branch_trackable && compound_states_register_per_result::<S>(element))

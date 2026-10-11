@@ -66378,8 +66378,81 @@ fn test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130() 
             "",
             0,
         ),
-        // A destructure that succeeds, a navigating source, UPDATE or EXTRACT, or a register an
-        // earlier `.a` moved, are not at the entry.
+        // A frozen `$x`, a wrapper the stage reads through, and a multi-output INIT keep it.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a (0; $x; .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a ($x; .; $x)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | first(foreach (1,2) as $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a ((0,1); .; .)) | $x)",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // A source that navigates (`$x as {a:$a} | .` steps `.a` before the loop body runs) moves
+        // the register ahead of every emission, whatever the bare alternative then does.
+        (
+            "[]",
+            r"path(. as $x | {a:{b:1}} | ((. as $x | foreach ($x as {a:$a} | .) as $k (.; .; .)) or .[0]) | $x)",
+            "",
+            r"Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"del(. as $x | {a:{b:1}} | ((foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) or .b?) | $x.a?)",
+            "",
+            r"Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(. as $x | {a:{b:1}} | ((foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) or true) | $x)",
+            "",
+            r"Invalid path expression",
+            5,
+        ),
+        // A navigating INIT or EXTRACT, a destructure that succeeds, a navigating source or
+        // UPDATE, or a register an earlier `.a` moved, are not at the entry.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a (.a; .; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a (0; .; .a?)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | 5 | (foreach (1,2) as $a ((.a,1); .; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
         (
             r#"{"a":true}"#,
             r"path(. as $x | 5 | (foreach . as {a:$q} (0; .; .)) | $x)",
