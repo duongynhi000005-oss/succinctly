@@ -2021,9 +2021,10 @@ is the revert that established what the other one costs.
    another fold's body (a `reduce` UPDATE or source), the price #4187 already pays; 142 the mixed chain `. as {a:$a}
    ?// $z | . as {a:$b} | .` and 142 `. as $x | first($x) as {a:$a} | .` under `try`/`?`/`and`, where jq catches its
    own error but the resolver's refusal is the uncatchable one (#4150; the `first($x)` operand also turns 203 wrong
-   accepts into matches); and 12 `. as $x ?// [$x] | $x as {a:$a}`. Nothing that matched jq became a wrong accept, on
-   those rows, on the #3744/#4187/#4278 operands as bare stages (62,307 rows: wrong accepts 1,368 to 217) or on a
-   `--sample 6000 --seed 7` over the whole grid.
+   accepts into matches); and 12 `. as $x ?// [$x] | $x as {a:$a}` (those full-shape counts are from the second review
+   round's build). On the final build, rebased on `main`: nothing that matched jq became a wrong accept on the 76
+   #3744/#4187/#4278 operands as bare stages (66,747 rows: wrong accepts 1,624 to 287, wrong answers 201 to 72, 225
+   matches lost to a refusal) or on a `--sample 6000 --seed 7` over the whole grid.
    [#4187](https://github.com/rust-works/succinctly/issues/4187) closes two of the families: a plain bind in front of
    the destructure (`. as $x | . as {a:$a} | .`, `source_destructures_register` stopped at the bind and never read its
    body: its source is a subexpression, so the body meets the register where the bind did) and a `?//` chain of
