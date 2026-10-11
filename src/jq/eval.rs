@@ -15964,11 +15964,14 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // filename`, `.a = {"n": filename}`), which real yq answers with the
         // file's name. A detached literal (`1 as $v | $v | filename`) is the
         // one case that over-answers -- see docs/compliance/yq/limitations.md.
+        //
+        // No ambient origin at all (`-s`, which installs no per-file scope)
+        // is `""`, not file 0: yq names no file for a slurped array.
         Builtin::Filename => QueryResult::Owned(OwnedValue::String(
-            super::eval_generic::filename_of_file(
-                super::eval_generic::ambient_file_index().unwrap_or(0),
-            )
-            .into(),
+            super::eval_generic::ambient_file_index()
+                .map(super::eval_generic::filename_of_file)
+                .unwrap_or_default()
+                .into(),
         )),
         Builtin::Shuffle => builtin_shuffle::<W, S>(value, optional),
         Builtin::Pivot => builtin_pivot::<W, S>(value, optional),
@@ -119290,6 +119293,65 @@ mod tests {
             eval_all_outputs(b"[10,20]", &[3, 4], "def f: file_index; .[] | f"),
             vec!["3", "4"]
         );
+    }
+
+    /// #2648: `filename` names the file `file_index` numbers, through the
+    /// run's name table -- by position under `--eval-all`'s origin table, by
+    /// the ambient per-file scope on the ordinary path, and `""` with neither.
+    #[test]
+    fn test_filename_reads_the_name_table_2648() {
+        let yq = |json: &[u8], origin: &[usize], filter: &str| -> Vec<String> {
+            let index = JsonIndex::build(json);
+            let input = to_owned_lossy::<JqSemantics, _>(&index.root(json).value());
+            let expr =
+                crate::jq::parser::parse_with_mode(filter, crate::jq::parser::ParserMode::Yq)
+                    .unwrap();
+            match eval_owned_with_file_index::<Vec<u64>, YqSemantics>(&expr, &input, origin) {
+                QueryResult::Owned(v) => vec![v.to_json()],
+                QueryResult::ManyOwned(vs) => vs.iter().map(OwnedValue::to_json).collect(),
+                other => panic!("expected outputs, got {other:?}"),
+            }
+        };
+        let names = enter_file_names_scope(vec!["a.yaml".into(), "./b.yaml".into()]);
+        // The origin table maps array element `i` to its file; the name follows.
+        assert_eq!(
+            yq(b"[10,20,30]", &[0, 1, 1], ".[] | filename"),
+            vec![r#""a.yaml""#, r#""./b.yaml""#, r#""./b.yaml""#]
+        );
+        assert_eq!(
+            yq(b"[10,20]", &[1, 0], ".[] | select(filename == \"a.yaml\")"),
+            vec!["20"]
+        );
+        // A file number past the table names nothing.
+        assert_eq!(yq(b"[1]", &[5], ".[] | filename"), vec![r#""""#]);
+        drop(names);
+        // No table at all: the empty string, not a panic and not file 0's name.
+        assert_eq!(yq(b"[1]", &[0], ".[] | filename"), vec![r#""""#]);
+    }
+
+    /// #2648: the ordinary multi-file path has no origin table, only the
+    /// per-file scope; and no scope at all (`-s`) names no file.
+    #[test]
+    fn test_filename_reads_the_ambient_file_scope_2648() {
+        let json = br#"{"x":1}"#;
+        let index = JsonIndex::build(json);
+        let run = |filter: &str| -> Vec<String> {
+            let expr =
+                crate::jq::parser::parse_with_mode(filter, crate::jq::parser::ParserMode::Yq)
+                    .unwrap();
+            eval::<Vec<u64>, YqSemantics>(&expr, index.root(json))
+                .collect_owned::<YqSemantics>()
+                .iter()
+                .map(OwnedValue::to_json)
+                .collect()
+        };
+        let _names = enter_file_names_scope(vec!["a.yaml".into(), "b.yaml".into()]);
+        {
+            let _scope = enter_file_index_scope(1);
+            assert_eq!(run("filename"), vec![r#""b.yaml""#]);
+            assert_eq!(run(".x | filename"), vec![r#""b.yaml""#]);
+        }
+        assert_eq!(run("filename"), vec![r#""""#], "no scope names no file");
     }
 
     #[test]

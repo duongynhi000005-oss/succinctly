@@ -9988,7 +9988,15 @@ fn file_index_for_path(path: &[OwnedValue]) -> i64 {
 
 /// `filename` for a node at `path`: the name of the file [`file_index_for_path`]
 /// resolves to (#2648).
+///
+/// With neither an ambient origin nor an `--eval-all` table installed there is
+/// no file to name, so `""` -- `file_index_for_path` would answer file `0`
+/// there, which is the right number for `file_index` but names a file the
+/// node did not come from (`-s`, which installs no per-file scope).
 fn filename_for_path(path: &[OwnedValue]) -> String {
+    if ambient_file_index().is_none() && file_origin::current().is_none() {
+        return String::new();
+    }
     filename_of_file(file_index_for_path(path))
 }
 

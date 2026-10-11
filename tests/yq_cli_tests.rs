@@ -22334,10 +22334,12 @@ fn test_eval_all_file_index_bare() -> Result<()> {
 #[test]
 fn test_filename_names_each_input_file_2648() -> Result<()> {
     let (f1, f2) = two_doc_fixtures()?;
-    let (p1, p2) = (
-        f1.path().display().to_string(),
-        f2.path().display().to_string(),
-    );
+    // JSON-escaped, so a path with a backslash (Windows) reads as the printer writes it.
+    let json_path = |p: &std::path::Path| -> Result<String> {
+        let quoted = serde_json::to_string(&p.display().to_string())?;
+        Ok(quoted[1..quoted.len() - 1].to_string())
+    };
+    let (p1, p2) = (json_path(f1.path())?, json_path(f2.path())?);
     for mode in [
         &["-o", "json", "-I", "0"][..],
         &["--eval-all", "-o", "json", "-I", "0"][..],

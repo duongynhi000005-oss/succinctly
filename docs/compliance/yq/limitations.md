@@ -718,9 +718,11 @@ $ yq '1 as $v | $v | filename' f1.yaml             # (empty)
 $ succinctly yq '1 as $v | $v | filename' f1.yaml  # f1.yaml
 $ yq '[.x] | .[0] | filename' f1.yaml              # (empty)
 $ succinctly yq '[.x] | .[0] | filename' f1.yaml   # f1.yaml
-$ yq -s '.[] | filename' f1.yaml f2.yaml           # (empty)
-$ succinctly yq -s '.[] | filename' f1.yaml f2.yaml  # f1.yaml / f1.yaml
 ```
+
+A `load()`ed document is the same gap from the other side: yq stamps the *loaded* file's name on
+its nodes (`yq -n '[load("f1.yaml") | filename]'` is `f1.yaml`, and so is `yq '[load("f2.yaml") |
+filename]' f1.yaml`), where succinctly names the file being read, or `""` under `-n`.
 
 `file_index` has the same shape (`yq ea '1 | fileIndex'` is `0` for every file, succinctly's is the
 file's own). Closing it needs the per-node provenance the `---` section names, tracked on
