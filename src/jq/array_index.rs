@@ -355,28 +355,34 @@ where
     values
 }
 
-/// The values a slice of `elements` holds (#4287): `resolve` turns the length
-/// into the slice's range, and `window`, when the bounds name one without the
-/// length (both non-negative), is a range the result lies within.
+/// The values a slice of `elements` holds (#4287), as a buffer and the range
+/// of it that is the slice: `resolve` turns the length into the slice's
+/// range, and `window`, when the bounds name one without the length (both
+/// non-negative), is a range the slice lies within.
 ///
 /// [`len_checked_memoized`] and [`values_in_range`] in one: an indexed array
 /// is answered from its index, and any other is walked **once**, with
-/// `len_checked`'s checks (and its error), keeping the cursors of `window`
-/// (of every element when there is none) and registering a wide array as
-/// that walk would. A length walk and then a second walk to the range cost a
+/// `len_checked`'s checks (and its error), keeping the values of `window` (of
+/// every element when there is none) and registering a wide array as that
+/// walk would. A length walk and then a second walk to the range cost a
 /// one-shot slice of most of a million-element array 5% over the single
-/// collecting walk it replaced.
+/// collecting walk it replaced; the range is handed back rather than copied
+/// out for the same reason.
 pub(crate) fn slice_values<E>(
     elements: &E,
     window: Option<Range<usize>>,
     resolve: impl FnOnce(usize) -> Range<usize>,
-) -> Result<Vec<E::Value>, EvalError>
+) -> Result<(Vec<E::Value>, Range<usize>), EvalError>
 where
     E: DocumentElements,
     E::Cursor: DocumentCursor<Value = E::Value>,
 {
+    let whole = |values: Vec<E::Value>| {
+        let all = 0..values.len();
+        (values, all)
+    };
     if let Some(len) = memo::len(elements) {
-        return Ok(values_in_range(elements, resolve(len)));
+        return Ok(whole(values_in_range(elements, resolve(len))));
     }
     let keep = window.unwrap_or(0..usize::MAX);
     let mut kept = Vec::new();
@@ -388,7 +394,7 @@ where
             return Err(elements.malformed_element_error());
         }
         if keep.contains(&count) {
-            kept.push(cursor);
+            kept.push(cursor.value());
         }
         count += 1;
         last = Some(cursor);
@@ -404,21 +410,23 @@ where
     }
     let range = resolve(count);
     if range.is_empty() {
-        return Ok(Vec::new());
+        return Ok(whole(Vec::new()));
     }
     let kept_range = range
         .start
         .checked_sub(keep.start)
-        .zip(range.end.checked_sub(keep.start));
-    match kept_range.and_then(|(from, to)| kept.get(from..to)) {
-        Some(cursors) => Ok(cursors.iter().map(DocumentCursor::value).collect()),
+        .zip(range.end.checked_sub(keep.start))
+        .map(|(from, to)| from..to)
+        .filter(|local| local.end <= kept.len());
+    match kept_range {
+        Some(local) => Ok((kept, local)),
         // A window names a range its bounds resolve within, so the kept cursors
         // cover it; a miss is a bug the tests must see, and a release build
         // still answers it by walking.
         // patchcov: coverage tolerate reason="unreachable: a window names a range its bounds resolve within, so the kept cursors always cover it"
         None => {
             debug_assert!(false, "the window {keep:?} does not cover {range:?}");
-            Ok(values_in_range(elements, range))
+            Ok(whole(values_in_range(elements, range)))
         } // patchcov: coverage end
     }
 }
@@ -1072,7 +1080,8 @@ mod tests {
                     }
                     _ => None,
                 };
-                let sliced = slice_values(&elements, window, |len| bounds.resolve(len));
+                let sliced = slice_values(&elements, window, |len| bounds.resolve(len))
+                    .map(|(values, range)| values[range].to_vec());
                 match (&walked, sliced) {
                     (Ok(len), Ok(values)) => {
                         let collected = elements.collect_values();
@@ -1320,10 +1329,11 @@ mod tests {
                     (Some(5), Some(2), Some(5..5)),
                 ] {
                     let bounds = SliceBounds::from_literals(start, end);
-                    let values =
+                    let (values, range) =
                         slice_values(&elements, window, |len| bounds.resolve(len)).unwrap();
+                    let values = &values[range];
                     assert_eq!(
-                        to_owned_all::<JqSemantics, _>(&values).unwrap(),
+                        to_owned_all::<JqSemantics, _>(values).unwrap(),
                         to_owned_all::<JqSemantics, _>(&collected[bounds.resolve(n)]).unwrap(),
                         "round {round}: {start:?}:{end:?}"
                     );

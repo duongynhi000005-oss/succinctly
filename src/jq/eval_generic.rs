@@ -22386,10 +22386,7 @@ fn slice_one_generic<S: EvalSemantics, V: DocumentValue>(
         let slice =
             crate::jq::array_index::slice_values(&elements, window, |len| bounds.resolve(len));
         let (items, range) = match slice {
-            Ok(items) => {
-                let all = 0..items.len();
-                (items, all)
-            }
+            Ok(slice) => slice,
             Err(_) => {
                 let items = elements.collect_values();
                 let range = SliceBounds::from_literals(start, end).resolve(items.len());
