@@ -4113,9 +4113,12 @@ $ yq -n '[{"key":false,"value":1}] | from_entries'  # {"false":1} -- a falsy key
 `succinctly yq` matches all of these since #4399 (`entries_to_object`'s yq branch,
 `yq_entry_key_and_value`; the `'key'` is checked first, and the position is the entry's index).
 `succinctly jq` keeps jq's own alias chain and truthy fallback (`ENTRY_KEY_ALIASES`),
-unchanged. Two things remain: a `key` that is a non-empty array or mapping (yq: `{"":2}`; here
-still `Cannot use array ... as object key`, see `yq_object_key_stringify`), and duplicate `key`
-entries in one source mapping, which collapse before the count (yq reports `found 2`).
+unchanged. Four things remain: a `key` that is a non-empty array or mapping (yq: `{"":2}`; here
+still `Cannot use array ... as object key`, see `yq_object_key_stringify`); duplicate `key`
+entries in one source mapping, which collapse before the count (yq reports `found 2`);
+duplicate *output* keys (`[{"key":"a","value":1},{"key":"a","value":2}] | from_entries` is
+`{"a":1,"a":2}` in yq and `{"a":2}` here, as `OwnedValue` holds each key once); and a YAML
+`~` key, which yq spells `"~"` and this renders as `"null"`.
 
 ### `type` answered jq's type name instead of the YAML tag — resolved ([#2516](https://github.com/rust-works/succinctly/issues/2516)); an alias through a constructed array/object is a residual gap
 

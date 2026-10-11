@@ -495,6 +495,11 @@ fn test_jq_from_entries_keeps_its_aliases_and_defaults_4399() -> Result<()> {
         let (out, code) = run_jq_stdin(filter, "null", &["-c"])?;
         assert_eq!((out.as_str(), code), (expected, 0), "{filter}");
     }
+    // The refusals are jq's own wording, not yq's `expected to find one 'key' entry`.
+    for filter in ["[null] | from_entries", "[5] | from_entries"] {
+        let (out, _stderr, code) = run_jq_full(&["-c", filter], Some("null"))?;
+        assert_eq!((out.as_str(), code), ("", 5), "{filter}");
+    }
     Ok(())
 }
 

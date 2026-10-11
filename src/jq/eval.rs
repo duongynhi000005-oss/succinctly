@@ -19700,7 +19700,7 @@ fn entry_key_and_value(entry: &OwnedValue) -> Result<(OwnedValue, OwnedValue), E
 }
 
 /// yq's reading of one entry (#4399): exactly a `key` and a `value` child, no aliases (`name`,
-/// `k`, `Key`, ... are jq's) and no defaults -- an entry missing either, or not a mapping at all
+/// `Name`, `Key` are jq's) and no defaults -- an entry missing either, or not a mapping at all
 /// (`null` and scalars included), is refused with yq's `expected to find one 'key' entry but
 /// found 0 in position N` (the `'key'` is checked first). An `OwnedValue` mapping holds each
 /// key once, so the count is only ever 0 here; a document's duplicate `key` entries collapse
