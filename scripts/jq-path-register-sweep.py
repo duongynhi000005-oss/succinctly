@@ -516,8 +516,21 @@ OPERANDS = [
     "(foreach (def f: .; (f, .) as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, f) as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, 7) as {a:$a} | .) as $k (.; .; .))",
+    # (#4320) a `$x` bound outside the `foreach` that is the register at it: certified by
+    # marker identity, so it is the source's own destructure as `. as {a:$a}` is. The contrasts
+    # are an outer `$x` bound to a member, a `reduce` (which backtracks its source), an outer
+    # `$x` rebound by a pattern, and one the source only reads.
+    "(. as $x | foreach ($x as [$q] | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x, $x) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ($x as {a:$a} | .a) as $k (.; .; $k))",
+    "(. as $x | foreach ($x as $v | .) as $k (.; .; .))",
+    "(. as $x | reduce ($x as {a:$a} | .) as $k (.; .))",
+    "(.a as $x | foreach ($x as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (. as {a:$x} | $x as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ($x | .a) as $k (.; .; .))",
     # ...and the second review's: a name two chain alternatives bind, a `$x` behind `first` or a
-    # comma, a `$x` bound outside the source (still accepted, #4320), and a run of calls to one
+    # comma, a `$x` bound outside the source (read since #4320's second part when it is the register), and a run of calls to one
     # pass-through `def`.
     "(foreach (. as $a ?// {a:$a} | $a as {a:$b} | .) as $k (.; .; .))",
     "(foreach (. as $x ?// [$x] | $x as {a:$a} | .) as $k (.; .; .))",

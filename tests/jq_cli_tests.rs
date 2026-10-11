@@ -60630,7 +60630,12 @@ fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
 /// jq's register and the EXTRACT is checked against it, so `del`, `=` and `|=` through it raise
 /// where the by-value drive answered `null` and wrote. The contrasts are a call whose body
 /// navigates or is a constant, a definition shadowed before the call, a bare `$var` bind, a
-/// `$x` bound to a member, and a `reduce`, which backtracks its source. Every row captured from
+/// `$x` bound to a member, and a `reduce`, which backtracks its source. Also a `$x` bound
+/// *outside* the `foreach` that is the register at it (`. as $x | foreach ($x as {a:$a} | .) ...`,
+/// a comma of them, an array pattern, a nested fold's source, and a `$x` that is a member rather than
+/// the register, which raises at its first step), decided by marker identity inside a fold body so a `$it` that is a
+/// different node (`reduce .[] as $it (.; foreach ($it as {a:$a} | .) ...)`, which jq answers) is
+/// not. Every row captured from
 /// jq 1.7.1 with `-c`; the message is pinned only where succinctly names the same step (a
 /// constant body is jq's `near attempt to access element`, here the value-mode `Cannot index`,
 /// on `main` too).
@@ -60770,6 +60775,97 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
             "null\n",
             "",
             0,
+        ),
+        (
+            doc,
+            r". as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | (foreach ($x as {a:$a} | .) as $y (.; .; .)) = 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | (foreach ($x as {a:$a} | .) as $y (.; .; .)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | [path(foreach ($x as {a:$a} | .) as $y (.; .; .))]",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | del(foreach (($x, $x) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | del(foreach ($x as [$q] | .) as $y (.; .; .))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            doc,
+            r". as $x | del(foreach ($x as $v | .) as $y (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r". as $x | del(reduce ($x as {a:$a} | .) as $y (.; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1},{"a":2}]"#,
+            r"[path(reduce .[] as $it (.; foreach ($it as {a:$a} | .) as $k (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r".a as $x | del(foreach ($x as {b:$b} | .) as $y (.; .; .))",
+            "",
+            "near attempt to access element \"b\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r". as $x | [path(.a | foreach ($x as {a:$a} | .) as $y (.; .; .))]",
+            "",
+            "near attempt to access element \"a\"",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r". as $x | [path(reduce (foreach ($x as {a:$a} | .) as $k (.; .; .)) as [$q] (0; .))]",
+            "",
+            "Cannot index array with string",
+            5,
         ),
     ])?;
     Ok(())
