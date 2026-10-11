@@ -62840,6 +62840,51 @@ fn test_block_scalar_header_on_its_own_line_4259() -> Result<()> {
     Ok(())
 }
 
+/// #4286: the `key` read of a computed slice (jq mode answers it from the slice's range) and the
+/// read of a computed slice over an owned array both keep yq's own answers. yq's slice keeps the
+/// position, so the `key` fusion declines there; the owned read follows yq's rules for a negative
+/// index and a string or empty target. The unfused spelling (the slice in parentheses) is the
+/// slice-then-read evaluation each must equal.
+#[test]
+fn test_computed_slice_key_and_owned_read_match_the_unfused_spelling_4286() -> Result<()> {
+    let docs = [
+        "[]",
+        "[10, 20, 30]",
+        "- a: 1\n  a: 2 # kept?\n- &x {b: 3}\n- *x\n# trailing\n- [4, 5]\n",
+        "k:\n  - 1\n  - 2\n",
+        "scalar",
+        "null",
+    ];
+    let bounds = ["$i:", ":$j", "$neg:", "(1,2):", "$z:"];
+    let prelude = "1 as $i | 2 as $j | -2 as $neg | null as $z | ";
+    for doc in docs {
+        for bound in bounds {
+            for (fused_read, unfused_read) in
+                [("[0]", "| .[0]"), ("[2]", "| .[2]"), ("[-1]", "| .[-1]")]
+            {
+                for tail in ["key", "tostring | key", "key | tostring"] {
+                    let fused = format!("{prelude}.[{bound}]{fused_read} | {tail}");
+                    let unfused = format!("{prelude}(.[{bound}]) {unfused_read} | {tail}");
+                    assert_eq!(
+                        run_yq_stdin(&fused, doc, &[])?,
+                        run_yq_stdin(&unfused, doc, &[])?,
+                        "{doc:?}: {fused}"
+                    );
+                }
+                // The owned array: a constructed copy of the document's members.
+                let fused = format!("{prelude}[.[]?] | .[{bound}]{fused_read}");
+                let unfused = format!("{prelude}[.[]?] | (.[{bound}]) {unfused_read}");
+                assert_eq!(
+                    run_yq_stdin(&fused, doc, &[])?,
+                    run_yq_stdin(&unfused, doc, &[])?,
+                    "{doc:?}: {fused}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// #4195: `E[a:b][k]` and `E[a:b] | length` read the slice's resolved range instead of building
 /// the slice, in yq mode as in jq mode. The rows marked yq v4.53.3 are that tool's own answers; the
 /// out-of-range negative index is the one place yq raises where jq answers `null`, so the fusion

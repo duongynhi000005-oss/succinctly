@@ -11050,6 +11050,17 @@ pub(crate) fn eval_each_owned_front_doors<S: EvalSemantics>(
             Demand::Stop => Flow::Stopped { pending: None },
         });
     }
+    // #4286: a read of a computed slice's range, `.[$i:][0]`, is the same question.
+    if let Expr::Pipe(stages) = unwrap_paren(expr) {
+        if let Some(read) =
+            super::eval_generic::eval_owned_fused_slice_read::<S>(stages.as_slice(), input)
+        {
+            return Some(match sink(read) {
+                Demand::Continue => Flow::Exhausted,
+                Demand::Stop => Flow::Stopped { pending: None },
+            });
+        }
+    }
     // #2889: `add`/`min`/`max` hand back one of their inputs rather than
     // computing a new value, and the round trip below would rebuild that
     // input as a copy. Before the peel, which cannot help here -- the fold
@@ -11663,10 +11674,21 @@ fn projection_peel<S: EvalSemantics>(
     if let Expr::Pipe(inner) = first {
         // The copy below is paid per re-entry, so a head that cannot peel
         // (`select(..)`, an empty pipe) is turned away before it.
-        if !skip_identity_stages(inner).first().is_some_and(|head| {
+        let skipped = skip_identity_stages(inner);
+        if !skipped.first().is_some_and(|head| {
             let head = unwrap_paren(head);
             is_peelable_head::<S>(head)
                 || matches!(head, Expr::Pipe(_) | Expr::Builtin(Builtin::Length))
+                // #4286: a computed slice, when the stage after it is a read the owned
+                // fusion answers (`eval_generic::fusable_slice_read` is the full gate).
+                || (matches!(head, Expr::SliceExpr { .. })
+                    && skipped.get(1).is_some_and(|read| {
+                        matches!(
+                            unwrap_paren(read),
+                            Expr::Index { key: None, .. }
+                                | Expr::Builtin(Builtin::Length | Builtin::First | Builtin::Last)
+                        )
+                    }))
         }) {
             return None;
         }
@@ -11676,6 +11698,25 @@ fn projection_peel<S: EvalSemantics>(
     }
     if rest.is_empty() {
         return None;
+    }
+    // #4286: a computed slice and the read after it step to the one value the read names, then
+    // the rest runs on it, without writing the whole array out and indexing it again to build a
+    // slice the read throws nearly all of away.
+    if matches!(first, Expr::SliceExpr { .. }) {
+        let after = &rest[1..];
+        if after.iter().any(needs_path_context) {
+            return None;
+        }
+        let pair = skip_identity_stages(stages).get(..2)?;
+        let child = super::eval_generic::eval_owned_fused_slice_read::<S>(pair, input)?;
+        return Some(if after.is_empty() {
+            match sink(child) {
+                Demand::Continue => Flow::Exhausted,
+                Demand::Stop => Flow::Stopped { pending: None },
+            }
+        } else {
+            RestPipe::new(after).run_owned::<S>(&child, optional, Reentry::REBUILT, sink)
+        });
     }
     // #3477: a leading `length` steps to the count, then the rest runs on it.
     let counted = eval_owned_length(first, input);
@@ -92190,6 +92231,132 @@ mod tests {
             assert!(
                 eval_owned_length(&expr, &OwnedValue::array_from(vec![])).is_none(),
                 "{src}"
+            );
+        }
+    }
+
+    /// #4286: `eval_owned_fused_slice_read` answers `.[a:b] | read` over an owned array the way the
+    /// reindex bridge does, in both modes, and declines every shape it does not model. The bounds
+    /// are closed expressions that keep the stage on `Expr::SliceExpr` (a literal bound would fold
+    /// to the static `Expr::Slice`), so the fused read is what answers, not the literal route.
+    #[test]
+    fn eval_owned_fused_slice_read_agrees_with_the_reindex_bridge_4286() {
+        let mut values = pure_value_matrix();
+        values.push(OwnedValue::array_from(vec![]));
+        values.push(OwnedValue::array_from(vec![
+            OwnedValue::Int(1),
+            OwnedValue::Null,
+            OwnedValue::String("x".into()),
+            OwnedValue::Float(2.5),
+            OwnedValue::array_from(vec![OwnedValue::Int(7)]),
+        ]));
+        let mut answered = 0;
+        let bounds = [
+            "(1+0):",
+            ":(1+0)",
+            "(0+0):(2+0)",
+            "(2+0):(1+0)",
+            "(0-2):",
+            ":(0-1)",
+            "(0-3):(1+0)",
+            "(9+0):",
+            "(1.5+0):",
+            ":(1.5+0)",
+            "(0+null):",
+            "(\"x\"|ascii_downcase):",
+        ];
+        let reads = [
+            "[0]", "[1]", "[2]", "[-1]", "[-2]", "[9]", "| length", "| first", "| last",
+        ];
+        for value in &values {
+            for bound in bounds {
+                for read in reads {
+                    let src = format!(".[{bound}]{read}");
+                    let expr = parse(&src).unwrap();
+                    let Expr::Pipe(stages) = &expr else {
+                        panic!("{src:?} did not parse to a pipe of the slice and the read");
+                    };
+                    for (mode, fast) in [
+                        (
+                            "jq",
+                            crate::jq::eval_generic::eval_owned_fused_slice_read::<JqSemantics>(
+                                stages, value,
+                            ),
+                        ),
+                        (
+                            "yq",
+                            crate::jq::eval_generic::eval_owned_fused_slice_read::<YqSemantics>(
+                                stages, value,
+                            ),
+                        ),
+                    ] {
+                        let Some(fast) = fast else { continue };
+                        answered += 1;
+                        // Rendered, not compared as values: the bridge hands an integer back as a
+                        // `NumberLiteral` carrying the spelling it re-parsed, which prints the same.
+                        let render = |(values, tag): (Vec<OwnedValue>, String)| {
+                            let json: Vec<String> =
+                                values.iter().map(OwnedValue::to_json).collect();
+                            (json, tag)
+                        };
+                        let bridge = if mode == "jq" {
+                            normalize(eval_owned_input_bridge::<Vec<u64>, JqSemantics>(
+                                &expr, value, false,
+                            ))
+                        } else {
+                            normalize(eval_owned_input_bridge::<Vec<u64>, YqSemantics>(
+                                &expr, value, false,
+                            ))
+                        };
+                        let fast = normalize(QueryResult::<Vec<u64>>::Owned(fast));
+                        assert_eq!(
+                            render(fast),
+                            render(bridge),
+                            "{mode} mode: {src:?} on {value:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            answered > 200,
+            "the matrix must reach the array arm: {answered}"
+        );
+        // Not the helper's to answer: a target that is not the input, a bound that reads the
+        // input or fans out, a read that is not one of the four, a longer pipe, a non-array.
+        let array = OwnedValue::array_from(vec![OwnedValue::Int(1), OwnedValue::Int(2)]);
+        for src in [
+            ".a[(1+0):][0]",
+            ".[.[0]:][0]",
+            ".[(0,1):][0]",
+            ".[(1+0):][0] | . + 1",
+            ".[(1+0):] | keys",
+            ".[(1+0):][0:1]",
+            ".[(1+0):]",
+        ] {
+            let expr = parse(src).unwrap();
+            let Expr::Pipe(stages) = &expr else {
+                continue;
+            };
+            assert!(
+                crate::jq::eval_generic::eval_owned_fused_slice_read::<JqSemantics>(stages, &array)
+                    .is_none(),
+                "{src}"
+            );
+        }
+        let expr = parse(".[(1+0):][0]").unwrap();
+        let Expr::Pipe(stages) = &expr else {
+            panic!("not a pipe");
+        };
+        for value in [
+            OwnedValue::Null,
+            OwnedValue::String("abc".into()),
+            OwnedValue::Int(3),
+        ] {
+            assert!(
+                crate::jq::eval_generic::eval_owned_fused_slice_read::<JqSemantics>(stages, &value)
+                    .is_none(),
+                "{value:?}"
             );
         }
     }
