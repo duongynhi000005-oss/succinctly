@@ -67,3 +67,9 @@ fuzz/corpus/
 fuzz/artifacts/
 fuzz/coverage/
 fuzz/target/
+
+# BSD `sed -i -e` leaves a backup named FILE-e (#4365)
+*.rs-e
+*.toml-e
+*.md-e
+*.py-e
