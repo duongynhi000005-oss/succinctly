@@ -6866,7 +6866,20 @@ fn bare_token_lost_to_fault(bytes: &[u8], span: (usize, usize), malformed: usize
 fn parse_error_detection(bytes: &[u8], start: usize) -> usize {
     use succinctly::json::validate::{validate_jq_lenient, ValidationErrorKind as Kind};
     let start = start.min(bytes.len());
-    match validate_jq_lenient(&bytes[start..]) {
+    let validated = validate_jq_lenient(&bytes[start..]);
+    // #4349: an invalid UTF-8 byte inside a string stops the raw validation first, though jq
+    // substitutes U+FFFD for it before it reads the string. Look for the fault it does meet in
+    // the substituted copy, and place it at the same byte of the original.
+    let validated = match validated {
+        Err(error) if matches!(error.kind, Kind::InvalidUtf8) => {
+            match fault_past_invalid_utf8(&bytes[start..]) {
+                Some(found) => found,
+                None => Err(error),
+            }
+        }
+        other => other,
+    };
+    match validated {
         Err(error) => {
             let at = start + error.position.offset;
             match error.kind {
@@ -6886,6 +6899,59 @@ fn parse_error_detection(bytes: &[u8], start: usize) -> usize {
         // starts.
         Ok(()) => start,
     }
+}
+
+/// The first fault in `tail` once the invalid UTF-8 bytes in its strings are substituted, as
+/// jq reads it (#4349), with the position moved back to the matching byte of `tail`: `Ok(())`
+/// when there is none. `None` when the substitution cannot be mapped back one-for-one (it is
+/// checked against the copy's length), and the raw fault is used.
+fn fault_past_invalid_utf8(
+    tail: &[u8],
+) -> Option<core::result::Result<(), succinctly::json::validate::ValidationError>> {
+    let substituted = succinctly::jq::utf8_document::substitute_invalid_utf8_jq_document(tail);
+    let mut error = match succinctly::json::validate::validate_jq_lenient(substituted.as_bytes()) {
+        Ok(()) => return Some(Ok(())),
+        Err(error) => error,
+    };
+    // Each invalid run is one U+FFFD (three bytes) in the copy; walk both.
+    let (mut original, mut copy) = (0, 0);
+    let target = error.position.offset;
+    let mut mapped = None;
+    let mut rest = tail;
+    while !rest.is_empty() {
+        // (`Utf8Chunks` is newer than this crate's MSRV.)
+        let (valid, invalid) = match core::str::from_utf8(rest) {
+            Ok(_) => (rest.len(), 0),
+            Err(e) => (
+                e.valid_up_to(),
+                e.error_len()
+                    .unwrap_or_else(|| rest.len() - e.valid_up_to()),
+            ),
+        };
+        rest = &rest[valid + invalid..];
+        if mapped.is_none() && target < copy + valid {
+            mapped = Some(original + (target - copy));
+        }
+        original += valid;
+        copy += valid;
+        if invalid > 0 {
+            if mapped.is_none() && target < copy + 3 {
+                mapped = Some(original);
+            }
+            original += invalid;
+            copy += 3;
+        }
+    }
+    // One-for-one means the copy is the original with each invalid run replaced by one U+FFFD
+    // and nothing else: not jq's collapse-or-drop of a run, nor an escape the copy re-spells.
+    // A length check alone lets a drop and a re-spelling cancel, so compare the bytes.
+    if copy != substituted.len()
+        || substituted.as_bytes() != String::from_utf8_lossy(tail).as_bytes()
+    {
+        return None;
+    }
+    error.position.offset = mapped.unwrap_or(tail.len());
+    Some(Err(error))
 }
 
 /// Where jq's lexer completes the token at `at`: a string's closing quote, the
@@ -7078,9 +7144,7 @@ fn token_runs_to_end(tail: &[u8]) -> bool {
 /// and settles every span that fails for another reason, or none: only a span whose first error
 /// is the invalid byte pays for the substitution.
 ///
-/// Recorded residual: the sibling that places where jq detects a fault ([`parse_error_detection`])
-/// still reads the raw bytes, so a malformed value that also holds an invalid byte resumes at
-/// the wrong read (limitations.md).
+/// [`parse_error_detection`] places a fault past such a byte the same way (#4349).
 fn span_is_refused_by_jq(span: &[u8]) -> bool {
     use succinctly::json::validate::{validate_jq_lenient, ValidationErrorKind as Kind};
     match validate_jq_lenient(span) {
@@ -12026,6 +12090,49 @@ mod tests {
         );
         assert_eq!(stitched(&[b"{\"a\":"]), vec![b"{\"a\":".to_vec()]);
         assert_eq!(stitched(&[]), Vec::<Vec<u8>>::new());
+    }
+
+    /// #4349: a fault in a value that also holds an invalid UTF-8 byte is placed as it is with a
+    /// valid byte of the same width there, since jq substitutes U+FFFD before it reads the string.
+    #[test]
+    fn parse_error_detection_places_a_fault_past_an_invalid_byte_4349() {
+        for (invalid, valid) in [
+            // a control character in the same string: detected at its closing quote
+            (&b"\"\xffb\nc\" "[..], &b"\"xxb\nc\" "[..]),
+            // a later token: detected where that token ends, not at the invalid byte
+            (b"[\"a\xffb\" 1]", b"[\"axxb\" 1]"),
+            (b"{\"k\xff\": 1 2}", b"{\"kxx\": 1 2}"),
+        ] {
+            // The invalid byte is one byte and the stand-in two, so compare as offsets from the
+            // value's end, which the fault shares.
+            let from_end = |bytes: &[u8]| bytes.len() - parse_error_detection(bytes, 0);
+            assert_eq!(from_end(invalid), from_end(valid), "{invalid:?}");
+        }
+    }
+
+    /// #4349: the substituted copy is mapped back to the original only when it differs from it by
+    /// one U+FFFD per invalid run; a fault past the byte is found at the matching original byte.
+    #[test]
+    fn fault_past_invalid_utf8_maps_back_one_for_one_4349() {
+        // Nothing left to fault on once the byte is substituted.
+        assert!(matches!(
+            fault_past_invalid_utf8(b"\"a\xffb\""),
+            Some(Ok(()))
+        ));
+        // The fault is the `1` after the string; its offset is in original bytes.
+        let Some(Err(error)) = fault_past_invalid_utf8(b"[\"a\xffb\" 1]") else {
+            panic!("a fault is expected");
+        };
+        assert_eq!(error.position.offset, 7);
+        // An escape the copy re-spells (`\u0041` is `A`) or a run jq drops (`\xe1A`) is not
+        // one-for-one: no mapping, so the raw fault stands.
+        assert!(fault_past_invalid_utf8(b"[\"\\u0041\xff\" 1]").is_none());
+        assert!(fault_past_invalid_utf8(b"[\"\xe1A\" 1]").is_none());
+        // Outside a string too: the stray byte is substituted and the fault found after it.
+        let Some(Err(error)) = fault_past_invalid_utf8(b"[1,\xff]") else {
+            panic!("a fault is expected");
+        };
+        assert_eq!(error.position.offset, 3);
     }
 
     /// #4335: an invalid UTF-8 byte inside a string is not a refusal, as jq substitutes U+FFFD for

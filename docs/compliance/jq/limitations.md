@@ -6499,11 +6499,16 @@ section).
 An invalid UTF-8 byte inside a string does not stop the stitch under `input`/`inputs` (#4335): the search
 for a file's open tail splits strictly there, and judges a span that fails only on such a byte after the
 U+FFFD substitution jq applies. Pinned by
-`test_jq_stitch_under_input_judges_invalid_utf8_after_substitution_4335`. **Recorded residual:** where jq
-detects a fault in a malformed value that also holds an invalid byte (`parse_error_detection`) is still
-placed from the raw bytes, which stop at the invalid byte first, so a stream with both a parse error and
-an invalid byte in the same value resumes at the wrong read under `input` (`"<0xff>\n[1,` then
-`<0xff>"] ` reads an extra value jq discards). Filed as #4349.
+`test_jq_stitch_under_input_judges_invalid_utf8_after_substitution_4335`.
+
+The place where jq detects a fault in a malformed value that also holds an invalid byte
+(`parse_error_detection`) is found past the byte (#4349): the fault is looked for in the substituted copy
+and mapped back to the original byte, so the read jq resumes at is the right one, pinned by
+`test_jq_fault_detection_skips_an_invalid_utf8_byte_4349`. The mapping applies only when the copy is the
+original with one U+FFFD per invalid run; where jq's collapse-or-drop of a run or a re-spelled escape
+makes it differ, the raw fault is used as before. **Recorded residual (#4352):** a resume whose discarded
+read ends inside a multi-byte character, with a truncated sequence at the end of a stitched file
+(`[1`, then ` 2]` and `"<0xc3>`, then `" [1 2] null`), still reads an extra or a missing value against jq.
 
 ## `input`/`inputs` residuals after #1309
 
