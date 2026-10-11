@@ -198,15 +198,23 @@ comm -13 <(covered rest.info) <(covered two.info)   # lines only the two cover; 
 
 #### Patchcov migration verification
 
-The shared coverage action uses `patchcov-action@v1` with **patchcov 0.1.1**
-(#3873; moved from the omni-dev-named action in #3880, same commit). The other omni-dev
-commands still use `.omni-dev/`; coverage alone reads `.patchcov/config.yaml`. Install the pinned tool with `cargo install patchcov --version 0.1.1`.
+The shared coverage action uses `patchcov-action@v2` with **patchcov 0.4.0**
+(#3873 moved coverage to patchcov, #3880 moved it from the omni-dev-named action, #4324 moved it from
+`patchcov-action@v1`, an interim 0.1.1 snapshot, to `@v2`). The other omni-dev
+commands still use `.omni-dev/`; coverage alone reads `.patchcov/config.yaml`. Install the pinned tool with `cargo install patchcov --version 0.4.0`.
 CI runs `patchcov lint-markers --include 'src/**/*.rs'` before reporting, alongside the
 existing pooled-profile check. The migrated source has 361 `tolerate-line`, 21 `tolerate`
 and 21 `end` markers across 17 Rust files; every Rust edit changes only the introducer.
 
-Verification on 2026-10-06 used the released macOS ARM64 binaries of omni-dev 0.46.0
-and patchcov 0.1.1, and unchanged x86_64 main artifacts from baseline runs
+Since 0.4.0 a nonempty report whose paths match no tracked file fails (exit 7) instead of
+diffing nothing. The lcov from a CI run holds `/home/runner/work/succinctly/succinctly/...`
+paths, which patchcov resolves against the working directory, so no `strip-prefix` is set;
+run outside that checkout root a report needs `--strip-prefix` (or `sed` the prefix to your
+checkout). Before moving the pin, run `patchcov lint-markers --include 'src/**/*.rs'` and a
+`patchcov diff` of two downloaded `coverage-baseline-*` artifacts (see below) with the new version.
+
+The omni-dev to patchcov migration was verified on 2026-10-06 with the released macOS ARM64
+binaries of omni-dev 0.46.0 and patchcov 0.1.1 (the version then pinned), and unchanged x86_64 main artifacts from baseline runs
 [37457872796](https://github.com/rust-works/succinctly/actions/runs/37457872796)
 (`1c71942d0`) and [37458546292](https://github.com/rust-works/succinctly/actions/runs/37458546292)
 (`c4a62bfbb`). Both artifacts contain `coverage-head.lcov`; no baseline conversion is needed.
