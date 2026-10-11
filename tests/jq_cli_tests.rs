@@ -118244,35 +118244,35 @@ fn test_isempty_path_answers_through_a_swallowed_break_retry_4114() -> Result<()
 /// for the second one refused it (`del` exited 5). Captured from jq 1.7.1.
 const RETRY_ROWS_ISEMPTY_PATH_4114_UNTRACKED: &[RetryRow3293] = &[
     (
-        r#"del(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x.a?)"#,
+        r"del(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x.a?)",
         "{}\n",
         "",
         "",
         0,
     ),
     (
-        r#"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x)"#,
+        r"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) or true) | $x)",
         "[]\n[]\n",
         "",
         "",
         0,
     ),
     (
-        r#"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) and true) | $x)"#,
+        r"path(. as $x | 1 | (isempty(. as $q ?// $z | if $q then true else empty end) and true) | $x)",
         "[]\n[]\n",
         "",
         "",
         0,
     ),
     (
-        r#"path(. as $x | 1 | (isempty(isempty(. as $q ?// $z | if $q then true else empty end)) and true) | $x)"#,
+        r"path(. as $x | 1 | (isempty(isempty(. as $q ?// $z | if $q then true else empty end)) and true) | $x)",
         "[]\n[]\n",
         "",
         "",
         0,
     ),
     (
-        r#"path(. as $x | 1 | (isempty(limit(2; . as $q ?// $z | if $q then true else empty end)) or (.a)?) | $x)"#,
+        r"path(. as $x | 1 | (isempty(limit(2; . as $q ?// $z | if $q then true else empty end)) or (.a)?) | $x)",
         "[]\n",
         "",
         "",
