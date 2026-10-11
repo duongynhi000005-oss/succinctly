@@ -77,7 +77,9 @@ fn assert_costs_like_twin(name: &str, swallowed: (&str, usize), twin: (&str, usi
 }
 
 /// The collecting entry: every spelling of the boundary reaches nothing and
-/// costs what the settled `path(.[]?)` does.
+/// costs what the settled `path(.[]?)` does. A closure argument has a floor of its
+/// own without default features (`opt(.[])` costs two calls per member more than
+/// `.[]?`, a cost that is not the message), so it is compared with its own twin.
 #[test]
 fn a_swallowed_scalar_lookup_builds_no_message_4227() {
     for (name, json) in fixtures() {
@@ -85,15 +87,19 @@ fn a_swallowed_scalar_lookup_builds_no_message_4227() {
         let (twin_cost, _) = allocations_collecting(twin, &json);
         // The counter counts: the twin allocates for every member.
         assert!(twin_cost >= N, "{name}: the twin made {twin_cost}");
-        for swallowed in [
-            "[.[] | path(.a?)] | length",
-            "[.[] | path(.[0]?)] | length",
-            "[.[] | path((.a)?)] | length",
-            "[.[] | path(try .a)] | length",
-            "[.[] | path(try .a catch empty)] | length",
-            "[.[] | path(try (.[0]) catch empty)] | length",
-            "def opt(f): f?; [.[] | path(opt(.a))] | length",
+        for (swallowed, twin) in [
+            ("[.[] | path(.a?)] | length", twin),
+            ("[.[] | path(.[0]?)] | length", twin),
+            ("[.[] | path((.a)?)] | length", twin),
+            ("[.[] | path(try .a)] | length", twin),
+            ("[.[] | path(try .a catch empty)] | length", twin),
+            ("[.[] | path(try (.[0]) catch empty)] | length", twin),
+            (
+                "def opt(f): f?; [.[] | path(opt(.a))] | length",
+                "def opt(f): f?; [.[] | path(opt(.[]))] | length",
+            ),
         ] {
+            let (twin_cost, _) = allocations_collecting(twin, &json);
             let (cost, answered) = allocations_collecting(swallowed, &json);
             assert_eq!(answered, 0, "{name}: `{swallowed}` reaches nothing");
             assert_costs_like_twin(name, (swallowed, cost), (twin, twin_cost));
