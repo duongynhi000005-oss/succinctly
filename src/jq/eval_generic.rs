@@ -12789,7 +12789,8 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
         // `optional = false` and so loses the `?` in `.[$k]?`; and it
         // serialises and re-indexes the whole document per evaluation.
         Expr::IndexExpr { target, key } => {
-            // #4317: `E[a:b][$k]` reads the slice's resolved range, as the `[k]` pipe form does.
+            // #4317, #4323: `E[a:b][$k]` (computed or literal bounds) reads the slice's resolved range,
+            // as the `[k]` pipe form does.
             if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return GenericResult::Owned(owned);
@@ -14676,7 +14677,7 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // jq mode only -- see `each_index_expr_generic`'s own doc comment
         // for why yq mode keeps the pre-existing eager fallback below.
         Expr::IndexExpr { target, key } if streams_escaped_generator_prefix::<S>() => {
-            // #4317: the sink route's twin of the fusion in `eval_single`.
+            // #4317, #4323: the sink route's twin of the fusion in `eval_single`.
             if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return push_one_generic(GenericItem::Owned(owned), sink);
@@ -22811,6 +22812,24 @@ fn is_pure_slice_operand(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `slice` is a slice a fused read may evaluate and then decline: a literal-bounded one
+/// (#4323), whose target is the input and whose bounds are folded integers, or a computed one
+/// over a pure target with pure bounds. `false` for any other expression. The one definition
+/// behind [`fusable_slice_read`] and [`fused_slice_index`].
+fn is_pure_fusable_slice(slice: &Expr) -> bool {
+    match slice {
+        Expr::SliceExpr { target, start, end } => {
+            // `map_or(true, ..)` rather than `is_none_or`: the crate's MSRV is 1.73 and
+            // `Option::is_none_or` is stable since 1.82.
+            let pure_bound =
+                |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
+            is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
+        }
+        Expr::Slice { .. } => true,
+        _ => false,
+    }
+}
+
 /// Whether a pipe's first stage is a slice, computed or literal-bounded (#4323), bare or under a
 /// postfix `?` (#4288): the cheap check in front of [`fusable_slice_read`] on the two pipe drivers.
 fn is_slice_head(stage: &Expr) -> bool {
@@ -22838,19 +22857,6 @@ fn fusable_slice_read(stages: &[Expr]) -> Option<(&Expr, SliceRead)> {
         Expr::Optional(inner) => inner.as_ref(),
         other => other,
     };
-    // A literal-bounded slice has nothing to evaluate: its target is the input and its bounds
-    // are folded integers, so it is pure by construction.
-    let pure_slice = match slice {
-        Expr::SliceExpr { target, start, end } => {
-            // `map_or(true, ..)` rather than `is_none_or`: the crate's MSRV is 1.73 and
-            // `Option::is_none_or` is stable since 1.82.
-            let pure_bound =
-                |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
-            is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
-        }
-        Expr::Slice { .. } => true,
-        _ => return None,
-    };
     let read = match read {
         Expr::Optional(inner) => inner.as_ref(),
         other => other,
@@ -22862,7 +22868,7 @@ fn fusable_slice_read(stages: &[Expr]) -> Option<(&Expr, SliceRead)> {
         Expr::Builtin(Builtin::Last) => SliceRead::Last,
         _ => return None,
     };
-    pure_slice.then_some((slice, read))
+    is_pure_fusable_slice(slice).then_some((slice, read))
 }
 
 /// The one value `bound` produces, or `None` when it produces none, several, or
@@ -23014,36 +23020,32 @@ fn fused_slice_window<S: EvalSemantics, V: DocumentValue>(
     value: V,
     cursor: Option<V::Cursor>,
 ) -> Option<(V::Elements, core::ops::Range<usize>)> {
-    let Expr::SliceExpr { target, start, end } = slice else {
-        return None; // patchcov: coverage tolerate-line reason="unreachable: every caller takes the stage from a match on SliceExpr"
-    };
     // The target first: it is the cheapest thing to rule out, so a string, `null`
     // or object target declines before either bound is evaluated. A literal-bounded slice
-    // (#4323) slices the pipe's input itself.
-    let target = match slice {
-        Expr::SliceExpr { target, .. } => {
-            match eval_single::<S, V>(target, value.clone(), false, cursor) {
+    // (#4323) slices the pipe's input itself, with its bounds already folded.
+    let (target, computed_bounds, literal_bounds) = match slice {
+        Expr::SliceExpr { target, start, end } => {
+            let target = match eval_single::<S, V>(target, value.clone(), false, cursor) {
                 GenericResult::One(v) => v,
                 GenericResult::OneCursor(c) => c.value(),
                 _ => return None,
-            }
+            };
+            (target, Some((start, end)), (None, None))
         }
-        Expr::Slice { .. } => value.clone(),
+        Expr::Slice { start, end, .. } => (value.clone(), None, (*start, *end)),
         _ => return None, // patchcov: coverage tolerate-line reason="unreachable: fusable_slice_read returns only a SliceExpr or Slice stage"
     };
     if unreadable_value_error(&target).is_some() {
         return None;
     }
     let elements = target.as_array()?;
-    let (start, end) = match slice {
-        Expr::SliceExpr { start, end, .. } => {
+    let (start, end) = match computed_bounds {
+        Some((start, end)) => {
             let start = single_slice_bound::<S, V>(start, value.clone(), cursor, f64::floor)?;
             let end = single_slice_bound::<S, V>(end, value, cursor, f64::ceil)?;
             resolve_computed_slice_bounds::<S>(SliceTargetKind::Sliceable, &start, &end).ok()?
         }
-        // Folded at parse time: the same integers the unfused arm slices by.
-        Expr::Slice { start, end, .. } => (*start, *end),
-        _ => return None, // patchcov: coverage tolerate-line reason="unreachable: the target match above already returned for any other stage"
+        None => literal_bounds,
     };
     let len = crate::jq::array_index::len_checked_memoized(&elements).ok()?;
     let range = SliceBounds::from_literals(start, end).resolve(len);
@@ -23069,11 +23071,12 @@ fn fused_slice_pipe_head<S: EvalSemantics, V: DocumentValue>(
 }
 
 /// `E[a:b][$k]` for a computed index (#4317): the slice's resolved range read at `k`, without
-/// building the slice. `IndexExpr { target: SliceExpr, key }` is the shape `.[$i:][$k]` parses to
-/// (not a pipe of two stages, so [`fusable_slice_read`] never sees it), and `key` is evaluated
-/// against the original `.`, like the slice's own bounds.
+/// building the slice. `IndexExpr { target: SliceExpr, key }` is the shape `.[$i:][$k]` parses to,
+/// and `IndexExpr { target: Slice, key }` (#4323) the shape `.[2:][$k]` does (neither is a pipe of
+/// two stages, so [`fusable_slice_read`] never sees them), and `key` is evaluated against the
+/// original `.`, like the slice's own bounds.
 ///
-/// Fused only for a pure target and bounds ([`is_pure_slice_operand`]) and a pure `key` that
+/// Fused only for a pure slice ([`is_pure_fusable_slice`]) and a pure `key` that
 /// yields exactly one integer-valued number; a string, `null`, fractional or non-number key, a
 /// key that fails or fans out, and everything [`try_fused_slice_read`] declines leave the pair
 /// to the ordinary route, which re-derives whatever error or value that stands for. Nothing
@@ -23085,17 +23088,7 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
     value: V,
     cursor: Option<V::Cursor>,
 ) -> Option<OwnedValue> {
-    let pure_slice = match slice {
-        Expr::SliceExpr { target, start, end } => {
-            let pure_bound =
-                |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
-            is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
-        }
-        // #4323: a literal-bounded slice of the input has nothing to evaluate.
-        Expr::Slice { .. } => true,
-        _ => return None, // patchcov: coverage tolerate-line reason="unreachable: both call sites match a SliceExpr or Slice target first"
-    };
-    if !(pure_slice && is_pure_slice_operand(key)) {
+    if !(is_pure_fusable_slice(slice) && is_pure_slice_operand(key)) {
         return None;
     }
     let key = match eval_single::<S, V>(key, value.clone(), false, cursor) {
@@ -44085,46 +44078,31 @@ mod tests {
         let a_json = br"[10,20,30,40]";
         let a_index = JsonIndex::build(a_json);
         let a_root = a_index.root(a_json);
-        let fused = |src: &str, read: Option<SliceRead>, with_cursor: bool| {
+        let fused = |src: &str, with_cursor: bool| {
             let Expr::Pipe(pair) = crate::jq::parse(src).unwrap() else {
                 panic!("a pipe of slice and read: {src}"); // patchcov: coverage tolerate-line reason="unreachable: every source below parses to a pipe; this is the test's own malformed-fixture message (#4323)"
             };
-            let (slice, parsed) = fusable_slice_read(pair.as_slice()).unwrap();
+            let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
             try_fused_slice_read::<JqSemantics, _>(
                 slice,
-                read.unwrap_or(parsed),
+                read,
                 a_root.value(),
                 with_cursor.then_some(a_root),
             )
         };
         for with_cursor in [true, false] {
+            assert_eq!(fused(".[1:][0]", with_cursor), Some(OwnedValue::Int(20)));
+            assert_eq!(fused(".[1:][-1]", with_cursor), Some(OwnedValue::Int(40)));
+            assert_eq!(fused(".[:-1][-1]", with_cursor), Some(OwnedValue::Int(30)));
+            assert_eq!(fused(".[1:3][2]", with_cursor), Some(OwnedValue::Null));
+            assert_eq!(fused(".[1:3][-3]", with_cursor), Some(OwnedValue::Null));
+            assert_eq!(fused(".[9:][0]", with_cursor), Some(OwnedValue::Null));
             assert_eq!(
-                fused(".[1:][0]", None, with_cursor),
-                Some(OwnedValue::Int(20))
-            );
-            assert_eq!(
-                fused(".[1:][-1]", None, with_cursor),
-                Some(OwnedValue::Int(40))
-            );
-            assert_eq!(
-                fused(".[:-1][-1]", None, with_cursor),
-                Some(OwnedValue::Int(30))
-            );
-            assert_eq!(
-                fused(".[1:3][2]", None, with_cursor),
-                Some(OwnedValue::Null)
-            );
-            assert_eq!(
-                fused(".[1:3][-3]", None, with_cursor),
-                Some(OwnedValue::Null)
-            );
-            assert_eq!(fused(".[9:][0]", None, with_cursor), Some(OwnedValue::Null));
-            assert_eq!(
-                fused(".[1:] | length", None, with_cursor),
+                fused(".[1:] | length", with_cursor),
                 Some(OwnedValue::Int(3))
             );
             assert_eq!(
-                fused(".[3:1] | length", None, with_cursor),
+                fused(".[3:1] | length", with_cursor),
                 Some(OwnedValue::Int(0))
             );
         }

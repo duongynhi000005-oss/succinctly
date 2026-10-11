@@ -1054,11 +1054,13 @@ through, since [#4317](https://github.com/rust-works/succinctly/issues/4317) `E[
 computed index that is one integer-valued number, and since
 [#4286](https://github.com/rust-works/succinctly/issues/4286) `.[a:b][k] | key` (with a `tostring`
 before or after the `key`; jq mode, a non-negative `k` inside the slice), converts only the element it
-names (the `key` read none at all), so a malformed value elsewhere in the range no longer raises. Since
-[#4323](https://github.com/rust-works/succinctly/issues/4323) the same holds for a literal-bounded
-slice (`.[2:][0]`, `.[:-2][-1]`, `.[2:] | length`, `first`, `last`, and `.[2:][$k]`, also behind
-navigation in the same postfix chain, `.a[2:][0]`), which used to validate the whole array on every read (the cost was O(length) per read, 7.9 s
-for 4,000 reads of a 4,000-element array on an M4 Pro, against 7 ms for the computed form):
+names (the `key` read none at all), so a malformed value elsewhere in the range no longer raises.
+
+Since [#4323](https://github.com/rust-works/succinctly/issues/4323) the same holds for a
+literal-bounded slice (`.[2:][0]`, `.[:-2][-1]`, `.[2:] | length`, `first`, `last` and `.[2:][$k]`,
+also behind navigation in the same postfix chain, `.a[2:][0]`). It used to validate the whole array
+on every read, which cost O(length) per read: 7.9 s for 4,000 reads of a 4,000-element array on an
+M4 Pro, against 7 ms for the computed form.
 
 | Filter                         | Input         | jq                      | succinctly                         |
 |--------------------------------|---------------|-------------------------|------------------------------------|
