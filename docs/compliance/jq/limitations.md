@@ -6496,6 +6496,14 @@ end-of-input lines, `EofTail`) starts after the first and reads on into the seco
 `test_jq_value_spanning_two_files_counts_each_files_own_lines_4316`. A parse error mid-file (`1 } 2` then
 `3\n`) still lets the next file's values through where jq stops reading at the error (unchanged by this
 section).
+An invalid UTF-8 byte inside a string does not stop the stitch under `input`/`inputs` (#4335): the search
+for a file's open tail splits strictly there, and judges a span that fails only on such a byte after the
+U+FFFD substitution jq applies. Pinned by
+`test_jq_stitch_under_input_judges_invalid_utf8_after_substitution_4335`. **Recorded residual:** where jq
+detects a fault in a malformed value that also holds an invalid byte (`parse_error_detection`) is still
+placed from the raw bytes, which stop at the invalid byte first, so a stream with both a parse error and
+an invalid byte in the same value resumes at the wrong read under `input` (`"<0xff>\n[1,` then
+`<0xff>"] ` reads an extra value jq discards). Filed as #4349.
 
 ## `input`/`inputs` residuals after #1309
 

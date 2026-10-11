@@ -41508,6 +41508,62 @@ fn test_jq_value_spanning_two_files_counts_each_files_own_lines_4316() -> Result
     Ok(())
 }
 
+/// #4335: a token that spans two files is still stitched under `input`/`inputs` when a file holds
+/// an invalid UTF-8 byte. The search for the open tail splits strictly there, and the strict
+/// splitter judged the raw `\xff` inside a string a refusal, though jq substitutes U+FFFD for it
+/// before the string is read. Every expectation is jq 1.7.1's own output.
+#[test]
+fn test_jq_stitch_under_input_judges_invalid_utf8_after_substitution_4335() -> Result<()> {
+    let run = |args: &[&str], files: &[&[u8]]| -> Result<(String, String, i32)> {
+        let temp: Vec<NamedTempFile> = files
+            .iter()
+            .map(|body| -> Result<NamedTempFile> {
+                let mut f = NamedTempFile::new()?;
+                f.write_all(body)?;
+                Ok(f)
+            })
+            .collect::<Result<_>>()?;
+        let paths: Vec<String> = temp
+            .iter()
+            .map(|f| f.path().to_string_lossy().into_owned())
+            .collect();
+        let mut argv: Vec<&str> = args.to_vec();
+        argv.extend(paths.iter().map(String::as_str));
+        Ok(run_jq_full(&argv, None).expect("runs"))
+    };
+    // The issue's repro: `"a` ends the first file and `b"` completes it in the second.
+    let spanning: [&[u8]; 2] = [b"1\t\"\xff\"  \"a", b"b\"\n"];
+    for (args, expected) in [
+        (
+            &["-nc", "[limit(5; repeat(try input catch .))]"][..],
+            "[1,\"\u{fffd}\",\"ab\",\"break\",\"break\"]\n",
+        ),
+        (&["-c", "."][..], "1\n\"\u{fffd}\"\n\"ab\"\n"),
+        (&["-nc", "[inputs]"][..], "[1,\"\u{fffd}\",\"ab\"]\n"),
+    ] {
+        let (stdout, stderr, code) = run(args, &spanning)?;
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert_eq!(stdout, expected, "{args:?}");
+    }
+    // The end-of-input marker reads the last file the same way: `"\xff` then `"` completes in the
+    // second file's first read, which is `<unknown>`.
+    let (_, stderr, code) = run(
+        &["-nc", "[inputs] | error"],
+        &[b"\"\xff".as_slice(), b"\"".as_slice()],
+    )?;
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains("(at <unknown>)"), "{stderr}");
+    // A byte that is invalid in a string and a fault outside one stay separate: the stray `}`
+    // is still a parse error (`E`, then the `break`s the catch also turns into `E`).
+    let (stdout, _, code) = run(
+        &["-nc", "[limit(4; repeat(try input catch \"E\"))]"],
+        &[b"\"\xff\" }\n"],
+    )?;
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "[\"\u{fffd}\",\"E\",\"E\",\"E\"]\n");
+    Ok(())
+}
+
 /// #1571: #1550/#1568 fixed only the *error-location* half of a `--seq`
 /// record spanning a file boundary -- the *value* itself, produced by
 /// `parse_json_seq` running once per file in isolation, was still silently
