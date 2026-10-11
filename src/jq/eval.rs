@@ -19428,13 +19428,18 @@ fn builtin_unique_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// The error for sorting a mapping that repeats a key, or `None` (#2064). yq lists every
 /// occurrence of a repeated key in a sorted mapping; the sorted answer here is an owned map,
 /// which holds a key once, so answering would drop an entry that a sort written back with `-i`
-/// would then lose for good. A mapping the walk cannot read answers `None`: that failure is
-/// reported by the sort itself.
+/// would then lose for good. A mapping the walk cannot read, or one with a key that does not
+/// decode, answers `None`: the sort itself reports those.
 pub(crate) fn yq_sort_repeated_key_error<F: DocumentFields>(fields: &F) -> Option<EvalError> {
     let checked = effective_fields_checked(fields, false).ok()?;
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for field in &checked {
-        let (key, _) = key_display_string_kind(&field.key)?;
+        let (key, is_fallback) = key_display_string_kind(&field.key)?;
+        // A key that does not decode is the colliding-key path's (#1813), which raises an
+        // error `?` and `try` cannot suppress; leave it to the sort.
+        if is_fallback {
+            return None;
+        }
         if !seen.insert(key.clone().into_owned()) {
             return Some(EvalError::new(format!(
                 "cannot sort a mapping with the repeated key {key:?}: its entries cannot be kept apart"
