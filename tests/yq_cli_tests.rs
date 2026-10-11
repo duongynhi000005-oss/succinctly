@@ -12533,6 +12533,59 @@ fn test_line_select_filters_and_keeps_position() -> Result<()> {
     Ok(())
 }
 
+/// #4364: `column` counts characters (Unicode scalar values, as go-yaml counts runes), not
+/// bytes, so a multi-byte character earlier on the line does not shift it. `line` is unchanged.
+/// Every row is a live yq v4.53.3 capture (`yq -o=json -I=0 '<filter>'`).
+#[test]
+fn test_column_counts_characters_not_bytes_4364() -> Result<()> {
+    // (input, filter, expected)
+    let rows: &[(&str, &str, &str)] = &[
+        ("\u{e9}: [1]\n", ".\u{e9} | [line,column]", "[1,4]"),
+        ("k: 1\n\u{e9}: 2\n", ".\u{e9} | [line,column]", "[2,4]"),
+        (
+            "\"\u{65e5}\u{672c}\": !!str 5\n",
+            ".[\"\u{65e5}\u{672c}\"] | [line,column]",
+            "[1,7]",
+        ),
+        // `e` plus a combining acute is two runes, so two columns (not one grapheme).
+        ("e\u{301}: [1]\n", ".[] | [line,column]", "[1,5]"),
+        // An astral character is one rune of four bytes.
+        ("\"\u{1f600}\": [1]\n", ".[] | [line,column]", "[1,6]"),
+        ("\u{e9}: x\nb: [1]\n", ".b | [line,column]", "[2,4]"),
+        // A multi-byte character in a comment on an earlier line, and CRLF line ends.
+        (
+            "a: \"\u{e9}\" # \u{e9}\nb: 1\n",
+            ".b | [line,column]",
+            "[2,4]",
+        ),
+        ("\u{e9}: x\r\nb: [1]\r\n", ".b | [line,column]", "[2,4]"),
+        // A node whose position is its `&anchor`/`!tag` property, and a flow collection.
+        ("\u{e9}: &a [1]\n", ".\u{e9} | [line,column]", "[1,4]"),
+        ("\u{e9}: !!str x\n", ".\u{e9} | [line,column]", "[1,4]"),
+        (
+            "x: \u{e9}\nf: [\u{e9}, \u{e9}]\n",
+            ".f[1] | [line,column]",
+            "[2,8]",
+        ),
+        (
+            "\u{e9}: {\u{fc}: 1}\n",
+            ".\u{e9}.\u{fc} | [line,column]",
+            "[1,8]",
+        ),
+        // An ASCII document keeps its byte columns.
+        ("a: [1]\n", ".a | [line,column]", "[1,4]"),
+    ];
+    for (input, filter, expected) in rows {
+        let (stdout, code) = run_yq_stdin(filter, input, &["-o", "json", "-I", "0"])?;
+        assert_eq!(
+            (stdout.trim(), code),
+            (*expected, 0),
+            "{filter} on {input:?}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn test_line_column_object_construction_is_a_known_limitation() -> Result<()> {
     // Object construction used to round-trip through OwnedValue, which has
