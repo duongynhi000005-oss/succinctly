@@ -100,6 +100,19 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         self.index.bp_to_text_pos(self.bp_pos)
     }
 
+    /// The offset `line`/`column` report: the node's first `&anchor`/`!tag`
+    /// token when it has one, else the value's first byte (#2712), which is
+    /// where yq anchors a node's position. Kept apart from
+    /// [`Self::text_position`], which `at_offset`, `yq-locate` and the
+    /// streaming writers need to keep pointing at the value.
+    #[inline]
+    fn metadata_position(&self) -> usize {
+        self.index
+            .property_start(self.bp_pos)
+            .or_else(|| self.text_position())
+            .unwrap_or(0)
+    }
+
     /// Get the text end byte offset for this node.
     ///
     /// For scalars, returns the end position. For containers, returns 0.
@@ -3150,8 +3163,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
 
     /// Get the 1-based line number of this node's position in the YAML text.
     ///
-    /// Returns the line number where this value starts. Line numbers are 1-based
-    /// to match common editor conventions and yq's `line` function.
+    /// Returns the line number where this value starts, or where its first
+    /// `&anchor`/`!tag` starts when it has one (#2712), as yq does. Line numbers
+    /// are 1-based to match common editor conventions and yq's `line` function.
     ///
     /// # Example
     ///
@@ -3167,14 +3181,15 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// ```
     #[inline]
     pub fn line(&self) -> usize {
-        let offset = self.text_position().unwrap_or(0);
+        let offset = self.metadata_position();
         let (line, _column) = self.index.to_line_column(offset, self.text);
         line
     }
 
     /// Get the 1-based column number of this node's position in the YAML text.
     ///
-    /// Returns the column number where this value starts. Column numbers are 1-based
+    /// Returns the column number where this value starts, or where its first
+    /// `&anchor`/`!tag` starts when it has one (#2712). Column numbers are 1-based
     /// to match common editor conventions and yq's `column` function.
     ///
     /// # Example
@@ -3191,7 +3206,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// ```
     #[inline]
     pub fn column(&self) -> usize {
-        let offset = self.text_position().unwrap_or(0);
+        let offset = self.metadata_position();
         let (_line, column) = self.index.to_line_column(offset, self.text);
         column
     }

@@ -2576,6 +2576,7 @@ fn test_1398_dup_key_format_parity_across_filters() -> Result<()> {
 /// $ printf 'b: 1\na: 2\nb: 3\n' | yq -o=json -I=0 '(keys|length) + 0'  # 3
 /// $ printf 'b: 1\na: 2\nb: 3\n' | yq -o=json -I=0 'length * -1'        # -3
 /// $ printf 'a: !!str 5\nb: &anc [1,2]\n' | yq -o=json -I=0 '.b | (line + 0)'    # 2
+/// $ printf 'a: !!str 5\nb: &anc [1,2]\n' | yq -o=json -I=0 '.b | (column + 0)'  # 4
 /// $ printf 'a: !!str 5\nb: &anc [1,2]\n' | yq -o=json -I=0 '.b | (anchor + "")' # "anc"
 /// $ printf 'a: !!str 5\nb: &anc [1,2]\n' | yq -o=json -I=0 '.b | (style + "")'  # "flow"
 /// $ printf 'a: 1\n---\nb: 2\n' | yq -o=json -I=0 'di + 0'              # 0 then 1
@@ -2585,11 +2586,10 @@ fn test_1398_dup_key_format_parity_across_filters() -> Result<()> {
 /// yq-spelled twin `length * -1` is the oracle row, and `(-length)` is
 /// asserted alongside it as internal consistency.
 ///
-/// **`column` is deliberately absent.** succinctly's own bare `.b | column`
-/// answers 9 where yq v4.53.3 answers 4 (yq reports the anchor's column,
-/// succinctly the value's). This change makes `(column + 0)` agree with
-/// succinctly's bare `column` -- internally consistent, still divergent --
-/// so pinning it here would pin the wrong number. Filed as #2712.
+/// `column` was absent from the rows below until #2712: succinctly's bare
+/// `.b | column` answered 9 where yq v4.53.3 answers 4 (yq reports the
+/// anchor's column, succinctly the value's), so pinning `(column + 0)` would
+/// have pinned the wrong number. It is pinned now that the number is right.
 #[test]
 fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
     let dup = "b: 1\na: 2\nb: 3\n";
@@ -2622,6 +2622,8 @@ fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
     for (filter, expected) in [
         (".b | line", "2"),
         (".b | (line + 0)", "2"),
+        (".b | column", "4"),
+        (".b | (column + 0)", "4"),
         (".b | anchor", "\"anc\""),
         (".b | (anchor + \"\")", "\"anc\""),
         (".b | style", "\"flow\""),
@@ -2641,6 +2643,91 @@ fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
         assert_eq!(out, "0\n1\n", "filter {filter}");
     }
 
+    Ok(())
+}
+
+/// #2712: `line` and `column` of a node that carries a property (`&anchor`
+/// and/or `!tag`) are the position of its *first property token*, not of the
+/// value; a node with no property reports the value's first byte. Every row
+/// was captured from pinned yq v4.53.3 as `[(P | line), (P | column)]` with
+/// `-o=json -I=0`. The rows that already agreed before the fix (an alias,
+/// a node with no property, a key's own anchor) are the must-not-change guards.
+#[test]
+fn test_line_and_column_of_a_property_bearing_node_2712() -> Result<()> {
+    let props = "a: !!str 5\nb: &anc [1,2]\nc: &x !!str 5\nd: !!str &y 5\ne: &z\n  k: 1\nf: &w\n  - 1\n\
+                 g: *anc\nh: &q # c\n  k: 1\nm: {x: &fa 1, y: !!str 2}\ns:\n  - &i 1\n  - !!str 2\n  - &j\n    k: 1\n\
+                 n:\n  k: 1\nsp:   &sp   5\nt: !!map\n  k: 1\n";
+    // Keys, explicit keys, block/quoted scalars and a deferred flow value.
+    let others = "? &ek k\n: v\n&ka k2: 1\n!!str k3: 1\n{&fk z: 3}: 4\nq: !!seq\n  [a, b]\nr: &bs |\n  text\n\
+                  u: !!str |\n  text\nv: !!str \"dq\"\nw: &sq 'x'\nx: &e\ny: !!null\n";
+    for (doc, rows) in [
+        (
+            props,
+            &[
+                (".a", "[1,4]"),    // tag
+                (".b", "[2,4]"),    // anchor on a flow sequence: the issue's row
+                (".c", "[3,4]"),    // anchor then tag: the first property
+                (".d", "[4,4]"),    // tag then anchor: the first property
+                (".e", "[5,4]"),    // deferred mapping: the line is the anchor's too
+                (".f", "[7,4]"),    // deferred sequence
+                (".g", "[9,4]"),    // alias: the `*` is the value (agreed before)
+                (".h", "[10,4]"),   // property followed by a trailing comment
+                (".m.x", "[12,8]"), // flow value
+                (".m.y", "[12,18]"),
+                (".s[0]", "[14,5]"), // block sequence items
+                (".s[1]", "[15,5]"),
+                (".s[2]", "[16,5]"),
+                (".n", "[19,3]"),  // no property: the value (agreed before)
+                (".sp", "[20,7]"), // extra spaces: the `&`, not the key
+                (".t", "[21,4]"),  // deferred mapping with a tag only
+            ][..],
+        ),
+        (
+            others,
+            &[
+                (".k", "[2,3]"),
+                (".k | key", "[1,3]"),  // explicit key's anchor
+                (".k2 | key", "[3,1]"), // a key's own anchor (agreed before)
+                (".k3", "[4,11]"),
+                (".q", "[6,4]"), // tag on the key's line, value on the next
+                (".q[0]", "[7,4]"),
+                (".r", "[8,4]"), // anchored block scalar
+                (".u", "[10,4]"),
+                (".v", "[12,4]"),
+                (".w", "[13,4]"),
+                (".x", "[14,4]"), // property with no value
+                (".y", "[15,4]"),
+            ][..],
+        ),
+    ] {
+        for (path, expected) in rows {
+            let filter = format!("[({path} | line), ({path} | column)]");
+            let (out, code) = run_yq_stdin(&filter, doc, &["-o=json", "-I=0"])?;
+            assert_eq!(code, 0, "{path}");
+            assert_eq!(out.trim(), *expected, "{path} in {doc:?}");
+        }
+    }
+
+    // A later document's property sits on the `---` line.
+    for (doc, expected) in [
+        ("a: 1\n--- &b\nj: 2\n", "[1,1]\n[2,5]\n"),
+        ("a: 1\n---   &b   [1]\n", "[1,1]\n[2,7]\n"),
+        ("k: 1\n---\n&b\nj: 2\n", "[1,1]\n[3,1]\n"),
+    ] {
+        let (out, code) = run_yq_stdin("[line, column]", doc, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{doc:?}");
+        assert_eq!(out, expected, "{doc:?}");
+    }
+
+    // The other position consumers still point at the value, not at the
+    // property: `at_offset` (a succinctly builtin, no yq oracle) resolves
+    // offset 19, the `[` of `b: &anc [1,2]`, to the sequence as before.
+    let (out, code) = run_yq_stdin(
+        "at_offset(19)",
+        "a: !!str 5\nb: &anc [1,2]\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!((code, out.as_str()), (0, "[1,2]\n"));
     Ok(())
 }
 

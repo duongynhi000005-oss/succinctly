@@ -255,6 +255,9 @@ pub struct SemiIndex {
     pub aliases: BTreeMap<usize, usize>,
     /// Explicit source tags: BP position → raw tag text (see [`YamlIndex::get_tag`](super::index::YamlIndex::get_tag))
     pub tags: BTreeMap<usize, String>,
+    /// BP position of a property-bearing node → byte offset of its *first*
+    /// `&anchor`/`!tag` token (#2712). See the `Parser` field of the same name.
+    pub property_starts: BTreeMap<usize, usize>,
     /// Head/line/foot comments, keyed by the BP position of the node they
     /// attach to. See [`NodeComments`].
     pub comments: BTreeMap<usize, NodeComments>,
@@ -327,6 +330,13 @@ struct Parser<'a, const HAS_CR: bool> {
     aliases: BTreeMap<usize, usize>,
     /// Explicit source tags collected during parsing: bp_pos → raw tag text
     tags: BTreeMap<usize, String>,
+    /// bp_pos of a property-bearing node → byte offset of its *first*
+    /// `&anchor`/`!tag` token (#2712). yq's `line`/`column` report this
+    /// position, not the value's, for a node that carries a property.
+    /// Recorded under the same `bp_pos` convention as `bp_to_anchor` and
+    /// `tags`, first property wins (`&x !!str 5` and `!!str &x 5` both name
+    /// the first token) — see [`Self::note_property_start`].
+    property_starts: BTreeMap<usize, usize>,
     /// `bp_pos` of the node an anchor or tag was just scanned for, if that
     /// node hasn't opened yet. An alias node opening at this same `bp_pos`
     /// would mean the property was meant for it — invalid per the YAML 1.2
@@ -634,6 +644,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             bp_to_anchor: BTreeMap::new(),
             aliases: BTreeMap::new(),
             tags: BTreeMap::new(),
+            property_starts: BTreeMap::new(),
             pending_property_bp: None,
             comments: BTreeMap::new(),
             pending_head_comment: None,
@@ -6974,9 +6985,18 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         Ok(name)
     }
 
+    /// Record `start` as the offset of the first property token of the node
+    /// at `bp`, unless an earlier property of the same node already did
+    /// (#2712). Called with `self.pos` *before* the property is consumed.
+    #[inline]
+    fn note_property_start(&mut self, bp: usize, start: usize) {
+        self.property_starts.entry(bp).or_insert(start);
+    }
+
     /// Parse an anchor definition (`&name`).
     /// Records the anchor and returns, expecting the value to follow.
     fn parse_anchor(&mut self) -> Result<String, YamlError> {
+        let start = self.pos;
         // Consume `&`
         self.advance();
 
@@ -6994,6 +7014,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // last-wins `anchors` map above -- see `bp_to_anchor`'s own doc
         // comment.
         self.bp_to_anchor.insert(self.bp_pos, name.clone());
+        self.note_property_start(self.bp_pos, start);
         self.pending_property_bp = Some(self.bp_pos);
 
         Ok(name)
@@ -7012,12 +7033,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// anchors to the value.
     fn record_key_anchor(&mut self) -> Result<(), YamlError> {
         debug_assert_eq!(self.peek(), Some(b'&'));
+        let start = self.pos;
         self.advance();
         let name = self.parse_anchor_name()?;
         self.skip_inline_whitespace();
         self.anchors.insert(name.clone(), self.bp_pos - 1);
         // #1353: see `parse_anchor`'s own matching insert above.
         self.bp_to_anchor.insert(self.bp_pos - 1, name);
+        self.note_property_start(self.bp_pos - 1, start);
         self.pending_property_bp = Some(self.bp_pos - 1);
         Ok(())
     }
@@ -7184,8 +7207,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     had_property = true;
                 }
                 Some(b'!') => {
+                    let start = self.pos;
                     let tag = self.parse_tag()?;
                     self.tags.insert(self.bp_pos, tag);
+                    self.note_property_start(self.bp_pos, start);
                     self.pending_property_bp = Some(self.bp_pos);
                     self.skip_inline_whitespace();
                     had_property = true;
@@ -7218,8 +7243,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     had_property = true;
                 }
                 Some(b'!') => {
+                    let start = self.pos;
                     let tag = self.parse_tag()?;
                     self.tags.insert(self.bp_pos, tag);
+                    self.note_property_start(self.bp_pos, start);
                     self.pending_property_bp = Some(self.bp_pos);
                     self.skip_flow_whitespace();
                     had_property = true;
@@ -7237,9 +7264,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// caller (not yet opened) would use.
     fn record_key_tag(&mut self) -> Result<(), YamlError> {
         debug_assert_eq!(self.peek(), Some(b'!'));
+        let start = self.pos;
         let tag = self.parse_tag()?;
         self.skip_inline_whitespace();
         self.tags.insert(self.bp_pos - 1, tag);
+        self.note_property_start(self.bp_pos - 1, start);
         self.pending_property_bp = Some(self.bp_pos - 1);
         Ok(())
     }
@@ -7269,8 +7298,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// to be called at all three (#369).
     fn record_flow_tag(&mut self) -> Result<(), YamlError> {
         if self.peek() == Some(b'!') {
+            let start = self.pos;
             let tag = self.parse_tag()?;
             self.tags.insert(self.bp_pos - 1, tag);
+            self.note_property_start(self.bp_pos - 1, start);
             self.skip_flow_whitespace();
         }
         Ok(())
@@ -7397,6 +7428,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             bp_to_anchor: core::mem::take(&mut self.bp_to_anchor),
             aliases: core::mem::take(&mut self.aliases),
             tags: core::mem::take(&mut self.tags),
+            property_starts: core::mem::take(&mut self.property_starts),
             comments: core::mem::take(&mut self.comments),
         })
     }

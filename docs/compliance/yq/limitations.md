@@ -899,10 +899,10 @@ yq v4.53.3. Pinned by `test_arithmetic_reads_the_real_document_2626`.
 Two things it does not fix. `generic_item_into_owned` still folds each *operand* to an
 `OwnedValue`, so an operand whose own value is a duplicate-keyed container collapses there
 (`. + {}`) — the `OwnedValue::Object` representation limit ADR-0017 declares out of scope
-(#796), the same residual `reduce`'s bindings have above. And `column` inside an arithmetic
-now agrees with succinctly's own bare `column`, which itself answers the value's column where
-yq answers the anchor's — a pre-existing divergence in the builtin, unrelated to the bridge
-([#2712](https://github.com/rust-works/succinctly/issues/2712)).
+(#796), the same residual `reduce`'s bindings have above. (`column` inside an arithmetic used
+to answer the value's column where yq answers the anchor's, a divergence in the builtin itself
+rather than the bridge; [#2712](https://github.com/rust-works/succinctly/issues/2712) fixed it
+and `.b | (column + 0)` is `4` on `b: &anc [1,2]`, as in yq.)
 
 Leaving the bridge also means arithmetic stops validating the whole document, which is a
 deliberate divergence in its own right and is recorded under

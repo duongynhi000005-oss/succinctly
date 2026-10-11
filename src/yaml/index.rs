@@ -72,6 +72,10 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// resolves to a tag by reference the way an alias resolves to an
     /// anchor, so this is a single side table, not three (#224).
     tags: BTreeMap<usize, String>,
+    /// BP position of a property-bearing node → byte offset of its first
+    /// `&anchor`/`!tag` token (#2712). Only `line`/`column` read it; every
+    /// navigation and streaming path keeps using `open_positions` (the value).
+    property_starts: BTreeMap<usize, usize>,
     /// Head/line/foot comments, keyed by the BP position of the owning node.
     /// See [`NodeComments`].
     comments: BTreeMap<usize, NodeComments>,
@@ -200,6 +204,7 @@ impl YamlIndex<Vec<u64>> {
             bp_to_anchor: semi.bp_to_anchor,
             aliases: semi.aliases,
             tags: semi.tags,
+            property_starts: semi.property_starts,
             has_standalone_comments: semi
                 .comments
                 .values()
@@ -266,6 +271,9 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             bp_to_anchor,
             aliases,
             tags,
+            // Like `comments`, a serialized index carries no property
+            // offsets, so `line`/`column` fall back to the value's position.
+            property_starts: BTreeMap::new(),
             // `from_parts` predates comment tracking and has no caller
             // in this codebase today; a future caller that needs it can be
             // given an explicit parameter then.
@@ -608,6 +616,17 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[inline]
     pub fn get_tag(&self, bp_pos: usize) -> Option<&str> {
         self.tags.get(&bp_pos).map(alloc::string::String::as_str)
+    }
+
+    /// Byte offset of the first `&anchor`/`!tag` token of the node at
+    /// `bp_pos`, or `None` when it carries no property (#2712).
+    ///
+    /// This is where yq reports a property-bearing node: its `line` and
+    /// `column` are the property's, not the value's (`b: &anc [1,2]` is
+    /// column 4, the `&`, where [`Self::bp_to_text_pos`] answers 9).
+    #[inline]
+    pub fn property_start(&self, bp_pos: usize) -> Option<usize> {
+        self.property_starts.get(&bp_pos).copied()
     }
 
     /// Whether any node in the document carries an explicit tag.
@@ -2606,5 +2625,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #2712: `property_start` names the *first* property token of a node
+    /// whichever order its anchor and tag come in, and nothing else -- a
+    /// node with no property and an alias (which cannot carry one) answer
+    /// `None`. `from_parts` has no offsets to restore, so it answers `None`
+    /// everywhere and `line`/`column` fall back to the value.
+    #[test]
+    fn test_property_start_is_the_first_property_token_2712() {
+        // `a: &x !!str 5` -> `&` at 3; `b: !!str &y 6` -> `!` at 17; `e: &z\n  k: 1`
+        // names the deferred mapping; `c`/`d` carry no property.
+        let yaml = b"a: &x !!str 5\nb: !!str &y 6\nc: 7\nd: *x\ne: &z\n  k: 1\n";
+        let index = YamlIndex::build(yaml).expect("should parse");
+        let starts: Vec<usize> = (0..index.bp().len())
+            .filter_map(|bp| index.property_start(bp))
+            .collect();
+        assert_eq!(starts, [3, 17, 42], "one entry per property-bearing node");
+        for &s in &starts {
+            assert!(matches!(yaml[s], b'&' | b'!'), "offset {s} is a property");
+        }
+
+        let semi = build_semi_index(yaml).expect("should parse");
+        let rebuilt = YamlIndex::from_parts(
+            semi.ib,
+            semi.ib_len,
+            semi.bp,
+            semi.bp_len,
+            semi.ty,
+            semi.ty_len,
+            semi.bp_to_text,
+            semi.bp_to_text_end,
+            semi.containers,
+            semi.anchors,
+            semi.aliases,
+            semi.tags,
+        );
+        assert!((0..rebuilt.bp().len()).all(|bp| rebuilt.property_start(bp).is_none()));
     }
 }
