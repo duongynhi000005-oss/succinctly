@@ -6434,9 +6434,22 @@ fn emit_yaml_value_at_depth(
                             // A no-op for the ordinary implicit-key case
                             // (`comment_suffix` is already non-empty then).
                             let comment_suffix = if comment_suffix.is_empty() {
-                                comments
-                                    .key_comment(k)
-                                    .map_or_else(String::new, |c| comment_suffix_text(c, indent))
+                                // A scalar keeps both of a key's comments, the second on a
+                                // line of its own (`b: 5 # floated` / `# own`). A container
+                                // here is flow or empty, where yq moves both onto the next
+                                // entry (`b: {c: 1}` / `d: 3 # floated` / `# own`): the first
+                                // alone stays on the key's line, as before, rather than a
+                                // standalone second line that would re-attach to that entry
+                                // (#2806).
+                                let scalar =
+                                    !matches!(v, OwnedValue::Object(_) | OwnedValue::Array(_));
+                                comments.key_comment(k).map_or_else(String::new, |c| {
+                                    if scalar {
+                                        comment_suffix_text(c, indent)
+                                    } else {
+                                        format!(" {}", c.split('\n').next().unwrap_or_default())
+                                    }
+                                })
                             } else {
                                 comment_suffix
                             };

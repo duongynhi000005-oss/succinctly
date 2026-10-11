@@ -3048,8 +3048,14 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
             // onto it from an earlier anchor's deferred value, then its own -- stored
             // newline-joined, the shape a `line_comment = "a\nb"` write stores.
             let key_comment = {
-                let comments = DocumentCursor::line_comments_raw(&field.key_cursor);
-                (!comments.is_empty()).then(|| comments.join("\n"))
+                let mut comments = DocumentCursor::line_comments_raw(&field.key_cursor).into_iter();
+                comments.next().map(|first| {
+                    comments.fold(first, |mut joined, next| {
+                        joined.push('\n');
+                        joined.push_str(&next);
+                        joined
+                    })
+                })
             };
             let value_absent = key_comment.is_some()
                 && field.value.is_null()

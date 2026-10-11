@@ -1,0 +1,3 @@
+a: &anc # floated
+  b: # own
+  d: 2
