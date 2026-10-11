@@ -1077,7 +1077,12 @@ mod tests {
                     _ => None,
                 };
                 let sliced = slice_cursors(&elements, window, |len| bounds.resolve(len)).map(
-                    |(cursors, range)| cursors[range].iter().map(|c| c.value()).collect::<Vec<_>>(),
+                    |(cursors, range)| {
+                        cursors[range]
+                            .iter()
+                            .map(DocumentCursor::value)
+                            .collect::<Vec<_>>()
+                    },
                 );
                 match (&walked, sliced) {
                     (Ok(len), Ok(values)) => {
@@ -1281,7 +1286,7 @@ mod tests {
                         owned(
                             &cursors_in_range(&elements, range.clone())
                                 .iter()
-                                .map(|c| c.value())
+                                .map(DocumentCursor::value)
                                 .collect::<Vec<_>>()
                         ),
                         owned(&collected[range.clone()]),
@@ -1333,7 +1338,7 @@ mod tests {
                     let bounds = SliceBounds::from_literals(start, end);
                     let (cursors, range) =
                         slice_cursors(&elements, window, |len| bounds.resolve(len)).unwrap();
-                    let values: Vec<_> = cursors[range].iter().map(|c| c.value()).collect();
+                    let values: Vec<_> = cursors[range].iter().map(DocumentCursor::value).collect();
                     let values = &values[..];
                     assert_eq!(
                         to_owned_all::<JqSemantics, _>(values).unwrap(),
