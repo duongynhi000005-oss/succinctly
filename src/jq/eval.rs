@@ -67693,6 +67693,17 @@ fn collect_paths(
     }
 }
 
+/// The events `tostream` emits for `value`, in order.
+///
+/// `[[path], leaf]` for each leaf and an empty container, `[[path]]` closing each non-empty one.
+/// `jq --stream` feeds the program these in place of each input document (#4397).
+#[must_use]
+pub fn tostream_events(value: &OwnedValue) -> Vec<OwnedValue> {
+    let mut events = Vec::new();
+    collect_tostream_events(value, &mut Vec::new(), &mut events);
+    events
+}
+
 /// Helper to collect `tostream`-style events: `[path, value]` for every leaf
 /// (scalar, or an empty array/object), plus a closing `[path]` marker after
 /// every *non-empty* container, whose path is the container's own path with

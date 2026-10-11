@@ -1003,6 +1003,10 @@ struct JqCommand {
     #[arg(long, overrides_with = "seq")]
     seq: bool,
 
+    /// Parse the input value in streaming fashion: the program reads `tostream` events instead of each document
+    #[arg(long, overrides_with = "stream")]
+    stream: bool,
+
     // === Exit Status ===
     /// Set exit status based on output (0 if last output != false/null)
     #[arg(short = 'e', long, overrides_with = "exit_status")]

@@ -11641,6 +11641,29 @@ To move to a newer jq, bump `JQ_VERSION`, install that version, run
 `./scripts/sync-jq-error-messages.sh` and `./scripts/sync-jq-golden.sh`, and review the
 diff.
 
+## `--stream` feeds `tostream` events, expanded per document (#4397)
+
+`succinctly jq --stream` replaces each input document with the events `tostream` emits for it (`[[path],leaf]` for a
+leaf or an empty container, `[[path]]` closing a non-empty one), so `.` sees one event at a time, `-s` slurps every
+event into one array, and `input`/`inputs` read events (`fromstream(inputs)` and `1|truncate_stream(inputs)` fold
+them back). `-R` ignores the flag, as in jq. Pinned by `test_jq_stream_flag_feeds_tostream_events_4397`.
+
+jq emits events while it parses, so two things differ for the shapes below, both recorded divergences:
+
+- **A document that fails to parse part-way** has already emitted the events of what it finished in jq
+  (`printf '[1,' | jq --stream -c .` prints `[[0],1]` and then the parse error); succinctly parses a document whole,
+  so it prints the events of the documents before it and then the error.
+- **`input_line_number`** is the line the parser is on when jq emits the event, so the events of a document that spans
+  lines carry different numbers; every event here carries the line its document completes on.
+- **`--seq`** combines with `--stream` in jq (`echo '[1] 2' | jq --seq --stream -c .` prints each event after an RS
+  byte); here `--seq` wins and the flag is ignored.
+- **A duplicate object key** is emitted once: the events come from the parsed value, which keeps the last
+  occurrence (`{"a":1,"a":2}` prints `[["a"],2]` and `[["a"]]`), where jq's `--stream` emits every occurrence
+  (`docs/plan/jq-duplicate-key-collapse.md`).
+
+`--stream-errors` is not accepted. The expansion materializes every event, so `--stream` does not give jq's
+constant-memory streaming of a large document.
+
 ## ANSI color bytes: succinctly emits one SGR per token, jq emits redundant repeats (#3110)
 
 `-C` output wraps the same tokens in the same colors as real jq -- including, since #3110,
