@@ -5566,3 +5566,15 @@ Still diverging: a write through `..` (`(.. | select(tag=="!!int")) |= . + 1` is
 yq and `p: 3, q: 4` here, the shared node incremented twice), `..` over an owned value
 (`to_entries | .[] | ..` expands the alias), a merge key (`<<: *b`, which yq also treats as the
 stop, listing `m.<<` where this lists the merged `m.p`/`m.q`), and `recurse(f; cond)`.
+
+### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363), [#4364](https://github.com/rust-works/succinctly/issues/4364))
+
+A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in
+yq ([#2712](https://github.com/rust-works/succinctly/issues/2712)): `b: &anc [1,2]` is column 4.
+Two pre-existing differences remain, neither specific to properties:
+
+- yq reports `1:1` for the root of a *first* document that opens with an explicit `---` or a leading
+  comment (`--- 5`, `# c` / `k: 1`); here the root reports its own position (`[1,5]`, `[2,1]`). A later
+  document's root agrees (#4363).
+- Columns are byte offsets here and character offsets in yq, so a multi-byte character earlier on the
+  line shifts the column (`é: [1]` is `[1,5]` here, `[1,4]` in yq; #4364).
