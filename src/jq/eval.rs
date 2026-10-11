@@ -44531,6 +44531,18 @@ fn foreach_states_register_per_emission<S: EvalSemantics>(expr: &Expr) -> bool {
         )
 }
 
+/// Whether `expr` is a `foreach` that states jq's register on every emission of an
+/// *untracked* entry (#4130), read through the wrappers [`peel_register_transparent`]
+/// passes the register through. jq emits from inside the loop, so the register an
+/// emission carries is where the pattern walk and `UPDATE` left it, not the fold's entry;
+/// [`resolve_foreach`] therefore states `Unmoved` (the frame's register) on an emission
+/// whose step took no walk step and whose `UPDATE`, `EXTRACT`, source and `INIT` cannot
+/// move it, and a loss on every other one, so the stage never reads an absent statement
+/// as the carried copy standing (#3826) for an emission that moved it. Jq mode only.
+fn foreach_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> bool {
+    last_register_unmoved::<S>() && matches!(peel_register_transparent(expr), Expr::Foreach { .. })
+}
+
 /// Whether `expr` is a `reduce` that states jq's register per result on an *untracked*
 /// entry (#4049), read through the wrappers [`peel_register_transparent`] passes the
 /// register through. jq backtracks a `reduce`'s source, pattern and `UPDATE` (the
@@ -53814,9 +53826,23 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && trackable
         && !register_unmoved
         && foreach_outside_update_cannot_move(patterns, input, init, extract);
+    // #4130: on an untracked entry the stage reads the statement of every emission
+    // that navigated nothing ([`foreach_states_register_on_untracked_entry`]), so each
+    // one states it: the frame's register when the step provably left it there
+    // (`step_at_entry`, set per step below), a loss otherwise.
+    let states_untracked = S::TAG == EvalTag::Jq && !trackable;
+    let step_at_entry = core::cell::Cell::new(false);
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
         if register_unmoved && !branch.trackable {
             sink(branch.with_register(BranchRegister::Unmoved(Cow::Borrowed(value))))
+        } else if states_untracked && !branch.trackable && branch.path.depth() == 0 {
+            let statement = match frame.register() {
+                Some(register) if step_at_entry.get() => {
+                    BranchRegister::Unmoved(Cow::Owned(register.clone()))
+                }
+                _ => BranchRegister::LostSomewhere,
+            };
+            sink(branch.without_entry_statement().with_register(statement))
         } else {
             sink(branch.without_entry_statement())
         }
@@ -53844,6 +53870,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
     let step_cannot_move =
         cannot_move_register(update) && extract.map_or(true, cannot_move_register);
+    // #4130: everything in the loop body but the pattern walk, judged once: an untracked
+    // entry's emission is at the entry register when this holds and the step walked nothing.
+    let entry_stays_at_register = states_untracked
+        && init_keeps_register
+        && !mentions_frozen_var
+        && cannot_move_register(input)
+        && step_cannot_move;
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
     // own trailing escape, which jq never reaches once a consumer has
@@ -54027,6 +54060,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             state_at_register,
                             state_path.as_ref(),
                         );
+                        // #4130: an emission of this step is at the entry register when the
+                        // step took no walk step (a bare `$var`, or the one a failed
+                        // destructure's restored fork reached) and nothing else in the loop
+                        // body can have moved it. Read by the sink above, per emission.
+                        step_at_entry.set(entry_stays_at_register && walked.is_none());
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "foreach")
                         {
@@ -58786,12 +58824,14 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         !stage_preserves_register && entry_marker_stage::<S>(element, branch_trackable);
     // #3758: read once per stage, applied per result inside `place_step`.
     // #3580: a `foreach` states its register per emission too -- the UPDATE
-    // output's -- but only on a trackable entry, where the statement is `Unmoved`;
-    // an untracked entry reads an absent statement as the carried copy standing
-    // (#3826), which is wrong for an emission whose UPDATE navigated.
+    // output's -- on a trackable entry, where the statement is `Unmoved`. An untracked
+    // entry reads an absent statement as the carried copy standing (#3826), which is
+    // wrong for an emission whose UPDATE navigated, so there `resolve_foreach` states
+    // every depth-0 emission itself (`Unmoved` or a loss, #4130) before the stage reads it.
     let stages_per_result_register = stage_states_register_per_result::<S>(element)
         || (branch_trackable && foreach_states_register_per_emission::<S>(element))
         || (branch_trackable && compound_states_register_per_result::<S>(element))
+        || (!branch_trackable && foreach_states_register_on_untracked_entry::<S>(element))
         || (!branch_trackable && reduce_states_register_on_untracked_entry::<S>(element));
     let mut place_step = |step: PathBranch<'a>| -> Demand {
         // #3293: only a `?//` retry re-invokes this after a stop.

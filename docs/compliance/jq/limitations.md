@@ -671,12 +671,21 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   the register it entered with: `del(try (.a and (reduce . as {a:$a} ?// $a (0; .))))` on
   `{"a":true}` is jq's `{}` (it refused "with result true"), and `path(.a | 5 | reduce null as
   {a:$q} (null; .))` on `{"a":null}` is `["a"]`; a `foreach` steps and extends the register's own
-  path (`["a","a"]`). Pinned by `test_fold_steps_from_known_untracked_register_4049`. **A
-  recorded divergence, in the safe direction**: a `foreach` states no register at its emissions
-  (they run inside the loop, after the pattern's steps and `UPDATE` moved jq's register), so
-  `del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))` on `{"a":true}` (jq `{}`) still refuses
-  at the result, as does a `reduce` whose `UPDATE` jq answers by navigating the accumulator
-  (`path(.a | 5 | reduce null as {a:$q} (null; .b))`, jq `["a"]`). The first
+  path (`["a","a"]`). Pinned by `test_fold_steps_from_known_untracked_register_4049`. Since
+  [#4130](https://github.com/rust-works/succinctly/issues/4130) a `foreach` on that untracked entry
+  states its register on every emission that navigated nothing: the register it entered with when the
+  step took no walk step (a bare `$var`, or the one a failed destructure's restored fork reached) and
+  nothing in the loop body can have moved it, a loss otherwise (the pattern's steps and `UPDATE` ran
+  before the emission, inside the loop). So `del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))` on
+  `{"a":true}` is jq's `{}` (it refused "with result true"), and so is
+  `path(. as $x | 5 | (foreach . as {a:$q} ?// $a (0; .; .)) | $x)` (`[]`), pinned by
+  `test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130`. Over a seeded
+  sample of 80,027 rows of the 190 `foreach` operands (`--sample 80000 --seed 5`, `/usr/bin/jq` 1.7.1,
+  against a `main` build) it moved REFUSE_WRONG 1,291 to 1,238 and MATCH 78,657 to 78,710, with no
+  regression and ACCEPT_WRONG unchanged at 53. **A recorded
+  divergence, in the safe direction**: a `reduce` whose `UPDATE` jq answers by navigating the
+  accumulator (`path(.a | 5 | reduce null as {a:$q} (null; .b))`, jq `["a"]`) still refuses at the
+  result. The first
   alternative's refusal on the untracked contexts where no register is carried (`var-rebind`,
   `untracked-*`) is unchanged. Over a seeded sample of 30,027 rows of the 20 `?//` fold operands
   (`--sample 30000 --seed 11`, `/usr/bin/jq` 1.7.1) #3999 moved REFUSE_WRONG 1,883 to 1,793 and
@@ -11569,10 +11578,10 @@ that fires once `g` ran to its end, after a swallowed answer or when it emitted 
 register the call entered with, which on an untracked entry is the frame's carried one (#4114,
 #4341), so an `and`/`or` around it accepts as jq does
 (`test_isempty_path_identity_answer_on_an_untracked_entry_4114`,
-`test_any_all_isempty_identity_answer_states_the_frames_register_4341`). A `foreach` whose UPDATE
+`test_any_all_isempty_identity_answer_states_the_frames_register_4341`). A *trackable* `foreach` whose UPDATE
 reaches that identity through an `or` whose right operand navigates (`foreach .[]? as $k (.;
-isempty(g ?// ..) or (.a)?; .)` on `[true]`) still refuses where jq answers `[0]`: the register of a
-`foreach` emission is #4130's. The sweep over the `isempty` operands (226,467 rows) went from 3,550
+isempty(g ?// ..) or (.a)?; .)` on `[true]`) still refuses where jq answers `[0]`
+([#4354](https://github.com/rust-works/succinctly/issues/4354)). The sweep over the `isempty` operands (226,467 rows) went from 3,550
 to 536 ACCEPT_WRONG and from 1,912 to 348 DIFF with #4114.
 
 The identity element `any`/`all` answer once `gen` is exhausted after a swallowed answer
