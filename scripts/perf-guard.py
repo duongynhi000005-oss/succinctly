@@ -139,6 +139,8 @@ FIXTURE_SEED = 20260101
 # `QUERIES` carries in its pattern column so `measure_all` knows not to ask the
 # binary for it. 663 objects of 512 keys each is the shape (and, with 12 bytes
 # a member, the ~4 MB size) #4167's -6.8% was measured on.
+# The row's size column (`4mb`) is a label only: nothing reads it for this
+# pattern, so the real size is these two constants.
 MID_WIDTH_PATTERN = "mid512"
 MID_WIDTH_ROW = "mid512_map_length_add"
 MID_WIDTH_OBJECTS = 663

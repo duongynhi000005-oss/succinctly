@@ -18,6 +18,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 _SCRIPT_PATH = pathlib.Path(__file__).parent / "perf-guard.py"
 _spec = importlib.util.spec_from_file_location("perf_guard", _SCRIPT_PATH)
@@ -95,12 +96,15 @@ class CensusRowTests(unittest.TestCase):
     is this file's to pin: a fixture of the wrong shape would still report an
     instruction count."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        cls.shared = cls.fixture("shared.json")
 
-    def fixture(self, name="mid.json"):
-        path = os.path.join(self.tmp.name, name)
+    @classmethod
+    def fixture(cls, name):
+        path = os.path.join(cls.tmp.name, name)
         perf_guard.generate_mid_width_fixture(path)
         return path
 
@@ -118,7 +122,7 @@ class CensusRowTests(unittest.TestCase):
         self.assertEqual(users, [perf_guard.MID_WIDTH_ROW])
 
     def test_fixture_is_equal_objects_of_512_distinct_keys(self):
-        with open(self.fixture()) as f:
+        with open(self.shared) as f:
             objects = json.load(f)
         self.assertEqual(len(objects), 663)
         keys = list(objects[0])
@@ -128,7 +132,7 @@ class CensusRowTests(unittest.TestCase):
             self.assertEqual(list(obj), keys)
 
     def test_fixture_is_about_4_mb(self):
-        size = os.path.getsize(self.fixture())
+        size = os.path.getsize(self.shared)
         self.assertTrue(3_900_000 <= size <= 4_200_000, size)
 
     def test_measure_all_gives_the_row_the_synthesized_fixture(self):
@@ -152,21 +156,16 @@ class CensusRowTests(unittest.TestCase):
             seen[filter_expr] = (fixture_path, os.path.getsize(fixture_path))
             return 1
 
-        patches = {
-            "generate_fixture": fake_generate,
-            "generate_compact_fixture": fake_derive,
-            "generate_lines_fixture": fake_derive,
-            "measure_query": fake_measure,
-        }
-        originals = {name: getattr(perf_guard, name) for name in patches}
-        for name, fn in patches.items():
-            setattr(perf_guard, name, fn)
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                measured = perf_guard.measure_all("bin", "valgrind", 1)
-        finally:
-            for name, fn in originals.items():
-                setattr(perf_guard, name, fn)
+        with contextlib.ExitStack() as stack:
+            for name, fn in {
+                "generate_fixture": fake_generate,
+                "generate_compact_fixture": fake_derive,
+                "generate_lines_fixture": fake_derive,
+                "measure_query": fake_measure,
+            }.items():
+                stack.enter_context(mock.patch.object(perf_guard, name, fn))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            measured = perf_guard.measure_all("bin", "valgrind", 1)
         self.assertNotIn(perf_guard.MID_WIDTH_PATTERN, generated)
         self.assertIn(perf_guard.MID_WIDTH_ROW, measured)
         path, size = seen["map(length) | add"]
@@ -176,7 +175,7 @@ class CensusRowTests(unittest.TestCase):
         self.assertTrue(seen["length"][0].endswith("wide_2mb.json"), seen["length"][0])
 
     def test_fixture_is_deterministic(self):
-        with open(self.fixture("a.json"), "rb") as a, open(self.fixture("b.json"), "rb") as b:
+        with open(self.shared, "rb") as a, open(self.fixture("again.json"), "rb") as b:
             self.assertEqual(a.read(), b.read())
 
 
