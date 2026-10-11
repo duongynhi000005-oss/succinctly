@@ -1573,7 +1573,19 @@ is the revert that established what the other one costs.
    `select` stages and constants navigates nothing at stage level and is read branch by branch
    (#4151): `try (select(.), error("e")) catch (select(.), 7)`, `catch (numbers // 7)` and `catch (if .
    then select(.) else 7 end)` leave `$x` at the root, pinned by
-   `test_register_catch_handler_compound_of_select_stages_4151`. Still refused where jq answers: a handler with an
+   `test_register_catch_handler_compound_of_select_stages_4151`. A handler that navigates is read too when
+   its body can raise only a fresh message string (#4309, `body_raises_only_fresh_messages`: `.`, a
+   literal, a field, index, slice or iteration step, `last(f)`, `select(f)`, the type filters, and a pipe or
+   `,` of them) and the handler takes its steps from its own input (`handler_navigates_only_its_input`:
+   `.a`, `.a.b`, `.[0]`, `.[]`, `.[1:]`, a pipe of them): it then runs, if the body raises, on a string
+   that is nobody's node and raises as in jq, and otherwise never runs, so `path(. as $x | try last(.a)
+   catch .a | $x)` is `[]` as in jq. Pinned by `test_register_catch_handler_that_never_runs_4309`. A body
+   that can raise a value (`error(.)`, `error($x)`) hands its handler a node that may be the register's own,
+   which navigates legitimately, so `try error(.) catch .a` stays as it was. Still refused where jq
+   answers: a handler that navigates from elsewhere or does more than navigate (`catch ($x | .a)`,
+   `catch (.a, 7)`, `catch .a?`; jq prints `[]` for each because the handler never runs), a body outside
+   that grammar (a nested `try`, an `?`, a `def` call, `first(.a)`, any other builtin: `try (try last(.a) catch .a)
+   catch .[0]`, `def f: try last(.a) catch .a; f | $x`), a handler with an
    unreachable navigating branch behind a literal condition (`catch (if true then select(.) else .a end)`), and any `try ... catch`
    inside a `foreach` UPDATE, with the plain handler `catch .` as much as with this one
    (`path(foreach .a? as $k (0; try (try (select(.), error("e")) catch .); $k))` on `null`).

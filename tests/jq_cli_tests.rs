@@ -121765,6 +121765,148 @@ fn test_register_catch_handler_compound_of_select_stages_4151() -> Result<()> {
     ])
 }
 
+/// #4309: a `catch` handler that navigates is read as leaving the register alone when the body
+/// can raise only a fresh message string (`body_raises_only_fresh_messages`): the handler then
+/// runs on a string that is nobody's node, so it raises, in jq as here, and the stage is the
+/// body's. A body that can raise a value (`error(.)`, `error($x)`) hands its handler a node
+/// that may be the register's own, which navigates legitimately, so those stay refused.
+/// (`catch ($x | .a)` and `catch (.a, 7)` are left out: jq prints `[]` for them because the
+/// handler never runs, and this refuses before printing, so stdout differs, as for #4151.)
+/// Every row captured from jq 1.7.1 with `-c` on `{"a":{"b":1},"k":2}`, on the stdin and `-n`
+/// routes.
+#[test]
+fn test_register_catch_handler_that_never_runs_4309() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try last(.a) catch .a | $x)",
+            "[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try last(.a) catch .a.b | $x)",
+            "[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try last(.a) catch .[0] | $x)",
+            "[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try last(.a) catch .[] | $x)",
+            "[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try select(.a) catch .a | $x)",
+            "[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try (select(.), last(.a)) catch .a | $x)",
+            "[]\n[]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try last(.a) catch .a | $x | .k)",
+            "[\"k\"]\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"del(. as $x | try last(.a) catch .a | $x.k)",
+            "{\"a\":{\"b\":1}}\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"(. as $x | try last(.a) catch .a | $x.k) |= 9",
+            "{\"a\":{\"b\":1},\"k\":9}\n",
+            r"",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | 5 | try last(.a) catch .a | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of "Invalid path expression n"#,
+            5,
+        ),
+        // ... for every step it may take, on a number and on a string
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | 5 | try last(.a) catch .[0] | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of "Invalid path expression n"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | 5 | try last(.a) catch .[] | $x)",
+            "",
+            r#"Invalid path expression near attempt to iterate through "Invalid path expression n"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | 5 | try last(.a) catch .[1:] | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element {"start":1,"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | 5 | try last(.a) catch (.a|.b) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of "Invalid path expression n"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r#"path(. as $x | "s" | try last(.a) catch .[0] | $x)"#,
+            "",
+            r#"Invalid path expression near attempt to access element 0 of "Invalid path expression n"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r#"path(. as $x | "s" | try last(.a) catch .[1:] | $x)"#,
+            "",
+            r#"Invalid path expression near attempt to access element {"start":1,"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try error(.) catch .a | $x)",
+            "",
+            r#"Invalid path expression with result {"a":{"b":1},"k":2}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"k":2}"#,
+            r"path(. as $x | try error($x) catch .a | $x)",
+            "",
+            r#"Invalid path expression with result {"a":{"b":1},"k":2}"#,
+            5,
+        ),
+    ])
+}
+
 /// jq runs a `try`'s handler after a backtrack to the fork the `try` set, and a
 /// backtrack restores the path state saved there, so `try E catch H` leaves
 /// jq's path register where `E` does: back at the entry for `last(f)`,
@@ -121772,10 +121914,11 @@ fn test_register_catch_handler_compound_of_select_stages_4151() -> Result<()> {
 /// error's payload, a value with no position of its own, so one that cannot move
 /// the register (`.`, a constant, `$x`, an `error(...)`) leaves it alone. Before
 /// #3767 the handler was not read, and every row below refused where jq answers
-/// `[]`. A handler that *navigates* (`catch .a`) is not admitted: it raises when
-/// it runs, in jq as here, and where it never runs jq answers while this still
-/// refuses (the last group, pinned as today's refuse-only behaviour so lifting it
-/// is a deliberate change). Every answer row captured from jq 1.7.1 with `-c` on
+/// `[]`. A handler that *navigates* is admitted only over a body that raises
+/// nothing but message strings and only from its own input (#4309); one that takes a step from
+/// elsewhere (`$x | .a`) raises when it runs, in jq as here, and where it never runs jq answers
+/// while this still refuses (the last group, pinned as today's refuse-only behaviour so lifting
+/// it is a deliberate change). Every answer row captured from jq 1.7.1 with `-c` on
 /// `{"a":{"b":1},"k":2}`, on both evaluators.
 #[test]
 fn test_register_catch_handler_over_register_keeping_stage_3767() -> Result<()> {
@@ -121930,11 +122073,19 @@ fn test_register_catch_handler_over_register_keeping_stage_3767() -> Result<()> 
             "Invalid path expression near attempt to access element \"a\"",
             5,
         ),
-        // Still refused where jq answers `[]`: a handler that navigates but never runs, and a
-        // compound inner stage (`|` `,`)
+        // A handler that navigates its own input but never runs is `[]` too (#4309, pinned in
+        // `test_register_catch_handler_that_never_runs_4309`). Still refused where jq answers
+        // `[]`: a handler that takes a step from elsewhere (`$x | .a`) or does more than navigate
         (
             doc,
-            r"path(. as $x | try last(.a) catch .a | $x)",
+            r"path(. as $x | try last(.a) catch ($x | .a) | $x)",
+            "",
+            with_root,
+            5,
+        ),
+        (
+            doc,
+            r"path(. as $x | try last(.a) catch (.a, 7) | $x)",
             "",
             with_root,
             5,
