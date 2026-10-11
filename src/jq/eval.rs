@@ -19425,6 +19425,83 @@ fn builtin_unique_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     }
 }
 
+/// The error for sorting a mapping that repeats a key, or `None` (#2064). yq lists every
+/// occurrence of a repeated key in a sorted mapping; the sorted answer here is an owned map,
+/// which holds a key once, so answering would drop an entry that a sort written back with `-i`
+/// would then lose for good. A mapping the walk cannot read, or one with a key that does not
+/// decode, answers `None`: the sort itself reports those.
+pub(crate) fn yq_sort_repeated_key_error<F: DocumentFields>(fields: &F) -> Option<EvalError> {
+    let checked = effective_fields_checked(fields, false).ok()?;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for field in &checked {
+        let (key, is_fallback) = key_display_string_kind(&field.key)?;
+        // A key that does not decode is the colliding-key path's (#1813), which raises an
+        // error `?` and `try` cannot suppress; leave it to the sort.
+        if is_fallback {
+            return None;
+        }
+        if !seen.insert(key.clone().into_owned()) {
+            return Some(EvalError::new(format!(
+                "cannot sort a mapping with the repeated key {key:?}: its entries cannot be kept apart"
+            )));
+        }
+    }
+    None
+}
+
+/// yq mode only (#2064): `sort` and `sort_by(f)` on a mapping reorder its entries by the
+/// values (or by `[f]` of each value), keeping the keys, and answer a mapping. Stable, with
+/// yq's comparator ([`yq_sort_by`]). jq has no such reading and keeps its pairing error.
+///
+/// `f` is `None` for `sort`, whose key is the value itself.
+///
+/// A mapping with a repeated key is refused ([`yq_sort_repeated_key_error`]) rather than
+/// collapsed (see the sort section of `docs/compliance/yq/limitations.md`).
+fn yq_sort_mapping<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    f: Option<&Expr>,
+    fields: JsonFields<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    if let Some(err) = yq_sort_repeated_key_error(&fields) {
+        return QueryResult::Error(err);
+    }
+    let checked = match effective_fields_checked(&fields, S::COLLAPSE_DUPLICATE_KEYS) {
+        Ok(checked) => checked,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let mut keyed: Vec<(Vec<OwnedValue>, (String, bool, OwnedValue))> =
+        vec_with_capacity(checked.len());
+    for field in checked {
+        let Some((key, is_fallback)) = key_display_string_kind(&field.key) else {
+            return QueryResult::Error(fields.malformed_member_error());
+        };
+        let key = key.into_owned();
+        let sort_key = match f {
+            Some(f) => match collect_array_items::<W, S>(f, field.value.clone(), optional) {
+                Ok(items) => Some(items),
+                Err(escape) => return escape,
+            },
+            None => None,
+        };
+        let owned = match to_owned::<S, _>(&field.value) {
+            Ok(v) => v,
+            Err(e) => return suppress_or_raise(e, optional),
+        };
+        let sort_key = sort_key.unwrap_or_else(|| vec![owned.clone()]);
+        keyed.push((sort_key, (key, is_fallback, owned)));
+    }
+    yq_sort_by::<_, S>(&mut keyed, |(key, _)| key.as_slice());
+    let mut sorted = IndexMap::with_capacity(keyed.len());
+    let mut guard = DisplayKeyGuard::default();
+    for (_, (key, is_fallback, value)) in keyed {
+        if !guard.check(&sorted, &key, is_fallback) {
+            return QueryResult::Error(EvalError::colliding_display_key(&key));
+        }
+        sorted.insert(key, value);
+    }
+    QueryResult::Owned(OwnedValue::Object(sorted.into()))
+}
+
 /// Builtin: sort - sort array
 fn builtin_sort<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'_, W>,
@@ -19444,6 +19521,9 @@ fn builtin_sort<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 items.sort_by(compare_values::<S>);
             }
             QueryResult::Owned(OwnedValue::array_from(items))
+        }
+        StandardJson::Object(fields) if S::TAG == EvalTag::Yq => {
+            yq_sort_mapping::<W, S>(None, fields, optional)
         }
         // #1755: a decode failure on the scalar itself must raise
         // unconditionally, checked ahead of `optional` -- see
@@ -19505,6 +19585,9 @@ fn builtin_sort_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
             let result: Vec<OwnedValue> = keyed.into_iter().map(|(_, v)| v).collect();
             QueryResult::Owned(OwnedValue::array_from(result))
+        }
+        StandardJson::Object(fields) if S::TAG == EvalTag::Yq => {
+            yq_sort_mapping::<W, S>(Some(f), fields, optional)
         }
         // #995: sort_by shares min_by/max_by/unique_by/group_by's
         // `map([f])`-pairing computation (see

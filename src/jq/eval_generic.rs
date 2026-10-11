@@ -31931,6 +31931,16 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 .as_array()
                 .filter(|_| reordering_may_keep_cursors::<V>(cursor.as_ref()))
             else {
+                // #2064: the bridge materializes a mapping, collapsing a repeated key before
+                // `sort`/`sort_by` could see it; yq lists every occurrence, so refuse here.
+                if S::TAG == EvalTag::Yq && matches!(builtin, Builtin::Sort | Builtin::SortBy(_)) {
+                    if let Some(err) = value
+                        .as_object()
+                        .and_then(|fields| crate::jq::eval::yq_sort_repeated_key_error(&fields))
+                    {
+                        return GenericResult::Error(err);
+                    }
+                }
                 return bridge_to_full_evaluator::<S, _>(
                     &builtin_expr(whole, builtin),
                     value,
