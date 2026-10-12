@@ -54093,17 +54093,15 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         // and then a later item is the first output, so those are read too.
         Expr::Comma(items) if first_only => match items.split_first() {
             Some((head, rest)) => {
-                update_navigates_within(head, true)
+                comma_item_navigates(head, true)
                     || (!matches!(
                         unwrap_paren(head),
                         Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_)
-                    ) && rest.iter().any(|item| update_navigates_within(item, true)))
+                    ) && rest.iter().any(|item| comma_item_navigates(item, true)))
             }
             None => false,
         },
-        Expr::Comma(items) => items
-            .iter()
-            .any(|item| update_navigates_within(item, false)),
+        Expr::Comma(items) => items.iter().any(|item| comma_item_navigates(item, false)),
         // #3797: a collect, the left of a `//`, `first(f)` and `last(f)` run their
         // body whatever it yields, and jq path-checks what it navigates, so
         // `[.k] | $x`, `(.k // .) | $x` and `first(.k) | $x` raise as `.k | $x` does.
@@ -54128,6 +54126,17 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         }
         Expr::Optional(inner) if is_postfix_optional_primitive(inner) => {
             update_navigates_within(inner, first_only)
+        }
+        // #4459: a `try` (or `(...)?`) runs its body whatever it yields, and after a source
+        // that moved the register that body's navigation of the accumulator raises a path
+        // error -- which the `try` then catches, so the step is empty (no `catch`) or the
+        // handler's output, not the body's value. Read as inert, the accumulator stayed the
+        // register, the body was evaluated by value, and `(reduce .[]? as $i (.; try
+        // isempty(.a) catch 1)) // .a` answered `["a"]` where jq raises on the handler's `1`.
+        // Reading the body as navigating sends the step through the live resolver, which
+        // catches that error itself. The handler runs only after a raise, so it is not read.
+        Expr::Try { expr: body, .. } | Expr::Optional(body) => {
+            update_navigates_within(body, first_only)
         }
         Expr::If {
             cond,
@@ -54173,6 +54182,20 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         }
         other => is_fold_source_navigation(other),
     }
+}
+
+/// [`update_navigates_within`] for one item of a comma in a `reduce` `UPDATE`, which reads a
+/// caught navigation (a `try`, or a `(...)?` that is not a bare postfix step) only where its
+/// output is the step's output (#4459). `reduce` keeps the *last* output of its `UPDATE`, so a
+/// sibling's caught navigation adds nothing: `reduce .[]? as $k (.; ((.k)?, .))` ends on `.` and
+/// is `[]` in jq, which reading the `(.k)?` as navigating would refuse.
+fn comma_item_navigates(item: &Expr, first_only: bool) -> bool {
+    let caught = match unwrap_paren(item) {
+        Expr::Try { .. } => true,
+        Expr::Optional(inner) => !is_postfix_optional_primitive(inner),
+        _ => false,
+    };
+    !caught && update_navigates_within(item, first_only)
 }
 
 /// Whether `reduce`'s accumulator is at jq's register for this step's UPDATE (#3780).
