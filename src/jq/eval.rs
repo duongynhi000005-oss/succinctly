@@ -49624,6 +49624,24 @@ impl<'e> RegisterSpine<'e> {
     }
 }
 
+/// Whether a `foreach` source is `. as P1 ?// ... ?// $v | body` with a destructuring alternative
+/// and a bare one (#4417): the chain [`routes_destructuring_chain`]'s comment leaves to the
+/// by-value drive. On a register that is `null` the first alternative's walk cannot fail
+/// (`null | .a` and `null | .[0]` are `null`), so jq runs it and its `INDEX` steps move the
+/// register onto the matched member, where the by-value drive never moves it. A `null` register is
+/// also the only one a moved register can be `jv_identical` to the emitted state of, so it is
+/// the only document on which the two answers show (`path(foreach (. as {a:$a} ?// $a | .) as $k
+/// (.; .; .))` is `["a"]` on `null`).
+fn null_register_destructuring_chain(source: &Expr) -> bool {
+    matches!(
+        unwrap_paren(source),
+        Expr::AsPattern { expr, patterns, .. }
+            if routes_destructuring_chain(patterns)
+                && !patterns_all_destructuring_chain(patterns)
+                && matches!(unwrap_paren(expr), Expr::Identity)
+    )
+}
+
 /// A `?//` chain *every* alternative of which is an array or object pattern (#4187): the chains
 /// a bare-`.` bind source meets the register through. [`routes_destructuring_chain`] asks for
 /// *any* destructuring alternative, which a bind source does not (see its comment).
@@ -49966,6 +49984,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && foreach_source
         && foreach_source_destructures_register(source, register_markers.clone()))
         || destructures_unplaced_register
+        || (S::TAG == EvalTag::Jq
+            && foreach_source
+            && ambient.trackable
+            && matches!(ambient.value, OwnedValue::Null)
+            && null_register_destructuring_chain(source))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
         // output that *is* the register binds as the register-derived element

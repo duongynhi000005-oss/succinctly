@@ -2151,6 +2151,14 @@ is the revert that established what the other one costs.
    the safe direction. A plain-bind source inside another fold's body is refused where jq answers
    (`[path(reduce range(2) as $i (.; foreach (. as $x | . as {a:$a} | .) as $y (.; .; .)))]` is `[[]]` in jq), as a
    bare destructure is when the accumulator is not a pass-through.
+   [#4417](https://github.com/rust-works/succinctly/issues/4417) places the one chain with a bare `$var` alternative
+   the by-value drive got wrong: on a register that is `null` the first alternative's walk cannot fail, jq moves the
+   register onto the matched member and the emitted `null` is `jv_identical` to it, so `path(foreach (. as {a:$a} ?// $a
+   | .) as $k (.; .; .))` is `["a"]` and `(...) |= 9` is `{"a":9}`, where the by-value drive answered `[]` and `9`.
+   `null_register_destructuring_chain` routes a bare-`.` source of that shape through the resolver when the fold's
+   ambient value is a trackable `null`; any other register keeps the by-value drive. Pinned by
+   `test_foreach_source_bare_alternative_chain_on_a_null_register_4417`. Over the 39 destructuring-fold operands
+   (`--stage-only`, 33,891 rows) the 10 DIFF rows on `main` went to 0 with no regression.
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
