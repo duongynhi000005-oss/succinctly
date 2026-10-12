@@ -7915,62 +7915,6 @@ fn test_nul_output_inplace_1701() -> Result<()> {
     Ok(())
 }
 
-/// #1701: `--join-output` has the identical gap -- it should suppress the
-/// trailing terminator entirely, but the M2 fast path always wrote a bare
-/// newline regardless. Confirmed live on unmodified `main`.
-#[test]
-fn test_join_output_identity_1701() -> Result<()> {
-    let (output, code) = run_yq_stdin(".", "a: 1\n", &["--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "a: 1");
-    Ok(())
-}
-
-/// Same fix, multiple results (evaluated, `.[]`) -- real join-output
-/// concatenates every result with no separator at all. Deliberately uses
-/// the default YAML output format, not `-o json`: `-o json` would also
-/// exercise the M2 fast path's separate, pre-existing `raw_output`
-/// gap (`stream_json` never strips JSON string quoting the way the DOM
-/// path's `output_value` does -- #1715, found by a gap-sweep review of
-/// this PR but predating it), which would make this test either fail or
-/// silently pin `"hello""world"` (still quoted) as "correct" instead of
-/// jq's own `-j` semantics (`helloworld`, confirmed against the pinned
-/// oracle). YAML output has no such gap: plain scalars are unquoted by
-/// default regardless of the M2/DOM path taken, so this test exercises
-/// only the separator-suppression fix it's actually named for.
-#[test]
-fn test_join_output_multiple_results_1701() -> Result<()> {
-    let (output, code) = run_yq_stdin(".[]", "[\"hello\", \"world\"]\n", &["--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "helloworld");
-    Ok(())
-}
-
-/// #1701 code review: `emit_yaml_doc_separator` used to assume the previous
-/// document's own output always ended in `\n`, so `--join-output` on
-/// multi-document YAML input glued `---` directly onto the prior document's
-/// last byte -- confirmed live to silently *corrupt* the document on
-/// reparse (`a: 1\n---\nb: 2\n` -> `a: 1---\nb: 2` -> reparses as the single
-/// document `{"a": "1---", "b": 2}` instead of two documents). Pins the fix:
-/// `---` must always start on its own line regardless of which terminator
-/// produced the document before it.
-#[test]
-fn test_join_output_multidoc_does_not_corrupt_documents_1701() -> Result<()> {
-    let input = "a: 1\n---\nb: 2\n";
-
-    let (output, code) = run_yq_stdin(".", input, &["--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "a: 1\n---\nb: 2");
-
-    // Round-trip: reparsing must still yield two distinct documents, not
-    // one document with "---" corrupted into a scalar's own text.
-    let (reparsed, code) = run_yq_stdin(".", &output, &["-o", "json", "-I0"])?;
-    assert_eq!(code, 0);
-    assert_eq!(reparsed, "{\"a\":1}\n{\"b\":2}\n");
-
-    Ok(())
-}
-
 /// #1715: the M2 fast path's JSON streaming never consulted `raw_output`,
 /// so `-r` failed to strip JSON string quoting -- unlike the DOM path's
 /// `output_value`, which handles it correctly. Confirmed live to still
@@ -8031,22 +7975,6 @@ fn test_raw_output_json_inplace_strips_quotes_1715() -> Result<()> {
     Ok(())
 }
 
-/// `--join-output` also sets `raw_output` (`OutputConfig::from_args`) and
-/// suppresses the terminator entirely -- verified against the pinned jq
-/// 1.7.1 oracle (`echo '["hello","world"]' | jq -j '.[]'` -> `helloworld`).
-/// (`-0` no longer sets `raw_output`, #1996; `-j`'s own reshaping is #1731.)
-#[test]
-fn test_join_output_json_strips_quotes_1715() -> Result<()> {
-    let (output, code) = run_yq_stdin(
-        ".[]",
-        "[\"hello\", \"world\"]\n",
-        &["-o", "json", "--join-output"],
-    )?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "helloworld");
-    Ok(())
-}
-
 /// #1996: `-0`/`--nul-output` does not imply `-r` for JSON output (JSON's default
 /// unwrap-scalar setting is false; only YAML's is true), so a JSON string keeps its quotes
 /// and its escapes. Every row was captured from yq v4.53.3 (`a: "b\0c"` is a real NUL).
@@ -8071,7 +7999,66 @@ fn test_nul_output_json_keeps_quotes_1996() -> Result<()> {
     Ok(())
 }
 
-/// #1708: `-0`/`--join-output` combined with `-C` (color) on the M2 fast
+/// #1731: `succinctly yq -j` is real yq's deprecated `--tojson`, not jq's join-output. Every row
+/// was captured from yq v4.53.3: the output is byte-identical to `-o=json`, stderr carries
+/// cobra's deprecation line, and the alias wins over `-o` whichever came first.
+#[test]
+fn test_short_j_is_the_deprecated_tojson_alias_1731() -> Result<()> {
+    const DEPRECATION: &str = "Flag --tojson has been deprecated, please use -o=json instead\n";
+    let doc = "a: {b: [1, 2], c: y}\n";
+    let pretty =
+        "{\n  \"a\": {\n    \"b\": [\n      1,\n      2\n    ],\n    \"c\": \"y\"\n  }\n}\n";
+    for args in [
+        &["-j"][..],
+        &["--tojson"][..],
+        &["-j", "-o", "yaml"][..],
+        &["-o", "yaml", "-j"][..],
+        &["-j", "-o", "auto"][..],
+        &["-j", "-j"][..],
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", doc, args)?;
+        assert_eq!(
+            (out.as_str(), err.as_str(), code),
+            (pretty, DEPRECATION, 0),
+            "{args:?}"
+        );
+    }
+    // `-j` does not imply `-I0`; the two compose.
+    let (out, err, code) = run_yq_stdin_with_stderr(".", doc, &["-j", "-I0"])?;
+    assert_eq!(
+        (out.as_str(), err.as_str(), code),
+        ("{\"a\":{\"b\":[1,2],\"c\":\"y\"}}\n", DEPRECATION, 0)
+    );
+    Ok(())
+}
+
+/// #1731: `-j` does not unwrap a scalar (`-r` does) and does not touch the terminator (`-0`
+/// does); `yq -j -0 '.a.b[]'` is `1\02\0` in yq v4.53.3.
+#[test]
+fn test_short_j_keeps_quotes_and_composes_with_r_and_nul_1731() -> Result<()> {
+    let doc = "a: {b: [1, 2], c: y}\n";
+    for (filter, args, expected) in [
+        (".a.c", &["-j"][..], "\"y\"\n"),
+        (".a.c", &["-j", "-r"][..], "y\n"),
+        (".a.b[]", &["-j", "-0"][..], "1\x002\x00"),
+    ] {
+        let (out, _err, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
+        assert_eq!((out.as_str(), code), (expected, 0), "{filter} {args:?}");
+    }
+    Ok(())
+}
+
+/// #1731: yq has no `--join-output`, so the long spelling is an unknown flag (`yq` exits 1,
+/// clap's usage error is 2, the same class as every other unknown flag).
+#[test]
+fn test_join_output_is_not_a_yq_flag_1731() -> Result<()> {
+    let (out, err, code) = run_yq_stdin_with_stderr(".", "a: 1\n", &["--join-output"])?;
+    assert_eq!((out.as_str(), code != 0), ("", true));
+    assert!(err.contains("--join-output"), "stderr: {err}");
+    Ok(())
+}
+
+/// #1708: `-0` combined with `-C` (color) on the M2 fast
 /// path's evaluated (non-identity) branch embedded the terminator byte
 /// *inside* the ANSI color span, before the trailing reset code --
 /// `colorize_yaml`'s per-token spans weren't self-closing, so the
@@ -8231,8 +8218,7 @@ fn test_color_terminator_ordering_terminator_is_final_byte_1708() -> Result<()> 
     Ok(())
 }
 
-/// Same fix, `-0`/`--nul-output` (#1701 code review). Unlike `--join-output`
-/// above, `-0`'s own glued-`---` case was confirmed byte-identical to real
+/// Same fix, `-0`/`--nul-output` (#1701 code review). `-0`'s own glued-`---` case was confirmed byte-identical to real
 /// yq's own multi-doc `-0` output -- but real yq can't reparse that output
 /// either, so this fix's extra newline is a permitted divergence under
 /// ADR-0018's carve-out for reference output the tool can't read back, not
@@ -8258,27 +8244,8 @@ fn test_slurp_nul_output_1701() -> Result<()> {
     Ok(())
 }
 
-/// #1701 code review round 2: the corruption bug found in
-/// `emit_yaml_doc_separator` also existed, independently, in every DOM-path
-/// document-separator writer -- `SplitDocState::write_separator`, the
-/// `--eval-all` branch's own inline check, and the "standard" (non-M2,
-/// non-slurp) multi-file loop's inline check. `.a + 0` is not M2-eligible
-/// (arithmetic forces the DOM path), so this exercises the standard loop's
-/// fix specifically.
-#[test]
-fn test_join_output_multidoc_dom_path_does_not_corrupt_1701() -> Result<()> {
-    let input = "a: 1\n---\na: 2\n";
-
-    let (output, code) = run_yq_stdin(".a + 0", input, &["--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "1\n---\n2");
-
-    Ok(())
-}
-
-/// `-0` counterpart of the above (#1701 code review round 4 gap sweep):
-/// the standard multi-file DOM loop's separator guard had only ever been
-/// tested with `--join-output`, never `-0`.
+/// #1701 code review round 4 gap sweep: the standard multi-file DOM loop's
+/// separator guard under `-0`.
 #[test]
 fn test_nul_output_multidoc_dom_path_does_not_corrupt_1701() -> Result<()> {
     let input = "a: 1\n---\na: 2\n";
@@ -8287,19 +8254,6 @@ fn test_nul_output_multidoc_dom_path_does_not_corrupt_1701() -> Result<()> {
     assert_eq!(code, 0);
     assert_eq!(output, "1\0\n---\n2\0");
 
-    Ok(())
-}
-
-/// Same fix, `--eval-all` (#1701 code review round 2). The between-results
-/// `---` guard (`yq_runner.rs`'s `results.len() > 1 && i > 0` arm) needs a
-/// multi-result filter: before #2427 that meant `.[]` over the slurped
-/// array, and since #2427 plain `.` is already one result per document.
-#[test]
-fn test_join_output_eval_all_does_not_corrupt_1701() -> Result<()> {
-    let input = "a: 1\n---\nb: 2\n";
-    let (output, code) = run_yq_stdin(".", input, &["--eval-all", "--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "a: 1\n---\nb: 2");
     Ok(())
 }
 
@@ -8313,33 +8267,8 @@ fn test_nul_output_eval_all_does_not_corrupt_1701() -> Result<()> {
     Ok(())
 }
 
-/// Same fix, `--inplace` on the DOM path (#1701 code review round 2).
-#[test]
-fn test_join_output_inplace_dom_path_does_not_corrupt_1701() -> Result<()> {
-    let mut input_file = NamedTempFile::new()?;
-    writeln!(input_file, "a: 1")?;
-    writeln!(input_file, "---")?;
-    writeln!(input_file, "a: 2")?;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
-        .arg("yq")
-        .arg("-i")
-        .arg("--join-output")
-        .arg(".a + 0")
-        .arg(input_file.path())
-        .stdin(Stdio::null())
-        .output()?;
-
-    assert!(output.status.success());
-    let rewritten = std::fs::read_to_string(input_file.path())?;
-    assert_eq!(rewritten, "1\n---\n2");
-
-    Ok(())
-}
-
-/// `-0` counterpart of the above (#1701 code review round 4 gap sweep):
-/// the `--inplace` DOM path's separator guard had only ever been tested
-/// with `--join-output`, never `-0`.
+/// #1701 code review round 4 gap sweep: the `--inplace` DOM path's
+/// separator guard under `-0`.
 #[test]
 fn test_nul_output_inplace_dom_path_does_not_corrupt_1701() -> Result<()> {
     let mut input_file = NamedTempFile::new()?;
@@ -21734,24 +21663,6 @@ fn test_front_matter_process_inplace_rewrites_file() -> Result<()> {
     Ok(())
 }
 
-/// #1701 code review round 4: unlike every other `---`-writing site in
-/// `yq_runner.rs`, `--front-matter=process`'s own closing fence had no
-/// `write_doc_marker_newline_guard` protection, so `--join-output`/`-0`
-/// glued it directly onto the front matter's own last byte -- e.g.
-/// `a: 1---` instead of `a: 1\n---`, silently corrupting the document
-/// boundary the same way #1701's other fixes already prevent elsewhere.
-/// Originally deferred as #1712; fixed directly here once the same
-/// "was anything actually written" gating the other sites already had
-/// for free (`any_output_this_file`) was added for this site too.
-#[test]
-fn test_join_output_front_matter_process_does_not_corrupt_1701() -> Result<()> {
-    let input = "---\na: 1\n---\nbody one\n";
-    let (output, code) = run_yq_stdin(".", input, &["--front-matter", "process", "--join-output"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "---\na: 1\n---\nbody one\n");
-    Ok(())
-}
-
 /// `-0` counterpart of the above.
 #[test]
 fn test_nul_output_front_matter_process_does_not_corrupt_1701() -> Result<()> {
@@ -21759,27 +21670,6 @@ fn test_nul_output_front_matter_process_does_not_corrupt_1701() -> Result<()> {
     let (output, code) = run_yq_stdin(".", input, &["--front-matter", "process", "-0"])?;
     assert_eq!(code, 0);
     assert_eq!(output, "---\na: 1\0\n---\nbody one\n");
-    Ok(())
-}
-
-/// Same fix on the `--inplace` path, which persists corruption to disk
-/// if unfixed.
-#[test]
-fn test_join_output_front_matter_process_inplace_does_not_corrupt_1701() -> Result<()> {
-    let mut input_file = NamedTempFile::new()?;
-    write!(input_file, "---\na: 1\n---\nbody one\n")?;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
-        .arg("yq")
-        .args(["--front-matter", "process", "-i", "--join-output"])
-        .arg(".")
-        .arg(input_file.path())
-        .stdin(Stdio::null())
-        .output()?;
-    assert!(output.status.success());
-
-    let rewritten = std::fs::read_to_string(input_file.path())?;
-    assert_eq!(rewritten, "---\na: 1\n---\nbody one\n");
     Ok(())
 }
 
@@ -21792,11 +21682,7 @@ fn test_join_output_front_matter_process_inplace_does_not_corrupt_1701() -> Resu
 #[test]
 fn test_front_matter_process_empty_filter_no_spurious_blank_line_1701() -> Result<()> {
     let input = "---\na: 1\n---\nbody one\n";
-    let (output, code) = run_yq_stdin(
-        "empty",
-        input,
-        &["--front-matter", "process", "--join-output"],
-    )?;
+    let (output, code) = run_yq_stdin("empty", input, &["--front-matter", "process", "-0"])?;
     assert_eq!(code, 0);
     assert_eq!(output, "---\n---\nbody one\n");
     Ok(())

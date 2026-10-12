@@ -1155,9 +1155,13 @@ pub struct YqCommand {
     #[arg(short = 'r', long = "unwrapScalar", overrides_with = "raw_output")]
     pub raw_output: bool,
 
-    /// Like -r but don't print newline after each output
-    #[arg(short = 'j', long, overrides_with = "join_output")]
-    pub join_output: bool,
+    /// (deprecated) Output as JSON, same as `-o=json`
+    ///
+    /// Real yq's own `-j`: a deprecated alias for `--tojson` that prints a
+    /// warning to stderr and wins over `-o` in either order. jq's `-j`
+    /// (join output) is `succinctly jq`'s, not this (#1731).
+    #[arg(short = 'j', long = "tojson", overrides_with = "tojson")]
+    pub tojson: bool,
 
     /// Use NUL char to separate values instead of newline
     #[arg(short = '0', long = "nul-output", overrides_with = "nul_output")]

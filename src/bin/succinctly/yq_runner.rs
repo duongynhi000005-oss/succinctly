@@ -593,7 +593,6 @@ struct OutputConfig {
     output_format: OutputFormat,
     compact: bool,
     raw_output: bool,
-    join_output: bool,
     nul_output: bool,
     ascii_output: bool,
     sort_keys: bool,
@@ -639,11 +638,9 @@ impl OutputConfig {
         Self {
             output_format: args.output_format,
             compact,
-            // `-0` does not imply `-r` (#1996): JSON output keeps its quotes and escapes unless
-            // `-r` is explicit. `-j` still does until #1731 reshapes the flag, since this
-            // repo documents it as "like -r".
-            raw_output: args.raw_output || args.join_output,
-            join_output: args.join_output,
+            // Neither `-0` (#1996) nor `-j` (real yq's `--tojson`, #1731) implies `-r`: JSON
+            // output keeps its quotes and escapes unless `-r` is explicit.
+            raw_output: args.raw_output,
             nul_output: args.nul_output,
             ascii_output: args.ascii_output,
             sort_keys: args.sort_keys,
@@ -712,7 +709,6 @@ impl OutputConfig {
             output_format,
             compact: self.compact,
             raw_output: self.raw_output,
-            join_output: self.join_output,
             nul_output: self.nul_output,
             ascii_output: self.ascii_output,
             sort_keys: self.sort_keys,
@@ -5480,10 +5476,11 @@ fn strip_presentation_style_at_depth(
 ///
 /// `terminator` (#1701 code review) says whether the *previous* document's
 /// own output already ended in a newline: only `Terminator::Newline` does.
-/// `-0`/`--join-output` end a document in `\0`/nothing instead, and this
+/// `-0` ends a document in `\0` instead, and this
 /// function used to assume a trailing `\n` unconditionally -- gluing `---`
 /// directly onto the prior document's own last byte with no boundary
-/// between them. Confirmed live: `--join-output` on two YAML documents
+/// between them. Confirmed live: join-output (then a `succinctly yq` flag, since
+/// removed by #1731) on two YAML documents
 /// `a: 1`/`b: 2` produced `a: 1---\nb: 2`, which *reparses* as the single,
 /// silently corrupted document `{"a": "1---", "b": 2}` -- `-i` persists
 /// that corruption to disk. Inserting an explicit `\n` first whenever the
@@ -5512,7 +5509,7 @@ fn emit_yaml_doc_separator<W: std::io::Write>(
 /// behind every `---`/front-matter-fence write in this file (#1701 code
 /// review): each one used to assume the byte immediately before it was
 /// already a newline (true for the default terminator, false for
-/// `-0`/`--join-output`), gluing the marker directly onto the previous
+/// `-0`), gluing the marker directly onto the previous
 /// document's own last byte and corrupting it on reparse. Called
 /// immediately before every such write, never after -- so it composes with
 /// whichever exact trailing form (`writeln!(..., "---")`, a bare
@@ -5618,7 +5615,7 @@ impl SplitDocState {
 /// path was taken (confirmed live on unmodified `main`, same root cause
 /// and fix shape as #1699's `--no-doc` gap in the same macro).
 fn terminator_from_config(config: &OutputConfig) -> Terminator {
-    Terminator::from_flags(config.nul_output, config.join_output)
+    Terminator::from_flags(config.nul_output, false)
 }
 
 /// Write the appropriate line terminator based on output config.
@@ -7712,7 +7709,15 @@ fn silence_depth_guard_panic_line() {
     });
 }
 
-fn run_yq_inner(args: YqCommand) -> Result<i32> {
+fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
+    // `-j` is real yq's deprecated `--tojson` (#1731): cobra prints the warning while parsing
+    // flags, so before everything else (`--version` included), and the alias is applied after
+    // flag parsing, so it wins over `-o` whichever came first.
+    if args.tojson {
+        eprintln!("Flag --tojson has been deprecated, please use -o=json instead");
+        args.output_format = OutputFormat::Json;
+    }
+
     // Handle --version
     if args.version {
         println!("succinctly-yq {}", env!("CARGO_PKG_VERSION"));
@@ -8144,8 +8149,8 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
     // `can_slurp_fast_path` originally diverged from this exact predicate
     // because #1577 copied it by hand instead of sharing it.
     // `!output_config.raw_output` (#1715): none of the M2 JSON streamers
-    // consult `raw_output` at all, so `-r`/`--join-output` (which set it, see
-    // `OutputConfig::from_args`; `-0` did too until #1996) fail to strip JSON string
+    // consult `raw_output` at all, so `-r` (which sets it, see
+    // `OutputConfig::from_args`; `-0` and `-j` do not, #1996, #1731) fails to strip JSON string
     // quoting on this path -- unlike the DOM path's `output_value`, whose
     // `if config.raw_output { if let OwnedValue::String(s) = value ... }`
     // arm handles it correctly. Excluded from fast-path eligibility here
@@ -8308,10 +8313,10 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
     // scope at definition time, not at each expansion site. `$fragment:expr`
     // parameters don't have that problem — they always evaluate in the
     // caller's own scope — hence passing color as `$use_color:expr`.
-    // `no_doc`/`nul_output`/`join_output` need the same `$fragment:expr`
+    // `no_doc`/`nul_output` need the same `$fragment:expr`
     // treatment (#1699, #1701 code review), even though nothing currently
-    // shadows any of them to a different value the way `--inplace` does for
-    // `.use_color` (every `OutputConfig::for_source` copies all three
+    // shadows either of them to a different value the way `--inplace` does for
+    // `.use_color` (every `OutputConfig::for_source` copies both
     // through unchanged) -- a bare reference would only be safe by that
     // coincidence, and would silently read the wrong value the day
     // something *does* start varying one of them per source/file. Threaded
@@ -9484,8 +9489,8 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
             // #1701: this fast path streams straight to `&mut writer`
             // (like `stream_cursor!`'s own identity branch), so it needs
             // the same `Terminator`-based write instead of a hardcoded
-            // `writeln!` -- confirmed live that `--slurp -0`/`--slurp
-            // --join-output` still emitted a bare newline here before this
+            // `writeln!` -- confirmed live that `--slurp -0`
+            // still emitted a bare newline here before this
             // fix, unlike the `stream_cursor!`-based fast paths this same
             // issue's title names. Skipped when the stream was cut short by a
             // decode failure (#1615) -- the diagnostic is already on stderr
@@ -10000,7 +10005,7 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
                 // halt before evaluating anything), and the guard would
                 // insert a spurious leading blank line there instead of
                 // fixing anything -- it's only the *document content*
-                // `output_value` wrote, subject to `-0`/`--join-output`,
+                // `output_value` wrote, subject to `-0`,
                 // that can need it.
                 if any_real_output {
                     write_doc_marker_newline_guard(
@@ -10274,7 +10279,7 @@ fn run_yq_inner(args: YqCommand) -> Result<i32> {
                 // #1701 code review round 4: same fix as the `--inplace`
                 // path's closing fence -- gated on whether this file's
                 // document loop actually wrote anything (subject to
-                // `-0`/`--join-output`), not applied unconditionally: with
+                // `-0`), not applied unconditionally: with
                 // zero real output, `writer` at this point holds only the
                 // opening fence's own always-`\n`-terminated `writeln!`.
                 if any_output_this_file {
@@ -10506,7 +10511,6 @@ mod tests {
             output_format: OutputFormat::Yaml,
             compact: true,
             raw_output: false,
-            join_output: false,
             nul_output: false,
             ascii_output: false,
             sort_keys: false,
@@ -10582,7 +10586,6 @@ mod tests {
             output_format: OutputFormat::Yaml,
             compact: true,
             raw_output: false,
-            join_output: false,
             nul_output: false,
             ascii_output: false,
             sort_keys: false,
@@ -11051,7 +11054,6 @@ mod tests {
             output_format: OutputFormat::Yaml,
             compact: false,
             raw_output: false,
-            join_output: false,
             nul_output: false,
             ascii_output: false,
             sort_keys: false,
@@ -12169,7 +12171,6 @@ mod tests {
             output_format: OutputFormat::Yaml,
             compact: false,
             raw_output: false,
-            join_output: false,
             nul_output: false,
             ascii_output: false,
             sort_keys: false,

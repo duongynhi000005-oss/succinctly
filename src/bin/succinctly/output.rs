@@ -20,13 +20,11 @@ use succinctly::jq::{
 pub use succinctly::yaml::format_float_yq;
 
 /// Which terminator follows a written value: NUL (`-0`/`--nul-output`),
-/// a bare newline (the default), or nothing (`-j`/`--join-output`). `nul`
-/// wins over `join` in both runners' own precedence -- verified against
-/// real *jq* 1.7.1 (`--raw-output0 -j`, order-independent either way), not
-/// yq: the pinned yq oracle (Homebrew v4.53.3) has no `--join-output` flag
-/// at all (it errors "unknown flag"), so `-j` in yq mode is a documented
-/// open divergence (docs/compliance/yq/limitations.md), not a real-yq
-/// behavior this precedence matches.
+/// a bare newline (the default), or nothing (jq's `-j`/`--join-output`). `nul`
+/// wins over `join` in the jq runner's precedence -- verified against
+/// real *jq* 1.7.1 (`--raw-output0 -j`, order-independent either way). yq has
+/// no join-output flag: real yq's own `-j` is a deprecated `--tojson` alias
+/// (#1731), so the yq runner always passes `join = false`.
 ///
 /// Shared by `jq_runner.rs` and `yq_runner.rs` (#1701, #1711) -- both
 /// binaries' own `OutputConfig` agree on this exact three-way rule but
