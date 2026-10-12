@@ -113585,11 +113585,10 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
             r#"del(. as $orig | has("k") | try (($orig as $p | $p) as {a:{b:$q}} | $q))"#,
         ),
         // The other forwarder arms: `last`, a rebind and a destructuring rebind's
-        // body, a type filter, and a pipe.
+        // body, and a pipe.
         (doc, r"del(last(., .) as $x | try $x.a)"),
         (doc, r"del((. as {a:$q} | .) as $x | try $x.a)"),
         (doc, r"del((. as $z | (., 1) | .) as $x | try $x.a)"),
-        (doc, r"del(((., 1) | objects) as $x | try $x.a)"),
         // A `catch` handler that names the frozen `$orig` (its `.` is the error
         // payload, so only the `$var` counts there).
         (
@@ -113637,6 +113636,9 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
             "{}\n",
         ),
         (doc, r"del(((., 1) | .) as $x | try $x.a)", "{}\n"),
+        // #4456: so does a type filter, which the grammar now places as `select` (it
+        // refused loudly before, the safe direction; jq writes `{}`).
+        (doc, r"del(((., 1) | objects) as $x | try $x.a)", "{}\n"),
         (doc, r"del((try (., 1) catch 2) as $x | try $x.a)", "{}\n"),
         (doc, r"del(((., 1) // 2) as $x | try $x.a)", "{}\n"),
         (doc, r"del(((., 1)?) as $x | try $x.a)", "{}\n"),

@@ -50986,13 +50986,23 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
 /// resolves no path (#4295) -- a fact about the paths, so the resolver judges it and
 /// the grammar only admits the shape.
 fn is_transparent_leaf(expr: &Expr) -> bool {
-    is_input_returning_stage(expr) || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+    is_input_returning_stage(expr)
+        || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+        || is_walk_identity(expr)
+}
+
+/// `walk(.)` (#4456): of a scalar it is `. | .`, the input itself, which the resolver
+/// passes through; of an array or object it is rebuilt and refused. Like `del(f)` it
+/// is a bind-source leaf only, never a [`may_alias_register`] forwarder -- the
+/// forwarders pin it as a value the source derives (#3423).
+fn is_walk_identity(expr: &Expr) -> bool {
+    matches!(expr, Expr::Builtin(Builtin::Walk(f)) if is_identity_stage(f))
 }
 
 /// A builtin the path resolver accepts as the input itself for some inputs
 /// (#4017): `tostring`/`@text` of a string, `tonumber` of a number (#3460),
 /// `ltrimstr`/`rtrimstr` whose argument does not match (#4016), `delpaths([])` and
-/// `setpath([]; .)` (#4295), `walk(.)` of a scalar (#4456). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
+/// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
 /// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
 /// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
 /// `trim_returns_input` ... guard); the arms judge the value
@@ -51001,19 +51011,17 @@ fn is_transparent_leaf(expr: &Expr) -> bool {
 /// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
 /// lists them.
 ///
-/// `del(f)` (empty path set, #4295) is the one pass-through arm *not* here: whether it
-/// returns its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds
-/// a fresh value), so [`may_alias_register`] must not treat it as a forwarder. It is a
-/// bind-source leaf only, [`is_transparent_leaf`].
+/// `del(f)` (empty path set, #4295) and `walk(.)` of a scalar (#4456,
+/// [`is_walk_identity`]) are the pass-through arms *not* here: whether `del(f)` returns
+/// its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds a fresh
+/// value), so [`may_alias_register`] must not treat it as a forwarder. Both are
+/// bind-source leaves only, [`is_transparent_leaf`].
 fn is_input_returning_stage(expr: &Expr) -> bool {
     match expr {
         Expr::Builtin(
             Builtin::ToString | Builtin::ToNumber | Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_),
         )
         | Expr::Format(FormatType::Text) => true,
-        // #4456: `walk(.)` of a scalar is `. | .`, the input itself; of an array or
-        // object it is rebuilt, which the resolver refuses.
-        Expr::Builtin(Builtin::Walk(f)) => is_identity_stage(f),
         Expr::Builtin(Builtin::DelPaths(paths)) => is_empty_array_literal(unwrap_paren(paths)),
         Expr::Builtin(Builtin::SetPath(path, new_value)) => {
             is_empty_array_literal(unwrap_paren(path)) && is_identity_stage(new_value)
@@ -136316,8 +136324,9 @@ mod tests {
     /// the pass-through arms of `resolve_node_sink`. Each stage here is accepted by
     /// the resolver on the document beside it (so the leaf is not dead) and sits on
     /// the bind-source grammar and on `may_alias_register`'s forwarders -- except
-    /// `del(f)`, which hands its input back only when `f` resolves no path, so it is a
-    /// grammar leaf and never a forwarder. The same stage on a document that gets a
+    /// `del(f)`, which hands its input back only when `f` resolves no path, and
+    /// `walk(.)`, which rebuilds a container (#3423), so they are grammar leaves and
+    /// never forwarders. The same stage on a document that gets a
     /// fresh result is still refused, which is what keeps the judgement per value.
     #[test]
     fn test_input_returning_stages_agree_with_resolver_and_grammar_4443() {
@@ -136335,14 +136344,12 @@ mod tests {
             let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
             assert!(is_transparent_leaf(&expr), "{stage}: not a grammar leaf");
             assert!(is_transparent_bind_source(&expr), "{stage}: not a source");
-            assert_eq!(
-                is_input_returning_stage(&expr),
-                !stage.starts_with("del("),
-                "{stage}"
-            );
+            // `del(f)` and `walk(.)` are grammar leaves, never forwarders.
+            let forwarder = !stage.starts_with("del(") && stage != "walk(.)";
+            assert_eq!(is_input_returning_stage(&expr), forwarder, "{stage}");
             assert_eq!(
                 may_alias_register(&expr, None),
-                !stage.starts_with("del("),
+                forwarder,
                 "{stage}: forwarder"
             );
             assert!(
