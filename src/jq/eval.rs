@@ -58657,9 +58657,10 @@ fn drive_slice_bound<S: EvalSemantics>(
     // exactly by draining first and only then feeding the sink, so yq mode's
     // observable behaviour is bit-for-bit what it was before #2267. There is
     // no oracle pressure to change it either: real yq has no `path()`, no
-    // `debug`/`stderr`, and rejects a computed comma bound outright
-    // (`.[0:(1,2)]` is "bad expression" on v4.53.3), so none of the orderings
-    // #2267 fixes are expressible through yq's own surface.
+    // `debug`/`stderr`, and wants exactly one number from a bound
+    // (`.[0:(1,2)]` is "expected to find 1 number, got 2 instead" on
+    // v4.53.3, #2056), so none of the orderings #2267 fixes are expressible
+    // through yq's own surface.
     if S::TAG == EvalTag::Yq {
         let (mut values, escape) = eval_owned_multi_keep_partial::<S>(expr, value);
         if escape.is_some() {

@@ -22301,10 +22301,6 @@ fn each_slice_expr_generic<S: EvalSemantics, V: DocumentValue>(
     )
 }
 
-/// [`slice_pair_generic`] for a target that can fan out, in jq mode (#3520):
-/// each target output is sliced and handed to `sink` as it is produced, so a
-/// stop ends the target's own generator. Returns the control that ended the
-/// pair, if any, and whether the consumer stopped.
 /// [`crate::jq::eval`]'s `yq_slice_bound_count_verdict` for the `DocumentValue` route: yq's
 /// verdict on a slice bound that did not produce exactly one number (#2056, #4197), raised only
 /// once `target` produced a node and after any error the target itself raised.
@@ -22327,6 +22323,10 @@ fn yq_slice_bound_count_verdict_generic<S: EvalSemantics, V: DocumentValue>(
     stash.stop(Control::Error(count_error.clone()))
 }
 
+/// [`slice_pair_generic`] for a target that can fan out, in jq mode (#3520):
+/// each target output is sliced and handed to `sink` as it is produced, so a
+/// stop ends the target's own generator. Returns the control that ended the
+/// pair, if any, and whether the consumer stopped.
 fn slice_pair_streaming<S: EvalSemantics, V: DocumentValue>(
     target: &Expr,
     s: &ComputedSliceBound,
@@ -22967,7 +22967,9 @@ fn fusable_slice_read(stages: &[Expr]) -> Option<(&Expr, SliceRead)> {
 }
 
 /// The one value `bound` produces, or `None` when it produces none, several, or
-/// escapes -- the fused slice's cue to leave the pair to the ordinary route.
+/// escapes -- the fused slice's cue to leave the pair to the ordinary route. In yq mode a
+/// bound with none or several values reaches the sink as the count error (#2056), which is
+/// also a decline here: the ordinary route raises it, once the target produced a node.
 fn single_slice_bound<S: EvalSemantics, V: DocumentValue>(
     bound: &Option<Box<Expr>>,
     value: V,
@@ -22985,6 +22987,9 @@ fn single_slice_bound<S: EvalSemantics, V: DocumentValue>(
         Demand::Continue
     });
     if extra || !matches!(flow, Flow::Exhausted) {
+        return None;
+    }
+    if S::TAG == EvalTag::Yq && matches!(seen, Some(Err(_))) {
         return None;
     }
     seen
