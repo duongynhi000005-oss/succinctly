@@ -40447,6 +40447,55 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
             });
             resolve_node_sink::<S>(&component, value, trackable, snapshot, frame, keep, sink)
         }
+        // #3890: jq defines `indices($i)` as `.[$i]` on an array (the pattern wrapped into a
+        // one-element array unless it already is one) and on an object or `null`, `index` as
+        // that then `.[0]`, `rindex` as that then `.[-1:][0]`. The lookup is a path step like
+        // any other, so on a tracked input it moves the register by that component
+        // (`path(.a | indices(1))` is `["a",[1]]`, `path(.a | index(1))` is `["a",[1],0]`), and
+        // on an untracked one it raises where the `Index` arm raises. Re-dispatching as the
+        // lookup reuses every `IndexExpr` rule, as the bare `first` arm above does for `.[0]`.
+        // A string input (searched by `_strindices`, or indexed by a non-string) keeps the leaf
+        // route. jq mode only: yq's `index` is not this definition.
+        Expr::Builtin(search @ (Builtin::Indices(_) | Builtin::Index(_) | Builtin::Rindex(_)))
+            if S::TAG == EvalTag::Jq
+                && matches!(
+                    value,
+                    OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::Null
+                ) =>
+        {
+            let (Builtin::Indices(pattern) | Builtin::Index(pattern) | Builtin::Rindex(pattern)) =
+                search
+            else {
+                unreachable!("the arm's pattern admits only the three searches");
+                // patchcov: coverage tolerate-line reason="unreachable: the match arm above admits only Indices, Index and Rindex"
+            };
+            let key = if matches!(value, OwnedValue::Array(_)) {
+                Expr::Pipe(
+                    vec![
+                        (**pattern).clone(),
+                        Expr::if_then_else(
+                            Expr::Compare {
+                                op: CompareOp::Eq,
+                                left: Box::new(Expr::Builtin(Builtin::Type)),
+                                right: Box::new(Expr::Literal(Literal::String("array".into()))),
+                            },
+                            Expr::Identity,
+                            Expr::array(Expr::Identity),
+                        ),
+                    ]
+                    .into(),
+                )
+            } else {
+                (**pattern).clone()
+            };
+            let lookup = Expr::index_by(Expr::Identity, key);
+            let redispatch = match search {
+                Builtin::Indices(_) => lookup,
+                Builtin::Index(_) => Expr::Pipe(vec![lookup, Expr::index(0)].into()),
+                _ => Expr::Pipe(vec![lookup, Expr::slice(Some(-1), None), Expr::index(0)].into()),
+            };
+            resolve_node_sink::<S>(&redispatch, value, trackable, snapshot, frame, keep, sink)
+        }
         // #3865: jq defines `map(f)` as `[.[] | f]`, so in a path `f` runs on each
         // element with the register on it and path-checks whatever it navigates.
         // The by-value leaf evaluated `map(f)` as one opaque value and never
