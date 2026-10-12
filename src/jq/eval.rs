@@ -54006,14 +54006,13 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         // accumulator -- the source is not a subexp, so `reduce .[1+1] as $k (.;
         // (reduce .[]? as $i (.; .)))` path-checks the inner `.[]?` against the register the
         // outer source moved, and raises. The inner UPDATE is not read: it runs only per
-        // source element. The source runs only when INIT yields, so it counts only behind an
-        // INIT that always does (`.`, a literal, a `$var`) or one that navigates itself.
+        // source element. The source runs only when INIT yields, so it is read unless INIT is
+        // `empty`: any other INIT may yield (`first(.)`, `(.)?`, `f`), and reading a source
+        // that does not run costs an answer, where skipping one that does accepts.
         Expr::Reduce { input, init, .. } | Expr::Foreach { input, init, .. } => {
             update_navigates_within(init, false)
-                || (matches!(
-                    unwrap_paren(init),
-                    Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_)
-                ) && update_navigates_within(input, false))
+                || (!matches!(unwrap_paren(init), Expr::Builtin(Builtin::Empty))
+                    && update_navigates_within(input, false))
         }
         other => is_fold_source_navigation(other),
     }

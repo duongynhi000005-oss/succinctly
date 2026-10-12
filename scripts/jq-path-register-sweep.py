@@ -1617,6 +1617,8 @@ OPERANDS = [
     "(reduce .[] as $i (.; .))",
     "(reduce 1 as $i (.a?; .))",
     "(reduce .[]? as $i (empty; .))",
+    "(reduce .[]? as $i (first(.); .))",
+    "(reduce .[]? as $i ((.)?; .))",
     "(reduce .[]? as $i (.; isempty(.[])))",
     "(reduce .[]? as $i (.; isempty(select(false), .a)))",
     "(reduce .[]? as $i (.; isempty(1, .a)))",

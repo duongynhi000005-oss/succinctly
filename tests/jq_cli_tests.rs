@@ -70280,6 +70280,42 @@ fn test_nested_fold_in_reduce_update_navigates_the_accumulator_4438() -> Result<
             "Invalid path expression near attempt to iterate through [true]",
             5,
         ),
+        // The source runs behind any INIT that yields, not only `.`, a literal or a `$var`.
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i (first(.); .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i ((.)?; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i (. as $x | $x; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(def f: .; reduce .[1+1] as $k (.; reduce .[]? as $i (f; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; (reduce .a? as $i (first(.); 5))))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of [true]"#,
+            5,
+        ),
         // Controls: a source that navigates nothing, an inner fold that navigates nothing, and an
         // INIT that yields nothing (so its source never runs).
         (
