@@ -87778,7 +87778,7 @@ mod tests {
     fn test_binary_fanout_raises_on_operand_decode_failure_1972() {
         query!(
             &b"[1,2,\"\xff\xfe\",4]"[..],
-            ".[:] == .[:]",
+            ".[:null] == .[:null]",
             QueryResult::Error(e) if e.is_decode_failure() => {
                 assert!(e.message.contains("invalid UTF-8"), "message: {}", e.message);
             }
@@ -87786,7 +87786,7 @@ mod tests {
         // Positive control: valid data is unaffected.
         query!(
             br#"[1,2,"ok",4]"#,
-            ".[:] == .[:]",
+            ".[:null] == .[:null]",
             QueryResult::Owned(OwnedValue::Bool(true)) => {}
         );
     }
@@ -88231,7 +88231,7 @@ mod tests {
     fn test_yq_string_interpolation_raises_on_slot_decode_failure_1972() {
         yq_query!(
             &b"[1,2,\"\xff\xfe\",4]"[..],
-            r#""\(.[:])""#,
+            r#""\(.[:null])""#,
             QueryResult::Error(e) if e.is_decode_failure() => {
                 assert!(e.message.contains("invalid UTF-8"), "message: {}", e.message);
             }
@@ -88239,7 +88239,7 @@ mod tests {
         // Positive control: valid data is unaffected.
         yq_query!(
             br#"[1,2,"ok",4]"#,
-            r#""\(.[:])""#,
+            r#""\(.[:null])""#,
             QueryResult::Owned(OwnedValue::String(s)) => {
                 assert_eq!(s, r#"[1,2,"ok",4]"#);
             }
@@ -88268,7 +88268,7 @@ mod tests {
     fn test_nth_stream_raises_on_selected_output_decode_failure_1972() {
         query!(
             &b"[1,2,\"\xff\xfe\",4]"[..],
-            "nth(2; .[:][])",
+            "nth(2; .[:null][])",
             QueryResult::Error(e) if e.is_decode_failure() => {
                 assert!(e.message.contains("invalid UTF-8"), "message: {}", e.message);
             }
@@ -88276,7 +88276,7 @@ mod tests {
         // Positive control: valid data through the same arm is unaffected.
         query!(
             br#"[1,2,"ok",4]"#,
-            "nth(2; .[:][])",
+            "nth(2; .[:null][])",
             QueryResult::Owned(OwnedValue::String(s)) => {
                 assert_eq!(s, "ok");
             }
@@ -112828,7 +112828,7 @@ mod tests {
             "5",
         ];
         let slices = [
-            ".[0:2]", ".[1:]", ".[:-1]", ".[-2:]", ".[2:1]", ".[:]", ".[5:100]", ".[1.5:3]",
+            ".[0:2]", ".[1:]", ".[:-1]", ".[-2:]", ".[2:1]", ".[:null]", ".[5:100]", ".[1.5:3]",
         ];
         fn itertools_product<'a>(
             a: &'a [&'a str],

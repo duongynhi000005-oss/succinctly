@@ -415,10 +415,10 @@ fn test_slice_single_element_stays_array() {
 
 #[test]
 fn test_full_slice_returns_whole_array() {
-    // `.[:]` is a full slice returning the whole array as a single value,
-    // taking the fast path that returns the original borrowed value.
-    query!(br"[0, 1, 2]", ".[:]",
-        QueryResult::One(StandardJson::Array(_)) => {}
+    // `.[:null]` is a full slice returning the whole array as a single value (`.[:]` is a
+    // syntax error in jq, #4407).
+    query!(br"[0, 1, 2]", ".[:null]",
+        QueryResult::Owned(OwnedValue::Array(_)) => {}
     );
 }
 

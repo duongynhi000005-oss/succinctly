@@ -767,9 +767,36 @@ fn test_array_slice_out_of_range_is_empty_array() -> Result<()> {
 
 #[test]
 fn test_full_array_slice_returns_whole_array() -> Result<()> {
-    let (output, code) = run_jq_stdin(".[:]", r"[0,1,2,3,4]", &["-c"])?;
-    assert_eq!(code, 0);
-    assert_eq!(output, "[0,1,2,3,4]\n");
+    // `.[:]` is a syntax error in jq 1.7.1 (#4407); `.[:null]` and `.[null:]` are its spellings.
+    for filter in [".[:null]", ".[null:]", ".[null:null]"] {
+        let (output, code) = run_jq_stdin(filter, r"[0,1,2,3,4]", &["-c"])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(output, "[0,1,2,3,4]\n", "{filter}");
+    }
+    Ok(())
+}
+
+/// #4407: a slice with both bounds absent is a compile error (exit 3) in jq mode, spaces, a
+/// postfix `?` and a path prefix included, where yq accepts it. Every expectation is jq 1.7.1's.
+#[test]
+fn test_all_absent_slice_is_a_syntax_error_in_jq_mode_4407() -> Result<()> {
+    for filter in [
+        ".[:]",
+        ".[ : ]",
+        ".a[:]",
+        ".[:]?",
+        ".[:][0]",
+        "path(.[:])",
+        "del(.[:])",
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":[1,2]}"#))?;
+        assert_eq!(code, 3, "{filter}: {stderr}");
+        assert_eq!(stdout, "", "{filter}");
+        assert!(
+            stderr.contains("syntax error, unexpected ']'"),
+            "{filter}: {stderr}"
+        );
+    }
     Ok(())
 }
 
