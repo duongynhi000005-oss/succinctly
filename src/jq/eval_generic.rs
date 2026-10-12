@@ -12789,9 +12789,9 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
         // `optional = false` and so loses the `?` in `.[$k]?`; and it
         // serialises and re-indexes the whole document per evaluation.
         Expr::IndexExpr { target, key } => {
-            // #4317, #4323: `E[a:b][$k]` (computed or literal bounds) reads the slice's resolved range,
-            // as the `[k]` pipe form does.
-            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
+            // #4317, #4323, #4406: `E[a:b][$k]` (computed or literal bounds, the literal one also behind
+            // navigation, `.a[2:][$k]`) reads the slice's resolved range, as the `[k]` pipe form does.
+            if is_fusable_index_target(target) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return GenericResult::Owned(owned);
                 }
@@ -14678,7 +14678,7 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // for why yq mode keeps the pre-existing eager fallback below.
         Expr::IndexExpr { target, key } if streams_escaped_generator_prefix::<S>() => {
             // #4317, #4323: the sink route's twin of the fusion in `eval_single`.
-            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. }) {
+            if is_fusable_index_target(target) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return push_one_generic(GenericItem::Owned(owned), sink);
                 }
@@ -22826,8 +22826,45 @@ fn is_pure_fusable_slice(slice: &Expr) -> bool {
             is_pure_slice_operand(target) && pure_bound(start) && pure_bound(end)
         }
         Expr::Slice { .. } => true,
+        Expr::Pipe(_) => navigated_literal_slice(slice).is_some(),
         _ => false,
     }
+}
+
+/// The navigation prefix and the folded bounds of `expr` when it is a postfix chain ending in a
+/// literal-bounded slice over a pure path (#4406): `.a[2:]`, `.a.b[:-1]`, `.a[2:]?`. Such a chain
+/// parses to `Pipe([.a, Slice])` as a *nested* stage, so `.a[2:] | length` is a pipe whose first
+/// stage is that pipe, and [`fusable_slice_read`] would not otherwise see the slice. The prefix is
+/// every stage before the slice (at least one) and must be pure, so the fused read may evaluate it
+/// and then decline; the bounds come from the last stage, a postfix `?` looked through. `None` for
+/// any other shape. Out of line for the reason [`fused_slice_pipe_head`] gives: its result must not
+/// widen the native frames of the evaluator arms that ask (`eval_single`'s `IndexExpr` arm sits on
+/// the recursion path the stack-depth guard is calibrated against, and
+/// `test_literal_dollar_argument_matches_jq_3260` failed on ARM64 when a call here left a temporary
+/// in it).
+#[inline(never)]
+fn navigated_literal_slice(expr: &Expr) -> Option<(&[Expr], Option<i64>, Option<i64>)> {
+    let Expr::Pipe(stages) = expr else {
+        return None;
+    };
+    let (last, prefix) = stages.split_last()?;
+    let slice = match last {
+        Expr::Optional(inner) => inner.as_ref(),
+        other => other,
+    };
+    let Expr::Slice { start, end, .. } = slice else {
+        return None;
+    };
+    (!prefix.is_empty() && prefix.iter().all(is_pure_slice_operand))
+        .then_some((prefix, *start, *end))
+}
+
+/// Whether the target of an `IndexExpr` is a slice [`fused_slice_index`] may read (#4317, #4323,
+/// #4406): computed or literal-bounded, or a literal one behind a pure path. The one definition
+/// behind both `IndexExpr` arms, the value route and the sink route.
+fn is_fusable_index_target(target: &Expr) -> bool {
+    matches!(target, Expr::SliceExpr { .. } | Expr::Slice { .. })
+        || navigated_literal_slice(target).is_some()
 }
 
 /// Whether a pipe's first stage is a slice, computed or literal-bounded (#4323), bare or under a
@@ -22836,6 +22873,8 @@ fn is_slice_head(stage: &Expr) -> bool {
     match stage {
         Expr::SliceExpr { .. } | Expr::Slice { .. } => true,
         Expr::Optional(inner) => matches!(**inner, Expr::SliceExpr { .. } | Expr::Slice { .. }),
+        // `.a[2:] | length` (#4406): the first stage is the postfix chain `.a[2:]` itself.
+        Expr::Pipe(_) => navigated_literal_slice(stage).is_some(),
         _ => false,
     }
 }
@@ -23033,6 +23072,27 @@ fn fused_slice_window<S: EvalSemantics, V: DocumentValue>(
             (target, Some((start, end)), (None, None))
         }
         Expr::Slice { start, end, .. } => (value.clone(), None, (*start, *end)),
+        // `.a[2:]` as a nested stage (#4406): the pure prefix reads the array, the literal bounds
+        // are the slice's own.
+        Expr::Pipe(_) => {
+            let (prefix, start, end) = navigated_literal_slice(slice)?;
+            let target = match prefix {
+                [only] => eval_single::<S, V>(only, value.clone(), false, cursor),
+                stages => eval_single_pipe::<S, V>(
+                    stages,
+                    &PipeWhole::rebuilt(),
+                    value.clone(),
+                    false,
+                    cursor,
+                ),
+            };
+            let target = match target {
+                GenericResult::One(v) => v,
+                GenericResult::OneCursor(c) => c.value(),
+                _ => return None,
+            };
+            (target, None, (start, end))
+        }
         _ => return None, // patchcov: coverage tolerate-line reason="unreachable: fusable_slice_read returns only a SliceExpr or Slice stage"
     };
     if unreadable_value_error(&target).is_some() {
@@ -44032,6 +44092,159 @@ mod tests {
         assert_eq!(gate("(.[1:])[0]"), None);
         assert_eq!(gate("length | .[$i:][0]"), None);
         assert_eq!(gate(".[$i:]"), None);
+    }
+
+    /// #4406: a literal slice behind navigation is the nested stage `.a[2:]`, so the gate looks
+    /// through that one pipe; only a pure path in front of the slice qualifies.
+    #[test]
+    fn test_fusable_navigated_literal_slice_gate_4406() {
+        fn gate(src: &str) -> Option<SliceRead> {
+            let Expr::Pipe(stages) = crate::jq::parse(src).unwrap() else {
+                return None;
+            };
+            fusable_slice_read(stages.as_slice()).map(|(_, read)| read)
+        }
+        assert_eq!(gate(".a[2:] | length"), Some(SliceRead::Length));
+        assert_eq!(gate(".a[2:] | first"), Some(SliceRead::First));
+        assert_eq!(gate(".a[:-1] | last"), Some(SliceRead::Last));
+        assert_eq!(gate(".a.b[1:3] | .[0]"), Some(SliceRead::Index(0)));
+        assert_eq!(gate(".a[0].b[1:] | .[-1]"), Some(SliceRead::Index(-1)));
+        assert_eq!(gate(".a[2:]? | length"), Some(SliceRead::Length));
+        assert_eq!(gate(".a[2:] | length?"), Some(SliceRead::Length));
+        // the same pairs the flat spellings already fused
+        assert_eq!(gate(".a[$i:] | length"), Some(SliceRead::Length));
+        // A prefix that could fan out, fail quietly or have an effect is not pure.
+        assert_eq!(gate(".a[]?[2:] | length"), None);
+        assert_eq!(gate(".a?[2:] | length"), None);
+        assert_eq!(gate("(.a, .b)[2:] | length"), None);
+        assert_eq!(gate("input[2:] | length"), None);
+        // Not a navigated literal slice, or not read by one of the four reads.
+        assert_eq!(gate(".a[2] | length"), None);
+        assert_eq!(gate(".a | length"), None);
+        assert_eq!(gate("(.a[2:]) | length"), None);
+        assert_eq!(gate(".a[2:] | keys"), None);
+        assert_eq!(gate(".a[2:] | .[$k]"), None);
+        // the helper itself: a lone slice has no navigation prefix to read
+        let Expr::Pipe(stages) = crate::jq::parse(".[2:] | length").unwrap() else {
+            panic!("a pipe"); // patchcov: coverage tolerate-line reason="unreachable: the source parses to a pipe; the test's own malformed-fixture message (#4406)"
+        };
+        assert_eq!(navigated_literal_slice(&stages[0]), None);
+        let nested = crate::jq::parse(".a.b[1:-1]").unwrap();
+        assert!(matches!(
+            navigated_literal_slice(&nested),
+            Some((prefix, Some(1), Some(-1))) if prefix.len() == 2
+        ));
+    }
+
+    /// #4406: the fused read of `.a[2:]` as a nested stage, with or without a cursor, and a target
+    /// that is not an array (or a path that fails) is declined, not answered.
+    #[test]
+    fn test_fused_navigated_literal_slice_read_4406() {
+        let json = br#"{"a":[10,20,30,40],"b":{"c":[1,2,3]},"s":"hello","n":null,"x":7}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        let fused = |src: &str, with_cursor: bool| {
+            let Expr::Pipe(pair) = crate::jq::parse(src).unwrap() else {
+                panic!("a pipe of slice and read: {src}"); // patchcov: coverage tolerate-line reason="unreachable: every source below parses to a pipe; this is the test's own malformed-fixture message (#4406)"
+            };
+            let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
+            try_fused_slice_read::<JqSemantics, _>(
+                slice,
+                read,
+                root.value(),
+                with_cursor.then_some(root),
+            )
+        };
+        for with_cursor in [true, false] {
+            assert_eq!(
+                fused(".a[1:] | .[0]", with_cursor),
+                Some(OwnedValue::Int(20))
+            );
+            assert_eq!(
+                fused(".a[1:] | .[-1]", with_cursor),
+                Some(OwnedValue::Int(40))
+            );
+            assert_eq!(
+                fused(".a[1:] | length", with_cursor),
+                Some(OwnedValue::Int(3))
+            );
+            assert_eq!(
+                fused(".a[9:] | length", with_cursor),
+                Some(OwnedValue::Int(0))
+            );
+            assert_eq!(fused(".a[9:] | first", with_cursor), Some(OwnedValue::Null));
+            assert_eq!(
+                fused(".a[:-1] | last", with_cursor),
+                Some(OwnedValue::Int(30))
+            );
+            // two path steps in front of the slice
+            assert_eq!(
+                fused(".b.c[1:] | first", with_cursor),
+                Some(OwnedValue::Int(2))
+            );
+            assert_eq!(
+                fused(".b.c[1:]? | length", with_cursor),
+                Some(OwnedValue::Int(2))
+            );
+            // a target that is not an array, and a path that fails, are left to the ordinary route
+            assert_eq!(fused(".s[1:] | length", with_cursor), None);
+            assert_eq!(fused(".n[1:] | length", with_cursor), None);
+            assert_eq!(fused(".x[1:] | length", with_cursor), None);
+            assert_eq!(fused(".missing[1:] | length", with_cursor), None);
+            assert_eq!(fused(".x.y[1:] | length", with_cursor), None);
+        }
+        // yq's `first`/`last` are other builtins, so the jq-mode gate declines them there, while
+        // `length` and an index read the same range in both modes.
+        let Expr::Pipe(pair) = crate::jq::parse(".a[1:] | first").unwrap() else {
+            panic!("a pipe"); // patchcov: coverage tolerate-line reason="unreachable: the source parses to a pipe; the test's own malformed-fixture message (#4406)"
+        };
+        let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
+        assert_eq!(
+            try_fused_slice_read::<YqSemantics, _>(slice, read, root.value(), Some(root)),
+            None
+        );
+        assert_eq!(
+            try_fused_slice_read::<JqSemantics, _>(slice, read, root.value(), Some(root)),
+            Some(OwnedValue::Int(20))
+        );
+        let Expr::Pipe(pair) = crate::jq::parse(".a[1:] | length").unwrap() else {
+            panic!("a pipe"); // patchcov: coverage tolerate-line reason="unreachable: the source parses to a pipe; the test's own malformed-fixture message (#4406)"
+        };
+        let (slice, read) = fusable_slice_read(pair.as_slice()).unwrap();
+        assert_eq!(
+            try_fused_slice_read::<YqSemantics, _>(slice, read, root.value(), Some(root)),
+            Some(OwnedValue::Int(3))
+        );
+    }
+
+    /// #4406: `.a[2:][$k]`, the computed-index twin, reads the same navigated slice, with the key
+    /// taken from the original input.
+    #[test]
+    fn test_fused_navigated_literal_slice_index_4406() {
+        let json = br#"{"a":[10,20,30,40],"n":1,"s":"x"}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        let fused = |src: &str, with_cursor: bool| {
+            let Expr::IndexExpr { target, key } = crate::jq::parse(src).unwrap() else {
+                panic!("an index over a slice: {src}"); // patchcov: coverage tolerate-line reason="unreachable: every source below parses to an IndexExpr over a nested slice; this is the test's own malformed-fixture message (#4406)"
+            };
+            fused_slice_index::<JqSemantics, _>(
+                &target,
+                &key,
+                root.value(),
+                with_cursor.then_some(root),
+            )
+        };
+        for with_cursor in [true, false] {
+            assert_eq!(fused(".a[1:][.n]", with_cursor), Some(OwnedValue::Int(30)));
+            assert_eq!(
+                fused(".a[:-1][.n - 2]", with_cursor),
+                Some(OwnedValue::Int(30))
+            );
+            assert_eq!(fused(".a[2:][.n + 5]", with_cursor), Some(OwnedValue::Null));
+            assert_eq!(fused(".a[1:][.s]", with_cursor), None);
+            assert_eq!(fused(".s[1:][.n]", with_cursor), None);
+        }
     }
 
     /// #4195: the fused read takes a bound only when it is exactly one value; a generator,
