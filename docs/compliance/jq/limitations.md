@@ -3753,10 +3753,18 @@ answers `["b"]` — and classified the two residuals appended below):
     half: `path(.b|tostring)` is `["b"]`, `(.b|tostring) = 9` writes, `..|tostring`/`.[0:]|tostring`
     over a bare string document answer, and the sweep's residual table is empty. `tostring` and
     `@text` are jq mode only (yq's `(.b|tostring) = "z"` is a no-op); `tonumber` of a number
-    writes in both modes, as in yq v4.53.3. Still refused where jq answers (never a write): a
-    *bound* result, `path(.b|tostring as $y|$y)` and `path(.n|tonumber as $x|$x)` (the bind-source
-    analyses do not know these stages return their input; the sweep alphabet cannot spell the bound
-    shape, #4017). `ltrimstr`/`rtrimstr` with a literal argument that does not match return their
+    writes in both modes, as in yq v4.53.3. A *bound* result is the register too (#4017):
+    `path(.b|tostring as $y|$y)` is `["b"]` and `path(.n|tonumber as $x|$x)` is `["n"]`, as are
+    `@text`, a non-matching `ltrimstr`/`rtrimstr`, `delpaths([])` and `setpath([]; .)` (jq mode
+    only; the witness is). The stage is a leaf of the transparent bind-source grammar, judged per
+    value by the resolver's own arms: an input that gets a fresh result (`{"b":5}|tostring`) is
+    still refused, as in jq. Still refused where jq answers (never a write): the stage under a
+    `//`, a postfix `?` or a `try` (`path(.b|(tostring // .) as $y|$y)`, `(tostring?)`), because
+    the resolver's refusal for a fresh result would be swallowed there and the register bound in its
+    place; such a bound result gets the `Unproven` marker, so a refusal off it is loud, not
+    catchable. A navigation of the result stays refused too (`(tostring|.[1:2]) as $y`). The sweep
+    pins each in its `input-returning-bind-*` rows, and `scripts/jq-bind-origin-fuzz.py
+    --input-returning-source-p` draws the shape. `ltrimstr`/`rtrimstr` with a literal argument that does not match return their
     input too (#4016); a matching edge builds a fresh string, and a non-literal argument still refuses.
     `del(f)`, `delpaths([])` and `setpath([]; .)` return their input as well when the path set
     is empty (#4295: `5 | path(del(.[]?))` and `[1] | path(del(.b?))` are `[[]]`),

@@ -61263,6 +61263,183 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
     Ok(())
 }
 
+/// #4017: a variable bound to the result of a stage that returns its input as the same
+/// `jv` (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
+/// `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`) is the register itself, so
+/// `$y` is accepted in path position (#3460, #4016 and #4295 did the same for the bare
+/// stage). Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_bound_result_of_input_returning_stage_is_the_register_4017() -> Result<()> {
+    const DOC: &str = r#"{"a":[1,2],"b":"s","n":2,"t":"1","c":"s"}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        // The bound result is the register itself when the input is returned as is.
+        (r"path(.b|tostring as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|@text as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.n|tonumber as $x|$x)", "[\"n\"]\n", 0),
+        (r#"path(.b|ltrimstr("x") as $y|$y)"#, "[\"b\"]\n", 0),
+        (r#"path(.b|rtrimstr("x") as $y|$y)"#, "[\"b\"]\n", 0),
+        (r"path(.b|delpaths([]) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|setpath([];.) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|tostring as $y|tostring|$y)", "[\"b\"]\n", 0),
+        (
+            r"(.b|tostring as $y|$y) = 9",
+            "{\"a\":[1,2],\"b\":9,\"n\":2,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (
+            r"(.n|tonumber as $y|$y) |= 5",
+            "{\"a\":[1,2],\"b\":\"s\",\"n\":5,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (
+            r"del(.b|tostring as $y|$y)",
+            "{\"a\":[1,2],\"n\":2,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (
+            r"path(.b|(tostring,tostring) as $y|$y)",
+            "[\"b\"]\n[\"b\"]\n",
+            0,
+        ),
+        (r"path(.b|(select(true)|tostring) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(tostring|select(true)) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|first(tostring) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|tostring as $y|try $y catch 1)", "[\"b\"]\n", 0),
+        (r"path(.b|(tostring|tostring) as $y|$y)", "[\"b\"]\n", 0),
+        // A fresh result, or another node: still refused, as in jq.
+        (r"path(.a|(.[0]|tostring) as $y|.[0]|$y)", "", 5),
+        (r"path(.n|tostring as $y|$y)", "", 5),
+        (r"path(.t|tonumber as $y|$y)", "", 5),
+        (r"path(.a|tostring as $y|$y)", "", 5),
+        (r#"path(.b|ltrimstr("s") as $y|$y)"#, "", 5),
+        (r#"path(.b|rtrimstr("s") as $y|$y)"#, "", 5),
+        (r#"path(.b|ltrimstr("") as $y|$y)"#, "", 5),
+        (r#"path(.b|delpaths([["x"]]) as $y|$y)"#, "", 5),
+        (r"path(.b|tojson as $y|$y)", "", 5),
+        (r"path(.b|tostring as $y|.|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|tostring as $y|$y|tostring)", "[\"b\"]\n", 0),
+        (r"(.n|tostring as $y|$y) = 9", "", 5),
+        // A refusal swallowed by `//`, `?` or `try` must not bind the register in place of
+        // the fresh value jq binds: the write would land where jq refuses.
+        (r"del(.n|tostring as $y|$y)", "", 5),
+        (r"path(.n|(tostring // .) as $y|$y)", "", 5),
+        (r"path(.n|(tostring?) as $y|$y)", "", 5),
+        (r"path(.n|(try tostring catch .) as $y|$y)", "", 5),
+        (r"(.n|(tostring // .) as $y|$y) = 9", "", 5),
+        // A navigation of the result stays refused.
+        (r"del(.n|(tostring // .) as $y|$y)", "", 5),
+        (r"path(.b|(tostring|.[0:1]) as $y|$y)", "", 5),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4017: `ltrimstr`/`rtrimstr` return a non-string input as the same `jv` too, so a
+/// variable bound to one is the register; with the bound result unplaced, the `try`
+/// around its use caught the resolver's refusal, and the write jq makes was dropped
+/// silently (an exact-looking verdict, not even a refusal). Includes the shapes where a
+/// `?`/`try` around the stage keeps the witness off, which must not go silent either.
+/// Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_bound_input_returning_stage_does_not_drop_a_write_under_try_4017() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"c":1,"d":{"b":1}}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (
+            r#"(.d | ltrimstr("s") as $v0 | try ($v0 | .b?)) = 9"#,
+            "{\"a\":false,\"c\":1,\"d\":{\"b\":9}}\n",
+            0,
+        ),
+        (
+            r#"del(.d | ltrimstr("s") as $v0 | try ($v0 | .b?))"#,
+            "{\"a\":false,\"c\":1,\"d\":{}}\n",
+            0,
+        ),
+        (
+            r#"path(.d | ltrimstr("s") as $v0 | try ($v0 | .b?))"#,
+            "[\"d\",\"b\"]\n",
+            0,
+        ),
+        (
+            r#"(.d | rtrimstr("s") as $v0 | try ($v0 | .b?)) = 9"#,
+            "{\"a\":false,\"c\":1,\"d\":{\"b\":9}}\n",
+            0,
+        ),
+        (
+            r#"(.d | (ltrimstr("s")?) as $v0 | try ($v0 | .b?)) = 9"#,
+            "{\"a\":false,\"c\":1,\"d\":{\"b\":9}}\n",
+            0,
+        ),
+        (
+            r#"(.d | (try ltrimstr("s") catch .) as $v0 | try ($v0 | .b?)) = 9"#,
+            "{\"a\":false,\"c\":1,\"d\":{\"b\":9}}\n",
+            0,
+        ),
+        (
+            r#"del(.d | (ltrimstr("s")?) as $v0 | try ($v0 | .b?))"#,
+            "{\"a\":false,\"c\":1,\"d\":{}}\n",
+            0,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4017 residual: where a `//`, `?` or `try` could swallow the refusal the resolver
+/// raises for an input that is not returned as is, the bound result is not placed in
+/// path mode (it would bind the register where jq binds a fresh value), so the
+/// string-input twins refuse where jq answers. The safe direction; documented in
+/// `docs/compliance/jq/limitations.md`.
+#[test]
+fn test_bound_result_under_swallowing_construct_refuses_4017() -> Result<()> {
+    const DOC: &str = r#"{"b":"s"}"#;
+    for filter in [
+        r"path(.b|(tostring // .) as $y|$y)",
+        r"path(.b|(tostring?) as $y|$y)",
+        r"path(.b|(try tostring catch .) as $y|$y)",
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, "", "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, 5, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4017, yq mode must-not-change: the bound result is jq mode only (the witness is
+/// gated on it, ADR-0018), so yq's `(.b|tostring as $y|$y) = "z"` stays a no-op.
+#[test]
+fn test_yq_bound_tostring_write_stays_a_noop_4017() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq", "(.b|tostring as $y|$y) = \"z\""])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .expect("piped")
+                .write_all(b"a: 1\nb: s\n")?;
+            child.wait_with_output()
+        })?;
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "a: 1\nb: s\n",
+        "{output:?}"
+    );
+    Ok(())
+}
+
 /// #3460, yq mode must-not-change: `(.b|tostring) = "z"` is a no-op in yq v4.53.3
 /// and stays one here.
 #[test]
