@@ -12791,9 +12791,7 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
         Expr::IndexExpr { target, key } => {
             // #4317, #4323, #4406: `E[a:b][$k]` (computed or literal bounds, the literal one also behind
             // navigation, `.a[2:][$k]`) reads the slice's resolved range, as the `[k]` pipe form does.
-            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. })
-                || navigated_literal_slice(target).is_some()
-            {
+            if is_fusable_index_target(target) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return GenericResult::Owned(owned);
                 }
@@ -14680,9 +14678,7 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // for why yq mode keeps the pre-existing eager fallback below.
         Expr::IndexExpr { target, key } if streams_escaped_generator_prefix::<S>() => {
             // #4317, #4323: the sink route's twin of the fusion in `eval_single`.
-            if matches!(**target, Expr::SliceExpr { .. } | Expr::Slice { .. })
-                || navigated_literal_slice(target).is_some()
-            {
+            if is_fusable_index_target(target) {
                 if let Some(owned) = fused_slice_index::<S, V>(target, key, value.clone(), cursor) {
                     return push_one_generic(GenericItem::Owned(owned), sink);
                 }
@@ -22856,6 +22852,14 @@ fn navigated_literal_slice(expr: &Expr) -> Option<(&[Expr], Option<i64>, Option<
     };
     (!prefix.is_empty() && prefix.iter().all(is_pure_slice_operand))
         .then_some((prefix, *start, *end))
+}
+
+/// Whether the target of an `IndexExpr` is a slice [`fused_slice_index`] may read (#4317, #4323,
+/// #4406): computed or literal-bounded, or a literal one behind a pure path. The one definition
+/// behind both `IndexExpr` arms, the value route and the sink route.
+fn is_fusable_index_target(target: &Expr) -> bool {
+    matches!(target, Expr::SliceExpr { .. } | Expr::Slice { .. })
+        || navigated_literal_slice(target).is_some()
 }
 
 /// Whether a pipe's first stage is a slice, computed or literal-bounded (#4323), bare or under a

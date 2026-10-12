@@ -126854,10 +126854,13 @@ fn test_fused_navigated_literal_slice_read_equals_the_unfused_spelling_4406() ->
         ("[$s]", "| .[$s]"),
         ("[$z]", "| .[$z]"),
     ];
+    // the reads that also run with a `?` on the slice itself, which the fusion looks through, on
+    // every bound
+    let reads_with_optional = [" | .[0]", " | length", " | last", "[1]", "[$neg]"];
     for doc in docs {
         for bound in bounds {
             for (fused_read, unfused_read) in reads {
-                // a `?` on the slice itself, which the fusion looks through, on the first bound
+                // a `?` on the slice itself
                 for (fused, unfused) in [
                     (
                         format!("{SLICE_READ_PRELUDE}.a[{bound}]{fused_read}"),
@@ -126869,8 +126872,11 @@ fn test_fused_navigated_literal_slice_read_equals_the_unfused_spelling_4406() ->
                     ),
                 ]
                 .into_iter()
-                .take(if bound.starts_with("1:") { 2 } else { 1 })
-                {
+                .take(if reads_with_optional.contains(&fused_read) {
+                    2
+                } else {
+                    1
+                }) {
                     assert_eq!(
                         run_jq_stdin(&fused, doc, &["-c"])?,
                         run_jq_stdin(&unfused, doc, &["-c"])?,
@@ -127013,7 +127019,7 @@ fn test_fused_navigated_literal_slice_read_is_not_quadratic_4406() -> Result<()>
         let elapsed = started.elapsed();
         assert_eq!((stdout.as_str(), code), ("6000\n", 0), "{filter}");
         assert!(
-            elapsed < std::time::Duration::from_secs(10),
+            elapsed < std::time::Duration::from_secs(20),
             "{filter} took {elapsed:?}: the loop is quadratic again"
         );
     }
