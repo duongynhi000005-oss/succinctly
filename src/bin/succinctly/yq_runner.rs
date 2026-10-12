@@ -6138,7 +6138,7 @@ fn emit_yaml_value(
 /// value constructed via `reduce`/`foreach`/etc. with no adversarial
 /// document on either side.
 ///
-/// `owner_indent` (#1485, was `owner_indent`): the indent of the *container this value belongs
+/// `owner_indent` (#1485, was `recursion_base`): the indent of the *container this value belongs
 /// to*, which a flow collection with comments closes at (`render_flow`'s
 /// `owner`) -- equal to `indent` everywhere except right after a real-yq
 /// "compact" positioning (the `Array` arm's two compact branches below, which
