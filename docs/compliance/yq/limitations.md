@@ -515,6 +515,27 @@ settled decision. The plain (non-combined) flags all match real yq:
 | `.a *=d .b` | `[3,4]` | `[3,4]` ✓ |
 | `.a *=+d .b` | `[3,4,3,4]` | `[1,2,3,4]` ✗ |
 
+### Evaluator nesting-depth ceiling — rule 4(c)
+
+Real yq has no nesting ceiling: it evaluates a 300-deep block-style mapping like any other
+(`sort`, `. as $x | $x`, `-P .` and the rest all exit 0). The evaluator here recurses on the
+native stack and refuses a document nested 256 levels or deeper where it has to materialize
+it, which is what ADR-0018 rule 4(c) permits (matching would take the host process down).
+The YAML parser's own 128 ceiling counts only flow/compact-inline nesting, so block-style
+nesting reaches the 256 one:
+
+```bash
+$ yq         sort deep300.yaml    # prints the document, exit 0
+$ succinctly yq sort deep300.yaml # Error: nesting depth exceeds limit of 256, exit 1
+```
+
+The refusal is a diagnostic and exit 1 on every route — default, `-P`, `--arg`,
+`--slurp`, `--eval-all`, `--split-exp`, `--inplace` — never a panic (exit 101), and in a
+multi-document stream the documents on either side of the offending one are still
+evaluated and printed (#1817, #2304). `tests/yq_cli_tests.rs` pins this
+(`test_deep_block_yaml_*_1817`). Streamed shapes that never materialize the document
+(`.`, `.[]`, `keys`, `length`, `map(.)`) have no ceiling at all.
+
 ## Input-spec divergences (below ADR-0018's scope)
 
 ADR-0018 adjudicates *evaluator and CLI behaviour*. A divergence originating in which inputs
