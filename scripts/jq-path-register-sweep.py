@@ -1212,6 +1212,16 @@ OPERANDS = [
     "(.a | index(\"a\"))",
     "(.a.b | indices(1))",
     "(.a | indices(1) | .[0])",
+    # a string input: `indices` of a string by a string only reads, and `index`/`rindex` then take
+    # `.[0]` / `.[-1:][0]` of the positions, which is never the register (jq names the access).
+    "(.key | indices(\"a\"))",
+    "(.key | index(\"a\"))",
+    "(.key | rindex(\"a\"))",
+    "(.key | index(true))",
+    "(\"abc\" | index(\"b\"))",
+    "(\"abc\" | rindex(\"b\"))",
+    "(.a | tostring | index(\"t\"))",
+    "(.a | tostring | rindex(\"t\"))",
     # (#3360) `from_entries` is `map({...}) | add`: it always iterates the array
     # `map` built, so jq raises on every value it produces. The `walk` rows are
     # the zero-output case (`f` yields nothing, but an input that reaches an

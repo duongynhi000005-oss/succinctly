@@ -2698,9 +2698,13 @@ is the revert that established what the other one costs.
    --candidate <build>` with those operands, `--jobs 14 --timeout 8`): `ACCEPT_WRONG` 20 → 0,
    `REFUSE_WRONG` 2,497 → 1,126, `DIFF` 10 → 0, `MATCH` 263,900 → 265,301, 0 regressions, 1,401 rows
    improved; `scripts/jq-bind-origin-fuzz.py -n 6000 --seed 11`: 0 fabricated, 0 mismatched. The
-   1,126 rows that still refuse are `?//` bodies (a refusal inside one is not retried, as above) and two
-   `foreach`/`try` shapes that refuse on `main` too. Still diverging, wording only: a *tracked string's*
-   `index`/`rindex` raises `with result 1` where jq says `near attempt to access element 0 of [1]`.
+   1,126 rows that still refuse are `?//` bodies (a refusal inside one is not retried, as above) and 100
+   `foreach`/`try` rows that refuse on `main` too. A string input is stepped for `index` and `rindex`
+   as well: `indices` of a string by a string answers its positions by value, so the `.[0]` /
+   `.[-1:][0]` they then take is the access that raises, and the error now names it as jq's does
+   (`path(.a | index("b"))` on `{"a":"abcb"}`: `near attempt to access element 0 of [1,3]`, where it
+   used to say `with result 1`). Swept again over twelve string-bearing operands (159,867 rows):
+   `REFUSE_WRONG` 1,970 → 600, `DIFF` 10 → 0, `MATCH` 157,887 → 159,267, 0 regressions.
    What #3890's first slice fixed was the *value*: `indices`/`index`/`rindex` on `null` or an object
    are jq's `.[$i]` lookup (`{"a":1} | indices("a")` is `1`, `null | indices(true)` raises), where
    they answered `null` for any key, which in `path()` was the root's own `null` and so answered

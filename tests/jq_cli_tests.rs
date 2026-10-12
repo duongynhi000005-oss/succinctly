@@ -64118,6 +64118,8 @@ fn test_indices_family_looks_up_in_yq_extensions_3890() -> Result<()> {
 #[test]
 fn test_indices_family_steps_a_tracked_input_3890() -> Result<()> {
     for (input, filter, expected) in [
+        (r#"{"a":"abcb"}"#, r#"[path(.a | index("b")?)]"#, "[]"),
+        (r#"{"a":"abcb"}"#, "[path(.a | rindex(empty))]", "[]"),
         (r#"{"a":[1,2,1]}"#, "path(.a | indices(1))", r#"["a",[1]]"#),
         (r#"{"a":[1,2,1]}"#, "path(.a | index(1))", r#"["a",[1],0]"#),
         (
@@ -64204,6 +64206,38 @@ fn test_indices_family_steps_a_tracked_input_3890() -> Result<()> {
         assert_eq!(stdout.trim(), expected, "#3890: `{input} | {filter}`");
     }
     for (input, filter, message) in [
+        // a string input: `indices` of it by a string only reads, and the access `index` and
+        // `rindex` then make of the positions is never the register
+        (
+            r#"{"a":"abcb"}"#,
+            r#"path(.a | index("b"))"#,
+            "near attempt to access element 0 of [1,3]",
+        ),
+        (
+            r#"{"a":"abcb"}"#,
+            r#"path(.a | rindex("b"))"#,
+            r#"near attempt to access element {"start":-1... of [1,3]"#,
+        ),
+        (
+            r#"{"a":"abcb"}"#,
+            r#"del(.a | index("b"))"#,
+            "near attempt to access element 0 of [1,3]",
+        ),
+        (
+            r#"{"a":"abcb"}"#,
+            r#"(.a | rindex("b")) |= 1"#,
+            r#"near attempt to access element {"start":-1... of [1,3]"#,
+        ),
+        (
+            r#"{"a":"abcb"}"#,
+            r#"path(.a | index("z"))"#,
+            "near attempt to access element 0 of []",
+        ),
+        (
+            r#"{"a":"abcb"}"#,
+            r#"path("abc" | index("b"))"#,
+            "near attempt to access element 0 of [1]",
+        ),
         (
             r#"{"a":[1,2,1]}"#,
             "[path(.a | indices(1) | length)]",
