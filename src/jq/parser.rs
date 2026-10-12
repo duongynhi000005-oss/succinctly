@@ -8757,6 +8757,24 @@ impl<'a> Parser<'a> {
 
         self.skip_ws();
 
+        // Real yq has no module system: its lexer rejects `module`, `import`
+        // and `include` outright (`invalid input text`, yq v4.53.3). Parsing
+        // them and then dropping them, as `run_yq` does for lack of a
+        // `ModuleLoader`, answers a filter yq refuses (#2683). Unconditional,
+        // not behind `--jq-extensions`: the flag has no loader to back it.
+        if self.mode == ParserMode::Yq {
+            for directive in ["module", "import", "include"] {
+                if self.matches_keyword(directive) {
+                    return Err(ParseError::new(
+                        format!(
+                            "\"{directive}\" is not part of yq's syntax (yq has no module system)"
+                        ),
+                        self.pos,
+                    ));
+                }
+            }
+        }
+
         // Parse optional module declaration
         if self.matches_keyword("module") {
             program.module = Some(self.parse_module_declaration()?);
@@ -12131,6 +12149,44 @@ mod tests {
             ),
             "`any_cat` is a different name"
         );
+    }
+
+    /// #2683: real yq's lexer rejects `module`/`import`/`include`
+    /// (`invalid input text`, v4.53.3) and yq mode has no loader, so the
+    /// directive is a parse error there, with or without `--jq-extensions`.
+    /// jq mode keeps parsing all three, and `.import`/`{"include": 1}` stay
+    /// ordinary field names in both.
+    #[test]
+    fn test_yq_rejects_module_import_include_directives_2683() {
+        for filter in [
+            r#"include "m"; length"#,
+            r#"import "m" as m; length"#,
+            r#"import "m" as $d; length"#,
+            r#"include "m" {search: "./"}; length"#,
+            "module {}; length",
+            r#"  include "m"; .a"#,
+        ] {
+            for extensions in [false, true] {
+                let err =
+                    parse_program_with_mode_and_extensions(filter, ParserMode::Yq, extensions)
+                        .unwrap_err();
+                assert!(
+                    err.message.contains("is not part of yq's syntax")
+                        && err.message.contains("no module system"),
+                    "{filter:?} (extensions: {extensions}): {err:?}"
+                );
+            }
+            assert!(
+                parse_program_with_mode(filter, ParserMode::Jq).is_ok(),
+                "jq mode keeps the directive: {filter:?}"
+            );
+        }
+        for filter in [".import", ".include.module", r#"{"include": 1}"#] {
+            assert!(
+                parse_program_with_mode(filter, ParserMode::Yq).is_ok(),
+                "{filter:?} is a plain field name, not a directive"
+            );
+        }
     }
 
     /// #2005: the `any`/`all` gate is on the *call*, read before its arguments, so what the

@@ -507,6 +507,32 @@ fn test_yq_index_and_transpose_raise_inside_path_like_jq_3888() -> Result<()> {
     Ok(())
 }
 
+/// #2683: yq has no module system and its lexer rejects the directive
+/// (`invalid input text`, v4.53.3); succinctly used to parse and drop it, so
+/// `include "mylib"; length` answered `1` for a module that does not exist.
+#[test]
+fn test_yq_module_directives_are_rejected_2683() -> Result<()> {
+    for filter in [
+        r#"include "mylib"; length"#,
+        r#"import "mylib" as m; length"#,
+        "module {}; length",
+    ] {
+        for extra in [&["-o=json"][..], &["--jq-extensions", "-o=json"][..]] {
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "a: 1\n", extra)?;
+            assert_ne!(code, 0, "`{filter}` {extra:?} -- stdout: {stdout:?}");
+            assert_eq!(stdout, "", "`{filter}` {extra:?}");
+            assert!(
+                stderr.contains("is not part of yq's syntax"),
+                "`{filter}` {extra:?} -- stderr: {stderr:?}"
+            );
+        }
+    }
+    // A field that merely shares the name is untouched.
+    let (stdout, code) = run_yq_stdin(".include", "include: 7\n", &[])?;
+    assert_eq!((stdout.as_str(), code), ("7\n", 0));
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
