@@ -1829,6 +1829,12 @@ impl<'a> Parser<'a> {
             self.skip_ws();
 
             if self.peek() == Some(']') {
+                // jq's grammar has no slice with both bounds absent: `.[:]` is a syntax error in
+                // 1.7.1 (`unexpected ']'`), `.[:null]` and `.[null:]` are its spellings (#4407).
+                // yq accepts it.
+                if self.mode == ParserMode::Jq {
+                    return Err(ParseError::new("syntax error, unexpected ']'", self.pos));
+                }
                 // `[:]` - full slice, returns the whole array as a single value
                 self.next();
                 return Ok(Bracket::Static(Expr::Slice {
@@ -9388,8 +9394,15 @@ mod tests {
         assert_eq!(parse(".[1:3]").unwrap(), Expr::slice(Some(1), Some(3)));
         assert_eq!(parse(".[1:]").unwrap(), Expr::slice(Some(1), None));
         assert_eq!(parse(".[:3]").unwrap(), Expr::slice(None, Some(3)));
-        // `[:]` is a full slice (returns the whole array), not an iterate
-        assert_eq!(parse(".[:]").unwrap(), Expr::slice(None, None));
+        // `[:]` is a syntax error in jq mode (#4407) and a full slice in yq mode (it returns the
+        // whole array), not an iterate
+        assert!(parse(".[:]").is_err());
+        assert!(parse(".[ : ]").is_err());
+        assert!(parse(".a[:]?").is_err());
+        assert_eq!(
+            parse_with_mode(".[:]", ParserMode::Yq).unwrap(),
+            Expr::slice(None, None)
+        );
     }
 
     #[test]

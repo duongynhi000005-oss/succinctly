@@ -59090,6 +59090,16 @@ fn test_yq_def_call_over_last_keeps_no_path_register_4109() -> Result<()> {
     Ok(())
 }
 
+/// #4407: jq mode rejects a slice with both bounds absent (`.[:]`) because jq's grammar has none;
+/// yq's does, so `succinctly yq '.[:]'` still returns the whole sequence.
+#[test]
+fn test_yq_all_absent_slice_is_still_accepted_4407() -> Result<()> {
+    let (stdout, code) = run_yq_stdin(".[:]", "[1, 2, 3]", &["-o", "json", "-I", "0"])?;
+    assert_eq!(code, 0, "stdout {stdout:?}");
+    assert_eq!(stdout, "[1,2,3]\n");
+    Ok(())
+}
+
 /// #3724: a `map`/`any`/`all` whose `f` navigates only the register's own node keeps
 /// jq's path register inside an `[E]` collect in jq mode only (ADR-0018). yq has no
 /// oracle for how its `map` leaves the register, so `succinctly yq` keeps refusing the
