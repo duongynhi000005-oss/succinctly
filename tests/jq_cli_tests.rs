@@ -78982,14 +78982,14 @@ fn test_foreach_source_pipe_head_of_a_chain_4424() -> Result<()> {
             r#"{"a":true}"#,
             r"del(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
             "",
-            "Invalid path expression",
+            "Cannot index object with number",
             5,
         ),
         (
             r#"{"a":true}"#,
             r"(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)) = 9",
             "",
-            "Invalid path expression",
+            "Cannot index object with number",
             5,
         ),
         // Inside a `reduce` UPDATE the destructuring-only chain keeps the by-value drive, which
@@ -79014,6 +79014,148 @@ fn test_foreach_source_pipe_head_of_a_chain_4424() -> Result<()> {
             "null",
             r"path(foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .))",
             "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4424 (second part): the register reaches a `foreach` source's `?//` chain through a call to a
+/// `def` with parameters, a comma that is the register on only some outputs (`(., 1) | CHAIN`), or
+/// a nested `foreach` over `.` whose accumulator is the register. The spine walk read each as
+/// opaque, so the by-value drive answered the root where jq's first step moves the register onto
+/// the matched member of a `null` document. A closure parameter shadows a same-named `def`
+/// (`def g: .a; def f(g): ...; f(.)`). On a register that is not `null` the bare alternative
+/// matches and the root stands, and a destructuring-only chain refuses. A destructuring-only pipe
+/// chain under `try`/`?`, whose refusal the resolver took for a guess a `try` swallows, refuses as
+/// jq does: the pipe of registers is the register for a chain with no bare alternative to retry
+/// onto. Every jq side captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_register_through_def_comma_and_nested_foreach_4424() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | .; f(1)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (def f($x): . as {a:$a} ?// $a | .; f(1)) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (def f(g): . as {a:$a} ?// $a | g; f(.)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (def g: .a; def f(g): . as {a:$a} ?// $a | g; f(.)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach ((1, .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (foreach (., 1) as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (foreach . as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | .; f(1)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (foreach (., 1) as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"del(foreach (def f($x): . as {a:$a} ?// [$a] | .; f(1)) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(foreach ((., 1) | . as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(try (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del((foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))?)",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(try ((.|.) as {a:$a} ?// [$a] | .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(try ((.|.) as {a:$a} ?// [$a] | .))",
+            "[\"a\"]\n",
             "",
             0,
         ),
