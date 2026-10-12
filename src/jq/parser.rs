@@ -1287,7 +1287,26 @@ impl<'a> Parser<'a> {
             return true;
         }
         let next_char = self.input[after..].chars().next();
+        // #1890: in yq mode `sin-approx` is one identifier, so `sin` is not a
+        // keyword match there (yq's unspaced `-` after a word is never
+        // subtraction; `sin - approx` still is).
         !matches!(next_char, Some(c) if c.is_alphanumeric() || c == '_')
+            && !self.yq_hyphen_continues_ident(after)
+    }
+
+    /// yq mode's hyphenated-identifier extension: the `-` at byte offset `at`
+    /// continues an identifier when an identifier character follows it
+    /// (`a-b`, `sin-approx`, `x-1`). A trailing or spaced `-` does not, and jq
+    /// mode never continues one. One definition for [`Self::parse_ident`] and
+    /// [`Self::matches_keyword`], so the two cannot disagree on where a
+    /// token ends (#1890).
+    fn yq_hyphen_continues_ident(&self, at: usize) -> bool {
+        self.mode == ParserMode::Yq
+            && self.input[at..].starts_with('-')
+            && self.input[at + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
     }
 
     /// Real yq's lexer has no token for jq-only surface like `paths`,
@@ -1416,19 +1435,9 @@ impl<'a> Parser<'a> {
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
                 self.next();
-            } else if self.mode == ParserMode::Yq && c == '-' {
+            } else if self.yq_hyphen_continues_ident(self.pos) {
                 // In Yq mode, allow hyphen if followed by valid ident char
-                // Peek ahead to check if there's a valid continuation
-                let remaining = &self.input[self.pos + 1..];
-                if let Some(next_c) = remaining.chars().next() {
-                    if next_c.is_alphanumeric() || next_c == '_' {
-                        self.next(); // consume the hyphen
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
+                self.next(); // consume the hyphen
             } else {
                 break;
             }
@@ -12187,6 +12196,50 @@ mod tests {
                 "{filter:?} is a plain field name, not a directive"
             );
         }
+    }
+
+    /// #1890: in yq mode `-` followed by an identifier character continues the
+    /// identifier, so a name that merely starts with a keyword (`sin-approx`,
+    /// `length-of-thing`, `not-x`) is not that keyword; spaced or trailing
+    /// `-` stays subtraction, and jq mode never continues an identifier.
+    #[test]
+    fn test_yq_hyphenated_ident_is_not_a_keyword_prefix_1890() {
+        // The call is to the hyphenated name, not to the `sin` builtin plus
+        // a subtraction, and not the `--jq-extensions` gate on `sin`.
+        for filter in [
+            "def sin-approx: 99; sin-approx",
+            "def length-of-thing: 1; length-of-thing",
+            "def not-x: 99; not-x",
+            "def if-x: 1; if-x",
+            "def input-foo: 1; input-foo",
+        ] {
+            let program = parse_program_with_mode_and_extensions(filter, ParserMode::Yq, true)
+                .unwrap_or_else(|e| panic!("{filter:?}: {e:?}"));
+            let name = filter.split(':').next().unwrap().trim_start_matches("def ");
+            let dump = format!("{:?}", program.expr);
+            assert!(
+                dump.contains(&format!("\"{name}\"")),
+                "{filter:?} should call `{name}`: {dump}"
+            );
+        }
+        // Without the flag the rejection is for `def`/the call, never for the
+        // builtin whose spelling the identifier happens to start with.
+        let err = parse_program_with_mode("def sin-approx: 99; sin-approx", ParserMode::Yq)
+            .err()
+            .map(|e| e.message);
+        assert!(
+            !err.as_deref().is_some_and(|m| m.contains("\"sin\"")),
+            "{err:?}"
+        );
+        // Spaced, trailing and jq-mode `-` is still subtraction / a boundary.
+        for filter in ["length - 1", "length -1", ".a | length -1"] {
+            assert!(
+                parse_program_with_mode(filter, ParserMode::Yq).is_ok(),
+                "{filter:?}"
+            );
+        }
+        let jq = parse_program_with_mode("length-1", ParserMode::Jq).unwrap();
+        assert!(matches!(jq.expr, Expr::Arithmetic { .. }), "{:?}", jq.expr);
     }
 
     /// #2005: the `any`/`all` gate is on the *call*, read before its arguments, so what the
