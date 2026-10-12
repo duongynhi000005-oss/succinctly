@@ -64087,11 +64087,11 @@ fn test_slice_bound_with_several_values_on_the_null_input_route_2056() -> Result
 #[test]
 fn test_nul_output_multi_file_aborts_at_first_failure_matching_yq_2002() -> Result<()> {
     let mut bad = NamedTempFile::new()?;
-    write!(bad, "a: \"b\\0c\"\n")?;
+    writeln!(bad, "a: \"b\\0c\"")?;
     let mut good = NamedTempFile::new()?;
-    write!(good, "a: good\n")?;
+    writeln!(good, "a: good")?;
     let mut later = NamedTempFile::new()?;
-    write!(later, "a: later\n")?;
+    writeln!(later, "a: later")?;
     let message = "Error: can't serialise value because it contains NUL char and you are using NUL separated output";
 
     for (files, expected_stdout) in [
