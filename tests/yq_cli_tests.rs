@@ -579,6 +579,12 @@ fn test_yq_hyphenated_name_is_not_a_builtin_prefix_1890() -> Result<()> {
     let (_stdout, stderr, code) = run_yq_stdin_with_stderr("sin-approx", "a: 1\n", &args)?;
     assert_ne!(code, 0);
     assert!(stderr.contains("sin-approx"), "{stderr:?}");
+    // `and`/`or` are operators, never a name start: yq reads `true and-1` as
+    // `true and -1` and prints `true`.
+    for filter in ["true and-1", "true or-1"] {
+        let (stdout, code) = run_yq_stdin(filter, "a: 1\n", &args)?;
+        assert_eq!((stdout.as_str(), code), ("true\n", 0), "`{filter}`");
+    }
     // A spaced `-` is still subtraction.
     let (stdout, code) = run_yq_stdin("length - 1", "[1, 2, 3]\n", &args)?;
     assert_eq!((stdout.as_str(), code), ("2\n", 0));

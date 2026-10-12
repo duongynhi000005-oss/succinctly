@@ -1092,6 +1092,12 @@ fn bind_retrying_value_arg(builtin: Builtin) -> Expr {
     }
 }
 
+/// Keywords that are operators or structural words, never the start of a name.
+/// yq mode's hyphenated-identifier rule does not apply to them: `true and-1`
+/// reads `true and -1` there (yq v4.53.3 answers `true`), so `matches_keyword`
+/// keeps the plain word boundary after these (#1890).
+const NON_NAME_KEYWORDS: [&str; 8] = ["and", "or", "then", "elif", "else", "end", "catch", "as"];
+
 impl<'a> Parser<'a> {
     #[allow(dead_code)] // STYLE-0005: kept for tests and future use
     fn new(input: &'a str) -> Self {
@@ -1289,9 +1295,11 @@ impl<'a> Parser<'a> {
         let next_char = self.input[after..].chars().next();
         // #1890: in yq mode `sin-approx` is one identifier, so `sin` is not a
         // keyword match there (yq's unspaced `-` after a word is never
-        // subtraction; `sin - approx` still is).
+        // subtraction; `sin - approx` still is). Operators and structural
+        // words never begin a name, so `-` after them stays a boundary:
+        // `true and-1` is `true and (-1)` in yq too.
         !matches!(next_char, Some(c) if c.is_alphanumeric() || c == '_')
-            && !self.yq_hyphen_continues_ident(after)
+            && (NON_NAME_KEYWORDS.contains(&keyword) || !self.yq_hyphen_continues_ident(after))
     }
 
     /// yq mode's hyphenated-identifier extension: the `-` at byte offset `at`
@@ -12231,6 +12239,14 @@ mod tests {
             !err.as_deref().is_some_and(|m| m.contains("\"sin\"")),
             "{err:?}"
         );
+        // Operators and structural words keep the plain boundary: yq answers
+        // `true and-1` (and `or-1`) with `true`.
+        for filter in ["true and-1", "true or-1", "true and -1"] {
+            assert!(
+                parse_program_with_mode(filter, ParserMode::Yq).is_ok(),
+                "{filter:?}"
+            );
+        }
         // Spaced, trailing and jq-mode `-` is still subtraction / a boundary.
         for filter in ["length - 1", "length -1", ".a | length -1"] {
             assert!(
