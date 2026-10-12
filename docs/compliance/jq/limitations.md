@@ -10742,7 +10742,7 @@ an order of magnitude cheaper than the walk this removes.
 | shape | behaviour | why |
 |---|---|---|
 | `path(.d)`, `.d \| key`, `.d \| parent`, `getpath(["d"])` | answer | never read `.a` |
-| `path(try .d)`, `path(try .d catch empty)` | answer | `E?`'s walk, since [#4412](https://github.com/rust-works/succinctly/issues/4412); `path(try .a[])` still raises, the value is read |
+| `path(try .d)`, `path(try .d catch empty)` | answer (jq mode; yq mode still raises) | `E?`'s walk, since [#4412](https://github.com/rust-works/succinctly/issues/4412); `path(try .a[])` still raises, the value is read |
 | `path(.a)`, `getpath(["a"])` | answer, echoing raw bytes like `.a` | naming a position is not reading it |
 | `getpath(["a"]) \| length`, `path(.a[])`, `.a[] \| key` | raise | the value is read |
 | `path(if . then .d else null end)`, `path(.d \| select(true))`, `path(.. \| .a?)`, `path(first(.d))` | raise | not cursor-navigable; the fallback materializes, and validates all of it |

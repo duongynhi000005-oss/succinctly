@@ -63675,3 +63675,33 @@ fn test_slice_of_a_wide_sequence_equals_its_per_position_reads_4287() -> Result<
     }
     Ok(())
 }
+
+/// #4412: `path(try E)` keeps the route it had in yq mode (under `--jq-extensions`, which `path(f)`
+/// needs there). The cursor walk counts a repeated mapping key's node once more than the owned
+/// walk, so only jq mode takes `try` through it; yq mode still collapses the duplicate, and still
+/// raises on an undecodable string elsewhere in the document, as `path(E?)` does not.
+#[test]
+fn test_path_try_keeps_its_route_in_yq_mode_4412() -> Result<()> {
+    let args = ["--jq-extensions", "-o=json", "-I=0"];
+    let dup = "a: 1\na: 2\nb: 3\n";
+    for (filter, expected) in [
+        ("[path(try .[])]", "[[\"a\"],[\"b\"]]\n"),
+        ("[path(try (.[]?) catch empty)]", "[[\"a\"],[\"b\"]]\n"),
+        ("[path(try .a)]", "[[\"a\"]]\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin(filter, dup, &args)?,
+            (expected.to_string(), 0),
+            "{filter}: the duplicate key is collapsed"
+        );
+    }
+    // The undecodable string still stops `try`, which materializes; the walk behind `?` never
+    // reads it.
+    let bad = "a: \"\\ud800\"\nd: 5\n";
+    assert_eq!(
+        run_yq_stdin("path(.d?)", bad, &args)?,
+        ("[\"d\"]\n".to_string(), 0)
+    );
+    assert_eq!(run_yq_stdin("path(try .d)", bad, &args)?.1, 1);
+    Ok(())
+}

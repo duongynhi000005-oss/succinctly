@@ -14846,7 +14846,7 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // keeps the bridge -- which now forwards demand too (#2925), so
         // every route here streams.
         Expr::Builtin(Builtin::Path(path_expr))
-            if !(cursor.is_some() && path_expr_is_cursor_navigable(path_expr)) =>
+            if !(cursor.is_some() && path_expr_is_cursor_navigable::<S>(path_expr)) =>
         {
             // #2642: demote any marker not proven to be `cursor`'s own node
             // before resolving, exactly as the eager arm does.
@@ -24024,7 +24024,19 @@ fn path_expr_observes_no_identity(expr: &Expr) -> bool {
 ///
 /// `Expr::Comma` is included: `path(.a, .b)` is just both walks, and the
 /// walk below already fans out for `Iterate`.
-fn path_expr_is_cursor_navigable(expr: &Expr) -> bool {
+///
+/// #4412: in jq mode `try E` and `try E catch empty` are `E?` and are admitted too; before, they
+/// fell to the materializing route, which copies the input and wraps the copy in an `Rc` on every
+/// `path(f)` call. Not in yq mode: the walk counts a repeated mapping key's node once more than
+/// the owned walk (`recurse(.[]?; true) | path` carries the same note), so moving `try` there
+/// would change a `path(try .[])` over a document with a duplicate key, and a decode failure
+/// elsewhere in a YAML document would stop raising. jq mode collapses duplicate keys on both
+/// routes.
+fn path_expr_is_cursor_navigable<S: EvalSemantics>(expr: &Expr) -> bool {
+    path_walk_navigable(expr, S::TAG == EvalTag::Jq)
+}
+
+fn path_walk_navigable(expr: &Expr, tries: bool) -> bool {
     match expr {
         Expr::Identity | Expr::Iterate => true,
         Expr::Field(_) => true,
@@ -24032,29 +24044,19 @@ fn path_expr_is_cursor_navigable(expr: &Expr) -> bool {
         // verbatim in both jq and succinctly today (verified live), so the
         // sign costs nothing here.
         Expr::Index { .. } => true,
-        Expr::Paren(inner) | Expr::Optional(inner) => path_expr_is_cursor_navigable(inner),
-        // #4412: `try E` and `try E catch empty` are `E?`, which the walk already takes; before,
-        // they fell to the materializing route, which copies the input and wraps it in an `Rc`
-        // per `path(f)` call.
+        Expr::Paren(inner) | Expr::Optional(inner) => path_walk_navigable(inner, tries),
+        // `try E` and `try E catch empty` (the only handler that delivers nothing, so the walk
+        // never evaluates it) are `E?`.
         Expr::Try { expr, catch } => {
-            catch
-                .as_deref()
-                .map_or(true, crate::jq::eval::is_empty_handler)
-                && path_expr_is_cursor_navigable(expr)
+            tries
+                && catch
+                    .as_deref()
+                    .map_or(true, crate::jq::eval::is_empty_handler)
+                && path_walk_navigable(expr, tries)
         }
-        Expr::Pipe(exprs) => exprs.iter().all(path_expr_is_cursor_navigable),
-        Expr::Comma(exprs) => exprs.iter().all(path_expr_is_cursor_navigable),
+        Expr::Pipe(exprs) => exprs.iter().all(|stage| path_walk_navigable(stage, tries)),
+        Expr::Comma(exprs) => exprs.iter().all(|stage| path_walk_navigable(stage, tries)),
         _ => false,
-    }
-}
-
-/// The body and handler of the swallowing boundaries the cursor walks take: `E?`, and `try E`
-/// or `try E catch empty` ([`path_expr_is_cursor_navigable`] admits no other handler, #4412).
-fn swallowing_boundary_parts(expr: &Expr) -> Option<(&Expr, Option<&Expr>)> {
-    match expr {
-        Expr::Optional(inner) => Some((inner, None)),
-        Expr::Try { expr, catch } => Some((expr, catch.as_deref())),
-        _ => None,
     }
 }
 
@@ -24571,40 +24573,9 @@ fn path_walk_generic<S: EvalSemantics, V: DocumentValue>(
             Ok(())
         }
         Expr::Paren(inner) => path_walk_generic::<S, V>(inner, node, path, out),
-        boundary @ (Expr::Optional(_) | Expr::Try { .. }) => {
-            let (inner, catch) = swallowing_boundary_parts(boundary).expect("a boundary arm");
-            // `?` swallows the error but *not* the outputs the branch had
-            // already produced before it: `[1] | path((.[0],.a)?)` emits
-            // `[0]` and then stops (jq 1.7.1). Discarding the whole branch
-            // made that emit nothing, where the non-navigable fallback
-            // (`path((.[0],.a[0:1])?)`, same shape) correctly emitted `[0]`.
-            //
-            // `path(.a?)` on an array still emits nothing, because there the
-            // error comes before anything is produced -- which is the case
-            // the discarded-branch version was checked against.
-            //
-            // #1620: a `decode_failure` is the one error `?` never swallows
-            // -- same rule as `Err(e) if e.is_decode_failure()` elsewhere in
-            // this file. Before #2168 this arm's inner call could not
-            // return one (the whole-document pre-walk always raised it
-            // first), so the unconditional `let _ =` was never wrong; now
-            // that the pre-walk is gone, `path(.a[]?)` on an undecodable
-            // string reached it silently, diverging from plain `.a[]?`
-            // navigation, which does raise.
-            //
-            // #3722: a bare `.[]?` over a scalar settles here without stepping
-            // it, so the `Cannot iterate` message the step would format and
-            // this arm would drop is never built (see [`swallowed_path_leaf`]).
-            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
-                return settled;
-            }
-            let mut branch = Vec::new();
-            let result = path_walk_generic::<S, V>(inner, node, path, &mut branch);
-            out.append(&mut branch);
-            match result {
-                Err(e) if e.is_decode_failure() => Err(e),
-                _ => Ok(()),
-            }
+        Expr::Optional(inner) => path_walk_swallowed::<S, V>(inner, None, node, path, out),
+        Expr::Try { expr, catch } => {
+            path_walk_swallowed::<S, V>(expr, catch.as_deref(), node, path, out)
         }
         Expr::Comma(exprs) => {
             for e in exprs {
@@ -24628,6 +24599,52 @@ fn path_walk_generic<S: EvalSemantics, V: DocumentValue>(
             }
             stepped
         }
+    }
+}
+
+/// [`path_walk_generic`]'s `E?` arm, and its `try E` / `try E catch empty` arms (#4412, which
+/// [`path_expr_is_cursor_navigable`] admits in jq mode and no other handler): `catch` is the handler,
+/// `None` for `?`, and is only ever `empty`, so the walk never evaluates it. Inlined into its two
+/// callers so the recursion keeps the frames it had.
+#[inline(always)]
+fn path_walk_swallowed<S: EvalSemantics, V: DocumentValue>(
+    inner: &Expr,
+    catch: Option<&Expr>,
+    node: &PathNode<V>,
+    path: &Rc<PathTrail>,
+    out: &mut Vec<OwnedValue>,
+) -> Result<(), EvalError> {
+    // `?` swallows the error but *not* the outputs the branch had
+    // already produced before it: `[1] | path((.[0],.a)?)` emits
+    // `[0]` and then stops (jq 1.7.1). Discarding the whole branch
+    // made that emit nothing, where the non-navigable fallback
+    // (`path((.[0],.a[0:1])?)`, same shape) correctly emitted `[0]`.
+    //
+    // `path(.a?)` on an array still emits nothing, because there the
+    // error comes before anything is produced -- which is the case
+    // the discarded-branch version was checked against.
+    //
+    // #1620: a `decode_failure` is the one error `?` never swallows
+    // -- same rule as `Err(e) if e.is_decode_failure()` elsewhere in
+    // this file. Before #2168 this arm's inner call could not
+    // return one (the whole-document pre-walk always raised it
+    // first), so the unconditional `let _ =` was never wrong; now
+    // that the pre-walk is gone, `path(.a[]?)` on an undecodable
+    // string reached it silently, diverging from plain `.a[]?`
+    // navigation, which does raise.
+    //
+    // #3722: a bare `.[]?` over a scalar settles here without stepping
+    // it, so the `Cannot iterate` message the step would format and
+    // this arm would drop is never built (see [`swallowed_path_leaf`]).
+    if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
+        return settled;
+    }
+    let mut branch = Vec::new();
+    let result = path_walk_generic::<S, V>(inner, node, path, &mut branch);
+    out.append(&mut branch);
+    match result {
+        Err(e) if e.is_decode_failure() => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -25070,8 +25087,8 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
         // reaches this function as the *head* of an outer pipe:
         // `path(((.a|.b)|.c))` steps `Pipe([.a, .b])`, `path((.a,.b)|.c)`
         // steps `Comma([.a, .b])`, and `path((.a?)|.c)` steps
-        // `Optional(.a)`. `path_expr_is_cursor_navigable` accepts all three,
-        // so before these arms existed each one hit the `unreachable!` below
+        // `Optional(.a)` (in jq mode `try .a` as well, #4412).
+        // `path_expr_is_cursor_navigable` accepts all three, so before these arms existed each one hit the `unreachable!` below
         // and aborted the process with exit 101 -- a live, CLI-reachable
         // panic, not a can't-happen.
         Expr::Pipe(exprs) => {
@@ -25083,38 +25100,54 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
             }
             Ok(())
         }
-        boundary @ (Expr::Optional(_) | Expr::Try { .. }) => {
-            let (inner, catch) = swallowing_boundary_parts(boundary).expect("a boundary arm");
-            // Same rule as `path_walk_generic`'s own `Optional` arm: the
-            // error is swallowed, the positions already reached are not --
-            // except a `decode_failure` (#1620), which `?` never swallows.
-            // This arm was unreachable before #2168 (the whole-document
-            // pre-walk always raised first); now that it is live, the
-            // unguarded discard let `path((.a[]?)|.x)` answer past an
-            // undecodable string that plain `(.a[])|.x` still raises on.
-            //
-            // #3722: a bare `.[]?` over a scalar settles here without stepping
-            // it, as in `path_walk_generic` (see [`swallowed_path_leaf`]).
-            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
-                return settled;
-            }
-            let mut branch = Vec::new();
-            let result = path_step_generic::<S, V, T>(
-                inner,
-                node,
-                path,
-                collapse_duplicate_keys,
-                &mut branch,
-            );
-            out.append(&mut branch);
-            match result {
-                Err(e) if e.is_decode_failure() => Err(e),
-                _ => Ok(()),
-            }
+        Expr::Optional(inner) => {
+            path_step_swallowed::<S, V, T>(inner, None, node, path, collapse_duplicate_keys, out)
         }
+        Expr::Try { expr, catch } => path_step_swallowed::<S, V, T>(
+            expr,
+            catch.as_deref(),
+            node,
+            path,
+            collapse_duplicate_keys,
+            out,
+        ),
         // `path_expr_is_cursor_navigable` gates every caller, so nothing else
         // can arrive here.
         other => unreachable!("non-navigable path expression reached the cursor walk: {other:?}"),
+    }
+}
+
+/// [`path_step_generic`]'s `E?` arm and its `try E` / `try E catch empty` arms (#4412), as
+/// [`path_walk_swallowed`] is for the walk. Inlined into its two callers for the same reason.
+#[inline(always)]
+fn path_step_swallowed<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
+    inner: &Expr,
+    catch: Option<&Expr>,
+    node: &PathNode<V>,
+    path: &T,
+    collapse_duplicate_keys: bool,
+    out: &mut Vec<(T, PathNode<V>)>,
+) -> Result<(), EvalError> {
+    // Same rule as `path_walk_generic`'s own `Optional` arm: the
+    // error is swallowed, the positions already reached are not --
+    // except a `decode_failure` (#1620), which `?` never swallows.
+    // This arm was unreachable before #2168 (the whole-document
+    // pre-walk always raised first); now that it is live, the
+    // unguarded discard let `path((.a[]?)|.x)` answer past an
+    // undecodable string that plain `(.a[])|.x` still raises on.
+    //
+    // #3722: a bare `.[]?` over a scalar settles here without stepping
+    // it, as in `path_walk_generic` (see [`swallowed_path_leaf`]).
+    if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
+        return settled;
+    }
+    let mut branch = Vec::new();
+    let result =
+        path_step_generic::<S, V, T>(inner, node, path, collapse_duplicate_keys, &mut branch);
+    out.append(&mut branch);
+    match result {
+        Err(e) if e.is_decode_failure() => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -32672,7 +32705,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             // whole document and therefore still raises on it -- that
             // boundary is recorded with the rest of the decision in
             // `docs/compliance/jq/limitations.md`.
-            if let Some(root) = cursor.filter(|_| path_expr_is_cursor_navigable(path_expr)) {
+            if let Some(root) = cursor.filter(|_| path_expr_is_cursor_navigable::<S>(path_expr)) {
                 let mut out = Vec::new();
                 return match path_walk_generic::<S, V>(
                     path_expr,
@@ -50761,7 +50794,10 @@ mod tests {
         ] {
             let expr = stage(admitted);
             assert!(array_route_stage_is_pure_navigation(&expr), "{admitted}");
-            assert!(path_expr_is_cursor_navigable(&expr), "{admitted}");
+            assert!(
+                path_expr_is_cursor_navigable::<JqSemantics>(&expr),
+                "{admitted}"
+            );
         }
         // #4412: `try E` and `try E catch empty` are `E?` for `path()`'s walker, but not for the
         // array routes, whose soundness argument covers `?` and nothing else spelled like it.
@@ -50773,7 +50809,15 @@ mod tests {
             "try try .a",
         ] {
             let expr = stage(walker_only);
-            assert!(path_expr_is_cursor_navigable(&expr), "{walker_only}");
+            assert!(
+                path_expr_is_cursor_navigable::<JqSemantics>(&expr),
+                "{walker_only}"
+            );
+            // yq mode keeps the materializing route: the walk counts a repeated key once more.
+            assert!(
+                !path_expr_is_cursor_navigable::<YqSemantics>(&expr),
+                "{walker_only}"
+            );
             assert!(
                 !array_route_stage_is_pure_navigation(&expr),
                 "{walker_only}"
@@ -50790,7 +50834,10 @@ mod tests {
             "try getpath([\"a\"])",
         ] {
             let expr = stage(refused);
-            assert!(!path_expr_is_cursor_navigable(&expr), "{refused}");
+            assert!(
+                !path_expr_is_cursor_navigable::<JqSemantics>(&expr),
+                "{refused}"
+            );
         }
         // A computed, effectful or specially routed stage is refused -- the
         // route's soundness argument covers none of them -- including the
@@ -50831,7 +50878,7 @@ mod tests {
             let expr = stage(query);
             assert!(
                 !array_route_stage_is_pure_navigation(&expr)
-                    || path_expr_is_cursor_navigable(&expr),
+                    || path_expr_is_cursor_navigable::<JqSemantics>(&expr),
                 "{query}"
             );
         }
@@ -50847,7 +50894,10 @@ mod tests {
         for bare in ["..", "(..)", "recurse", "recurse(.[]?)", "((recurse))"] {
             let expr = stage(bare);
             assert!(path_expr_is_bare_descent(&expr), "{bare}");
-            assert!(!path_expr_is_cursor_navigable(&expr), "{bare}");
+            assert!(
+                !path_expr_is_cursor_navigable::<JqSemantics>(&expr),
+                "{bare}"
+            );
             assert!(!array_route_stage_is_pure_navigation(&expr), "{bare}");
         }
         for other in [
