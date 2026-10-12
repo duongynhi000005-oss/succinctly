@@ -703,6 +703,42 @@ AMBIGUOUS_SOURCES = [
 def ambiguous_source_program(rng):
     return program(rng, AMBIGUOUS_SOURCES)
 
+# #4017: a builtin that hands its input back as the same `jv` for some inputs
+# (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
+# `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`), bound with `as` *after a
+# navigation* -- `path(.a | tostring as $v | $v)` -- so the input is a scalar leaf and
+# the register sits on it. The stock SOURCES run against the root object, where every
+# one of them builds a fresh value, so they could never emit the shape. The pool draws
+# the same builtin against both kinds of leaf (the document holds `"s"`, `1`, `null`,
+# `true`, containers), because which one returns its input is the per-value fact the
+# resolver judges. The second group are the traps: a `try`/`?`/`//` that would swallow
+# the resolver's refusal and run something else, a navigation of the result, and a
+# fresh value; none may be written through where jq refuses.
+INPUT_RETURNING_PREFIX = [".a", ".c", ".d", ".x.a", ".x.c", ".arr[0]?"]
+INPUT_RETURNING_SOURCES = [
+    ("tostring", False), ("@text", False), ("tonumber", False), ("ltrimstr(\"z\")", False),
+    ("rtrimstr(\"z\")", False), ("ltrimstr(\"s\")", False), ("rtrimstr(\"s\")", False),
+    ("ltrimstr(\"\")", False), ("delpaths([])", False), ("setpath([]; .)", False),
+    ("(tostring, tostring)", False), ("(select(true) | tostring)", False),
+    ("(tostring | select(true))", False), ("first(tostring)", False), ("limit(1; tostring)", False),
+    ("(tostring | tostring)", False), ("(tostring | tonumber)", False), ("(tonumber | tostring)", False),
+    ("(if true then tostring else . end)", False), ("(tostring | ltrimstr(\"z\"))", False),
+    ("(. | tostring)", False), ("(tostring | .)", False), ("(tostring, .)", False),
+    ("(. , tostring)", False), ("(tostring | $p)", True), ("($p | tostring)", True),
+    # Traps.
+    ("(tostring // .)", False), ("(tostring?)", False), ("(try tostring catch .)", False),
+    ("(try tostring catch $p)", True), ("((tostring // .) | tostring)", False),
+    ("(tostring // $p)", True), ("(tostring | .[0:1])", False), ("((tostring | .[0:1])?)", False),
+    ("(tostring | .b?)", False), ("(tostring | .[0]?)", False), ("(.b? | tostring)", False),
+    ("(tojson)", False), ("(ascii_downcase?)", False), ("(tostring | ascii_downcase?)", False),
+    ("((. + \"\")?)", False), ("(try (tostring | error) catch .)", False),
+    ("(first(tostring, .) // 1)", False), ("(select(false) // tostring)", False),
+    ("(select(false) // tostring | tostring)", False),
+]
+
+def input_returning_source_program(rng):
+    return program(rng, INPUT_RETURNING_SOURCES, INPUT_RETURNING_PREFIX)
+
 def stage(rng, v):
     r = rng.random()
     if r < 0.4: return rng.choice(NAV)
@@ -711,10 +747,13 @@ def stage(rng, v):
     if r < 0.8: return rng.choice(MOVES)
     return rng.choice(USES).replace("$v", v)
 
-def program(rng, sources=SOURCES):
+def program(rng, sources=SOURCES, prefix=None):
     n_bind = rng.choice([1, 1, 2])
     parts = []; prev = None
-    if rng.random() < PREFIX_P:
+    if prefix is not None:
+        # #4017: a forced navigation first, so a source runs against a leaf.
+        parts.append(rng.choice(prefix))
+    elif rng.random() < PREFIX_P:
         parts.append(rng.choice(PREFIX))
     for i in range(n_bind):
         v = f"$v{i}"
@@ -823,6 +862,13 @@ def main():
                          "through by pointer outside the grammars (#3423): a comma nested under a "
                          "pipe/`if`/`try`/`//`, `label`, a rebind. Off by default so existing "
                          "seeds keep their stream; run at 1.0 to weight the sweep onto it")
+    ap.add_argument("--input-returning-source-p", type=float, default=0.0,
+                    help="probability a program binds `as $v` from a builtin that returns its "
+                         "input as the same `jv` for some inputs (`tostring`, `tonumber`, "
+                         "`ltrimstr`, ...) after navigating to a leaf (#4017). The stock SOURCES "
+                         "run against the root object, where each builds a fresh value. Off by "
+                         "default so existing seeds keep their stream; run at 1.0 to weight the "
+                         "sweep onto it")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     pin = open("tests/data/jq-golden/JQ_VERSION").read().strip()
@@ -848,7 +894,9 @@ def main():
                            ("DESTRUCTURE_BIND_STAGES", DESTRUCTURE_BIND_STAGES),
                            ("OPTIONAL_SOURCES", [src for src, _ in OPTIONAL_SOURCES]),
                            ("TRANSPARENT_SOURCES", [src for src, _ in TRANSPARENT_SOURCES]),
-                           ("AMBIGUOUS_SOURCES", [src for src, _ in AMBIGUOUS_SOURCES])]:
+                           ("AMBIGUOUS_SOURCES", [src for src, _ in AMBIGUOUS_SOURCES]),
+                           ("INPUT_RETURNING_PREFIX", INPUT_RETURNING_PREFIX),
+                           ("INPUT_RETURNING_SOURCES", [src for src, _ in INPUT_RETURNING_SOURCES])]:
             print(f"{name} ({len(pool)}): " + " ; ".join(pool))
         return 0
     rng = random.Random(a.seed)
@@ -879,6 +927,8 @@ def main():
             f = transparent_source_program(rng)
         elif a.ambiguous_source_p and rng.random() < a.ambiguous_source_p:
             f = ambiguous_source_program(rng)
+        elif a.input_returning_source_p and rng.random() < a.input_returning_source_p:
+            f = input_returning_source_program(rng)
         elif a.embed_write_p and rng.random() < a.embed_write_p:
             f = embed_write_program(rng)
         elif a.destructure_bind_p and rng.random() < a.destructure_bind_p:
