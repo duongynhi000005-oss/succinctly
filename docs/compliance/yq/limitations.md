@@ -2065,17 +2065,16 @@ b: 2
 c: 3' | yq 'del(.a, 1, .c)'  # a: 1\nb: 2       -- only .c deleted, not .a
 ```
 
-The pattern across all four is consistent with `del()` processing its targets in *reverse*
-of the given argument order and aborting every remaining one — without undoing whatever
-already completed — the instant it hits an untracked target. Simply extending the other
-three operations' "skip and continue in given order" fix to `del()` would make it delete
-*more* than real yq does for some orderings (`del(.a, 1)` would delete `.a`, which real yq
-leaves untouched) — a data-loss-shaped divergence in the wrong direction, not a cosmetic
-one. `del()` therefore keeps raising `reject_untracked_at_terminal`'s pre-existing error
-(via `resolve_del_path_branches`, `del()`'s own path-resolution entry point, which is
-what distinguishes its call shape from its three siblings') until the real reverse-order/
-abort-without-rollback algorithm is implemented, tracked as
-[#1865](https://github.com/rust-works/succinctly/issues/1865) rather than guessed at here.
+The rule is in yq's `deleteChildOperator`: it walks its targets back to front and returns at
+the first one with no parent, keeping whatever it already deleted
+([#1865](https://github.com/rust-works/succinctly/issues/1865)). The root, a literal, a
+constructor and a bound value have no parent, so only the targets *after* the last such one
+are deleted, and if that one is the root itself the document goes (`del(1, .)` prints
+nothing, `del(., 1)` keeps the document). `resolve_del_path_branches` applies that scan to the
+branches in source order, a fan-out ordered by its resolved targets (`del(1, .a[])` empties
+`.a`, `del(.a[], 1)` keeps it). Extending the other three operations' "skip and continue"
+fix to `del()` would delete *more* than yq does, so `del()` stays on its own rule. A genuine
+error in any target still wins.
 
 A lone untracked target refuses too, although real yq deletes nothing: `del(1)` on
 `{a: 1}` prints `a: 1` in yq. succinctly cannot skip it safely, because its "untracked" is
@@ -2091,7 +2090,8 @@ When every target is one of those, the result matches real yq: `null | del(null)
 `jv_identical` rule answers such a literal with the root path `[]` (in jq,
 `null | path(null)` is `[[]]`), and that rule is gated to jq mode. In yq mode the root
 path used to reach yq's bare-`del(.)` rule, which printed nothing. A mix with a tracked
-target (`null | del(null, .a)`) still refuses.
+target follows the same back-to-front rule: `null | del(., null)` keeps the document and
+`null | del(null, .)` prints nothing.
 
 A `del()` target that is a bound variable holding the root keeps the document
 ([#3244](https://github.com/rust-works/succinctly/issues/3244)): `. as $y | del($y)`,
@@ -2105,8 +2105,8 @@ What stays
 different, all of it yq's node identity ([#2643](https://github.com/rust-works/succinctly/issues/2643)):
 a variable bound below the root (`.a as $y | del($y)` deletes `.a` in yq, refuses here),
 `. as $y | del($y.a)` (yq keeps the document, succinctly deletes `.a`), and the mixed orders
-`del(., $y)` / `del(.a, $y)` (yq keeps the document, succinctly empties it), which are
-#1865's reverse-order quirk.
+`del(., $y)` / `del(.a, $y)` (yq keeps the document, succinctly empties it): a bound variable
+is tracked here, so it does not end the loop the way yq's parentless node does.
 
 The test is value identity with the input, not whether the target has a path, so a literal
 that doesn't equal its input still refuses where real yq deletes nothing:

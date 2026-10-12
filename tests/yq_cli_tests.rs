@@ -1615,6 +1615,69 @@ fn test_yq_setpath_checks_the_path_before_the_value_1380() -> Result<()> {
     Ok(())
 }
 
+/// #1865: yq's `deleteChildOperator` walks its targets back to front and returns at the first one
+/// with no parent, keeping what it already deleted. The root, a literal, a constructor and a
+/// bound value have no parent, so only the targets *after* the last such one are deleted, and if
+/// that one is the root the document goes. Every answer was captured from yq v4.53.3.
+#[test]
+fn test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865() -> Result<()> {
+    let args = ["-o=json", "-I=0"];
+    let obj = "a: 1\nb: 2\nc: 3\n";
+    let arr = "[10, 20, 30, 40]\n";
+    for (filter, doc, expected) in [
+        // Object keys: only the targets behind the last literal go.
+        ("del(.a, 1)", obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del(1, .a)", obj, r#"{"b":2,"c":3}"#),
+        ("del(.a, .c, 1)", obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del(.a, 1, .c)", obj, r#"{"a":1,"b":2}"#),
+        // Array indices behave the same.
+        ("del(.[0], 1)", arr, "[10,20,30,40]"),
+        ("del(1, .[0])", arr, "[20,30,40]"),
+        ("del(.[2], 1, .[0])", arr, "[20,30,40]"),
+        // Other parentless shapes, and a literal reached through a pipe.
+        (r#"del(.a, "b")"#, obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del(.a, null)", obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del(.a, [1])", obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del((.a | 1), .c)", obj, r#"{"a":1,"b":2}"#),
+        // A fan-out is ordered by its resolved targets.
+        ("del(.a[], 1)", "a: [1, 2]\n", r#"{"a":[1,2]}"#),
+        ("del(1, .a[])", "a: [1, 2]\n", r#"{"a":[]}"#),
+        // The root ends the loop when it is the last parentless target, and keeps the document
+        // when a literal comes after it.
+        ("del(., 1)", obj, r#"{"a":1,"b":2,"c":3}"#),
+        ("del(.., 1)", obj, r#"{"a":1,"b":2,"c":3}"#),
+        // `null` documents (#3207's literal against the same rule).
+        ("del(., null)", "null\n", "null"),
+        ("del(null, .a)", "null\n", "null"),
+    ] {
+        assert_eq!(
+            run_yq_stdin(filter, doc, &args)?,
+            (format!("{expected}\n"), 0),
+            "{filter}"
+        );
+    }
+    // The root as the last target deletes the document: yq prints nothing.
+    for (filter, doc) in [
+        ("del(1, .)", obj),
+        ("del(1, ..)", obj),
+        ("del(null, .)", "null\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin(filter, doc, &args)?,
+            (String::new(), 0),
+            "{filter}"
+        );
+    }
+    // A genuine error still wins, and jq mode keeps raising on every untracked target.
+    let (_out, err, code) = run_yq_stdin_with_stderr(r#"del(.a, error("x"))"#, obj, &args)?;
+    assert_eq!(code, 1);
+    assert!(err.contains('x'), "{err}");
+    let (_out, err, code) = run_jq_stdin_with_stderr("del(.a, 1)", r#"{"a":1,"b":2}"#, &["-c"])?;
+    assert_eq!(code, 5, "{err}");
+    assert!(err.contains("Invalid path expression"), "{err}");
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]
@@ -28636,16 +28699,17 @@ fn test_yq_untracked_comma_branch_genuine_error_still_propagates_1764() -> Resul
     Ok(())
 }
 
-/// #1764: `del()` is deliberately *excluded* from the no-op fix and keeps
-/// raising -- real yq's own `del()` has order-dependent reverse/abort
-/// semantics unlike its three siblings (tracked separately as #1865); the
-/// safe default (an error) is kept rather than guessing at that algorithm,
-/// since naively extending the no-op fix to `del()` would delete more than
-/// real yq does for some argument orderings.
+/// #1764, then #1865: `del()` is *excluded* from the per-branch no-op fix -- real yq's own `del()`
+/// walks its targets back to front and stops at the first one with no parent -- so
+/// `del(.a, 1)` deletes nothing, where the three sibling operations would skip `1` and write `.a`.
+/// A `del()` whose targets are *all* untracked keeps raising (`del(1)`), since succinctly's
+/// "untracked" is wider than yq's "pathless". The full order matrix is
+/// `test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865`.
 #[test]
-fn test_yq_untracked_comma_branch_del_still_raises_1764() -> Result<()> {
-    let (_out, err, code) =
-        run_yq_stdin_with_stderr("del(.a, 1)", "a: 1\nb: 2\n", &["-o", "json"])?;
+fn test_yq_untracked_comma_branch_del_stops_the_loop_1764() -> Result<()> {
+    let (out, code) = run_yq_stdin("del(.a, 1)", "a: 1\nb: 2\n", &["-o=json", "-I=0"])?;
+    assert_eq!((out.as_str(), code), ("{\"a\":1,\"b\":2}\n", 0));
+    let (_out, err, code) = run_yq_stdin_with_stderr("del(1)", "a: 1\nb: 2\n", &["-o", "json"])?;
     assert_ne!(code, 0);
     assert!(err.contains("Invalid path expression"), "err={err}");
     Ok(())
@@ -28689,19 +28753,15 @@ fn test_yq_del_identical_null_bool_literal_is_noop_3207() -> Result<()> {
     Ok(())
 }
 
-/// #3207: every other untracked `del()` target still refuses, as before.
-/// A mix of the identical literal with a tracked target is #1865's
-/// order-dependent case (`del(., null)` keeps a `null` document in yq,
-/// `del(null, .)` deletes it) -- these used to discard the document too.
+/// #3207: every other untracked `del()` target still refuses, as before, when no target is
+/// tracked. (A mix with a tracked target is ordered by yq's back-to-front rule, #1865: see
+/// `test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865`.)
 /// And succinctly's "untracked" is wider than yq's "pathless": yq's `$var`
 /// keeps node identity and `tojson` keeps its input's path, so both of
 /// these *delete `.a`* in yq; a no-op here would silently drop the delete.
 #[test]
 fn test_yq_del_other_untracked_targets_still_refuse_3207() -> Result<()> {
     for (filter, doc) in [
-        ("del(null, .a)", "null\n"),
-        ("del(., null)", "null\n"),
-        ("del(null, .)", "null\n"),
         ("del(false)", "null\n"),
         ("del(1)", "a: 1\n"),
         ("del(.a as $y | $y)", "a: {b: 1}\nc: 2\n"),
@@ -28827,8 +28887,8 @@ fn test_yq_untracked_branch_path_trailing_iterate_noop_1764() -> Result<()> {
 /// `reject_untracked_at_terminal`, and gets the same "write the
 /// trackable branch, skip the untracked one" result rather than
 /// aborting the whole write the way it did (and, in jq mode, still
-/// does) before this fix. `del()` is unaffected -- still raises, since
-/// it's excluded from the skip entirely (`skip_untracked == false`).
+/// does) before this fix. `del()` is excluded from the skip: the untracked handler value ends
+/// yq's back-to-front loop, so the tracked `.a` before it is not deleted either (#1865).
 #[test]
 fn test_yq_untracked_branch_via_try_catch_noop_1764() -> Result<()> {
     let (out, code) = run_yq_stdin(
@@ -28840,13 +28900,12 @@ fn test_yq_untracked_branch_via_try_catch_noop_1764() -> Result<()> {
     let v: serde_json::Value = serde_json::from_str(&out)?;
     assert_eq!(v, serde_json::json!({"a": "X"}));
 
-    let (_out, err, code) = run_yq_stdin_with_stderr(
+    let (out, code) = run_yq_stdin(
         r#"del(try (.a, error({"y":99})) catch select(true))"#,
         "a: 10\n",
         &["--jq-extensions", "-o=json", "-I=0"],
     )?;
-    assert_ne!(code, 0);
-    assert!(err.contains("Invalid path expression"), "err={err}");
+    assert_eq!((out.as_str(), code), ("{\"a\":10}\n", 0));
     Ok(())
 }
 
