@@ -2124,7 +2124,7 @@ is the revert that established what the other one costs.
    something; in the one body `fold_body::acc_is_register` marked it certifies each with `marker_identical`, so a
    fold-body `$it` that is a different node stays by value (`path(reduce .[] as $it (.; foreach ($it as {a:$a} | .) as
    $k (.; .; .)))` is `[[]]` in jq). A nested fold's source is read the same way. A marker behind
-   `first`/`last`/`limit`/`try`/`?` is read since #4320's fifth part: `. as $x | del(foreach (first($x) as {a:$a} | .)
+   `first`/`last`/`limit`/`try` is read since #4320's fifth part: `. as $x | del(foreach (first($x) as {a:$a} | .)
    as $y (.; .; .))` raises as jq does (on `null` its path is `["a"]`), pinned by
    `test_foreach_source_marker_behind_a_value_wrapper_destructures_4320`. The resolver cannot place such a head and
    its refusal used to be the kind a `try` does not catch where jq's is (the pinned row
@@ -2135,7 +2135,7 @@ is the revert that established what the other one costs.
    pattern's first step is placed and its refusal is exact (the `first($x)` rows of the #4278 table above: ACCEPT_WRONG 62 to 6 and DIFF 5 to 0 over the
    three operands that spell one, 2,691 `--stage-only` rows, 77 more matches and no match lost; the 6 left are inside a
    `reduce` body or after a `{a:{b:1}} |`, identical on `main`). Still accepted: a comma inside the wrapper
-   (`first($x, 1)`), and `nth`, `label` and `$x?` heads; an outer `$x` destructured inside a `foreach` UPDATE/EXTRACT or another fold's body, where `.` is not known to be the
+   (`first($x, 1)`), a nested wrapper (`first(first($x))`), and `nth`, `label` and `$x?` heads; an outer `$x` destructured inside a `foreach` UPDATE/EXTRACT or another fold's body, where `.` is not known to be the
    register (`path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))` raises in jq); a
    register an INIT moved; and an outer `$x` returned by a call whose `def` is written outside the source. Over every
    fold operand that binds a `$x`/`$it`/`$y` (`--stage-only`, 75,339 rows) wrong accepts go from 534 to 343 and wrong

@@ -78160,6 +78160,35 @@ fn test_foreach_source_marker_behind_a_value_wrapper_destructures_4320() -> Resu
             "Invalid path expression",
             5,
         ),
+        // `|=` and an array pattern.
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .)) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | foreach (first($x) as [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(. as $x | foreach (limit(1; $x) as [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"(. as $x | foreach (first($x) as [$a] | .) as $k (.; .; .)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
         // On `null` the walk succeeds and the register lands on the member.
         (
             "null",
