@@ -44948,7 +44948,7 @@ fn collect_keeps_register<S: EvalSemantics>(expr: &Expr) -> bool {
 /// moved the register).
 fn stage_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
-        && match peel_register_transparent(expr) {
+        && match peel_register_through_calls(expr) {
             Expr::Builtin(
                 Builtin::Any
                 | Builtin::All
@@ -44977,7 +44977,7 @@ fn stage_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
 /// an untracked one no leaf sees the register. Jq mode only (ADR-0018).
 fn compound_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
-        && match peel_register_transparent(expr) {
+        && match peel_register_through_calls(expr) {
             Expr::Comma(_) | Expr::Alternative(..) | Expr::If { .. } => true,
             // #3899: a destructuring `?//` bind whose body is itself such a compound
             // stage. A result that navigated nothing came from the bare `$var`
@@ -45019,7 +45019,7 @@ fn compound_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
 fn foreach_states_register_per_emission<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
         && matches!(
-            peel_register_transparent(expr),
+            peel_register_through_calls(expr),
             Expr::Foreach { input, init, extract, .. }
                 if foreach_body_cannot_move(input, init, extract.as_deref())
         )
@@ -45034,7 +45034,8 @@ fn foreach_states_register_per_emission<S: EvalSemantics>(expr: &Expr) -> bool {
 /// move it, and a loss on every other one, so the stage never reads an absent statement
 /// as the carried copy standing (#3826) for an emission that moved it. Jq mode only.
 fn foreach_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> bool {
-    last_register_unmoved::<S>() && matches!(peel_register_transparent(expr), Expr::Foreach { .. })
+    last_register_unmoved::<S>()
+        && matches!(peel_register_through_calls(expr), Expr::Foreach { .. })
 }
 
 /// Whether `expr` is a `reduce` that states jq's register per result on an *untracked*
@@ -45051,7 +45052,7 @@ fn foreach_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> 
 fn reduce_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
         && matches!(
-            peel_register_transparent(expr),
+            peel_register_through_calls(expr),
             Expr::Reduce { input, init, update, .. }
                 if reduce_leaves_register_in_place(input, init, update)
         )
@@ -45144,6 +45145,38 @@ fn peel_register_transparent(expr: &Expr) -> &Expr {
             peel_register_transparent(inner)
         }
         other => other,
+    }
+}
+
+/// [`peel_register_transparent`], then through a zero-arity `def` call into its body, and again
+/// (#3826). `resolve_node_sink`'s `DefCall` arm resolves the bound body in place against the call's own
+/// input and frame, so the register statement the body's leaf makes is the one the call hands the
+/// stage: `def f: any; f | $x` states what `any | $x` does. Bounded by [`DEF_CALL_SHAPE_BUDGET`]
+/// hops, so a recursive `def f: f; f` ends; past it the call is not peeled, which reads as it did
+/// before this existed (a stage that moves the register). A call with arguments binds code this cannot
+/// see and is not peeled. Reads `def.body` as [`def_call_keeps_register`] does, so a call is seen through
+/// only when its body is itself a verdict (or wrapper of one): a body that defines another `def`
+/// (`def f: def g: any; g; f`) is a `FuncDef` until bound and reads as before (pinned refused).
+///
+/// Not folded into [`peel_register_transparent`]: that answers "does this wrapper add no movement of
+/// its own?" for callers (`entry_marker_stage`, [`stage_is_register_keeping`]) whose questions about a
+/// call are answered elsewhere ([`def_call_keeps_register`]); this is for the per-result admissions,
+/// which only ask what the stage's leaf states.
+fn peel_register_through_calls(expr: &Expr) -> &Expr {
+    let mut peeled = peel_register_transparent(expr);
+    for _ in 0..DEF_CALL_SHAPE_BUDGET {
+        match peeled {
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                peeled = peel_register_transparent(&def.body);
+            }
+            _ => return peeled,
+        }
+    }
+    // Out of hops: a call still in hand was not seen through.
+    if matches!(peeled, Expr::DefCall { .. }) {
+        peel_register_transparent(expr)
+    } else {
+        peeled
     }
 }
 
@@ -46824,6 +46857,20 @@ fn reduce_leaves_register_in_place(input: &Expr, init: &Expr, update: &Expr) -> 
 fn fold_update_movement_tracked(update: &Expr) -> bool {
     register_movement_tracked(update)
         || match update {
+            // #3826: a verdict builtin resolves its generator and condition live in path
+            // position (#3749, #3763), raising where jq does, and the fold backtracks it.
+            // The bare spellings and `any(f)`/`all(f)` iterate their input, which
+            // [`update_navigates_within`] counts, so a source that moved the register has them
+            // checked against its element; `f` itself is path-checked live by the resolver (swept
+            // with `any(.a)`, `any(1 | .a)`), not by this predicate. The generator forms navigate
+            // only through `gen`/`cond`, so they are admitted when neither can move the register.
+            Expr::Builtin(Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)) => {
+                true
+            }
+            Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
+                cannot_move_register(gen) && cannot_move_register(cond)
+            }
+            Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen),
             Expr::Paren(inner) | Expr::Optional(inner) => fold_update_movement_tracked(inner),
             Expr::Try { expr, catch: None } => fold_update_movement_tracked(expr),
             _ => false,
@@ -53743,6 +53790,12 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
                     || update_navigates_within(else_branch, first_only)
             }
         },
+        // #3826: the bare `any`/`all` and `any(f)`/`all(f)` iterate their input (`.[] | f`), so a
+        // source that moved the register has them path-checked against its element
+        // (`reduce .[] as $i (.; any)` raises in jq). "Definitely" is an over-approximation for an
+        // accumulator that is an empty container, where `.[]` iterates nothing: the stage then
+        // reads the register as moved and refuses a shape jq answers, the safe direction.
+        Expr::Builtin(Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)) => true,
         other => is_fold_source_navigation(other),
     }
 }
@@ -141296,6 +141349,100 @@ mod compound_states_register_mode_gate_tests {
                 "`{src}` must not be admitted by the compound arm"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod verdict_stage_through_def_call_tests_3826 {
+    use super::*;
+    use crate::jq::parse;
+
+    /// `src` parsed with its leading `def f(..): ..;` installed, so the use site is a `DefCall`.
+    fn installed(src: &str) -> Expr {
+        let Expr::FuncDef {
+            name,
+            params,
+            body,
+            then,
+            ..
+        } = parse(src).unwrap()
+        else {
+            panic!("expected a def") // patchcov: coverage tolerate-line reason="unreachable in a passing suite: every source this helper parses starts with `def f: ...;` (#3826)"
+        };
+        let def = Rc::new(FuncDefData::new(name, params, *body));
+        install_def_calls(&then, &def, 0, false)
+    }
+
+    // #3826: a zero-arity call is read as its body, so the verdict stage behind it is admitted,
+    // in jq mode only (ADR-0018).
+    #[test]
+    fn a_zero_arity_call_is_admitted_as_its_body_in_jq_mode_only() {
+        for src in [
+            "def f: any; f",
+            "def f: isempty(empty); f",
+            "def f: first(any(.[]?; .)); f",
+            "def f: any; f?",
+        ] {
+            let call = installed(src);
+            assert!(
+                stage_states_register_per_result::<JqSemantics>(&call),
+                "jq mode must admit `{src}`"
+            );
+            assert!(
+                !stage_states_register_per_result::<YqSemantics>(&call),
+                "yq mode must not admit `{src}`"
+            );
+        }
+    }
+
+    // The peel must not turn the predicate into a constant: a body that is not a verdict, and a
+    // call with an argument, are refused.
+    #[test]
+    fn a_call_over_another_body_or_with_an_argument_is_refused() {
+        for src in ["def f: .a; f", "def f: 1; f", "def f(g): any; f(.a)"] {
+            let call = installed(src);
+            assert!(
+                !stage_states_register_per_result::<JqSemantics>(&call),
+                "`{src}` must not be admitted"
+            );
+        }
+    }
+
+    // A chain of calls is followed up to the shared budget and no further: a chain longer than
+    // the budget is not seen through, and a call that is its own body ends.
+    #[test]
+    fn a_chain_of_calls_is_followed_up_to_the_budget() {
+        let chain = |links: u32| {
+            let mut src = String::from("def f0: any;");
+            for i in 1..=links {
+                src.push_str(&format!(" def f{i}: f{}; ", i - 1));
+            }
+            src.push_str(&format!("f{links}"));
+            parse(&src).unwrap()
+        };
+        // Bound by `bind_def` the way the evaluator does, so each link is a call.
+        let bound = |e: Expr| -> Expr {
+            let Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                bound,
+            } = e
+            else {
+                panic!("expected a def") // patchcov: coverage tolerate-line reason="unreachable in a passing suite: the chain source starts with a def (#3826)"
+            };
+            // The whole spine of defs is bound at once.
+            (*bind_def(&name, &params, &body, &then, &bound)).clone()
+        };
+        assert!(stage_states_register_per_result::<JqSemantics>(&bound(
+            chain(3)
+        )));
+        assert!(!stage_states_register_per_result::<JqSemantics>(&bound(
+            chain(DEF_CALL_SHAPE_BUDGET + 4)
+        )));
+        let looping = installed("def f: f; f");
+        assert!(!stage_states_register_per_result::<JqSemantics>(&looping));
     }
 }
 

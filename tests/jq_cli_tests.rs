@@ -69453,12 +69453,288 @@ fn test_foreach_over_the_register_binds_it_as_a_path_3790() -> Result<()> {
     ])
 }
 
+/// #3826: the verdict stage of #3758 behind a zero-arity `def` call and behind a `reduce`.
+/// `resolve_node_sink` resolves a call's bound body in place, so the body's leaf states the
+/// register and the call is read as its body is (`def f: any; f | $x` is `[]` as `any | $x` is,
+/// and a decided element that moved the register still raises). A `reduce` backtracks its source
+/// and `UPDATE` to the post-INIT register, so `reduce 1 as $i (.; any) | $x` is `[]` even on
+/// `{"a":true}`, where an `UPDATE` that iterates the accumulator after a source that moved the
+/// register (`reduce .[] as $i (.; any)`), or on its second pass (`reduce (1,2) ...`), still
+/// raises. A `def` that carries the stage onto an untracked entry keeps jq's answer. Every row
+/// captured from jq 1.7.1 (`/usr/bin/jq`), on the stdin and `-n` routes.
+#[test]
+fn test_verdict_stage_behind_a_def_or_reduce_3826() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: any; f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | def f: any; f | $x)",
+            "",
+            r#"Invalid path expression with result {"a":true}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: all; f | $x)",
+            "",
+            r#"Invalid path expression with result {"a":false}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: isempty(empty); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[false]",
+            r"path(. as $x | def f: isempty(.[]?); f | $x)",
+            "",
+            r"Invalid path expression with result [false]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | def f: isempty(.[]?); f | $x)",
+            "",
+            r"Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            r"[false]",
+            r"path(. as $x | def f: any(.[]?; .); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: any; def g: f; g | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | def f: any; def g: f; g | $x)",
+            "",
+            r#"Invalid path expression with result {"a":true}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: first(any); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: (any, any); f | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: (any, .a); f | $x)",
+            "[]\n",
+            r#"Invalid path expression with result {"a":false}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(. as $x | def f: any; f | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(. as $x | def f: any; f | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(. as $x | def f: any; f | $x) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | def f: any; f | $x)",
+            "",
+            r#"Invalid path expression with result {"a":true}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | 1 | def f: any; f | $x)",
+            "",
+            r"Invalid path expression near attempt to iterate through 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | def f: isempty(empty); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | def f: any(empty; .); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce 1 as $i (.; any) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; all) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce empty as $i (.; any) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; isempty(empty)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any(empty; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce (1,2) as $i (.; any) | $x)",
+            "",
+            r"Invalid path expression near attempt to iterate through false",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce .[] as $i (.; any) | $x)",
+            "",
+            r#"Invalid path expression near attempt to iterate through {"a":false}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce .[] as $i (.; isempty(empty)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce .[] as $i (.; any(.a)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to iterate through {"a":false}"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.a; any) | $x)",
+            "",
+            r"Cannot iterate over boolean (false)",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: reduce 1 as $i (.; any); f | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(. as $x | reduce 1 as $i (.; any) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(. as $x | reduce 1 as $i (.; any) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(. as $x | reduce 1 as $i (.; any) | $x) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | reduce empty as $i (.; any) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any(1 | .a)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 1"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any(.[]?)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #3749/#3757, what is still refused where jq answers, in the safe direction. A
-/// verdict stage behind a `def` call or a `reduce` is refused (a compound stage of them,
-/// `(any, any)` and `any // 1`, answers since #3644; the plain stage was lifted by #3758 and the
-/// untracked entry by #3826, see
-/// [`test_pipe_stage_reads_the_backtracked_register_verdict_3758`] and
-/// [`test_verdict_stage_on_an_untracked_entry_3826`]). And a
+/// verdict stage over an untracked entry's generator the allowlist cannot prove leaves the
+/// register in place (`1 | isempty(def f: 2; f)`) and a `def` call with an argument are refused (a compound stage of them,
+/// `(any, any)` and `any // 1`, answers since #3644; the plain stage was lifted by #3758, the
+/// untracked entry by #3826 and a `def` call or `reduce` of one by #3826 too, see
+/// [`test_pipe_stage_reads_the_backtracked_register_verdict_3758`],
+/// [`test_verdict_stage_on_an_untracked_entry_3826`] and
+/// [`test_verdict_stage_behind_a_def_or_reduce_3826`]). And a
 /// computed `true` that decides under a `cond` on an untracked entry
 /// (`.a and any(true; select(.))`, an `and` right operand) is ambiguous -- it
 /// may be the carried register, whose position is not known -- so jq's `["a"]`
@@ -69471,6 +69747,29 @@ fn test_foreach_over_the_register_binds_it_as_a_path_3790() -> Result<()> {
 #[test]
 fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
     for (input, filter, jq_answer, expected) in [
+        // #3826: a `def` whose body defines another is a `FuncDef` until bound, which the peel
+        // does not read.
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: def g: any; g; f | $x)",
+            "[]",
+            r#"Invalid path expression with result {"a":false}"#,
+        ),
+        // #3826: a `def` call with an argument binds code the admission cannot read.
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f(g): any; f(.a) | $x)",
+            "[]",
+            r#"Invalid path expression with result {"a":false}"#,
+        ),
+        // #3826: a `reduce` whose `UPDATE` is a verdict over a generator that navigates is not
+        // admitted (only the bare `any`/`all`, and a generator that moves nothing, are).
+        (
+            r"[false]",
+            r"path(. as $x | reduce 1 as $i (.; isempty(.[]?)) | $x)",
+            "[]",
+            r"Invalid path expression with result [false]",
+        ),
         // #3826: on an untracked entry a generator the allowlist cannot prove leaves the
         // register in place states a loss, which the stage does not override.
         (
@@ -69478,20 +69777,6 @@ fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
             r"path(. as $x | 1 | isempty(def f: 2; f) | $x)",
             "[]",
             r#"Invalid path expression with result {"a":1}"#,
-        ),
-        // #3758: a verdict stage the resolver cannot see as one: behind a `def`
-        // call or a `reduce`, which hand back no register statement.
-        (
-            r#"{"a":false}"#,
-            r"path(. as $x | def f: any; f | $x)",
-            "[]",
-            r#"Invalid path expression with result {"a":false}"#,
-        ),
-        (
-            r#"{"a":false}"#,
-            r"path(. as $x | reduce 1 as $i (.; any) | $x)",
-            "[]",
-            r#"Invalid path expression with result {"a":false}"#,
         ),
         (
             r#"{"a":true}"#,
