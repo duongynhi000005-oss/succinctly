@@ -64102,13 +64102,14 @@ fn test_nul_output_multi_file_aborts_at_first_failure_matching_yq_2002() -> Resu
         let (stdout, stderr, code) = run_yq_files(".a", &files, &["-0"])?;
         assert_eq!(code, 1, "{files:?}: stderr: {stderr:?}");
         assert_eq!(stdout, expected_stdout, "{files:?}");
-        assert_eq!(stderr.trim(), message, "{files:?}");
+        // The first line only: an `anyhow` error carries a backtrace under `RUST_BACKTRACE`.
+        assert_eq!(stderr.lines().next(), Some(message), "{files:?}");
     }
 
     // The single-file, multi-document spelling of the same run.
     let (stdout, stderr, code) =
         run_yq_stdin_with_stderr(".a", "a: good\n---\na: \"b\\0c\"\n---\na: good2\n", &["-0"])?;
     assert_eq!((code, stdout.as_str()), (1, "good\0"), "stderr: {stderr:?}");
-    assert_eq!(stderr.trim(), message);
+    assert_eq!(stderr.lines().next(), Some(message));
     Ok(())
 }
