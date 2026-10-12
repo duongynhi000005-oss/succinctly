@@ -60547,7 +60547,7 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
     } else {
         Untracked::Refuse
     };
-    let branches = match resolve_terminal::<S>(expr, input, false, untracked) {
+    let mut branches = match resolve_terminal::<S>(expr, input, false, untracked) {
         Ok(branches) => branches,
         Err((_prefix, escape)) => return Err(escape),
     };
@@ -60558,34 +60558,92 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
             DelPaths::Branches(branches)
         });
     }
-    // yq's `deleteChildOperator` walks its targets back to front and returns at the first
-    // one with no parent, keeping whatever it already deleted (#1865): the root, a literal,
-    // a constructor and a bound value all have none. So only the branches after the last
-    // parentless one are deleted, and if that one is the root itself the document goes.
-    if !branches.is_empty() && branches.iter().all(|b| !b.trackable) {
-        // Nothing tracked to delete: succinctly's "untracked" is wider than yq's "pathless"
-        // (`del(.b | tostring)` deletes `.b` in yq), so only a target that is a `null`/`true`/
-        // `false` identical to the input is known to delete nothing (#3207); any other refuses.
-        return match branches
+    if !branches.iter().any(|b| !b.trackable) {
+        // Nothing untracked: every branch has a path, and a root branch deletes the document.
+        return Ok(if branches.iter().any(|b| b.path.depth() == 0) {
+            DelPaths::Root
+        } else {
+            DelPaths::Branches(branches)
+        });
+    }
+    if del_target_shape(expr) == DelTargetShape::Other {
+        // succinctly's "untracked" is wider than yq's "pathless" (`del(.b | tostring)` deletes
+        // `.b` in yq, and so does a bound `$y`), so a target that is not plainly a path or a
+        // parentless value cannot be ordered: it refuses, as it always did -- unless every
+        // target is a `null`/`true`/`false` identical to the input, which deletes nothing
+        // (#3207).
+        let all_untracked = branches.iter().all(|b| !b.trackable);
+        let refused = branches
             .iter()
-            .find(|b| !null_bool_identical(&b.value, input))
-        {
-            Some(b) => Err(EvalError::invalid_path_expression(&b.value).into()),
-            None => Ok(DelPaths::Branches(Vec::new())),
+            .find(|b| !b.trackable && !null_bool_identical(&b.value, input))
+            .or_else(|| branches.iter().find(|b| !b.trackable));
+        return match refused {
+            Some(b) if !(all_untracked && null_bool_identical(&b.value, input)) => {
+                Err(EvalError::invalid_path_expression(&b.value).into())
+            }
+            _ => Ok(DelPaths::Branches(Vec::new())),
         };
     }
-    let mut kept = Vec::new();
-    for branch in branches.into_iter().rev() {
-        if !branch.trackable {
-            break;
-        }
-        if branch.path.depth() == 0 {
-            return Ok(DelPaths::Root);
-        }
-        kept.push(branch);
+    // yq's `deleteChildOperator` walks its targets back to front and returns at the first one
+    // with no parent, keeping whatever it already deleted (#1865): the root, a literal, a
+    // constructor and a bound value have none. So only the branches after the last parentless
+    // one are deleted, and if that one is the root itself the document goes.
+    match branches
+        .iter()
+        .rposition(|b| !b.trackable || b.path.depth() == 0)
+    {
+        None => Ok(DelPaths::Branches(branches)),
+        Some(at) if branches[at].trackable => Ok(DelPaths::Root),
+        Some(at) => Ok(DelPaths::Branches(branches.split_off(at + 1))),
     }
-    kept.reverse();
-    Ok(DelPaths::Branches(kept))
+}
+
+/// What yq's back-to-front `del()` loop (#1865) makes of one `del()` target, judged from its
+/// syntax alone because the resolved branch no longer says how it was produced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DelTargetShape {
+    /// Only navigates: every branch it yields has a path.
+    Navigation,
+    /// Yields values with no parent in yq: a literal, a constructor, or a pipe ending in one.
+    Parentless,
+    /// Anything else. A derived value (`.b | tostring`, `.b + 1`) or a bound variable can keep
+    /// its source's slot in yq, which succinctly's untracked branches cannot tell.
+    Other,
+}
+
+fn del_target_shape(expr: &Expr) -> DelTargetShape {
+    use DelTargetShape::{Navigation, Other, Parentless};
+    match expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::ArrayKey(_)
+        | Expr::Iterate
+        | Expr::IndexExpr { .. }
+        | Expr::SliceExpr { .. }
+        | Expr::RecursiveDescent
+        | Expr::RecursiveDescentWithKeys => Navigation,
+        Expr::Literal(_) | Expr::Array(_) | Expr::Object(_) => Parentless,
+        Expr::Optional(inner) | Expr::Paren(inner) => del_target_shape(inner),
+        Expr::Pipe(stages) => match stages.last().map(del_target_shape) {
+            Some(Parentless) => Parentless,
+            _ if stages.iter().all(|s| del_target_shape(s) == Navigation) => Navigation,
+            _ => Other,
+        },
+        Expr::Comma(branches) => {
+            let mut shape = Navigation;
+            for branch in branches {
+                match del_target_shape(branch) {
+                    Other => return Other,
+                    Parentless => shape = Parentless,
+                    Navigation => {}
+                }
+            }
+            shape
+        }
+        _ => Other,
+    }
 }
 
 /// Whether every output of a `del()` target is a bound variable's node and nothing else (#3244):
