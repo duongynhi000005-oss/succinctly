@@ -2335,8 +2335,13 @@ $ printf 'a: null\n' | succinctly yq -o=json '.a[].b = error("boom")'   # {"a":[
 
 Reaches every yq-mode assignment operator routed through this mechanism (`=`, `+=`, `-=`,
 `*=`, `/=`, `%=`, `//=`). A **terminal** `Iterate` (`.a[] = v`, the assignment target itself)
-is a different, still-open case neither this fix nor #1432's own covers — see
-[#1921](https://github.com/rust-works/succinctly/issues/1921). Plain `|=` doesn't share this
+is classified by what it would write into
+([#1921](https://github.com/rust-works/succinctly/issues/1921)): over an empty container, a
+scalar or `Null` the RHS is never read, as in yq, and over a non-empty one it still is. The
+comma form `(.a[], .b[]) = v` and a `select(...)` member (`(.a[] | select(. == 1)) = v`)
+take the dynamic-path route and are not covered
+([#4401](https://github.com/rust-works/succinctly/issues/4401)). An index past the end of an
+array, or into `null`, before the `Iterate` pads like yq (`.a[3][] = v` on `a: []`). Plain `|=` doesn't share this
 mechanism at all and turned out to have a separate, more severe divergence (a hard error
 instead of missing autovivification) — see
 [#1919](https://github.com/rust-works/succinctly/issues/1919).

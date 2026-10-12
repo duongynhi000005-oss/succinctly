@@ -33705,8 +33705,7 @@ fn test_yq_nonterminal_iterate_scalar_noop_discards_rhs_1298() -> Result<()> {
 ///
 /// Scoped to a *mid-chain* `Iterate` only (`.a[].b = v`, something after
 /// the `[]`) -- a *terminal* one (`.a[] = v`, the assignment target
-/// itself) is a different, still-open case this fix doesn't reach, filed
-/// separately as #1921.
+/// itself) is the separate case #1921 fixed.
 #[test]
 fn test_yq_nonterminal_iterate_null_target_skips_rhs_1298() -> Result<()> {
     let (out, err, code) =
@@ -33783,27 +33782,74 @@ fn test_yq_absent_field_terminal_write_still_evaluates_rhs_1857() -> Result<()> 
     Ok(())
 }
 
-/// #1921 (known gap, not fixed by #1857): a *terminal* `Iterate` -- the
-/// assignment target itself, no further path after it -- always evaluates
-/// the RHS, even over an already-empty container or `Null`. Real yq skips
-/// it (`.a[] = error("boom")` on `a: []`/`a: null` both stay/become `[]`,
-/// live-verified v4.53.3); succinctly still errors. Pinned here as a known
-/// divergence rather than silently left uncovered -- see #1921 for why
-/// this needs its own fix, not a #1857 extension (a terminal `Iterate`'s
-/// own semantics -- overwrite every real element regardless of type --
-/// genuinely differ from a mid-chain one's).
+/// #1921: a *terminal* `Iterate` -- the assignment target itself, no further path after it --
+/// writes into every element of its target, so it reads the RHS exactly when there is an
+/// element: over an empty container, a scalar or `Null` (which autovivifies to `[]`) real yq
+/// never runs the RHS (`resultsForRHS` evaluates it inside the per-candidate loop). Every row
+/// was captured from yq v4.53.3 with `error("boom")` as the RHS, so a wrongly eager evaluation
+/// shows as an exit code.
 #[test]
-fn test_yq_terminal_iterate_empty_or_null_target_still_evaluates_rhs_known_gap_1921() -> Result<()>
-{
-    let (_out, err, code) =
-        run_yq_stdin_with_stderr(".a[] = error(\"boom\")", "a: []\n", &["-o", "json"])?;
-    assert_ne!(code, 0);
-    assert!(err.contains("boom"), "err={err}");
-
-    let (_out, err, code) =
-        run_yq_stdin_with_stderr(".a[] = error(\"boom\")", "a: null\n", &["-o", "json"])?;
-    assert_ne!(code, 0);
-    assert!(err.contains("boom"), "err={err}");
+fn test_yq_terminal_iterate_with_nothing_to_write_skips_rhs_1921() -> Result<()> {
+    for (doc, filter, expected) in [
+        ("a: []\n", ".a[] = error(\"boom\")", "{\"a\":[]}"),
+        ("a: {}\n", ".a[] = error(\"boom\")", "{\"a\":{}}"),
+        ("a: null\n", ".a[] = error(\"boom\")", "{\"a\":[]}"),
+        ("null\n", ".[] = error(\"boom\")", "[]"),
+        ("a: [[]]\n", ".a[][] = error(\"boom\")", "{\"a\":[[]]}"),
+        ("a: [null]\n", ".a[][] = error(\"boom\")", "{\"a\":[[]]}"),
+        ("a: 5\n", ".a[] = error(\"boom\")", "{\"a\":5}"),
+        // Past the end of an array, or into `null`, yq pads and steps into the new slot.
+        ("a: []\n", ".a[0][] = error(\"boom\")", "{\"a\":[[]]}"),
+        (
+            "a: []\n",
+            ".a[3][] = error(\"boom\")",
+            "{\"a\":[null,null,null,[]]}",
+        ),
+        (
+            "a: null\n",
+            ".a[2][] = error(\"boom\")",
+            "{\"a\":[null,null,[]]}",
+        ),
+        ("a: []\n", ".a[] += error(\"boom\")", "{\"a\":[]}"),
+        ("a: []\n", ".a[] -= error(\"boom\")", "{\"a\":[]}"),
+        ("a: []\n", ".a[] *= error(\"boom\")", "{\"a\":[]}"),
+        ("a: null\n", ".a[] += error(\"boom\")", "{\"a\":[]}"),
+        // The RHS is read against the root, not the element.
+        ("a: [1, 2]\n", ".a[] = length", "{\"a\":[1,1]}"),
+        (
+            "k: 10\na: [1, 2]\n",
+            ".a[] += .k",
+            "{\"k\":10,\"a\":[11,12]}",
+        ),
+        ("a: [1, 2]\n", ".a[] = 99", "{\"a\":[99,99]}"),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (out.trim(), code),
+            (expected, 0),
+            "{filter} on {doc:?}: {err}"
+        );
+    }
+    // A non-empty target still needs the RHS.
+    for (doc, filter) in [
+        ("a: [1, 2]\n", ".a[] = error(\"boom\")"),
+        ("a: [1, 2]\n", ".a[] += error(\"boom\")"),
+        // One element with something to write into is enough, wherever it sits.
+        ("a: [[], [1]]\n", ".a[][] = error(\"boom\")"),
+        ("a: [[1], []]\n", ".a[][] = error(\"boom\")"),
+        ("a: {x: 1}\n", ".a[] = error(\"boom\")"),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!((out.as_str(), code), ("", 1), "{filter} on {doc:?}");
+        assert!(err.contains("boom"), "{filter}: {err}");
+    }
+    // A null *value* is still an element to overwrite.
+    let (out, _err, code) = run_yq_stdin_with_stderr(
+        ".a[] = error(\"boom\")",
+        "a: {x: null}\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!((out.as_str(), code), ("", 1));
     Ok(())
 }
 
@@ -33913,8 +33959,8 @@ fn test_yq_nonterminal_iterate_container_fanout_noop_1432() -> Result<()> {
 /// - a genuinely out-of-range `Index` step *autovivifies* the array out
 ///   to that length in real yq (writing `null` padding, then fanning the
 ///   `Iterate` into the newly-created empty tail -- no error, no RHS
-///   evaluation at all), where succinctly has no such padding and
-///   evaluates the RHS instead;
+///   evaluation at all); succinctly agrees since #1921, so that shape
+///   asserts yq's document below;
 /// - an `Index` step hitting a real `Object` coerces the index to a
 ///   string key and inserts it in real yq (`{"0": []}`), where
 ///   succinctly has no such coercion and raises. Since #2481 it raises
@@ -33951,13 +33997,13 @@ fn test_yq_assign_all_noop_mismatched_element_type_1432() -> Result<()> {
 
     // `Index` mid-prefix is out of range on a real `Array`, with an
     // `Index` still ahead of it in the prefix.
-    let (_out, err, code) = run_yq_stdin_with_stderr(
+    let (out, err, code) = run_yq_stdin_with_stderr(
         ".a[5][].b = error(\"boom\")",
         "a:\n  - 1\n  - 2\n",
-        &["-o", "json"],
+        &["-o=json", "-I=0"],
     )?;
-    assert_ne!(code, 0);
-    assert!(err.contains("boom"), "err={err}");
+    assert_eq!(code, 0, "err={err}");
+    assert_eq!(out.trim(), "{\"a\":[1,2,null,null,null,[]]}");
 
     // `Index` mid-prefix hits a genuine scalar -- permanently no-ops,
     // matching real yq exactly (#1232).
