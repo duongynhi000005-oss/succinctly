@@ -10742,9 +10742,10 @@ an order of magnitude cheaper than the walk this removes.
 | shape | behaviour | why |
 |---|---|---|
 | `path(.d)`, `.d \| key`, `.d \| parent`, `getpath(["d"])` | answer | never read `.a` |
+| `path(try .d)`, `path(try .d catch empty)` | answer | `E?`'s walk, since [#4412](https://github.com/rust-works/succinctly/issues/4412); `path(try .a[])` still raises, the value is read |
 | `path(.a)`, `getpath(["a"])` | answer, echoing raw bytes like `.a` | naming a position is not reading it |
 | `getpath(["a"]) \| length`, `path(.a[])`, `.a[] \| key` | raise | the value is read |
-| `path(if . then .d else null end)`, `path(.d \| select(true))`, `path(.. \| .a?)` | raise | not cursor-navigable; the fallback materializes, and validates all of it |
+| `path(if . then .d else null end)`, `path(.d \| select(true))`, `path(.. \| .a?)`, `path(first(.d))` | raise | not cursor-navigable; the fallback materializes, and validates all of it |
 | `path(..)`, `path(recurse)` | raise | the walk reads every node, as `.. \| path` does (#3850) |
 | `select(f)`, `sort_by(f)`, `unique_by(f)`, `min_by(f)`, `max_by(f)` | raise | the subtree walked *is* the value tested or emitted |
 | `to_entries`, `map_values(f)`, `. as $x`, `.a \|= 1`, `[.[]]` | raise | materialize |
@@ -10774,6 +10775,7 @@ applies decNumber's notation rule, as jq does, so both routes print `1E-301`.
 
 Pinned by `test_lazy_validation_boundary_2168` (the table above, as one test),
 `test_path_answers_past_an_undecodable_sibling_2168`,
+`test_path_try_answers_past_an_undecodable_sibling_4412`,
 `test_path_answers_past_a_colliding_key_2168`,
 `test_path_answers_past_a_structural_fault_it_never_reads_2168`,
 `test_getpath_touches_only_the_nodes_it_navigates_2168`,
