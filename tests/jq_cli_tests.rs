@@ -294,6 +294,22 @@ fn test_pick_pathexps_cli_errors_3026() -> Result<()> {
     Ok(())
 }
 
+/// #2514's jq-mode control: a numeric index written on an object stays jq's
+/// `Cannot index object with number` (exit 5) -- only yq mode addresses the key
+/// spelled from the number.
+#[test]
+fn test_jq_numeric_index_write_on_an_object_still_errors_2514() -> Result<()> {
+    for filter in [".a[0] = 1", ".a[-1] |= 5", "del(.a[0])"] {
+        let (stdout, stderr, code) = run_jq_stdin_streams(filter, r#"{"a":{"p":1}}"#, &["-c"])?;
+        assert_eq!(code, 5, "`{filter}` -- stdout: {stdout:?}");
+        assert!(
+            stderr.contains("Cannot index object with number"),
+            "`{filter}` -- stderr: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3025: a reindexed value must keep the source number seen by native reads.
 /// Expectations were captured from /usr/bin/jq 1.7.1-apple.
 #[test]
