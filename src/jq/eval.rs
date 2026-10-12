@@ -47823,8 +47823,9 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // #4059: stages that cannot have moved the register ahead of the last one leave it where
         // it entered, so the last stage's statements are read as they would be alone
         // (`1 | (not, ($v|.b?))`, whose comma states the register per sibling; #4063:
-        // `. | .b?`, `(1, 2) | .`, whose last stage is a leaf). A head that may navigate keeps
-        // the pipe as opaque as it was.
+        // `. | .b?`, `(1, 2) | .`, whose last stage is a leaf; #4123: a trailing `.` or `select(f)` is
+        // dropped first, even after a seed producer). A head that may navigate keeps the pipe as
+        // opaque as it was.
         Expr::Pipe(stages) if stages.len() > 1 && pipe_forwards_last_statement(stages) => {
             entry_marker_pipe_shape(stages, calls)
         }
@@ -47851,7 +47852,7 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
 /// #4059, #4063): the stages ahead of it cannot have moved the register, after dropping the
 /// trailing `.` stages that only forward the statement of the one before them.
 fn pipe_forwards_last_statement(stages: &[Expr]) -> bool {
-    let stages = pipe_without_trailing_identity(stages);
+    let stages = pipe_without_trailing_forwarders(stages);
     stages.len() == 1
         || stages[..stages.len() - 1]
             .iter()
@@ -47860,21 +47861,25 @@ fn pipe_forwards_last_statement(stages: &[Expr]) -> bool {
 
 /// [`entry_marker_shape`] of a pipe that [`pipe_forwards_last_statement`] holds for.
 fn entry_marker_pipe_shape(stages: &[Expr], calls: &core::cell::Cell<u32>) -> EntryMarkers {
-    let stages = pipe_without_trailing_identity(stages);
+    let stages = pipe_without_trailing_forwarders(stages);
     entry_marker_shape_in(&stages[stages.len() - 1], calls)
 }
 
-/// `stages` without the `.` stages at its end (never emptying it): a stage that cannot move the
-/// register leaves the statement it received as it was (`(X) | .` states what `X` states). Not
-/// after a stage that is itself a seed producer (`.. | .`, `. | .`): a pipe re-seeds, and its
-/// inner stage reads that statement, not the one outside it.
-fn pipe_without_trailing_identity(stages: &[Expr]) -> &[Expr] {
+/// `stages` without the `.` and `select(f)` forwarder stages at its end (never emptying it): a stage that
+/// cannot move the register leaves the statement it received as it was (`(X) | .` and `(X) |
+/// select(f)` state what `X` states; `f` is a subexp, and `select` hands its input through as the
+/// very node it received, #3653). Also after a stage that is itself a seed producer (`.. | .`,
+/// `.. | select(true)`, #4123): the producer's statement is relative to the register the pipe
+/// entered, which is the one the stage after the forwarder reads.
+fn pipe_without_trailing_forwarders(stages: &[Expr]) -> &[Expr] {
     let mut end = stages.len();
-    while end > 1 && matches!(unwrap_paren(&stages[end - 1]), Expr::Identity) {
+    while end > 1
+        && matches!(
+            unwrap_paren(&stages[end - 1]),
+            Expr::Identity | Expr::Builtin(Builtin::Select(_))
+        )
+    {
         end -= 1;
-    }
-    if end < stages.len() && is_entry_marker_producer(unwrap_paren(&stages[end - 1])) {
-        return stages;
     }
     &stages[..end]
 }
@@ -129119,22 +129124,25 @@ mod tests {
             "((.a | .b), $x)",
             "(.a, first($x))",
             "(1, 2)",
+            // #4123: a pipe whose last stages only hand a statement on (`.`, `select(f)`) states
+            // what the producer ahead of them does.
+            ".. | .",
+            "(.. | select(true))",
+            "recurse(.a) | .",
+            ".. | select(.a?) | .",
+            // ...and a bind forwards its body, a pipe there included (#3892, #4123).
+            ". as $v | .. | .",
         ] {
             assert!(jq(filter), "{filter}");
         }
         for filter in [
-            // A pipe re-seeds: its inner stage reads the statement, not this one.
-            ".. | .",
-            "(.. | select(true))",
-            "recurse(.a) | .",
             // A container, a bind, a call and a fold are not forwarders.
             "[..]",
             "{a: ..}",
             ". as {a: $q} | ..",
             ". as [$q] | ..",
             "def f: ..; f",
-            // #3892: a bind forwards only its body, and a pipe there re-seeds.
-            ". as $v | .. | .",
+            // #3892: a bind forwards only its body.
             ". as $v | [..]",
             "reduce .. as $i (0; .)",
             "foreach .. as $i (0; .)",
@@ -129168,7 +129176,11 @@ mod tests {
         let shared = |filter: &str| Expr::Shared(Rc::new(SharedArg::new(parse(filter).unwrap())));
         assert!(entry_marker_stage::<JqSemantics>(&shared(".."), false));
         assert!(!entry_marker_stage::<JqSemantics>(&shared("1"), false));
-        assert!(!entry_marker_stage::<JqSemantics>(&shared(".. | ."), false));
+        assert!(entry_marker_stage::<JqSemantics>(&shared(".. | ."), false));
+        assert!(!entry_marker_stage::<JqSemantics>(
+            &shared(".. | .a"),
+            false
+        ));
         // A trackable branch is its own register, so there is nothing to carry.
         let recursion = parse("..").unwrap();
         assert!(!entry_marker_stage::<JqSemantics>(&recursion, true));
@@ -141433,7 +141445,7 @@ mod neutral_leaves_register_tests_4028 {
     }
 
     // #4059, #4063: a pipe reads its last stage's register statements when every stage ahead
-    // of it is neutral, after dropping the trailing `.` stages that only forward the statement of
+    // of it is neutral, after dropping the trailing `.` and `select(f)` stages that only forward the statement of
     // the one before them; behind a head that may navigate it is classified as it always was.
     #[test]
     fn a_pipe_reads_its_last_stage_behind_neutral_heads() {
@@ -141457,8 +141469,10 @@ mod neutral_leaves_register_tests_4028 {
             (".a | .", "none"),
             ("(.a, .b) | .", "none"),
             (". | .b? | tostring", "opaque"),
-            // A seed producer ahead of a trailing `.` re-seeds and stays opaque.
-            (".. | .", "opaque"),
+            // #4123: a trailing `.` or `select(f)` after a seed producer forwards its statement.
+            (".. | .", "forwarded"),
+            (".. | select(true)", "forwarded"),
+            (". | select(.a?) | .", "forwarded"),
         ] {
             assert_eq!(marker_shape(src), shape, "entry_marker_shape({src})");
         }
@@ -141496,8 +141510,9 @@ mod neutral_leaves_register_tests_4028 {
             ("def f: if false then .. else 1 end; f", "forwarded"),
             ("def f: 1; f", "none"),
             ("def f: .a; f", "none"),
-            // A pipe in the body re-seeds, exactly as it would written in place.
-            ("def f: .. | .; f", "opaque"),
+            // A pipe in the body reads as it would written in place (#4123).
+            ("def f: .. | .; f", "forwarded"),
+            ("def f: .. | .a; f", "opaque"),
             ("def f: [..]; f", "opaque"),
             // A call with an argument binds code the shape cannot see.
             ("def f(a): ..; f(1)", "opaque"),
