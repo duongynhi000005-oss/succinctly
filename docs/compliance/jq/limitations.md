@@ -1060,7 +1060,9 @@ the one element the field steps read), so a malformed value elsewhere in the ran
 
 Since [#4323](https://github.com/rust-works/succinctly/issues/4323) the same holds for a
 literal-bounded slice (`.[2:][0]`, `.[:-2][-1]`, `.[2:] | length`, `first`, `last` and `.[2:][$k]`,
-also behind navigation in the same postfix chain, `.a[2:][0]`). It used to validate the whole array
+also behind navigation, `.a[2:][0]`, and, since [#4406](https://github.com/rust-works/succinctly/issues/4406),
+`.a[2:] | length`, `| first`, `| last`, `| .[k]` and `.a[2:][$k]`, where the navigated slice is a stage of
+its own). It used to validate the whole array
 on every read, which cost O(length) per read: 7.9 s for 4,000 reads of a 4,000-element array on an
 M4 Pro, against 7 ms for the computed form.
 
@@ -1081,10 +1083,11 @@ The unfused spellings above are what a read of the whole slice does, and they st
 every element. The cost of the other choice is the point of the fusion: validating the range
 means touching all of it, which is the O(tail) per read that made a loop over `.[$i:][0]`
 quadratic. Pinned by `test_fused_slice_read_does_not_convert_siblings_4195` and, for a literal
-slice, `test_fused_literal_slice_read_does_not_convert_siblings_4323`. A bare `.[a:b]` with no read is
-not fused and still validates its whole range, as does the unfused `(.[a:b])[k]`. So does a read
-after a navigated literal slice that is a separate pipe stage (`.a[2:] | length`, `.a[2:] | first`),
-which stays O(tail) per read (the spelling `.a | .[2:] | length` is fused). The last row shows
+slice, `test_fused_literal_slice_read_does_not_convert_siblings_4323` (behind navigation,
+`test_fused_navigated_literal_slice_read_does_not_convert_siblings_4406`). A bare `.[a:b]` with no
+read is not fused and still validates its whole range, as does the unfused `(.[a:b])[k]`. So does a
+parenthesised navigated slice (`(.a[2:]) | length`), and a slice behind a path step that could fan
+out or fail quietly (`.a[]?[2:] | length`, `.a?[2:] | length`), which stay O(tail) per read. The last row shows
 the reach: the unfused literal slice validates the whole *array*, so a malformed element outside the
 range raises there too, and the fused read never looks at it.
 

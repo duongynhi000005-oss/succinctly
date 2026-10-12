@@ -126819,6 +126819,207 @@ fn test_fused_literal_slice_read_does_not_convert_siblings_4323() -> Result<()> 
     Ok(())
 }
 
+/// #4406: a literal-bounded slice behind navigation, read by a *separate* pipe stage
+/// (`.a[2:] | length`), is fused like `.a[2:][0]` and `.a | .[2:] | length`, and must answer what
+/// the unfused spelling `(.a[2:]) | length` does -- values, errors and exit codes alike -- on every
+/// document shape, bound and read, behind one and two path steps and under a `?`.
+#[test]
+fn test_fused_navigated_literal_slice_read_equals_the_unfused_spelling_4406() -> Result<()> {
+    let docs = [
+        r#"{"a":[]}"#,
+        r#"{"a":[1,2,3,4,5,6,7]}"#,
+        r#"{"a":[null,false,{"a":1},"s",[],[2,3]]}"#,
+        r#"{"a":null}"#,
+        r#"{"a":"hello"}"#,
+        r#"{"a":{"b":[1,2,3]}}"#,
+        "[1,2,3]",
+    ];
+    let bounds = [
+        "1:", ":2", ":-2", "-2:", "1:3", "3:1", "9:", "-9:", ":", "1.5:",
+    ];
+    let reads = [
+        (" | .[0]", "| .[0]"),
+        (" | .[-1]", "| .[-1]"),
+        (" | .[7]", "| .[7]"),
+        (" | length", "| length"),
+        (" | .[0] | tostring", "| .[0] | tostring"),
+        (" | first", "| first"),
+        (" | last", "| last"),
+        (" | .[0]?", "| .[0]?"),
+        (" | length?", "| length?"),
+        ("[1]", "| .[1]"),
+        // a computed index over the navigated literal slice
+        ("[$i]", "| .[$i]"),
+        ("[$neg]", "| .[$neg]"),
+        ("[$s]", "| .[$s]"),
+        ("[$z]", "| .[$z]"),
+    ];
+    for doc in docs {
+        for bound in bounds {
+            for (fused_read, unfused_read) in reads {
+                // a `?` on the slice itself, which the fusion looks through, on the first bound
+                for (fused, unfused) in [
+                    (
+                        format!("{SLICE_READ_PRELUDE}.a[{bound}]{fused_read}"),
+                        format!("{SLICE_READ_PRELUDE}(.a[{bound}]) {unfused_read}"),
+                    ),
+                    (
+                        format!("{SLICE_READ_PRELUDE}.a[{bound}]?{fused_read}"),
+                        format!("{SLICE_READ_PRELUDE}(.a[{bound}]?) {unfused_read}"),
+                    ),
+                ]
+                .into_iter()
+                .take(if bound.starts_with("1:") { 2 } else { 1 })
+                {
+                    assert_eq!(
+                        run_jq_stdin(&fused, doc, &["-c"])?,
+                        run_jq_stdin(&unfused, doc, &["-c"])?,
+                        "{doc}: {fused}"
+                    );
+                }
+            }
+        }
+    }
+    // two path steps in front of the slice
+    for doc in [
+        r#"{"a":{"b":[1,2,3,4]}}"#,
+        r#"{"a":{"b":"xyz"}}"#,
+        r#"{"a":[1]}"#,
+    ] {
+        for bound in ["1:", ":-1", "9:"] {
+            for (fused_read, unfused_read) in &reads[..9] {
+                let fused = format!("{SLICE_READ_PRELUDE}.a.b[{bound}]{fused_read}");
+                let unfused = format!("{SLICE_READ_PRELUDE}(.a.b[{bound}]) {unfused_read}");
+                assert_eq!(
+                    run_jq_stdin(&fused, doc, &["-c"])?,
+                    run_jq_stdin(&unfused, doc, &["-c"])?,
+                    "{doc}: {fused}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #4406: the fused navigated read's values, from jq 1.7.1, through the top of a filter, the sink
+/// driver (a `map` body, `.[]`) and a path with an element index in it.
+#[test]
+fn test_fused_navigated_literal_slice_read_values_4406() -> Result<()> {
+    let doc = r#"{"a":[1,2,3,4,5,6,7],"b":{"c":[[9,8,7],[6,5]]}}"#;
+    for (filter, expected) in [
+        (".a[5:] | length", "2\n"),
+        (".a[5:] | first", "6\n"),
+        (".a[5:] | last", "7\n"),
+        (".a[5:] | .[1]", "7\n"),
+        (".a[5:] | .[-3]", "null\n"),
+        (".a[9:] | length", "0\n"),
+        (".a[9:] | first", "null\n"),
+        (".a[:-2] | last", "5\n"),
+        (".a[5:]? | length", "2\n"),
+        (".a[5:] | length?", "2\n"),
+        (".b.c[0][1:] | length", "2\n"),
+        (".b.c[1][1:] | first", "5\n"),
+        ("1 as $k | .a[5:][$k]", "7\n"),
+        ("(-1) as $k | .a[2:][$k]", "7\n"),
+        ("[(.a[3:] | length), .a[3:][0]]", "[4,4]\n"),
+        (".a[3:] | first | . * 10", "40\n"),
+        ("[range(3) as $i | .a[$i:] | length]", "[7,6,5]\n"),
+        ("[range(3) as $i | .a[2:] | .[$i]]", "[3,4,5]\n"),
+        ("[.b.c[] | .[1:] | length]", "[2,1]\n"),
+        ("[.b.c[] | .[1:][0]]", "[8,5]\n"),
+        ("[.b | .c[1:] | length]", "[1]\n"),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (expected.to_string(), 0),
+            "{filter}"
+        );
+    }
+    // A string, null or object target is answered by the ordinary route, whose answers are jq's.
+    for (filter, doc, expected) in [
+        (".a[2:] | length", r#"{"a":"abcdef"}"#, "4\n"),
+        (".a[2:] | length", r#"{"a":null}"#, "0\n"),
+        (".a[2:] | first", r#"{"a":null}"#, "null\n"),
+        (".a[2:] | length", r"{}", "0\n"),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (expected.to_string(), 0),
+            "{doc}: {filter}"
+        );
+    }
+    Ok(())
+}
+
+/// #4406: pins that the navigated fusion runs, and the one thing it changes (as #4323 does for the
+/// head form): the read names one element, so a malformed element elsewhere in the range is not
+/// converted, while the unfused spelling builds the whole slice and still raises. Must be able to
+/// fail: if the pair stopped fusing, the first rows would raise.
+#[test]
+fn test_fused_navigated_literal_slice_read_does_not_convert_siblings_4406() -> Result<()> {
+    let doc = r#"{"a":[1,1.2.3,3]}"#;
+    for (filter, expected) in [
+        (".a[0:3] | .[0]", "1\n"),
+        (".a[0:] | length", "3\n"),
+        (".a[0:] | first", "1\n"),
+        (".a[0:] | last", "3\n"),
+        ("0 as $k | .a[0:][$k]", "1\n"),
+        ("[.a[0:] | length]", "[3]\n"),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (expected.to_string(), 0),
+            "{filter}"
+        );
+    }
+    // The sink driver as well as the top of a filter.
+    assert_eq!(
+        run_jq_stdin(
+            "map(.a[0:] | length)",
+            r#"[{"a":[1,1.2.3,3]},{"a":[4,5]}]"#,
+            &["-c"]
+        )?,
+        ("[3,2]\n".to_string(), 0)
+    );
+    // The element the read names is converted, so its own malformation still raises, and the
+    // unfused spelling converts the whole range.
+    for filter in [".a[0:] | .[1]", "(.a[0:]) | .[0]", "(.a[0:3]) | length"] {
+        let (stdout, code) = run_jq_stdin(filter, doc, &["-c"])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+    }
+    Ok(())
+}
+
+/// #4406: a loop over a navigated literal slice read by a separate stage must not rebuild the slice
+/// on every read. 6,000 reads of a 6,000-element array took about 18 s when each one converted the
+/// whole tail, against well under a second fused.
+#[test]
+fn test_fused_navigated_literal_slice_read_is_not_quadratic_4406() -> Result<()> {
+    let doc = format!(
+        r#"{{"a":[{}]}}"#,
+        (0..6000)
+            .map(|i| format!(r#"{{"a":{{"b":{i}}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for filter in [
+        "[range(6000) as $i | .a[2:] | length] | length",
+        "[range(6000) as $i | .a[2:] | first | .a.b] | length",
+        "[range(6000) as $i | .a[2:] | last | .a.b] | length",
+        "[range(6000) as $i | .a[2:][$i] | .a.b] | length",
+    ] {
+        let started = std::time::Instant::now();
+        let (stdout, code) = run_jq_stdin(filter, &doc, &["-c"])?;
+        let elapsed = started.elapsed();
+        assert_eq!((stdout.as_str(), code), ("6000\n", 0), "{filter}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "{filter} took {elapsed:?}: the loop is quadratic again"
+        );
+    }
+    Ok(())
+}
+
 /// #4260: splitting an empty string has no pieces, and an empty separator yields the characters
 /// alone -- `"" | split(",")` is `[]`, `"abc" / ""` is `["a","b","c"]`. Every row was captured from
 /// `/usr/bin/jq` 1.7.1 (yq v4.53.3 agrees on all of them; see `yq_cli_tests.rs`).
