@@ -54048,8 +54048,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         // register's own seeding (`enter`) is the `acc == reg.value` case,
         // which is a genuine navigation to the register's own path.
         let mut acc_at_register = init_branch.trackable;
-        // #4131: whether a step resolved UPDATE against the live `null`/boolean register
-        // ([`FoldRegister::trackable_at_live_null_bool`]); read by the final emission.
+        // #4131: whether the latest step resolved UPDATE against the live `null`/boolean
+        // register ([`FoldRegister::trackable_at_live_null_bool`]); read by the final emission.
         let mut navigated_live_register = false;
         // #2896: the accumulator's own position — see `resolve_foreach`'s
         // identical seeding and [`accumulator_provenance`]. `reduce`'s own
@@ -54228,7 +54228,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // accumulator equal to that register is on it by kind, so a navigating
                         // UPDATE passes `path_intact` in jq. Only the step's input is widened:
                         // `acc_at_register`, which the final emission reads, is untouched.
-                        let live_step_reg = update_navigates
+                        let live_step_reg = (update_navigates && is_null_or_bool(acc_effective))
                             .then(|| reg.trackable_at_live_null_bool())
                             .flatten()
                             .filter(|live| null_bool_identical(acc_effective, &live.value));
@@ -54255,7 +54255,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
                         let step_reg = live_step_reg.as_ref().filter(|_| update_at_register);
-                        navigated_live_register |= step_reg.is_some();
+                        navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
                             &substituted,
                             acc_input,
