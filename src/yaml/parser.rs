@@ -5909,8 +5909,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
             // #2279: a leading `,` (`[,1]`, and `[,]`'s first pass) is an
             // element YAML reads as an empty scalar and JSON has no spelling
-            // for at all.
-            if first && self.json_strict && self.peek() == Some(b',') {
+            // for at all. Real yq (go-yaml) rejects it for YAML input too --
+            // `,` cannot start a flow node (#2886) -- so this is not gated on
+            // `json_strict`.
+            if first && self.peek() == Some(b',') {
                 return Err(
                     self.err_unexpected_char(self.pos, "expected value or ']' in flow sequence")
                 );
@@ -5927,8 +5929,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.advance(); // Skip `,`
                 self.skip_flow_whitespace();
 
-                // #2279: `[1,,2]` -- a second `,` where an element belongs.
-                if self.json_strict && self.peek() == Some(b',') {
+                // #2279: `[1,,2]` -- a second `,` where an element belongs
+                // (#2886: in YAML input too, as in go-yaml).
+                if self.peek() == Some(b',') {
                     return Err(
                         self.err_unexpected_char(self.pos, "expected value in flow sequence")
                     );
@@ -6237,6 +6240,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 });
             }
 
+            // #2886: `,` cannot start a flow node, so `{,}` / `{,a: 1}` have no
+            // entry for it to separate; go-yaml (real yq) rejects them, where
+            // this used to read an empty-string key with a null value.
+            if first && self.peek() == Some(b',') {
+                return Err(self.err_unexpected_char(self.pos, "expected key in flow mapping"));
+            }
+
             if !first {
                 // Expect comma
                 if self.peek() != Some(b',') {
@@ -6246,6 +6256,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 }
                 self.advance(); // Skip `,`
                 self.skip_flow_whitespace();
+
+                // `{a: 1,,b: 2}` -- a second `,` where an entry belongs.
+                if self.peek() == Some(b',') {
+                    return Err(self.err_unexpected_char(self.pos, "expected key in flow mapping"));
+                }
 
                 // Allow trailing comma
                 if self.peek() == Some(b'}') {
@@ -9002,6 +9017,48 @@ mod tests {
             result.is_ok(),
             "quoted key mapping should parse: {result:?}"
         );
+    }
+
+    /// #2886: `,` cannot start a flow node, so a flow collection with a stray
+    /// comma (no entry before it) is an error in YAML input, as in go-yaml
+    /// (`did not find expected node content`) -- not an empty-string key or a
+    /// null element. A trailing comma stays legal.
+    #[test]
+    fn test_flow_stray_comma_rejected_2886() {
+        for yaml in [
+            "{,}",
+            "{,a: 1}",
+            "{a: 1,,b: 2}",
+            "{a: 1, , }",
+            "x: {,}",
+            "[,]",
+            "[,1]",
+            "[1,,2]",
+            "[1, , ]",
+            "x: [,]",
+            "- {a: [,]}",
+        ] {
+            assert!(
+                build_semi_index(yaml.as_bytes()).is_err(),
+                "{yaml:?} should be rejected"
+            );
+        }
+        for yaml in [
+            "{a: 1,}",
+            "{a: 1, b: 2,}",
+            "[1,]",
+            "[1, 2, ]",
+            "{}",
+            "[]",
+            "{a, b}",
+            "[a, b]",
+            "{ a: 1 , b: 2 }",
+        ] {
+            assert!(
+                build_semi_index(yaml.as_bytes()).is_ok(),
+                "{yaml:?} should still parse"
+            );
+        }
     }
 
     #[test]
