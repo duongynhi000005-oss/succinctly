@@ -67012,14 +67012,14 @@ fn test_fold_steps_from_known_untracked_register_4049() -> Result<()> {
             r#"Invalid path expression near attempt to access element "a" of null"#,
             5,
         ),
-        // Recorded residual (safe direction): jq answers `["a"]`; an `UPDATE` that navigates the
-        // accumulator is not followed on an untracked entry.
+        // The residual this row used to record is #4131: an `UPDATE` that navigates the
+        // accumulator is followed on an untracked entry whose register is `null`.
         (
             r#"{"a":null}"#,
             r"path(.a | 5 | reduce null as {a:$q} (null; .b))",
+            "[\"a\"]\n",
             "",
-            r#"Invalid path expression near attempt to access element "b" of null"#,
-            5,
+            0,
         ),
         // The `foreach` twin (#4130): the bare `$a` alternative reached after the destructure
         // failed leaves jq's register at the entry, so the `and` result is the register.
@@ -67027,6 +67027,162 @@ fn test_fold_steps_from_known_untracked_register_4049() -> Result<()> {
             r#"{"a":true}"#,
             r"del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))",
             "{}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4131: a `reduce` on an untracked entry whose stage carries a `null`/boolean register
+/// follows an `UPDATE` that navigates the accumulator. `null` and the booleans are
+/// `jv_identical` to an equal one by kind, so an accumulator holding one is on the register
+/// and jq's `path_intact` passes: `path(.a | 5 | reduce null as {a:$q} (null; .b))` on
+/// `{"a":null}` is `["a"]`, where it refused at `.b` ("of null"). A boolean accumulator
+/// passes the path check and then raises jq's own value error. Contrasts that still refuse as
+/// jq does: a register that is not `null`/boolean (a pointer identity this model cannot
+/// compare), an accumulator that is not the register (`1`, a constructed object), and a
+/// navigation that follows a non-register output. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_reduce_update_navigates_accumulator_on_untracked_null_register_4131() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce null as {a:$q} (null; .b))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce null as $q (null; .b))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // More than one step, and a navigation more than one key deep.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; .b.c))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; .b | .c))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r"path(.[0] | 5 | reduce null as [$q] (null; .[0]))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // The last output is the accumulator, or a navigation that is not.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; (.b, .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; (5, .b)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // The write side lands on the register, and a later stage navigates from it.
+        (
+            r#"{"a":null}"#,
+            r"del(.a | 5 | reduce (1,2) as $q (null; .b))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a | 5 | reduce (1,2) as $q (null; .b)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce null as {a:$q} (null; .b) | .e)",
+            "[\"a\",\"e\"]\n",
+            "",
+            0,
+        ),
+        // A boolean register: the step is intact and `jv_get` raises on the boolean.
+        (
+            r#"{"a":true}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (true; .b))",
+            "",
+            r#"Cannot index boolean with string "b""#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; .b))",
+            "",
+            r#"Cannot index boolean with string "b""#,
+            5,
+        ),
+        // Controls. The register is `1`, not `null`: the accumulator is not on it.
+        (
+            r#"{"a":1}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; .b))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of null"#,
+            5,
+        ),
+        // The accumulator is `1` when `.b` runs, whichever step makes it so.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; 1 | .b))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of 1"#,
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2,3) as $q (null; (.b, 5)))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of 5"#,
+            5,
+        ),
+        // A source that navigates moves the register off the entry.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce .b as $q (null; .b))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of 5"#,
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(.a | 5 | reduce {"b":1} as {b:$q} (null; .b))"#,
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        // `UPDATE` shapes whose result is not a bare navigation.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; first(.b)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; .b // .c))",
+            "[\"a\"]\n",
             "",
             0,
         ),

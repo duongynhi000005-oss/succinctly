@@ -48367,6 +48367,27 @@ impl FoldRegister {
         }
     }
 
+    /// #4131: this untracked register as a *trackable* one at the fold's root, when the stage
+    /// carries its live value ([`FoldRegister::live_register`]) and that value is `null` or a
+    /// boolean. Those are `jv_identical` to any equal `null`/boolean by kind
+    /// ([`null_bool_identical`]), so an accumulator holding one is on the register wherever it
+    /// came from and a navigation of it passes `path_intact`; resolving `UPDATE` against this
+    /// register lets that navigation through. `reduce` reads only the provenance of what
+    /// `UPDATE` yields and discards its paths, so nothing resolved here reaches the stage as a
+    /// position. `None` for any other untracked register, whose identity is a pointer this
+    /// model cannot compare.
+    fn trackable_at_live_null_bool(&self) -> Option<Self> {
+        self.live_register()
+            .filter(|live| is_null_or_bool(live))
+            .map(|live| Self {
+                path: Rc::clone(&self.path),
+                value: live.clone(),
+                trackable: true,
+                frame: self.frame.clone(),
+                live_register_known: false,
+            })
+    }
+
     /// Seed the register from one INIT branch (one INIT fork) and the
     /// accumulator's own starting value (always INIT's own computed
     /// value, regardless of whether it was itself trackable).
@@ -54027,6 +54048,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         // register's own seeding (`enter`) is the `acc == reg.value` case,
         // which is a genuine navigation to the register's own path.
         let mut acc_at_register = init_branch.trackable;
+        // #4131: whether a step resolved UPDATE against the live `null`/boolean register
+        // ([`FoldRegister::trackable_at_live_null_bool`]); read by the final emission.
+        let mut navigated_live_register = false;
         // #2896: the accumulator's own position — see `resolve_foreach`'s
         // identical seeding and [`accumulator_provenance`]. `reduce`'s own
         // final re-entry check still refuses whatever this admits inside
@@ -54199,6 +54223,15 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 &acc_snapshot,
                                 S::TAG == EvalTag::Jq,
                             );
+                        // #4131: an untracked entry whose stage carries a `null`/boolean
+                        // register has no path to navigate the accumulator along, but an
+                        // accumulator equal to that register is on it by kind, so a navigating
+                        // UPDATE passes `path_intact` in jq. Only the step's input is widened:
+                        // `acc_at_register`, which the final emission reads, is untouched.
+                        let live_step_reg = update_navigates
+                            .then(|| reg.trackable_at_live_null_bool())
+                            .flatten()
+                            .filter(|live| null_bool_identical(acc_effective, &live.value));
                         // #3780: see [`reduce_update_at_register`].
                         let update_at_register = reduce_update_at_register::<S>(
                             update_navigates,
@@ -54208,7 +54241,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             frame,
                             acc_effective,
                             &acc_snapshot,
-                            acc_at_register,
+                            acc_at_register || live_step_reg.is_some(),
                         );
                         let acc_input = acc.take().unwrap_or(OwnedValue::Null);
                         if let Some(control) =
@@ -54218,9 +54251,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             return Demand::Stop;
                         }
                         let _acc_is_register = ((keeps_accumulator || try_update_on_register)
-                            && update_at_register)
-                            .then(fold_body::acc_is_register);
-                        match reg.resolve::<S>(
+                            && update_at_register
+                            && live_step_reg.is_none())
+                        .then(fold_body::acc_is_register);
+                        let step_reg = live_step_reg.as_ref().filter(|_| update_at_register);
+                        navigated_live_register |= step_reg.is_some();
+                        match step_reg.unwrap_or(&reg).resolve::<S>(
                             &substituted,
                             acc_input,
                             update_at_register,
@@ -54328,6 +54364,17 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         // by `reg.path` exactly once — rather than absolute, which
         // would prepend `reg.path` a second time.
         let acc = acc.unwrap_or(OwnedValue::Null);
+        // #4131: a `null`/boolean accumulator is the live register of the same kind, which
+        // `UPDATE`'s navigation (whose result `fold_branch_provenance` reads as elsewhere)
+        // does not change: jq's exit boundary checks identity, not the path taken.
+        if navigated_live_register
+            && !acc_at_register
+            && reg
+                .live_register()
+                .is_some_and(|live| null_bool_identical(&acc, live))
+        {
+            acc_at_register = true;
+        }
         let final_branch = if acc_at_register {
             PathBranch::new(PathPrefix::root(), Cow::Owned(acc), true)
         } else {
