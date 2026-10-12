@@ -1808,11 +1808,11 @@ same expression already answered without the consumer around it.
 
 ### Residues
 
-- **`setpath`/`delpaths` count-message wording.** Real yq says `SETPATH: expected single path but
-  found 2 results instead` (and `...single value on RHS but found 2`, and `DELPATHS: expected
-  single value but found 2`); succinctly says `expected a single result but found 2`. The
-  *outcome* — an error rather than a fan-out or a silent truncation — is what #1279 preserved;
-  matching the per-slot wording is unstarted.
+- **`delpaths` count-message wording.** Real yq says `DELPATHS: expected single value but found
+  2`; succinctly says `expected a single result but found 2`. The *outcome* — an error rather
+  than a fan-out or a silent truncation — is what #1279 preserved; matching the wording is
+  unstarted. `setpath` takes yq's per-slot text (`SETPATH: expected single path but found 2
+  results instead`, `...single value on RHS but found 2`) since #1380.
 - **Two-argument escape ordering** ([#1533](https://github.com/rust-works/succinctly/issues/1533),
   now fully closed). The escape-clearing above is deliberately *not* applied to
   `fanout_two_args`: emptying one slot's values skips the body, which is where the other slot

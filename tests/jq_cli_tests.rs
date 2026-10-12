@@ -93172,15 +93172,9 @@ fn test_array_key_in_path_and_write_position_3506() -> Result<()> {
 /// still refused with the same message everywhere it was.
 #[test]
 fn test_array_key_in_path_and_write_position_yq_mode_unchanged_3506() -> Result<()> {
-    // `setpath` is `--jq-extensions` surface there, and the array key is still
-    // refused through it (#3506 review).
-    for filter in [
-        ".a[[1]] = 5",
-        "del(.a[[1]])",
-        ".a[[1]] |= 5",
-        "[.a[[1]]]",
-        "setpath([\"a\",[1]]; 5)",
-    ] {
+    // The array key is still refused through every write and path form in yq mode (#3506
+    // review); `setpath`, a real yq builtin, has its own check below (#1380).
+    for filter in [".a[[1]] = 5", "del(.a[[1]])", ".a[[1]] |= 5", "[.a[[1]]]"] {
         let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
             .args(["yq", "--jq-extensions", "-o", "json", "-I", "0", filter])
             .stdin(Stdio::piped())
@@ -93203,6 +93197,35 @@ fn test_array_key_in_path_and_write_position_yq_mode_unchanged_3506() -> Result<
             "#3506 (yq): `{filter}`: {output:?}"
         );
     }
+    // `setpath` refuses the array key before it navigates, with yq's own sentence (#1380).
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args([
+            "yq",
+            "--jq-extensions",
+            "-o",
+            "json",
+            "-I",
+            "0",
+            "setpath([\"a\",[1]]; 5)",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .expect("piped")
+                .write_all(b"a: [1,2,1]\n")?;
+            child.wait_with_output()
+        })?;
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("SETPATH: expected either a !!str or !!int in the path, found !!seq instead"),
+        "#1380 (yq): {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "#1380 (yq): {output:?}");
     Ok(())
 }
 

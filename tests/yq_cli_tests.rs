@@ -1343,6 +1343,126 @@ fn test_fromjson_rejects_every_surrogate_escape_like_go_yaml_2018() -> Result<()
     Ok(())
 }
 
+/// #1380: yq's `setpath` reads the path, counts it and checks every element before it looks at the
+/// value argument or navigates: only `!!str` and `!!int` elements pass (a slice descriptor, a float
+/// -- `1.0` too --, a sequence, a boolean and a null are refused with their own tag), and a path
+/// error outranks a value error. A string or integer key through a scalar is a silent no-op, and a
+/// negative index below the start names the index and the array size. Every row's answer was
+/// captured from yq v4.53.3.
+#[test]
+fn test_yq_setpath_checks_the_path_before_the_value_1380() -> Result<()> {
+    let args = ["-o=json", "-I=0"];
+    for (filter, doc, tag) in [
+        (
+            r#"setpath(["a",{"start":0,"end":1}]; [9])"#,
+            "a: [1,2,3]\n",
+            "!!map",
+        ),
+        (
+            r#".a |= setpath([{"start":0,"end":1},"b"]; 5)"#,
+            "a: hello\n",
+            "!!map",
+        ),
+        (r#"setpath(["a",1.5]; 5)"#, "a: [1,2,3]\n", "!!float"),
+        (r#"setpath(["a",1.0]; 5)"#, "a: [1,2,3]\n", "!!float"),
+        (r#"setpath(["a",[1]]; 5)"#, "a: [1]\n", "!!seq"),
+        (r#"setpath(["a",true]; 5)"#, "a: [1]\n", "!!bool"),
+        (r#"setpath(["a",null]; 5)"#, "a: [1]\n", "!!null"),
+        // The path is checked before the value is evaluated, or counted.
+        (r#"setpath([{"a":1}]; error("r"))"#, "a: 1\n", "!!map"),
+        (r#"setpath([{"a":1}]; (1,2))"#, "a: 1\n", "!!map"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &args)?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{filter}: {stderr:?}");
+        assert_eq!(
+            stderr,
+            format!(
+                "Error: SETPATH: expected either a !!str or !!int in the path, found {tag} instead\n"
+            ),
+            "{filter}"
+        );
+    }
+    for (filter, doc, message) in [
+        (r#"setpath([error("p")]; error("r"))"#, "a: 1\n", "p"),
+        (r#"setpath(["a"]; error("r"))"#, "a: 1\n", "r"),
+        (
+            r#"setpath(["a"]; (1,2))"#,
+            "a: 1\n",
+            "SETPATH: expected single value on RHS but found 2",
+        ),
+        (
+            r#"setpath((["a"],["b"]); error("r"))"#,
+            "a: 1\n",
+            "SETPATH: expected single path but found 2 results instead",
+        ),
+        (
+            r"setpath(1; 2)",
+            "a: 1\n",
+            "SETPATH: expected path array, but got !!int instead",
+        ),
+        (
+            r"setpath(null; 3)",
+            "a: 1\n",
+            "SETPATH: expected path array, but got !!null instead",
+        ),
+        (
+            r#"setpath(["a",-2]; 5)"#,
+            "a: [1]\n",
+            "index [-2] out of range, array size is 1",
+        ),
+        (
+            r#"setpath(["a",-1]; 5)"#,
+            "a: null\n",
+            "index [-1] out of range, array size is 0",
+        ),
+        (
+            r#"setpath(["a",-3]; 5)"#,
+            "a: [1,2]\n",
+            "index [-3] out of range, array size is 2",
+        ),
+        (
+            r#"setpath(["a","-5"]; 9)"#,
+            "a: [1,2]\n",
+            "index [-5] out of range, array size is 2",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &args)?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{filter}: {stderr:?}");
+        assert_eq!(stderr, format!("Error: {message}\n"), "{filter}");
+    }
+    for (filter, doc, expected) in [
+        (r#"setpath(["a","b"]; 5)"#, "a: 5\n", r#"{"a":5}"#),
+        (r#"setpath(["a","b","c"]; 5)"#, "a: 5\n", r#"{"a":5}"#),
+        (r#"setpath(["a",0]; 5)"#, "a: hello\n", r#"{"a":"hello"}"#),
+        (r#"setpath(["a",0,"b"]; 5)"#, "a: [1]\n", r#"{"a":[1]}"#),
+        (r"setpath([0]; 5)", "7\n", "7"),
+        (r#"setpath(["x"]; 5)"#, "7\n", "7"),
+        (r#".a |= setpath(["b"]; 5)"#, "a: 1\n", r#"{"a":1}"#),
+        // The accepted shapes are unchanged.
+        (r#"setpath(["a",1]; 5)"#, "a: [1,2,3]\n", r#"{"a":[1,5,3]}"#),
+        (
+            r#"setpath(["a",3]; 5)"#,
+            "a: [1]\n",
+            r#"{"a":[1,null,null,5]}"#,
+        ),
+        (r#"setpath(["a",0]; 5)"#, "a: {}\n", r#"{"a":{"0":5}}"#),
+        (r#"setpath(["a","b"]; 5)"#, "a: null\n", r#"{"a":{"b":5}}"#),
+        (r"setpath([]; 3)", "a: 1\n", "3"),
+        // A string that spells an integer indexes an array, as yq's ParseInt does.
+        (r#"setpath(["a","1"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["a","-1"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["a","01"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["c","0",0]; 9)"#, "c: [[1]]\n", r#"{"c":[[9]]}"#),
+    ] {
+        assert_eq!(
+            run_yq_stdin(filter, doc, &args)?,
+            (format!("{expected}\n"), 0),
+            "{filter}"
+        );
+    }
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]
@@ -35898,10 +36018,8 @@ fn test_yq_has_gate_is_per_mode_not_per_format_1279() -> Result<()> {
 ///
 /// So they take `ArgFanout::RejectMany` rather than `FirstOnly` — jq mode fans
 /// all three out (#1279), and letting yq mode do so would turn an error into a
-/// silent success. succinctly's own wording differs from yq's per-slot text;
-/// what ADR-0018 requires preserving here is the *outcome*, which is why these
-/// assert on the exit code and the "single result" substring rather than
-/// byte-for-byte parity.
+/// silent success. `setpath` words each slot as yq does (#1380); `delpaths` keeps
+/// succinctly's own "single result" text, so that arm asserts the outcome.
 ///
 /// The three cases are deliberately distinct code paths: the value slot is
 /// `fanout_two_args`' outer loop, the path slot its inner loop, and `delpaths`
@@ -35915,7 +36033,10 @@ fn test_yq_setpath_delpaths_reject_a_multi_output_argument_1279() -> Result<()> 
         &["-o", "json", "-I", "0"],
     )?;
     assert_ne!(code, 0, "out: {out:?}");
-    assert!(err.contains("single result"), "err: {err:?}");
+    assert!(
+        err.contains("SETPATH: expected single value on RHS but found 2"),
+        "err: {err:?}"
+    );
 
     // `fanout_two_args`' INNER slot: setpath's path.
     let (out, err, code) = run_yq_stdin_with_stderr(
@@ -35924,7 +36045,10 @@ fn test_yq_setpath_delpaths_reject_a_multi_output_argument_1279() -> Result<()> 
         &["-o", "json", "-I", "0"],
     )?;
     assert_ne!(code, 0, "out: {out:?}");
-    assert!(err.contains("single result"), "err: {err:?}");
+    assert!(
+        err.contains("SETPATH: expected single path but found 2 results instead"),
+        "err: {err:?}"
+    );
 
     // `fanout_arg`'s own RejectMany arm: delpaths' single argument.
     let (out, err, code) = run_yq_stdin_with_stderr(
@@ -36419,7 +36543,10 @@ fn test_yq_setpath_reject_many_prefers_inner_violation_over_outer_1533() -> Resu
     // nothing on inner's side to prefer, so outer's own violation reports.
     let (_, err, code) =
         run_yq_stdin_with_stderr(r#"setpath(["a"]; (1,2))"#, "a: 1\n", &["-o", "json"])?;
-    assert!(err.contains("single result"), "err: {err:?}");
+    assert!(
+        err.contains("SETPATH: expected single value on RHS but found 2"),
+        "err: {err:?}"
+    );
     assert_eq!(code, 1);
 
     // Outer escapes with multiple values, inner is fine (a plain literal,
@@ -36486,7 +36613,10 @@ fn test_yq_two_argument_body_validation_outranks_a_slot_escape_1533() -> Result<
 fn test_yq_reject_many_still_refuses_a_clean_multi_output_argument_1533() -> Result<()> {
     let (_, err, code) =
         run_yq_stdin_with_stderr(r#"setpath((["a"],["b"]); 1)"#, "a: 1\n", &["-o", "json"])?;
-    assert!(err.contains("single result"), "err: {err:?}");
+    assert!(
+        err.contains("SETPATH: expected single path but found 2 results instead"),
+        "err: {err:?}"
+    );
     assert_eq!(code, 1);
 
     let (_, err, code) = run_yq_stdin_with_stderr(

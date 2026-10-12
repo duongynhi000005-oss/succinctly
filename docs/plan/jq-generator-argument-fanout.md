@@ -375,8 +375,8 @@ dedicated issue was warranted; otherwise the existing issue that already covers 
   question settled first (which `pick` is succinctly's?), not a fan-out change.
 - **`eval_index_expr`/`eval_slice_expr`** — the conservative `Partial(_, Error) => Error`
   prefix drop, documented in place as outside #400/#494's verified semantics.
-- **yq `setpath`/`delpaths` count-message wording** — succinctly's `expected a single result
-  but found 2` versus real yq's per-slot `SETPATH:`/`DELPATHS:` text. Recorded in
+- **yq `delpaths` count-message wording** (`setpath` was matched in #1380) — succinctly's
+  `expected a single result but found 2` versus real yq's `DELPATHS:` text. Recorded in
   [docs/compliance/yq/limitations.md](../compliance/yq/limitations.md).
 - **`combinations` error wording** on a non-array input (`expected array, got number` vs jq's
   `Cannot iterate over number (1)`) — pre-existing and unrelated to fan-out; already covered by

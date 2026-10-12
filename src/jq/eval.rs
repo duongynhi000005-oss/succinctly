@@ -69451,6 +69451,19 @@ fn set_value_at_path<S: EvalSemantics>(
     path: &[OwnedValue],
     new_val: OwnedValue,
 ) -> Result<OwnedValue, EvalError> {
+    set_value_at_path_impl::<S, false>(value, path, new_val)
+}
+
+/// [`set_value_at_path`] with yq's `setpath` traversal rules when `YQ_SETPATH` is set (#1380): a
+/// key walked through a scalar writes nothing, a string key that spells an integer indexes an
+/// array, and a negative index below the start is yq's `index [-N] out of range` sentence.
+/// Only `setpath` asks for them -- `fromstream` and `pick` call the plain form, whose jq rules
+/// the `--jq-extensions` surface follows.
+fn set_value_at_path_impl<S: EvalSemantics, const YQ_SETPATH: bool>(
+    value: OwnedValue,
+    path: &[OwnedValue],
+    new_val: OwnedValue,
+) -> Result<OwnedValue, EvalError> {
     let Some(key) = path.first() else {
         return Ok(new_val);
     };
@@ -69464,7 +69477,7 @@ fn set_value_at_path<S: EvalSemantics>(
         let mut text_path = vec_with_capacity(path.len());
         text_path.push(OwnedValue::String(text.into()));
         text_path.extend_from_slice(rest);
-        return set_value_at_path::<S>(value, &text_path, new_val);
+        return set_value_at_path_impl::<S, YQ_SETPATH>(value, &text_path, new_val);
     }
 
     match key {
@@ -69475,9 +69488,10 @@ fn set_value_at_path<S: EvalSemantics>(
                     // jq leaves an existing key where it was, and `IndexMap`
                     // would move it to the end after a `shift_remove`.
                     let old = core::mem::replace(slot, OwnedValue::Null);
-                    *slot = set_value_at_path::<S>(old, rest, new_val)?;
+                    *slot = set_value_at_path_impl::<S, YQ_SETPATH>(old, rest, new_val)?;
                 } else {
-                    let val = set_value_at_path::<S>(OwnedValue::Null, rest, new_val)?;
+                    let val =
+                        set_value_at_path_impl::<S, YQ_SETPATH>(OwnedValue::Null, rest, new_val)?;
                     entries.insert(name.to_string(), val);
                 }
                 Ok(OwnedValue::Object(entries))
@@ -69486,24 +69500,44 @@ fn set_value_at_path<S: EvalSemantics>(
                 let mut entries = IndexMap::new();
                 entries.insert(
                     String::clone(name),
-                    set_value_at_path::<S>(OwnedValue::Null, rest, new_val)?,
+                    set_value_at_path_impl::<S, YQ_SETPATH>(OwnedValue::Null, rest, new_val)?,
                 );
                 Ok(OwnedValue::Object(entries.into()))
             }
+            // yq spells an array index as a string too: `setpath(["a","1"]; 9)` writes element 1.
+            OwnedValue::Array(arr) if YQ_SETPATH && name.parse::<i64>().is_ok() => {
+                let mut indexed = vec_with_capacity(path.len());
+                indexed.push(OwnedValue::Int(name.parse().expect("checked just above")));
+                indexed.extend_from_slice(rest);
+                set_value_at_path_impl::<S, YQ_SETPATH>(OwnedValue::Array(arr), &indexed, new_val)
+            }
+            // yq walks a key through a scalar without writing anything, as it does for `=`;
+            // only an array refuses a string key.
+            other if YQ_SETPATH && !matches!(other, OwnedValue::Array(_)) => Ok(other),
             other => Err(EvalError::cannot_index(other.type_name(), key)),
         },
         OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..) => {
             let mut arr = match value {
                 OwnedValue::Array(arr) => arr,
                 OwnedValue::Null => Vec::new().into(),
+                // #1380: an index through a scalar is a no-op in yq mode.
+                other if YQ_SETPATH => return Ok(other),
                 other => return Err(EvalError::cannot_index(other.type_name(), key)),
             };
+            if YQ_SETPATH {
+                // yq words a negative index below the start by the index and the length.
+                if let OwnedValue::Int(i) | OwnedValue::NumberLiteral(NumberRepr::Int(i), _) = key {
+                    if *i < 0 && i.saturating_add(arr.len() as i64) < 0 {
+                        return Err(EvalError::yq_negative_index_out_of_range(*i, arr.len()));
+                    }
+                }
+            }
             let index = resolve_setpath_index(key, arr.len())?;
             if index >= arr.len() {
                 pad_with_nulls(&mut arr, index)?;
             }
             let old = core::mem::replace(&mut arr[index], OwnedValue::Null);
-            arr[index] = set_value_at_path::<S>(old, rest, new_val)?;
+            arr[index] = set_value_at_path_impl::<S, YQ_SETPATH>(old, rest, new_val)?;
             Ok(OwnedValue::Array(arr))
         }
         // An object path element is jq's slice, `{"start":s,"end":e}` — what
@@ -69585,7 +69619,9 @@ fn set_value_at_path<S: EvalSemantics>(
                 }
                 _ => (ArrayVec::new(), OwnedValue::Null, 0..0),
             };
-            let OwnedValue::Array(items) = set_value_at_path::<S>(sub, rest, new_val)? else {
+            let OwnedValue::Array(items) =
+                set_value_at_path_impl::<S, YQ_SETPATH>(sub, rest, new_val)?
+            else {
                 return Err(EvalError::slice_assign_non_array());
             };
             arr.splice(range, items);
@@ -69720,6 +69756,9 @@ fn builtin_setpath<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    if S::TAG == EvalTag::Yq {
+        return builtin_setpath_yq::<W, S>(path_expr, val_expr, value, optional);
+    }
     // The VALUE is the outer loop and the PATH the inner one -- the opposite
     // of `sub(re; str)` at the same arity, and the reason #1279's audit
     // insisted every multi-generator order be probed rather than inferred.
@@ -69743,10 +69782,8 @@ fn builtin_setpath<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         path_expr,
         value.clone(),
         optional,
-        // Real yq refuses a multi-output path or value outright rather than
-        // taking its first, unlike its `has`/`test`/`sub` -- see
-        // `ArgFanout::RejectMany`.
-        ArgFanout::reject_many_in_yq::<S>(),
+        // jq mode fans both out; yq mode returned above (`builtin_setpath_yq`).
+        ArgFanout::All,
         |new_val, path_owned| {
             let OwnedValue::Array(path) = path_owned else {
                 return if optional {
@@ -69755,31 +69792,111 @@ fn builtin_setpath<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     QueryResult::Error(EvalError::path_must_be_array())
                 };
             };
-            // #1953: a non-decode-failure to_owned error respects
-            // `optional`, the same as every other builtin refusal here.
-            let owned = match to_owned::<S, _>(&value) {
-                Ok(owned) => owned,
-                Err(e) => return suppress_or_raise(e, optional),
-            };
-            // #1351: `setpath(["b","p"]; 9)` through an alias lands on the
-            // shared node, like `.b.p = 9`.
-            let mut path = path;
-            alias_identity::redirect_concrete_path(&mut path, &owned);
-            let pre = alias_identity::active().then(|| owned.clone());
-            match set_value_at_path::<S>(owned, &path, new_val) {
-                Ok(mut result) => {
-                    if let Some(pre) = &pre {
-                        alias_identity::mirror_after_write(pre, &mut result);
-                    }
-                    QueryResult::Owned(result)
-                }
-                // An optional context swallows the refusal, as it does for
-                // every other builtin here.
-                Err(_) if optional => QueryResult::None,
-                Err(e) => e.into(),
-            }
+            setpath_write::<W, S, false>(&value, path, new_val, optional)
         },
     )
+}
+
+/// One `setpath` write: read the document, redirect an alias path, set, mirror.
+fn setpath_write<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics, const YQ_SETPATH: bool>(
+    value: &StandardJson<'a, W>,
+    mut path: crate::jq::ArrayOf<OwnedValue>,
+    new_val: OwnedValue,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // #1953: a non-decode-failure to_owned error respects
+    // `optional`, the same as every other builtin refusal here.
+    let owned = match to_owned::<S, _>(value) {
+        Ok(owned) => owned,
+        Err(e) => return suppress_or_raise(e, optional),
+    };
+    // #1351: `setpath(["b","p"]; 9)` through an alias lands on the
+    // shared node, like `.b.p = 9`.
+    alias_identity::redirect_concrete_path(&mut path, &owned);
+    let pre = alias_identity::active().then(|| owned.clone());
+    match set_value_at_path_impl::<S, YQ_SETPATH>(owned, &path, new_val) {
+        Ok(mut result) => {
+            if let Some(pre) = &pre {
+                alias_identity::mirror_after_write(pre, &mut result);
+            }
+            QueryResult::Owned(result)
+        }
+        // An optional context swallows the refusal, as it does for every other builtin here --
+        // except yq's negative-index error, which `?` never hides.
+        Err(e) if optional && !e.is_yq_negative_index_error() => QueryResult::None,
+        Err(e) => e.into(),
+    }
+}
+
+/// `setpath(path; value)` in yq mode (#1380): the path is read, counted and checked before the
+/// value argument is evaluated at all.
+///
+/// Real yq takes the path first -- `setpath([error("p")]; error("r"))` is `p` -- and refuses a
+/// path element that is not a `!!str` or an `!!int` (a slice descriptor, a float, a sequence, a
+/// boolean, a null) before it navigates anything. jq mode keeps its value-outermost order.
+fn builtin_setpath_yq<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    path_expr: &Expr,
+    val_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let (mut paths, trailing) =
+        stream_outputs::<_, S>(eval_single::<W, S>(path_expr, value.clone(), optional));
+    let found = paths.len();
+    if apply_arg_fanout(ArgFanout::RejectMany, &mut paths).is_err() {
+        // A count violation is only ever a symptom of an argument that also escaped, so the
+        // escape is reported in preference to the count (#1533).
+        return match trailing {
+            Some(control) => partial(Vec::new(), control),
+            None => QueryResult::Error(EvalError::setpath_expects_single_path(found)),
+        };
+    }
+    if let Some(control) = trailing {
+        return partial(Vec::new(), control);
+    }
+    let Some(path_owned) = paths.pop() else {
+        return QueryResult::None;
+    };
+    let OwnedValue::Array(path) = path_owned else {
+        return if optional {
+            QueryResult::None
+        } else {
+            QueryResult::Error(EvalError::setpath_expects_path_array(owned_yaml_type_tag(
+                &path_owned,
+            )))
+        };
+    };
+    if let Some(bad) = path.iter().find(|element| {
+        !matches!(
+            element,
+            OwnedValue::String(_)
+                | OwnedValue::Int(_)
+                | OwnedValue::NumberLiteral(NumberRepr::Int(_), _)
+        )
+    }) {
+        return if optional {
+            QueryResult::None
+        } else {
+            QueryResult::Error(EvalError::setpath_rejects_type(owned_yaml_type_tag(bad)))
+        };
+    }
+
+    let (mut values, trailing) =
+        stream_outputs::<_, S>(eval_single::<W, S>(val_expr, value.clone(), optional));
+    let found = values.len();
+    if apply_arg_fanout(ArgFanout::RejectMany, &mut values).is_err() {
+        return match trailing {
+            Some(control) => partial(Vec::new(), control),
+            None => QueryResult::Error(EvalError::setpath_expects_single_value(found)),
+        };
+    }
+    if let Some(control) = trailing {
+        return partial(Vec::new(), control);
+    }
+    match values.pop() {
+        Some(new_val) => setpath_write::<W, S, true>(&value, path, new_val, optional),
+        None => QueryResult::None,
+    }
 }
 
 /// Delete every path in `paths` from `value`, the way jq's `delpaths_sorted`
