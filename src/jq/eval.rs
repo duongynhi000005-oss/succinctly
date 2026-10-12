@@ -50645,7 +50645,9 @@ fn resolve_bind_source_witness<S: EvalSemantics>(
 /// construction ([`is_fresh_leaf`], #3423): jq builds it fresh, so it is never
 /// the register, and the resolver places it as computed (an untracked branch,
 /// bound by value), which is what keeps `select(false) // {"a":1}` an exact
-/// source instead of an ambiguous one.
+/// source instead of an ambiguous one. #4017 adds the builtins that hand their input
+/// back as the same `jv` for some inputs ([`is_input_returning_stage`]) as a leaf the
+/// resolver judges per value, except under a `try`, `?` or the left of `//`.
 ///
 /// Measured against `/usr/bin/jq` 1.7.1 with `scripts/jq-bind-origin-fuzz.py`
 /// (25 runs of 3,000 programs over every family) and
@@ -50653,18 +50655,21 @@ fn resolve_bind_source_witness<S: EvalSemantics>(
 /// Widening it to any source wrote where jq refuses
 /// (`(.a | tostring | .[0:1])? as $v`), which is why it is a grammar.
 fn is_transparent_bind_source(source: &Expr) -> bool {
-    transparent_outputs(source, true).is_some()
+    transparent_outputs(source, true, false).is_some()
 }
 
 /// [`is_transparent_bind_source`]'s grammar walk, for a source whose input is
 /// register-tracked when `input_tracked` holds: `None` off the grammar, else
 /// whether every output it can produce is still tracked -- what a navigating leaf
 /// downstream of it needs (#3795).
-fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
+///
+/// `swallowed` says an enclosing `try`, `?` or `//` would catch a resolver
+/// refusal raised at this position (#4017); see [`is_input_returning_stage`].
+fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> Option<bool> {
     let all = |exprs: &mut dyn Iterator<Item = &Expr>| {
         let mut tracked = true;
         for e in exprs {
-            tracked &= transparent_outputs(e, input_tracked)?;
+            tracked &= transparent_outputs(e, input_tracked, swallowed)?;
         }
         Some(tracked)
     };
@@ -50685,6 +50690,16 @@ fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
         // refusal, which a `try` or `//` here would swallow where jq navigates
         // (`([1] | try .[0]) as $y` binds `1`).
         leaf if is_navigating_leaf(leaf) => input_tracked.then_some(true),
+        // #4017: a builtin that hands its input back as the same `jv` for some
+        // inputs (`tostring` of a string, `tonumber` of a number, ...), which the
+        // resolver's own arms place as a pass-through of the register. Whether this
+        // input is one of them is a per-value fact the resolver judges; for any
+        // other it refuses, and the witness then declines to the by-value route. So
+        // the leaf is exact unless an enclosing `try`/`?`/`//` swallows that refusal
+        // and runs something else (`(5 | tostring // .)` would bind the register
+        // where jq binds `"5"`). Its output is not statically tracked, which keeps a
+        // navigation downstream of it off the grammar (`tostring | .[1:2]`).
+        leaf if is_transparent_leaf(leaf) => (!swallowed).then_some(false),
         Expr::Comma(exprs) => all(&mut exprs.iter()),
         // A handler's output is untracked; one that may see the register as its
         // error payload ([`try_body_may_raise_alias`]) is not placed at all, so the
@@ -50693,25 +50708,68 @@ fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
             expr,
             catch: Some(_),
         } => (!try_body_may_raise_alias(expr))
-            .then(|| transparent_outputs(expr, input_tracked))
+            .then(|| transparent_outputs(expr, input_tracked, true))
             .flatten()
             .map(|_| false),
-        Expr::Optional(inner)
-        | Expr::FirstExpr(inner)
-        | Expr::Limit { expr: inner, .. }
-        | Expr::Try { expr: inner, .. } => transparent_outputs(inner, input_tracked),
+        Expr::Optional(inner) | Expr::Try { expr: inner, .. } => {
+            transparent_outputs(inner, input_tracked, true)
+        }
+        Expr::FirstExpr(inner) | Expr::Limit { expr: inner, .. } => {
+            transparent_outputs(inner, input_tracked, swallowed)
+        }
         Expr::If {
             then_branch,
             else_branch,
             ..
         } => all(&mut [&**then_branch, &**else_branch].into_iter()),
-        Expr::Alternative(left, right) => all(&mut [&**left, &**right].into_iter()),
+        // The left of `//` is run with its errors suppressed.
+        Expr::Alternative(left, right) => {
+            let left = transparent_outputs(left, input_tracked, true)?;
+            Some(left & transparent_outputs(right, input_tracked, swallowed)?)
+        }
         Expr::Pipe(stages) if !stages.is_empty() => {
             stages.iter().try_fold(input_tracked, |tracked, stage| {
-                transparent_outputs(stage, tracked)
+                transparent_outputs(stage, tracked, swallowed)
             })
         }
         _ => None,
+    }
+}
+
+/// [`is_input_returning_stage`], plus `del(f)`, which hands its input back when `f`
+/// resolves no path (#4295) -- a fact about the paths, so the resolver judges it and
+/// the grammar only admits the shape.
+fn is_transparent_leaf(expr: &Expr) -> bool {
+    is_input_returning_stage(expr) || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+}
+
+/// A builtin the path resolver accepts as the input itself for some inputs
+/// (#4017): `tostring`/`@text` of a string, `tonumber` of a number (#3460),
+/// `ltrimstr`/`rtrimstr` whose argument does not match (#4016), `delpaths([])` and
+/// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
+/// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
+/// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
+/// `trim_returns_input` ... guard); the arms judge the value
+/// -- and the argument: a non-literal `ltrimstr` argument keeps the refusal -- and
+/// refuse for an input that gets a fresh result. A new pass-through arm there is owed
+/// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
+/// lists them.
+///
+/// `del(f)` (empty path set, #4295) is the one pass-through arm *not* here: whether it
+/// returns its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds
+/// a fresh value), so [`may_alias_register`] must not treat it as a forwarder. It is a
+/// bind-source leaf only, [`is_transparent_leaf`].
+fn is_input_returning_stage(expr: &Expr) -> bool {
+    match expr {
+        Expr::Builtin(
+            Builtin::ToString | Builtin::ToNumber | Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_),
+        )
+        | Expr::Format(FormatType::Text) => true,
+        Expr::Builtin(Builtin::DelPaths(paths)) => is_empty_array_literal(unwrap_paren(paths)),
+        Expr::Builtin(Builtin::SetPath(path, new_value)) => {
+            is_empty_array_literal(unwrap_paren(path)) && is_identity_stage(new_value)
+        }
+        _ => false,
     }
 }
 
@@ -52816,7 +52874,8 @@ impl NavKind {
 /// the input is the register's: `identity`) and a `$var` marker. The forwarders are
 /// the constructs that pass a sub-expression's output through unchanged: a comma,
 /// `if`, `//`, `try`/`?`, `first`/`last`/`limit`/`nth`, `label`, a rebind's body,
-/// `select` and the type filters (which hand their input back), and a pipe, whose
+/// `select` and the type filters (which hand their input back, as do the
+/// [`is_input_returning_stage`] builtins, #4017), and a pipe, whose
 /// last stage sees what the stages before it left, and a zero-arity user def, which
 /// forwards what its body does (#3795, under a total work budget). Everything
 /// else -- a builtin, a call with arguments, a navigation, a construction, a fold --
@@ -52934,6 +52993,8 @@ fn may_alias_register(source: &Expr, register_frame: Option<&Frame>) -> bool {
                 {
                     identity
                 }
+                // #4017: `tostring` of a string and the like hand their input back.
+                leaf if is_input_returning_stage(leaf) => identity,
                 // Each stage's `.` is what the stages before it left.
                 Expr::Pipe(stages) => stages
                     .iter()
@@ -135585,7 +135646,7 @@ mod tests {
             ("def f: .; def f(g): 1; f", true),
             ("def f: 1; f", false),
             ("def f: .a; f", false),
-            ("def f: .; f | tostring", false),
+            ("def f: .; f | tojson", false),
             // The body sees its own scope, not the call site's.
             ("def g: 1; def f: g; def g: .; f", false),
             // A recursive def is cut off by the budget.
@@ -135623,9 +135684,48 @@ mod tests {
             ("try error(.) catch .", false),
             ("try select(error(.)) catch .", false),
             ("(error(.) // .)", false),
-            ("(.a | tostring)", false),
             ("(.a // length)", false),
             ("($x // .)", false),
+            // #4017: a builtin that returns its input for some inputs is a leaf,
+            // judged per value by the resolver, but never where a `try`, `?` or the
+            // left of `//` could swallow its refusal and run something else; its
+            // output is untracked, so no navigation follows it.
+            ("tostring", true),
+            ("(.a | tostring)", true),
+            ("@text", true),
+            ("tonumber", true),
+            ("ltrimstr(\"x\")", true),
+            ("rtrimstr(\"x\")", true),
+            ("delpaths([])", true),
+            ("setpath([]; .)", true),
+            ("del(.x?)", true),
+            ("del(.[]?)", true),
+            // The argument is the resolver's to judge (a non-literal one keeps the
+            // refusal there), not the grammar's.
+            ("ltrimstr(.a)", true),
+            ("ltrimstr(\"x\", \"y\")", true),
+            ("(tostring, tonumber)", true),
+            ("(select(.a) | tostring)", true),
+            ("first(tostring)", true),
+            ("limit(1; tostring)", true),
+            ("if .c then tostring else . end", true),
+            ("(. // tostring)", true),
+            ("(tostring | select(.))", true),
+            ("(tostring | tostring)", true),
+            ("tostring?", false),
+            ("try tostring", false),
+            ("try tostring catch 1", false),
+            ("(tostring // .)", false),
+            ("((.a | tostring) // .)", false),
+            ("(.a, tostring?)", false),
+            ("(tostring | .a)", false),
+            ("(tostring | .[1:2])", false),
+            ("(.a | tostring | .[1:2])", false),
+            ("delpaths([[\"a\"]])", false),
+            ("setpath([\"a\"]; .)", false),
+            ("setpath([]; 1)", false),
+            ("ascii_downcase", false),
+            ("(del(.x?) // .)", false),
         ] {
             let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
             assert_eq!(is_transparent_bind_source(&expr), expected, "{filter}");
@@ -135681,8 +135781,26 @@ mod tests {
             ("del(.zz)", false),
             ("del(.[5])", false),
             ("(. | tojson | fromjson)", false),
-            ("(. | tostring)", false),
+            ("(. | tojson)", false),
             (".a", false),
+            // #4017: ...except a builtin that returns its input as the same `jv`
+            // for some inputs, which forwards whatever its own input is.
+            ("(. | tostring)", true),
+            ("(. | @text)", true),
+            ("(. | tonumber)", true),
+            ("(. | ltrimstr(\"x\"))", true),
+            ("(. | rtrimstr(\"x\"))", true),
+            ("delpaths([])", true),
+            ("setpath([]; .)", true),
+            // ...but not `del(f)`: it returns its input only when `f` resolves no path, which
+            // is a fact about the paths (`del(.zz)` builds a fresh value), not the shape.
+            ("(. | del(.x?))", false),
+            ("(.a | tostring)", false),
+            ("(1 | tostring)", false),
+            ("delpaths([[\"a\"]])", false),
+            ("setpath([\"a\"]; .)", false),
+            ("setpath([]; 1)", false),
+            ("ascii_downcase", false),
             ("(.a, .b)", false),
             ("(.a // .b)", false),
             ("first(.a, .b)", false),

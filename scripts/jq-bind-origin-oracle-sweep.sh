@@ -240,6 +240,14 @@ if [[ "${1:-}" != "--list-cases" ]]; then
   fi
 fi
 
+# The `input-returning-bind-*` rows are #4017: a variable bound to the result of a
+# builtin that hands its input back as the same `jv` (`tostring`/`@text` of a string,
+# `tonumber` of a number, a non-matching `ltrimstr`/`rtrimstr`, `delpaths([])`,
+# `setpath([]; .)`) is the register, so `path(.b|tostring as $y|$y)` is `["b"]`. The
+# `fresh` rows are the inputs that get a new value (jq refuses), the `swallowed-fresh`
+# rows pin that a `//`/`?`/`try` around the stage cannot turn that refusal into a bind
+# of the register, and the `swallowed-string` rows are the three refuse-only residuals.
+#
 # id <TAB> input <TAB> filter
 # `read -d ''`, not `$(cat <<EOF)`: bash scans a command substitution's body for
 # quotes and parens even inside a quoted heredoc, so a filter or a reason with an
@@ -1204,6 +1212,36 @@ fold-loop-var-rebound-constructed-refuses	{"a":1}	reduce (.) as $x (.; [$x] as $
 fold-loop-var-rebound-literal-init-refuses	{"a":1}	reduce (.) as $x ({a:1}; $x as $y | ($y.a) = 9)
 fold-loop-var-rebound-later-fork-refuses	{"a":1}	reduce (.,.) as $x (.; $x as $y | ($y.a) = 9)
 fold-loop-var-rebound-alt-chain	{"a":1}	reduce (.) as $x (.; $x as [$y] ?// $y | ($y.a) = 9)
+input-returning-bind-tostring	{"b":"s"}	path(.b|tostring as $y|$y)
+input-returning-bind-text	{"b":"s"}	path(.b|@text as $y|$y)
+input-returning-bind-tonumber	{"n":5}	path(.n|tonumber as $y|$y)
+input-returning-bind-ltrimstr-nomatch	{"b":"s"}	path(.b|ltrimstr("x") as $y|$y)
+input-returning-bind-rtrimstr-nomatch	{"b":"s"}	path(.b|rtrimstr("x") as $y|$y)
+input-returning-bind-delpaths-empty	{"b":"s"}	path(.b|delpaths([]) as $y|$y)
+input-returning-bind-setpath-empty	{"b":"s"}	path(.b|setpath([];.) as $y|$y)
+input-returning-bind-write	{"b":"s"}	(.b|tostring as $y|$y) = 9
+input-returning-bind-del	{"b":"s"}	del(.b|tostring as $y|$y)
+input-returning-bind-comma	{"b":"s"}	path(.b|(tostring,tostring) as $y|$y)
+input-returning-bind-select	{"b":"s"}	path(.b|(select(true)|tostring) as $y|$y)
+input-returning-bind-first	{"b":"s"}	path(.b|first(tostring) as $y|$y)
+input-returning-bind-nonstring-ltrimstr-try-write	{"d":{"b":1}}	(.d | ltrimstr("s") as $v0 | try ($v0 | .b?)) = 9
+input-returning-bind-nonstring-ltrimstr-optional-try-write	{"d":{"b":1}}	(.d | (ltrimstr("s")?) as $v0 | try ($v0 | .b?)) = 9
+input-returning-bind-fresh-number-tostring	{"b":5}	path(.b|tostring as $y|$y)
+input-returning-bind-fresh-string-tonumber	{"n":"5"}	path(.n|tonumber as $y|$y)
+input-returning-bind-fresh-ltrimstr-match	{"b":"s"}	path(.b|ltrimstr("s") as $y|$y)
+input-returning-bind-swallowed-fresh-alt	{"n":5}	path(.n|(tostring // .) as $y|$y)
+input-returning-bind-swallowed-fresh-alt-write	{"n":5}	(.n|(tostring // .) as $y|$y) = 9
+input-returning-bind-swallowed-fresh-optional	{"n":5}	path(.n|(tostring?) as $y|$y)
+input-returning-bind-swallowed-fresh-try	{"n":5}	path(.n|(try tostring catch .) as $y|$y)
+input-returning-bind-result-slice-refuses	{"b":"sss"}	path(.b|(tostring|.[1:2]) as $y|$y)
+input-returning-bind-swallowed-string-alt	{"b":"s"}	path(.b|(tostring // .) as $y|$y)
+input-returning-bind-swallowed-string-optional	{"b":"s"}	path(.b|(tostring?) as $y|$y)
+input-returning-bind-swallowed-string-try	{"b":"s"}	path(.b|(try tostring catch .) as $y|$y)
+input-returning-bind-del-empty-path-set	{"b":"s","n":1}	path(.b|del(.x?) as $y|$y)
+input-returning-bind-del-empty-path-set-write	{"b":"s","n":1}	(.n|del(.[]?) as $y|$y) = 4
+input-returning-bind-del-nonempty-path-set	{"b":{"x":1}}	path(.b|del(.x?) as $y|$y)
+input-returning-bind-trim-runtime-arg	{"b":"s"}	"x" as $c | path(.b|ltrimstr($c) as $y|$y)
+input-returning-bind-trim-runtime-arg-match	{"b":"s"}	"s" as $c | path(.b|ltrimstr($c) as $y|$y)
 CASES_EOF
 
 # Known refuse-only rows (jq answers, succinctly refuses), each with the
@@ -1251,6 +1289,9 @@ nested-fold-frozen-init-foreach-after-length:#3984 -- the fold's register is unt
 nested-fold-frozen-foreach-in-foreach-extract-del:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
 nested-fold-frozen-foreach-in-foreach-extract-assign:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
 nested-fold-frozen-foreach-in-foreach-extract-path:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
+input-returning-bind-swallowed-string-alt:#4017 -- a `//` over the stage keeps it off the witness grammar (the resolver's refusal for an input that gets a fresh value would be swallowed and `.` bound in its place), so the bound result of a string input is a plain value
+input-returning-bind-swallowed-string-optional:#4017 -- same gate, for a postfix `?` over the stage
+input-returning-bind-swallowed-string-try:#4017 -- same gate, for a `try` over the stage
 REFUSE_EOF
 
 if [[ "${1:-}" == "--list-cases" ]]; then
