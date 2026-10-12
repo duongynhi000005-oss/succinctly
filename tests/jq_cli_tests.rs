@@ -127201,6 +127201,128 @@ fn test_fused_navigated_literal_slice_read_is_not_quadratic_4406() -> Result<()>
     Ok(())
 }
 
+/// #4412: `path(try E)` and `path(try E catch empty)` are `path(E?)`, so they take the cursor walk
+/// the `?` spelling does rather than copying the input. Every row answers what the `?` spelling
+/// does -- values, errors and exit codes -- on every document shape, behind a path step, in a
+/// pipe, in a comma and at the streaming entry.
+#[test]
+fn test_path_try_equals_the_question_mark_spelling_4412() -> Result<()> {
+    let docs = [
+        r#"{"a":{"b":[1,2]},"b":3}"#,
+        r#"{"a":[1,2,3]}"#,
+        r#"[1,[2],{"a":5},null,"s",true]"#,
+        r#"{"a":null}"#,
+        "null",
+        "5",
+        "[]",
+        r#"[{"a":1},{"a":[2]},3]"#,
+        // a repeated key: jq mode collapses it on both routes
+        r#"{"a":1,"a":2,"b":3}"#,
+    ];
+    let bodies = [
+        ".a",
+        ".a.b",
+        ".[0]",
+        ".[]",
+        ".a[]",
+        "(.a, .b)",
+        ".a | .[0]",
+        ".[] | .a",
+        ".[]?",
+    ];
+    for doc in docs {
+        for body in bodies {
+            for shape in [
+                "[path({})]",
+                "[path({} | .z)]",
+                "[.[]? | path({})]",
+                "[path(({}), .b)]",
+            ] {
+                let question = shape.replace("{}", &format!("(({body})?)"));
+                for tried in [
+                    shape.replace("{}", &format!("(try ({body}))")),
+                    shape.replace("{}", &format!("(try ({body}) catch empty)")),
+                ] {
+                    assert_eq!(
+                        run_jq_stdin(&tried, doc, &["-c"])?,
+                        run_jq_stdin(&question, doc, &["-c"])?,
+                        "{doc}: {tried}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #4412: the rows from jq 1.7.1, and the boundary: a handler that runs, or a body that is not
+/// navigation, is not `E?` and keeps its route and its answer.
+#[test]
+fn test_path_try_values_and_boundary_4412() -> Result<()> {
+    let doc = r#"[1, null, "s", {"a": 1}, [2], true]"#;
+    for (filter, expected) in [
+        ("[.[] | path(try .a)]", r#"[["a"],["a"]]"#),
+        ("[.[] | path(try .a catch empty)]", r#"[["a"],["a"]]"#),
+        // not navigation the walk takes: keeps the route it had, and its answer
+        ("[.[] | path(try first(.a))]", r#"[["a"],["a"]]"#),
+        ("[.[] | path(try .[0])]", "[[0],[0]]"),
+        ("[.[] | path(try .[])]", r#"[["a"],[0]]"#),
+        ("[.[] | path(try .[] catch empty)]", r#"[["a"],[0]]"#),
+        ("[path(try .[3].a)]", r#"[[3,"a"]]"#),
+        ("[path(try .[1].a.b)]", r#"[[1,"a","b"]]"#),
+        ("[path(try .[2].a)]", "[]"),
+        ("[path(try try .[3].a)]", r#"[[3,"a"]]"#),
+        ("[path((try .[3]), .[4])]", "[[3],[4]]"),
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (format!("{expected}\n"), 0),
+            "{filter}"
+        );
+    }
+    // A handler that runs hands `path()` a value that is no path, in jq and here; a body that
+    // computes is not navigation and keeps the route it had. jq 1.7.1 raises on every row below
+    // (`Invalid path expression with result ...`, exit 5), and so does the route they keep.
+    for filter in [
+        "[.[] | path(try .a catch .)]",
+        r#"[.[] | path(try .a catch "x")]"#,
+        "[.[] | path(try (.a + 1))]",
+    ] {
+        assert_eq!(
+            run_jq_stdin(filter, doc, &["-c"])?,
+            (String::new(), 5),
+            "{filter}"
+        );
+    }
+    Ok(())
+}
+
+/// #4412: `path(try .d)` reads only what it navigates, as `path(.d?)` and `path(.d)` do (#2168).
+/// The materializing route it used to take copied the input and raised on an undecodable string
+/// anywhere in it, so the three spellings of one question answered differently on the same
+/// document. A body that reads the corrupt value still raises.
+#[test]
+fn test_path_try_answers_past_an_undecodable_sibling_4412() -> Result<()> {
+    let doc = r#"{"a":"\ud800","d":5}"#;
+    for filter in [
+        "path(.d)",
+        "path(.d?)",
+        "path(try .d)",
+        "path(try .d catch empty)",
+        "[path(try .d)]",
+    ] {
+        let (stdout, code) = run_jq_stdin(filter, doc, &["-c"])?;
+        assert_eq!(code, 0, "{filter}: {stdout}");
+        assert!(stdout.contains(r#"["d"]"#), "{filter}: {stdout}");
+    }
+    // `.[]` reads the undecodable string, so the failure `?` never swallows escapes.
+    for filter in ["path(.a[]?)", "path(try .a[])", "[path(try .a[])]"] {
+        let (stdout, code) = run_jq_stdin(filter, doc, &["-c"])?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "{filter}");
+    }
+    Ok(())
+}
+
 /// #4260: splitting an empty string has no pieces, and an empty separator yields the characters
 /// alone -- `"" | split(",")` is `[]`, `"abc" / ""` is `["a","b","c"]`. Every row was captured from
 /// `/usr/bin/jq` 1.7.1 (yq v4.53.3 agrees on all of them; see `yq_cli_tests.rs`).

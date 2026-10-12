@@ -6002,7 +6002,7 @@ fn iterates_at_value_position(expr: &Expr) -> bool {
 /// handlers run (#3728). Peeled by [`unwrap_bind_source`], as the shape tests
 /// above are: a `def empty:` in scope is a `DefCall`, a closure argument arrives as
 /// `Expr::Shared`, and nothing is evaluated here either way.
-fn is_empty_handler(catch: &Expr) -> bool {
+pub(crate) fn is_empty_handler(catch: &Expr) -> bool {
     matches!(unwrap_bind_source(catch), Expr::Builtin(Builtin::Empty))
 }
 

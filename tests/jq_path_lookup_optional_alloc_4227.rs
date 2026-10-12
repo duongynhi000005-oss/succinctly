@@ -127,10 +127,11 @@ fn an_alternative_over_a_swallowed_lookup_costs_like_its_twin_4227() {
     }
 }
 
-/// The streaming entry (`succinctly jq` drives it) reaches the same shortcut. A `try`
-/// or closure boundary has a floor of its own there (`.[] | path(try .[] catch empty)`
-/// costs two calls per member where `path(.[]?)` costs one, a cost that is not the
-/// message), so each spelling is compared with its own `.[]` twin.
+/// The streaming entry (`succinctly jq` drives it) reaches the same shortcut. A `try` over a
+/// bare lookup or `.[]`, with no handler or `catch empty`, is `E?` and takes the same cursor walk
+/// (#4412), so it costs what `path(.[]?)` does; before, it took the materializing route and cost
+/// two calls per member (a copy of the member and the `Rc` around it, neither of them a message).
+/// A closure boundary has a floor of its own there, so it is compared with its own `.[]` twin.
 #[test]
 fn the_streaming_entry_reaches_the_same_shortcut_4227() {
     for (name, json) in fixtures() {
@@ -138,11 +139,11 @@ fn the_streaming_entry_reaches_the_same_shortcut_4227() {
             (".[] | path(.a?)", ".[] | path(.[]?)"),
             (".[] | path(.[0]?)", ".[] | path(.[]?)"),
             (".[] | path((.a)?)", ".[] | path(.[]?)"),
-            (
-                ".[] | path(try .a catch empty)",
-                ".[] | path(try .[] catch empty)",
-            ),
-            (".[] | path(try .a)", ".[] | path(try .[])"),
+            (".[] | path(try .a catch empty)", ".[] | path(.[]?)"),
+            (".[] | path(try .a)", ".[] | path(.[]?)"),
+            (".[] | path(try .[0])", ".[] | path(.[]?)"),
+            (".[] | path(try .[])", ".[] | path(.[]?)"),
+            (".[] | path(try .[] catch empty)", ".[] | path(.[]?)"),
             (
                 "def opt(f): f?; .[] | path(opt(.a))",
                 "def opt(f): f?; .[] | path(opt(.[]))",
