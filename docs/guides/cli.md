@@ -794,7 +794,8 @@ one: warns to stderr and continues, rather than refusing outright, for the byte 
 a diagnostic tool, not an edge case. That includes a byte inside a *mapping key* on the path
 to the requested offset (#1759): the key is read lossily, so its invalid bytes (or an invalid
 escape's raw text) show as U+FFFD and the key takes bracket form, e.g. `.[0]["b�c"]`.
-`jq-locate` does the same for a JSON key.
+`jq-locate` does the same for a JSON key. Because the decoding is lossy, two keys that differ only
+in their invalid bytes locate to the same expression, and that expression does not select either key.
 
 ---
 
