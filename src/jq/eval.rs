@@ -49245,6 +49245,30 @@ fn binds_variable(e: &Expr) -> bool {
     }
 }
 
+/// The `$x` marker `e` is, bare or in parentheses (#4320).
+fn bare_marker(e: &Expr) -> Option<&Rc<Tracked>> {
+    match unwrap_bind_source(e) {
+        Expr::TrackedVar(marker) => Some(marker),
+        _ => None,
+    }
+}
+
+/// The `$x` marker a bind source hands on unchanged through `first`, `last`, `limit(n; ..)` (a
+/// count that cannot move the register) or a bare `try` (#4320). The one definition both the
+/// spine walk ([`RegisterSpine::binds_register`]) and the resolver's placement of the head
+/// ([`resolve_as_pattern`]) read, so a source the walk routes is a source the resolver can place:
+/// a head it could not place refuses a pattern step as a guess, which a `try` cannot catch where
+/// jq's is its own. Not `nth`, `label`, `$x?` or a nested wrapper, which the resolver does not
+/// place, nor a comma inside the wrapper (`first($x, 1)`).
+fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
+    match unwrap_bind_source(e) {
+        Expr::FirstExpr(inner) | Expr::LastExpr(inner) => bare_marker(inner),
+        Expr::Limit { n, expr } if cannot_move_register(n) => bare_marker(expr),
+        Expr::Try { expr, catch: None } => bare_marker(expr),
+        _ => None,
+    }
+}
+
 /// What a node on a fold source's spine does with jq's register ([`RegisterSpine::reach`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reach {
@@ -49327,11 +49351,12 @@ impl<'e> RegisterSpine<'e> {
     ///
     /// [`body_binds_register`]: Self::body_binds_register
     fn binds_register(&mut self, e: &'e Expr) -> bool {
-        // #4320: a `$x` bound outside the source that is the register at the fold. Only the bare
-        // marker, not one behind `first`/`limit`/`?`: the resolver cannot place those heads, and
-        // its refusal for them is the kind a `try` around the fold does not catch, where jq's is
+        // #4320: a `$x` bound outside the source that is the register at the fold, also behind
+        // the wrappers [`wrapped_marker`] names. [`resolve_as_pattern`] places such a head as
+        // the register for a single pattern; a head it could not place would refuse a pattern
+        // step as a guess a `try` around the fold cannot catch, where jq's is its own
         // (`del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) ...) | ...)`).
-        if let Expr::TrackedVar(marker) = unwrap_bind_source(e) {
+        if let Some(marker) = bare_marker(e).or_else(|| wrapped_marker(e)) {
             return self.markers.contains(&Rc::as_ptr(marker));
         }
         match peel_value_wrappers(e) {
@@ -49402,7 +49427,10 @@ impl<'e> RegisterSpine<'e> {
     ///
     /// [`binds_register`]: Self::binds_register
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
-        let register = self.binds_register(expr);
+        // A wrapped marker is the register for a single pattern only (#4320): a `?//` chain keeps
+        // the retry rules of #3279/#3781, which a placed head would change.
+        let register =
+            self.binds_register(expr) && (patterns.len() == 1 || wrapped_marker(expr).is_none());
         // #4320: a later bare alternative binds the register only after the body raised on
         // the earlier one. At the top level the walk is then the register's (`. as $x ?//
         // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
@@ -49571,7 +49599,9 @@ impl<'e> RegisterSpine<'e> {
                     || patterns_all_destructuring_chain(patterns)
                     || (self.null_register && routes_destructuring_chain(patterns)))
                     && self.binds_register(expr)
-                    && (patterns.len() == 1 || !matches!(unwrap_bind_source(expr), Expr::Pipe(_)))
+                    && (patterns.len() == 1
+                        || (!matches!(unwrap_bind_source(expr), Expr::Pipe(_))
+                            && wrapped_marker(expr).is_none()))
                 {
                     return Reach::Destructures;
                 }
@@ -51159,6 +51189,9 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // is it, or the previous stage's. Not for a `?//` chain, whose retry rules (#3279) keep
     // proving such a head identical off the table: `(. | .) as {a:$v0} ?// $v0 | .c` retries in
     // jq and a head proven the register would not.
+    //
+    // #4320: and a `$x` marker behind `first`/`last`/`limit`/`try` ([`wrapped_marker`]) is the
+    // register when the marker is, again for a single pattern only.
     let head_resolves_to_register = register.is_some_and(|reg| {
         resolves_to_register::<S>(head, trackable, reg, frame)
             || (patterns.len() == 1
@@ -51166,6 +51199,10 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                 && matches!(head, Expr::Pipe(stages) if stages
                     .iter()
                     .all(|stage| resolves_to_register::<S>(stage, trackable, reg, frame))))
+            || (patterns.len() == 1
+                && S::TAG == EvalTag::Jq
+                && wrapped_marker(head)
+                    .is_some_and(|marker| marker_identical::<S>(marker, reg, frame)))
     });
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
