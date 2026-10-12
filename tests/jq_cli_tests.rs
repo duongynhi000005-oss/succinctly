@@ -78488,8 +78488,7 @@ fn test_foreach_source_marker_behind_a_value_wrapper_destructures_4320() -> Resu
             "",
             0,
         ),
-        // A count that navigates is not a wrapper the resolver places, and a wrapper it does not
-        // name (`nth`) keeps the by-value drive's catchable answer.
+        // A count that navigates is not a wrapper the resolver places.
         (
             r#"{"a":true}"#,
             r"del(. as $x | foreach (limit(.a; $x) as {a:$a} | .) as $k (.; .; .))",
@@ -78509,6 +78508,139 @@ fn test_foreach_source_marker_behind_a_value_wrapper_destructures_4320() -> Resu
         (
             r#"{"a":true}"#,
             r"del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4320, sixth part: the wrappers the fifth part left. A `$x` marker behind a *nested* wrapper
+/// (`first(first($x))`, `limit(1; first($x))`), `first` over a comma whose first leaf is it
+/// (`first($x, 1)`, the only output `first` emits), `nth(0; $x)` and a `label` is jq's register as
+/// the bare marker is, so `. as $x | foreach (W($x) as {a:$a} | .) ...` raises in path position
+/// where the by-value drive deleted or replaced the document. The contrasts are the commas that
+/// emit a non-register leaf too (`limit(2; $x, 1)`, `last($x, 1)`: still a raise, from the leaf
+/// `1`), a member `$x`, `nth(1; $x)` (no output at all) and the same on `null`, where the walk
+/// succeeds. Every row captured from jq 1.7.1; succinctly's wording differs for the refusals.
+#[test]
+fn test_foreach_source_marker_behind_nested_wrappers_4320() -> Result<()> {
+    let wrappers = [
+        "first(first($x))",
+        "limit(1; first($x))",
+        "last(first($x))",
+        "first($x, 1)",
+        "first($x, $x)",
+        "nth(0; $x)",
+        "(label $f | $x)",
+        "((first($x))?)",
+    ];
+    let mut rows: Vec<PathRow3289> = Vec::new();
+    for wrapper in wrappers {
+        for (input, shape) in [
+            (
+                r#"{"a":true}"#,
+                "del(. as $x | foreach (W as {a:$a} | .) as $k (.; .; .))",
+            ),
+            (
+                r#"{"a":true}"#,
+                "(. as $x | foreach (W as {a:$a} | .) as $k (.; .; .)) = 9",
+            ),
+            (
+                r#"{"a":true}"#,
+                "(. as $x | foreach (W as {a:$a} | .) as $k (.; .; .)) |= 9",
+            ),
+            (
+                "[true]",
+                "path(. as $x | foreach (W as [$a] | .) as $k (.; .; .))",
+            ),
+        ] {
+            // The leaked filter lives for the test run, as the rows' `&'static str` asks.
+            let filter: &'static str = Box::leak(shape.replace('W', wrapper).into_boxed_str());
+            rows.push((input, filter, "", "Invalid path expression", 5));
+        }
+    }
+    assert_path_rows_both_routes_3749(&rows)?;
+    assert_path_rows_both_routes_3749(&[
+        // On `null` the walk succeeds and the register lands on the member.
+        (
+            "null",
+            r"path(. as $x | foreach (first(first($x)) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach (first($x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach (nth(0; $x) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach ((label $f | $x) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(. as $x | foreach (first(first($x)) as [$a] | .) as $k (.; .; .)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        // `nth(1; $x)` emits nothing, so there is nothing to destructure.
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (nth(1; $x) as {a:$a} | .) as $k (.; .; .))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        // A marker for another node than the register keeps raising at the first step.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (first(first($x)) as {b:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // A comma that emits a non-register leaf too still raises (from the leaf `1`).
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (last($x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "jq: error",
+            5,
+        ),
+        // The pinned row of the #4320 comment, through each new head: the `try` catches jq's own
+        // refusal, so the document is returned.
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (first(first($x)) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (nth(0; $x) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (first($x, 1) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
             "{\"a\":true}\n",
             "",
             0,
