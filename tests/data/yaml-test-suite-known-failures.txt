@@ -61,7 +61,6 @@ HU3P      lax:mapping       mapping/key rules not validated — #223
 JEF9/02   scalars           blank final line with no break — follows yq, which gives "" — #344
 KS4U      lax:flow          flow syntax not validated — #223
 L24T/00   scalars           scalar content/folding differs from spec
-M5C3      scalars           scalar content/folding differs from spec
 M7A3      structure         bare document / `...` end-marker mis-parsed (both paths agree)
 MUS6/01   lax:documents     directive/document rules not validated — #223
 QLJ7      lax:documents     directive/document rules not validated — #223

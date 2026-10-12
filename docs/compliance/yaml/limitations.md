@@ -26,7 +26,7 @@ path:
 
 | Dimension                              | Result              | Meaning                                        |
 |----------------------------------------|---------------------|------------------------------------------------|
-| **Load** (valid YAML, output compared) | **267/279 = 95.7%** | Parses and produces the JSON the suite expects |
+| **Load** (valid YAML, output compared) | **266/279 = 95.3%** | Parses and produces the JSON the suite expects |
 | **Reject** (invalid YAML, must fail)   | **69/94 = 73.4%**   | Refused by the loader or the opt-in validator  |
 | **Parse** (valid YAML, no JSON form)   | **29/29 = 100.0%**  | Parses without error                           |
 
@@ -57,7 +57,7 @@ the default loader too. This does not move the overall **Reject** figure (still 
 also a re-measurement correction from the 66/94 recorded above): both cases were already
 counted as rejected via the validator before this change.
 
-The 39 non-passing cases are enumerated individually, with a category and reason, in
+The 38 non-passing cases are enumerated individually, with a category and reason, in
 [`tests/data/yaml-test-suite-known-failures.txt`](../../../tests/data/yaml-test-suite-known-failures.txt).
 That file is the machine-readable source of truth; the test asserts it matches reality
 exactly, so it cannot silently drift from this page.
@@ -542,7 +542,7 @@ floats render as integers on the streaming path, `1.0` → `1` —
 
 | Category     | Cases | Cause                                                             |
 |--------------|-------|-------------------------------------------------------------------|
-| `scalars`    | 7     | Zero-indented block scalars; tabs; trailing whitespace            |
+| `scalars`    | 6     | Zero-indented block scalars; tabs; trailing whitespace            |
 | `structure`  | 4     | Document end markers; anchors with colons in the name             |
 | `tags`       | 1     | `S4JQ`: non-specific `!` resolution follows `yq` over the spec (above) |
 

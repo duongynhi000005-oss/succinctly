@@ -5004,7 +5004,9 @@ scalar included; [#4268](https://github.com/rust-works/succinctly/issues/4268)).
 
 A block scalar whose `|`/`>` header is on a line of its own below the owning `-` or `key:`
 (`a:` / `  >` / `  text`) reads its text since #4259, and so does one with an anchor or tag in
-front of the header on that line (`&x |`, `!!str >`; [#4271](https://github.com/rust-works/succinctly/issues/4271)).
+front of the header on that line (`&x |`, `!!str >`), or on a line of their own above it (`&x` / `|`;
+[#4271](https://github.com/rust-works/succinctly/issues/4271)). A comment after properties that stand
+alone (`&x # c` / `|`) still reads wrong, as it did before.
 
 Four known gaps this write shares with every other write form, none specific to #798:
 

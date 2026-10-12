@@ -1790,7 +1790,8 @@ fn test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865() -> Resu
 /// The properties used to send the value down the plain-scalar path, which measured its
 /// continuation against the header's own line: the text read as an empty string (and under a key,
 /// split into a stray entry), on every read and write (#4271). Every row was captured from the
-/// pinned binary.
+/// pinned binary. The last rows are the neighbours the change must leave alone: the same-line
+/// forms (`a: &x |`, `- &x |`), a root-level header and a comment above the properties.
 #[test]
 fn test_block_scalar_header_after_properties_on_its_own_line_4271() -> Result<()> {
     for (input, filter, args, expected) in [
@@ -1917,6 +1918,90 @@ fn test_block_scalar_header_after_properties_on_its_own_line_4271() -> Result<()
             &[][..],
             "a: !!str |\n  x\n  y\nz: 1\n",
         ),
+        (
+            "a:\n  &x\n  |\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\"}\n",
+        ),
+        ("a:\n  &x\n  |\n  x\n", ".", &[][..], "a: &x |\n  x\n"),
+        (
+            "a:\n  &x\n  |\n  x\n",
+            ".z = 1",
+            &[][..],
+            "a: &x |\n  x\nz: 1\n",
+        ),
+        (
+            "a:\n  !!str\n  |\n  x\nb: 1\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\",\"b\":1}\n",
+        ),
+        (
+            "a:\n  !!str\n  |\n  x\nb: 1\n",
+            ".",
+            &[][..],
+            "a: !!str |\n  x\nb: 1\n",
+        ),
+        (
+            "a:\n  !!str\n  |\n  x\nb: 1\n",
+            ".z = 1",
+            &[][..],
+            "a: !!str |\n  x\nb: 1\nz: 1\n",
+        ),
+        (
+            "-\n  !!str\n  &x\n  >\n  x\n  y\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x y\\n\"]\n",
+        ),
+        (
+            "-\n  !!str\n  &x\n  >\n  x\n  y\n",
+            ".",
+            &[][..],
+            "- &x !!str >\n  x y\n\n",
+        ),
+        (
+            "a:\n  # c\n  &x |\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\"}\n",
+        ),
+        (
+            "a:\n  # c\n  &x |\n  x\n",
+            ".",
+            &[][..],
+            "a: &x |\n  x\n# c\n",
+        ),
+        (
+            "a: &x |\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\"}\n",
+        ),
+        ("a: &x |\n  x\n", ".", &[][..], "a: &x |\n  x\n"),
+        ("a: &x |\n  x\n", ".z = 1", &[][..], "a: &x |\n  x\nz: 1\n"),
+        (
+            "- &x |\n  x\n- y\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x\\n\",\"y\"]\n",
+        ),
+        ("- &x |\n  x\n- y\n", ".", &[][..], "- &x |\n  x\n- y\n"),
+        (
+            "&x |\n  text\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "\"text\\n\"\n",
+        ),
+        ("&x |\n  text\n", ".", &[][..], "text\n\n"),
+        (
+            "---\n&x |\n  text\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "\"text\\n\"\n",
+        ),
+        ("---\n&x |\n  text\n", ".", &[][..], "---\ntext\n\n"),
     ] {
         assert_eq!(
             run_yq_stdin_with_stderr(filter, input, args)?,
