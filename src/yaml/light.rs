@@ -6315,7 +6315,9 @@ impl<'a> YamlString<'a> {
         while line_start > 0 && !is_line_break(text[line_start - 1]) {
             line_start -= 1;
         }
-        if text[line_start..indicator_pos].iter().any(|&b| b != b' ') {
+        // Node properties (`&x`, `!!str`) may precede the header on its line (#4271); anything
+        // else (`key: |`, `- |`) is the same-line form.
+        if !crate::yaml::parser::only_node_properties(&text[line_start..indicator_pos]) {
             return None;
         }
         let mut end = line_start;
@@ -6334,6 +6336,10 @@ impl<'a> YamlString<'a> {
             let rest = &line[indent..];
             end = prev_start;
             if rest.is_empty() || rest[0] == b'#' {
+                continue;
+            }
+            // A line of node properties alone belongs to the value below it (#4271).
+            if crate::yaml::parser::only_node_properties(rest) {
                 continue;
             }
             if rest[0] == b'-' && matches!(rest.get(1), None | Some(b' ' | b'\t')) {

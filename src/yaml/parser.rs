@@ -7679,10 +7679,34 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if rest.is_empty() || rest[0] == b'#' {
                 continue;
             }
+            // Node properties on a line of their own (`&x`) are part of the value that follows;
+            // the line before them is the owner (#4271).
+            if only_node_properties(rest) {
+                continue;
+            }
             return line_ends_with_colon_before_comment(rest)
                 || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest));
         }
         false
+    }
+
+    /// A block scalar whose header sits on a line of its own (#4259, and after node properties
+    /// #4271), with the gap and close checks already made by the caller: its content has to be
+    /// indented more than the block that owns it, which can be no more than the header itself.
+    fn parse_own_line_block_scalar(&mut self, indent: usize) -> Result<(), YamlError> {
+        self.attach_document_root_node(indent);
+        let parent = self.innermost_block_indent();
+        self.parse_block_scalar(parent)
+    }
+
+    /// Whether nothing but spaces sits between the start of the cursor's line and `start`, so
+    /// the node properties parsed from `start` open the line (#4271).
+    fn line_opens_with_properties_only(&self, start: usize) -> bool {
+        let mut line_start = start;
+        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
+            line_start -= 1;
+        }
+        self.input[line_start..start].iter().all(|&b| b == b' ')
     }
 
     /// Dispatch the block-context node that begins at the cursor, treating
@@ -7815,11 +7839,24 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.close_deeper_indents(indent);
                     // Consume any leading `&anchor` and/or `!tag`, in either
                     // order, for non-mapping-key cases
+                    let properties_start = self.pos;
                     self.parse_node_properties()?;
                     // Check what follows
                     match self.peek() {
                         Some(b'\n' | b'\r') | None => {
                             // Property with value on next line - will be parsed in next iteration
+                        }
+                        // #4271: the properties open a line of their own and the block scalar
+                        // header follows them (`&x |`, `!!str >`), under a `-` or `key:` that
+                        // left its value for this line -- the same slot, and the same
+                        // parent-relative content indent, as the bare header below (#4259).
+                        Some(b'|' | b'>')
+                            if !self.json_strict
+                                && self.type_stack.len() > 1
+                                && self.line_opens_with_properties_only(properties_start)
+                                && self.previous_content_line_defers_its_value() =>
+                        {
+                            self.parse_own_line_block_scalar(indent)?;
                         }
                         // Keep this guard on one line: rustfmt splitting the
                         // `matches!` across lines gives the opening line its own
@@ -7913,9 +7950,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             {
                 self.check_mapping_under_mapping_gap(indent, false)?;
                 self.close_deeper_indents(indent);
-                self.attach_document_root_node(indent);
-                let parent = self.innermost_block_indent();
-                self.parse_block_scalar(parent)?;
+                self.parse_own_line_block_scalar(indent)?;
             }
             Some(_) => {
                 // Check if this looks like a mapping entry (has `: ` on this line)
@@ -8013,6 +8048,19 @@ pub(crate) fn line_ends_with_colon_before_comment(line: &[u8]) -> bool {
         end -= 1;
     }
     end > 0 && line[end - 1] == b':'
+}
+
+/// Whether every whitespace-separated token of `bytes`, a trailing ` #` comment aside, is a node
+/// property (`&anchor`, `!tag`, `!!str`, `!<verbatim>`) -- and not a key that merely begins with
+/// one (`&x:`). True for an empty slice (#4271).
+pub(crate) fn only_node_properties(bytes: &[u8]) -> bool {
+    let code_end = (0..bytes.len())
+        .find(|&i| bytes[i] == b'#' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t')))
+        .unwrap_or(bytes.len());
+    bytes[..code_end]
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|token| !token.is_empty())
+        .all(|token| matches!(token[0], b'&' | b'!') && token[token.len() - 1] != b':')
 }
 
 /// Whether `line` (already without its leading spaces) is a `-` and nothing else, a trailing
