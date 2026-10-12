@@ -441,6 +441,24 @@ OPERANDS = [
     "(reduce (. as [$a] | .) as $k (.; .))",
     "(reduce (. as {a:$a} | $a) as $k (.; .))",
     "try (foreach (. as {a:$a} | .) as $k (.; .; .)) catch 7",
+    # (#4129) a destructuring bind or fold under a `try` with a handler: the bind's source is a
+    # subexpression, so only a producer in its *body* can state a register, and a fold whose
+    # pattern destructures still leaves its entry register to the handler's output. The
+    # contrasts keep a producer (`.`) in the body, a handler that navigates, and a body that
+    # navigates before the bind.
+    "try (. as [$a] | $a) catch 7",
+    "try (. as {a:$a} | $a) catch 7",
+    "try (. as [$a] ?// $a | $a) catch 7",
+    "try (. as [$a] | 1) catch 7",
+    "try (. as [$a] | .) catch 7",
+    "try (. as [$a] | .a) catch 7",
+    "try (. as [$a] | $a) catch .a",
+    "try (.a | . as [$a] | $a) catch 7",
+    "try (reduce . as [$a] (0; .)) catch 7",
+    "try (reduce . as {a:$a} (0; .)) catch 7",
+    "try (foreach . as [$a] (0; .; .)) catch 7",
+    "try (foreach . as {a:$a} ?// $a (0; .; .)) catch 7",
+    "try (reduce . as [$a] (0; .)) catch .a",
     # (#4187) a plain bind in front of the destructure does not move the register (its source is a
     # subexpression), so the destructure behind it is the source's own; the contrasts bind a
     # different value, destructure something the bind produced, or follow it with a navigation.

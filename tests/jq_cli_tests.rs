@@ -67732,6 +67732,185 @@ fn test_foreach_destructuring_pattern_states_the_entry_register_per_step_4129() 
     ])
 }
 
+/// #4129: a `try` with a handler over a destructuring bind or fold. The handler's outputs state the
+/// register jq restored at the `try`'s entry, but the stage read nothing from them: a bind that
+/// destructures was classed opaque because its *source* holds a `.` (a subexpression, which states
+/// nothing into the sink), and a fold that destructures was read as moving the register (its
+/// pattern's steps are backtracked in `reduce`, and state themselves in `foreach`). A `$x` frozen
+/// ahead of the `try`, or a write through it, was refused where jq answers
+/// (`path(. as $x | {a:1} | (try (. as [$a] | $a) catch 7) | $x)` on `[{"a":1}]` is `[]`, was exit
+/// 5). The same bind and fold with no handler already answered. Every row captured from jq 1.7.1.
+#[test]
+// The rows' jq filters (`{a:1}`) are literals, not formatting strings; clippy cannot tell the two
+// apart from the brace shape alone.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_try_handler_over_destructuring_bind_or_fold_states_the_entry_register_4129() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // A bind whose body holds no `.` or recursion states nothing into the sink, so the handler's output
+        // is the only statement the stage reads: the source's `{a:1}` is a literal, and `$x` is the root.
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"del(. as $x | {a:1} | (try (. as [$a] | $a) catch 7) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"(. as $x | {a:1} | (try (. as [$a] | $a) catch 7) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as {a:$a} | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] ?// $a | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] | 1) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] | $a) catch 7) | $x | .a?)",
+            "",
+            "",
+            0,
+        ),
+        // A `reduce`/`foreach` that destructures, under a handler that navigates nothing: the fold's own
+        // outputs state the carried register, the handler's output states the `try`'s entry.
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (reduce . as [$a] ?// $a (0; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (reduce . as {a:$a} (0; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"del(. as $x | {a:{b:1}} | (try (reduce . as [$a] (0; .)) catch 7) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"(. as $x | {a:{b:1}} | (try (reduce . as [$a] (0; .)) catch 7) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (foreach . as [$a] (0; .; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (foreach . as [$a] ?// $a (0; .; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (reduce . as [$a] ?// $a (0; .)) catch 7)? | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // The destructure succeeds on the source: the register did not move for the handler's output.
+        (
+            r"[[1]]",
+            r"path(. as $x | [1] | (try (. as [$a] | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[[1]]",
+            r"path(. as $x | [1] | (try (reduce . as [$a] (0; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls that answer: a body that navigates, a fold whose UPDATE navigates.
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] | .a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (foreach . as [$a] (0; .a?; .)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls, jq's own refusals: the register moved before the `try`, and a handler that navigates
+        // the caught error's payload.
+        (
+            r"[[1]]",
+            r"path(. as $x | .[0] | (try (. as [$a] | $a) catch 7) | $x)",
+            "",
+            r"Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            r"[[1]]",
+            r"path(. as $x | .[0] | (try (reduce . as [$a] (0; .)) catch 7) | $x)",
+            "",
+            r"Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:1} | (try (. as [$a] | $a) catch .a) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a""#,
+            5,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (reduce . as [$a] (0; .)) catch .a) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a""#,
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
