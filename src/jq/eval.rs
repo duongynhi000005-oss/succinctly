@@ -36609,12 +36609,7 @@ fn body_performs_no_step(e: &Expr) -> bool {
 /// and an `if`, whose jq behaviour differs per form -- the safe direction, a refusal stays one.
 fn body_leads_with_navigation(e: &Expr) -> bool {
     match e {
-        Expr::Field(_)
-        | Expr::Index { .. }
-        | Expr::Iterate
-        | Expr::Slice { .. }
-        | Expr::IndexExpr { .. }
-        | Expr::SliceExpr { .. } => true,
+        e if is_postfix_optional_primitive(e) => true,
         Expr::Optional(inner) => is_postfix_optional_primitive(inner),
         Expr::Paren(inner) => body_leads_with_navigation(inner),
         Expr::Pipe(stages) => stages.first().is_some_and(body_leads_with_navigation),
@@ -51475,8 +51470,6 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             let mut outcome: Option<BranchOutcome> = None;
             // #3843: the retry generation `outcome` was recorded at.
             let mut outcome_at = 0u64;
-            // #4115: set per body run, read when that run escapes.
-            let mut first_step_refused_by_jq = false;
             // #2872: one body run per branch of the walk, as it completes --
             // a computed key's outputs branch the register, and the `?//`
             // rules below apply per branch, partway through the stream:
@@ -51510,7 +51503,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         &all_names,
                     );
                     clear_nonretryable_stop();
-                    first_step_refused_by_jq = false;
+                    let mut first_step_refused_by_jq = false;
                     let flow = if reg.path.depth() == 0 {
                         match register {
                             // No step ran (a bare `$x` alternative, or an
@@ -51565,7 +51558,6 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         // raises in jq).
                         first_step_refused_by_jq = S::TAG == EvalTag::Jq
                             && fold_body::depth() == 0
-                            && !null_bool_identical(value, &reg.value)
                             && !equals_register(value, &reg.value)
                             && body_leads_with_navigation(&substituted);
                         let seed = if null_bool_identical(value, &reg.value) {
@@ -51628,6 +51620,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             Demand::Stop
                         }
                         ResolveFlow::Escaped(escape) => {
+                            // #4115: the first step is the first thing the body evaluates and it
+                            // always raises, so no later step runs and this escape is its refusal.
                             let retries = path_alternative_retries(&escape, is_last)
                                 || (first_step_refused_by_jq
                                     && !is_last

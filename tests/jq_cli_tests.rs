@@ -86778,13 +86778,11 @@ fn test_destructuring_moves_path_register_2649() -> Result<()> {
     // a write would then corrupt data through. Exit 5 and empty stdout are
     // the only assertions; each row is otherwise a pure jq answer, not a
     // succinctly one.
-    {
-        // jq: ["a"]
-        let filter = "path(. as {a:$q} | .a as $z | $z)";
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(d))?;
-        assert_eq!(code, 5, "`{filter}`: stdout={stdout} stderr={stderr}");
-        assert!(stdout.is_empty(), "`{filter}` must not print: {stdout}");
-    }
+    // jq: ["a"]
+    let refused = "path(. as {a:$q} | .a as $z | $z)";
+    let (stdout, stderr, code) = run_jq_full(&["-c", refused], Some(d))?;
+    assert_eq!(code, 5, "`{refused}`: stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "`{refused}` must not print: {stdout}");
     // The other former refuse-only pin of this block answers since #4115: the body leads with
     // a navigation of an ambient that is not the register the pattern moved to, which is
     // jq's own path error and sends it to the `$z` alternative -- jq's `["a"]`.
@@ -123923,6 +123921,29 @@ fn test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115() 
             "",
             0,
         ),
+        // A computed index or slice leads with a navigation step too.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[1-1]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[0:1+0]))",
+            "[\"x\",{\"start\":0,\"end\":1}]\n",
+            "",
+            0,
+        ),
+        // The last alternative has no next one to retry: its refusal is raised.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as {a:$a} ?// [$q] | .[0]))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
         // The body does not lead with a navigation step: the refusal stays jq's.
         (
             r#"{"x":[true]}"#,
@@ -123956,6 +123977,23 @@ fn test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115() 
             0,
         ),
     ])
+}
+
+/// #4115: inside a `foreach` UPDATE jq's state slot is `null`, so no retry is modelled there. jq
+/// prints `["x",0]` after raising `near attempt to access element 0 of true`; this refuses
+/// without printing (recorded in `limitations.md`).
+#[test]
+fn test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115() -> Result<()> {
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-c",
+            r"path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))",
+        ],
+        Some(r#"{"x":[true]}"#),
+    )?;
+    assert_eq!(code, 5, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "must not print: {stdout}");
+    Ok(())
 }
 
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes

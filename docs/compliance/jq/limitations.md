@@ -11751,7 +11751,11 @@ refusal when the body *leads with* a navigation step (a bare `.k`/`.[n]`/`.[]`/s
 of a pipe, the first branch of a comma, the left operand of a `//`) and the ambient is not equal to the moved register's value
 (`test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115`). A body that reaches its navigation behind
 anything else (`if`, `first(.a)`, `$q | .a`, a `try`-scoped `(.a)?`) keeps the old rule that a resolver refusal never retries, so it can
-still be refused where jq retries. An answer that is a valid path is printed before the raise of the
+still be refused where jq retries. Inside a `reduce`/`foreach` UPDATE or EXTRACT no retry is modelled either: jq hands the fold's state slot back as `null` there,
+so the retried alternative does not start at the register the stage entered (`path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))` on
+`[[]]` raises in jq, and `path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))` on `{"x":[true]}` prints `["x",0]` after raising, where
+this refuses without printing it, `test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115`). The rule is `jq` mode only,
+and `yq` mode keeps its by-value rules (ADR-0018). An answer that is a valid path is printed before the raise of the
 retry that follows it, as jq does (`test_any_all_path_answer_precedes_retry_raise_3827`).
 
 ## Provenance
