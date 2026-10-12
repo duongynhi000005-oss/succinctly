@@ -34512,18 +34512,21 @@ fn through_slice<E: From<EvalError>>(
         // (`.a[0:2].foo = v`, field access on an array) -- the attempt
         // against the throwaway fails the same way it would against the
         // real array, it just never gets spliced back on success.
-        OwnedValue::Array(_) | OwnedValue::String(_) if container_noop => {
-            // `expect`, not `unwrap_or(Null)`: the guard above has already
-            // narrowed `root` to Array/String, and `slice_owned_value` only
-            // ever returns `Ok(None)` for a target that's neither
-            // Array/Null/String -- unreachable here. A silent `Null`
-            // fallback would hide that invariant breaking if this guard is
-            // ever widened (e.g. to `Object`, per #1157 — a separate,
-            // still-open gap in this assignment-side `container_noop` gate;
-            // #1162's own container-target gap was in `del()`'s entirely
-            // separate walker, fixed without touching this function).
-            let mut throwaway = slice_owned_value(root, start, end, optional)?
-                .expect("Array/String target always yields Some from slice_owned_value");
+        OwnedValue::Array(_) | OwnedValue::String(_) | OwnedValue::Object(_) if container_noop => {
+            // An object target (#1157) is no-op'd too, and its throwaway is
+            // what yq's own slice would read: the object's alternating
+            // key/value child list (`slice_object_as_yq_children`, #1102),
+            // which never errors. Array/String keep the genuine
+            // `slice_owned_value` read. `expect`, not `unwrap_or(Null)`: the
+            // guard above has already narrowed `root` to Array/String, and
+            // `slice_owned_value` only ever returns `Ok(None)` for a target
+            // that's none of Array/Null/String -- unreachable here, and a
+            // silent `Null` fallback would hide that invariant breaking.
+            let mut throwaway = match root {
+                OwnedValue::Object(map) => slice_object_as_yq_children(map, start, end),
+                _ => slice_owned_value(root, start, end, optional)?
+                    .expect("Array/String target always yields Some from slice_owned_value"),
+            };
             edit(&mut throwaway)?;
             Ok(true)
         }
