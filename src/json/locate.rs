@@ -222,9 +222,23 @@ fn find_key_for_value<W: AsRef<[u64]>>(
 }
 
 /// Extract the key string from a key cursor.
+///
+/// A key that does not decode (invalid UTF-8, or an invalid escape) is read
+/// lossily from its source text rather than dropped (#1759): returning `None`
+/// here fails the whole locate for the key and everything under it. U+FFFD is
+/// the spelling `jq` prints for those bytes, and it forces the bracket form
+/// (`.["b\u{fffd}c"]`), which is still a valid jq expression.
 fn extract_key_string<W: AsRef<[u64]>>(cursor: JsonCursor<'_, W>, _text: &[u8]) -> Option<String> {
     match cursor.value() {
-        StandardJson::String(s) => s.as_str().ok().map(alloc::borrow::Cow::into_owned),
+        StandardJson::String(s) => Some(match s.as_str() {
+            Ok(decoded) => decoded.into_owned(),
+            Err(_) => {
+                let raw = s.raw_bytes();
+                let inner = raw.strip_prefix(b"\"").unwrap_or(raw);
+                let content = inner.strip_suffix(b"\"").unwrap_or(inner);
+                String::from_utf8_lossy(content).into_owned()
+            }
+        }),
         _ => None,
     }
 }
@@ -602,6 +616,34 @@ mod tests {
                     "Failed to locate offset {offset} - may indicate enclose() word boundary bug"
                 );
             }
+        }
+    }
+
+    /// #1759: a key that does not decode is read lossily instead of failing
+    /// the whole locate, for the key, its value and every descendant.
+    #[test]
+    fn test_locate_key_that_does_not_decode_1759() {
+        for (json, expected_key) in [
+            // invalid UTF-8
+            (&b"{\"a\":1,\"b\xe4c\":{\"d\":5}}"[..], "b\u{fffd}c"),
+            // invalid escape: the raw escape text is kept
+            (&b"{\"a\":1,\"b\\qc\":{\"d\":5}}"[..], "b\\\\qc"),
+        ] {
+            let index = JsonIndex::build(json);
+            let key_at = json.iter().rposition(|&b| b == b'b').unwrap();
+            let five = json.iter().rposition(|&b| b == b'5').unwrap();
+            assert_eq!(
+                locate_offset(&index, json, key_at).as_deref(),
+                Some(format!(".[\"{expected_key}\"]").as_str()),
+                "{:?}",
+                String::from_utf8_lossy(json)
+            );
+            assert_eq!(
+                locate_offset(&index, json, five).as_deref(),
+                Some(format!(".[\"{expected_key}\"].d").as_str()),
+                "{:?}",
+                String::from_utf8_lossy(json)
+            );
         }
     }
 }

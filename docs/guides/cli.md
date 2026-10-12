@@ -791,10 +791,11 @@ Unlike `succinctly yq`/`yq --validate`/`at_offset`, which all reject a YAML docu
 containing invalid UTF-8 at the input boundary, `yq-locate` deliberately keeps answering on
 one: warns to stderr and continues, rather than refusing outright, for the byte in question
 (#1627). Asking "what's at byte N" of a file a parser just rejected is the normal case for
-a diagnostic tool, not an edge case. This doesn't cover every invalid byte in the document,
-though: if the byte falls inside a *mapping key* on the path to the requested offset, the
-path expression still can't be built at all (a separate, pre-existing limitation in how
-`yq-locate` renders keys, not fixed by #1627) and the command still fails — see #1759.
+a diagnostic tool, not an edge case. That includes a byte inside a *mapping key* on the path
+to the requested offset (#1759): the key is read lossily, so its invalid bytes (or an invalid
+escape's raw text) show as U+FFFD and the key takes bracket form, e.g. `.[0]["b�c"]`.
+`jq-locate` does the same for a JSON key. Because the decoding is lossy, two keys that differ only
+in their invalid bytes locate to the same expression, and that expression does not select either key.
 
 ---
 
