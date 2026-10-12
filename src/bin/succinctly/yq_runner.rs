@@ -1442,14 +1442,43 @@ fn json_nested_past_depth_limit<W: AsRef<[u64]>>(
 /// `--inplace`'s own DOM-fallback call sites only -- `--eval-all` calls
 /// plain [`parse_input`] directly (#2282: no M2-parity pre-check applies
 /// to it).
+///
+/// The JSON arm builds its `JsonIndex` once and hands the root cursor on to
+/// [`parse_json_input_from_cursor`] after the depth check, rather than
+/// delegating to [`parse_input`] and building a second index of the same
+/// bytes (#2296). The check still runs before any materialization, so the
+/// message and exit code are unchanged.
 fn parse_input_m2_parity(bytes: &[u8], format: InputFormat) -> Result<Vec<OwnedValue>> {
     if format == InputFormat::Json {
         let index = JsonIndex::build(bytes);
-        if json_nested_past_depth_limit(index.root(bytes), 0, M2_PARSE_TIME_DEPTH_LIMIT) {
+        let cursor = index.root(bytes);
+        if json_nested_past_depth_limit(cursor, 0, M2_PARSE_TIME_DEPTH_LIMIT) {
             anyhow::bail!(nesting_depth_exceeded_message(M2_PARSE_TIME_DEPTH_LIMIT));
         }
+        return parse_json_input_from_cursor(&cursor);
     }
     parse_input(bytes, format)
+}
+
+/// Materialize a JSON document from its already-built root cursor -- the one
+/// definition of what [`parse_input`]'s JSON arm does after indexing, shared
+/// with [`parse_input_m2_parity`] so the two cannot drift (#2296).
+fn parse_json_input_from_cursor<W: AsRef<[u64]> + Clone>(
+    cursor: &JsonCursor<'_, W>,
+) -> Result<Vec<OwnedValue>> {
+    // #2781: pass the root cursor through rather than going via the
+    // cursor-less `to_owned_canonicalizing_numbers` wrapper -- the
+    // premise that "there is no cursor for the true top-level
+    // container" was false at this call site all along; the root
+    // cursor is already in hand here, it just was not threaded down.
+    // Without it, `tail_gap_ok` falls back to `child_tail_gap_ok`,
+    // which can only see a last child and so misses a stray `,` in
+    // an empty top-level container (`[,]`/`{,}`) -- every *nested*
+    // level already gets `Some(cursor)` (#2403) and closes the same
+    // gap via `container_tail_gap_ok`.
+    let value = to_owned_canonicalizing_numbers_at_depth(&cursor.value(), cursor, 0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(vec![value])
 }
 
 /// Parse input bytes according to the specified format.
@@ -1457,20 +1486,7 @@ fn parse_input(bytes: &[u8], format: InputFormat) -> Result<Vec<OwnedValue>> {
     match format {
         InputFormat::Json => {
             let index = JsonIndex::build(bytes);
-            let cursor = index.root(bytes);
-            // #2781: pass the root cursor through rather than going via the
-            // cursor-less `to_owned_canonicalizing_numbers` wrapper -- the
-            // premise that "there is no cursor for the true top-level
-            // container" was false at this call site all along; the root
-            // cursor is already in hand here, it just was not threaded down.
-            // Without it, `tail_gap_ok` falls back to `child_tail_gap_ok`,
-            // which can only see a last child and so misses a stray `,` in
-            // an empty top-level container (`[,]`/`{,}`) -- every *nested*
-            // level already gets `Some(cursor)` (#2403) and closes the same
-            // gap via `container_tail_gap_ok`.
-            let value = to_owned_canonicalizing_numbers_at_depth(&cursor.value(), &cursor, 0)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            Ok(vec![value])
+            parse_json_input_from_cursor(&index.root(bytes))
         }
         InputFormat::Yaml | InputFormat::Auto => {
             // Parse as YAML (Auto defaults to YAML when no extension hint)
