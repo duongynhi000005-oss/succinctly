@@ -44866,17 +44866,20 @@ fn compound_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
 
 /// Whether `expr` is a `foreach` whose emissions state jq's register per emission
 /// (#3580), read through the wrappers [`peel_register_transparent`] passes the
-/// register through: one that [`foreach_outside_update_cannot_move`] and whose
-/// `UPDATE` may navigate (a stage that cannot is already
-/// [`cannot_move_register`]'s). [`resolve_foreach`] states `Unmoved` on the
-/// emissions whose `UPDATE` output was at the entry and nothing on the rest, so
-/// this only admits the stage to *read* the statement; jq mode only.
+/// register through: one whose source, `INIT` and `EXTRACT` cannot move it
+/// ([`foreach_body_cannot_move`]) and whose `UPDATE` may navigate (a stage that
+/// cannot is already [`cannot_move_register`]'s). [`resolve_foreach`] states
+/// `Unmoved` on the emissions whose `UPDATE` output was at the entry and nothing on
+/// the rest, so this only admits the stage to *read* the statement; jq mode only.
+/// The pattern is not asked about (#4129): a destructuring one moves the register
+/// on the steps that walk, which state nothing, and a step that took no walk step (the
+/// bare `$var` alternative a failed destructure retried onto) states the entry.
 fn foreach_states_register_per_emission<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
         && matches!(
             peel_register_transparent(expr),
-            Expr::Foreach { patterns, input, init, extract, .. }
-                if foreach_outside_update_cannot_move(patterns, input, init, extract.as_deref())
+            Expr::Foreach { input, init, extract, .. }
+                if foreach_body_cannot_move(input, init, extract.as_deref())
         )
 }
 
@@ -46685,20 +46688,18 @@ fn fold_update_movement_tracked(update: &Expr) -> bool {
         }
 }
 
-/// Whether everything in a `foreach` but its `UPDATE` leaves jq's register alone
-/// (#3580): a bare-variable pattern, a source, an `INIT` and an `EXTRACT` that
-/// cannot navigate. jq emits from inside the loop, so the register an emission
-/// carries is the one `UPDATE`'s output left -- the fold's entry whenever that
-/// output said so ([`BranchRegister::AtEntry`]). Shared by [`resolve_foreach`],
-/// which states it per emission, and [`resolve_seq_stage`], which reads it.
-fn foreach_outside_update_cannot_move(
-    patterns: &[Pattern],
-    input: &Expr,
-    init: &Expr,
-    extract: Option<&Expr>,
-) -> bool {
-    patterns_all_bare(patterns)
-        && cannot_move_register(input)
+/// Whether everything in a `foreach` but its pattern and `UPDATE` leaves jq's register
+/// alone (#3580): a source, an `INIT` and an `EXTRACT` that cannot navigate. jq emits from
+/// inside the loop, so the register an emission carries is the one `UPDATE`'s output
+/// left -- the fold's entry whenever that output said so ([`BranchRegister::AtEntry`]).
+/// Shared by [`resolve_foreach`], which states it per emission, and
+/// [`resolve_seq_stage`], which reads it.
+///
+/// The pattern is left out (#4129): a destructuring one is the one part of the loop that
+/// moves the register, and only on a step that took a walk step, so the caller reads it
+/// from the step (`walked.is_none()`) rather than from the fold.
+fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -> bool {
+    cannot_move_register(input)
         && cannot_move_register(init)
         && extract.map_or(true, cannot_move_register)
 }
@@ -54228,10 +54229,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
     // inside the loop, so the register an emission carries is the one UPDATE's
     // output left. The statement is per emission; this only says it may be read.
-    let update_states_entry = S::TAG == EvalTag::Jq
+    // #4129: not the pattern, which is asked per step instead (`step_walked` below): a
+    // destructuring pattern moves the register only on the steps that walk.
+    let update_states_entry_if_unwalked = S::TAG == EvalTag::Jq
         && trackable
         && !register_unmoved
-        && foreach_outside_update_cannot_move(patterns, input, init, extract);
+        && foreach_body_cannot_move(input, init, extract);
+    let all_bare = patterns_all_bare(patterns);
     // #4130: on an untracked entry the stage reads the statement of every emission
     // that navigated nothing ([`foreach_states_register_on_untracked_entry`]), so each
     // one states it: the frame's register when the step provably left it there
@@ -54471,6 +54475,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // destructure's restored fork reached) and nothing else in the loop
                         // body can have moved it. Read by the sink above, per emission.
                         step_at_entry.set(entry_stays_at_register && walked.is_none());
+                        // #4129: this step's emissions state the entry when no walk step
+                        // moved the register off it.
+                        let update_states_entry =
+                            update_states_entry_if_unwalked && (all_bare || walked.is_none());
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "foreach")
                         {

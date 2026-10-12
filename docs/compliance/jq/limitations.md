@@ -679,7 +679,15 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   before the emission, inside the loop). So `del(.a and (foreach . as {a:$a} ?// $a (0; .; .)))` on
   `{"a":true}` is jq's `{}` (it refused "with result true"), and so is
   `path(. as $x | 5 | (foreach . as {a:$q} ?// $a (0; .; .)) | $x)` (`[]`), pinned by
-  `test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130`. Over a seeded
+  `test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130`. Since
+  [#4129](https://github.com/rust-works/succinctly/issues/4129) a *trackable* entry reads the same
+  per-step statement instead of treating the whole fold as moving the register because its pattern
+  destructures: `del(. as $x | (foreach . as {("a"):$a} ?// $a (0; .; .)) | $x)` on `[true]` is jq's
+  `null` (it refused "with result [true]"), pinned by
+  `test_foreach_destructuring_pattern_states_the_entry_register_per_step_4129`. Over the 212
+  `foreach` operands, `--stage-only` (185,211 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
+  REFUSE_WRONG went 4,464 to 4,424 and MATCH 180,267 to 180,307, with no regression and
+  ACCEPT_WRONG (303) and DIFF (177) unchanged. Over a seeded
   sample of 80,027 rows of the 190 `foreach` operands (`--sample 80000 --seed 5`, `/usr/bin/jq` 1.7.1,
   against a `main` build) it moved REFUSE_WRONG 1,291 to 1,238 and MATCH 78,657 to 78,710, with no
   regression and ACCEPT_WRONG unchanged at 53. **A recorded

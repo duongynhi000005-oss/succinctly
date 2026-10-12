@@ -67004,6 +67004,130 @@ fn test_foreach_emission_states_the_entry_register_on_an_untracked_entry_4130() 
     ])
 }
 
+/// #4129: a `foreach` with a destructuring pattern states jq's register per step, not for the whole
+/// fold. jq emits from inside the loop, so a step that walked the pattern emits at the register
+/// the walk left, and a step that took no walk step (the bare `$var` alternative reached after a
+/// destructure failed, whose fork the `?//` restored) emits at the register the fold entered
+/// with. The stage used to read the whole fold as moving the register, so a `$x` frozen before it,
+/// or a write through it, was refused where jq answers (`del(. as $x | (foreach . as {("a"):$a}
+/// ?// $a (0; .; .)) | $x)` on `[true]` is `null`, was exit 5). Controls, jq's own refusals: a
+/// navigating `INIT`, `UPDATE` or `EXTRACT`, and a source that navigates. Every jq side captured
+/// from jq 1.7.1.
+#[test]
+fn test_foreach_destructuring_pattern_states_the_entry_register_per_step_4129() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The first alternative's computed key never succeeds on an array, so the bare one runs.
+        (
+            "[true]",
+            r#"del(. as $x | (foreach . as {("a"):$a} ?// $a (0; .; .)) | $x)"#,
+            "null\n",
+            "",
+            0,
+        ),
+        // An array pattern off an object fails, the bare alternative runs: the register is the
+        // entry's, so `$x` is a path, and a write through it lands on the root.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(. as $x | (foreach . as [$a] ?// $a (0; .; .)) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Any number of destructuring alternatives ahead of the bare one.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// [$a] ?// $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // The stage after reads the root register natively.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .; .)) | $x | .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A destructure that succeeds still lands at the register the walk left, which a frozen
+        // `$x` then names.
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | (foreach . as {a:$a} ?// $a (0; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls, all jq 1.7.1's own refusals: an `UPDATE` or `EXTRACT` that navigates the
+        // emitted `0`, a navigating `INIT`, a navigating source, and a stage that reads `.`
+        // where the register is not.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .a?; .)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .; .a)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (.a; .; .)) | $x)",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach (.a, .) as [$a] ?// $a (0; .; .)) | $x)",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// $a (0; .; .)) | .a)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
+            5,
+        ),
+        // No bare alternative: every step walks, and jq's walk leaves the register off the root.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as [$a] ?// {b:$a} (0; .; .)) | $x)",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | (foreach . as {a:$a} (0; .; .)) | $x)",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
