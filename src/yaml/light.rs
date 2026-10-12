@@ -2582,6 +2582,20 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// - `sort_keys`: sort each mapping's fields before writing (`-S`). See
     ///   `stream_yaml_value`'s doc comment for why materializing into a
     ///   `Vec<YamlField>` is cheap even when unsorted.
+    ///
+    /// **No nesting-depth guard, deliberately (#2187).** This recurses once per
+    /// nesting level and checks neither `MAX_NESTING_DEPTH` nor
+    /// `MAX_VALUE_TREE_DEPTH`, so `.`, `.[]` and `map(.)` stream a document the
+    /// materializing builtins (`sort`, `to_entries`, ...) refuse past 256 levels,
+    /// as real yq does. The recursion is bounded by the input rather than
+    /// unbounded: block nesting to depth `d` costs at least `d * (d + 1) / 2`
+    /// bytes of indentation, so depth grows as the square root of the document
+    /// size (a 1 GiB document tops out near 46k levels), and flow/compact-inline
+    /// nesting stops at the parser's own 128. 20,000 levels (a 200 MB document)
+    /// streamed in a live run, well inside the 256 MiB evaluation-thread stack.
+    /// A guard here would make `yq . deep.yaml` fail where yq succeeds, for no
+    /// safety gain; `test_m2_streaming_lazyseq_streams_past_materialization_ceiling_2187`
+    /// pins the behaviour.
     fn stream_json_value<Out: core::fmt::Write>(
         &self,
         out: &mut Out,
@@ -7891,6 +7905,10 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
 
     /// `numbers` (#1576) is ignored -- see this trait's `stream_json` impl
     /// above for why.
+    ///
+    /// Like `YamlCursor::stream_json_value` it recurses with no nesting-depth
+    /// guard, on purpose: the depth is bounded by the square root of the
+    /// document size, not unbounded (#2187, see that function's doc comment).
     #[inline]
     fn stream_sequence_json<Out: core::fmt::Write>(
         cursors: &[Self],
