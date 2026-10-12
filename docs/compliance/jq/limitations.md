@@ -1483,11 +1483,12 @@ is the revert that established what the other one costs.
      in place, so the body's leaf states the register) and through a `reduce`, which backtracks its source and `UPDATE`
      to the post-INIT register (`reduce 1 as $i (.; any) | $x` is `[]` even when `any` decides), pinned by
      `test_verdict_stage_behind_a_def_or_reduce_3826`; an `UPDATE` that iterates the accumulator after a source that
-     moved the register (`reduce .[] as $i (.; any)`), or on a second pass, still raises as in jq. Shapes that still refuse where jq answers, in the safe
+     moved the register (`reduce .[] as $i (.; any)`), or on a second pass, still raises as in jq. Shapes that
+     still refuse where jq answers, in the safe
      direction (a sample, not an exhaustive list), pinned by
      `test_any_all_pipe_stage_verdict_residuals_stay_refused_3757`: inside a compound stage (`(any, any)`,
      `any // 1`, `any? // 1`), which is refused as a whole (#3644), behind a `def` call with an argument
-     (`def f(g): any; f(.a) | $x`) or a `reduce` whose `UPDATE` is a verdict over a generator that navigates
+     (`def f(g): any; f(.a) | $x`), a `def` whose body defines another (`def f: def g: any; g; f | $x`) or a `reduce` whose `UPDATE` is a verdict over a generator that navigates
      (`reduce 1 as $i (.; isempty(.[]?)) | $x`), and on an untracked entry over a generator the allowlist
      cannot prove leaves the register in place (`1 | isempty(def f: 2; f)`: the step states a loss, which the stage
      does not override; `1 | isempty(first(2,3))` and `1 | any(first(2,3); .)` answer since

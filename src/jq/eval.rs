@@ -45154,7 +45154,9 @@ fn peel_register_transparent(expr: &Expr) -> &Expr {
 /// stage: `def f: any; f | $x` states what `any | $x` does. Bounded by [`DEF_CALL_SHAPE_BUDGET`]
 /// hops, so a recursive `def f: f; f` ends; past it the call is not peeled, which reads as it did
 /// before this existed (a stage that moves the register). A call with arguments binds code this cannot
-/// see and is not peeled.
+/// see and is not peeled. Reads `def.body` as [`def_call_keeps_register`] does, so a call is seen through
+/// only when its body is itself a verdict (or wrapper of one): a body that defines another `def`
+/// (`def f: def g: any; g; f`) is a `FuncDef` until bound and reads as before (pinned refused).
 ///
 /// Not folded into [`peel_register_transparent`]: that answers "does this wrapper add no movement of
 /// its own?" for callers (`entry_marker_stage`, [`stage_is_register_keeping`]) whose questions about a
@@ -46857,10 +46859,11 @@ fn fold_update_movement_tracked(update: &Expr) -> bool {
         || match update {
             // #3826: a verdict builtin resolves its generator and condition live in path
             // position (#3749, #3763), raising where jq does, and the fold backtracks it.
-            // The bare spellings iterate their input, which [`update_navigates_within`]
-            // counts, so a source that moved the register has them checked against its
-            // element. The generator forms navigate only through `gen`/`cond`, which are
-            // admitted when neither can move the register, the same as there.
+            // The bare spellings and `any(f)`/`all(f)` iterate their input, which
+            // [`update_navigates_within`] counts, so a source that moved the register has them
+            // checked against its element; `f` itself is path-checked live by the resolver (swept
+            // with `any(.a)`, `any(1 | .a)`), not by this predicate. The generator forms navigate
+            // only through `gen`/`cond`, so they are admitted when neither can move the register.
             Expr::Builtin(Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)) => {
                 true
             }
@@ -53787,9 +53790,11 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
                     || update_navigates_within(else_branch, first_only)
             }
         },
-        // #3826: the bare `any`/`all` and `any(f)`/`all(f)` iterate their input unconditionally
-        // (`.[] | f`), so a source that moved the register has them path-checked against its
-        // element (`reduce .[] as $i (.; any)` raises in jq).
+        // #3826: the bare `any`/`all` and `any(f)`/`all(f)` iterate their input (`.[] | f`), so a
+        // source that moved the register has them path-checked against its element
+        // (`reduce .[] as $i (.; any)` raises in jq). "Definitely" is an over-approximation for an
+        // accumulator that is an empty container, where `.[]` iterates nothing: the stage then
+        // reads the register as moved and refuses a shape jq answers, the safe direction.
         Expr::Builtin(Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)) => true,
         other => is_fold_source_navigation(other),
     }

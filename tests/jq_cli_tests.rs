@@ -69460,7 +69460,8 @@ fn test_foreach_over_the_register_binds_it_as_a_path_3790() -> Result<()> {
 /// and `UPDATE` to the post-INIT register, so `reduce 1 as $i (.; any) | $x` is `[]` even on
 /// `{"a":true}`, where an `UPDATE` that iterates the accumulator after a source that moved the
 /// register (`reduce .[] as $i (.; any)`), or on its second pass (`reduce (1,2) ...`), still
-/// raises. A `def` that carries the stage onto an untracked entry keeps jq's answer. Every row captured from jq 1.7.1, on the stdin and `-n` routes.
+/// raises. A `def` that carries the stage onto an untracked entry keeps jq's answer. Every row
+/// captured from jq 1.7.1 (`/usr/bin/jq`), on the stdin and `-n` routes.
 #[test]
 fn test_verdict_stage_behind_a_def_or_reduce_3826() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -69709,6 +69710,20 @@ fn test_verdict_stage_behind_a_def_or_reduce_3826() -> Result<()> {
             "",
             0,
         ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any(1 | .a)) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 1"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | reduce 1 as $i (.; any(.[]?)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
 }
 
@@ -69732,6 +69747,14 @@ fn test_verdict_stage_behind_a_def_or_reduce_3826() -> Result<()> {
 #[test]
 fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
     for (input, filter, jq_answer, expected) in [
+        // #3826: a `def` whose body defines another is a `FuncDef` until bound, which the peel
+        // does not read.
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | def f: def g: any; g; f | $x)",
+            "[]",
+            r#"Invalid path expression with result {"a":false}"#,
+        ),
         // #3826: a `def` call with an argument binds code the admission cannot read.
         (
             r#"{"a":false}"#,
