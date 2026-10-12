@@ -64077,3 +64077,38 @@ fn test_slice_bound_with_several_values_on_the_null_input_route_2056() -> Result
     assert_eq!((code, stdout.as_str()), (0, ""), "{stderr:?}");
     Ok(())
 }
+
+/// #2002: a result `-0` cannot serialise (its text holds a NUL, which is the separator) aborts
+/// the whole run at that result -- earlier results stay printed, later files and documents are
+/// never reached -- exactly as real yq does (v4.53.3, every row captured live). The run has no
+/// per-file isolation to add: continuing would be a divergence none of ADR-0018 rule 4's
+/// carve-outs covers. This pins the abort so the #1564 collect-pass guarantee is not extended
+/// to the writing loop by accident.
+#[test]
+fn test_nul_output_multi_file_aborts_at_first_failure_matching_yq_2002() -> Result<()> {
+    let mut bad = NamedTempFile::new()?;
+    write!(bad, "a: \"b\\0c\"\n")?;
+    let mut good = NamedTempFile::new()?;
+    write!(good, "a: good\n")?;
+    let mut later = NamedTempFile::new()?;
+    write!(later, "a: later\n")?;
+    let message = "Error: can't serialise value because it contains NUL char and you are using NUL separated output";
+
+    for (files, expected_stdout) in [
+        (vec![bad.path(), good.path()], ""),
+        (vec![good.path(), bad.path()], "good\0"),
+        (vec![good.path(), bad.path(), later.path()], "good\0"),
+    ] {
+        let (stdout, stderr, code) = run_yq_files(".a", &files, &["-0"])?;
+        assert_eq!(code, 1, "{files:?}: stderr: {stderr:?}");
+        assert_eq!(stdout, expected_stdout, "{files:?}");
+        assert_eq!(stderr.trim(), message, "{files:?}");
+    }
+
+    // The single-file, multi-document spelling of the same run.
+    let (stdout, stderr, code) =
+        run_yq_stdin_with_stderr(".a", "a: good\n---\na: \"b\\0c\"\n---\na: good2\n", &["-0"])?;
+    assert_eq!((code, stdout.as_str()), (1, "good\0"), "stderr: {stderr:?}");
+    assert_eq!(stderr.trim(), message);
+    Ok(())
+}
