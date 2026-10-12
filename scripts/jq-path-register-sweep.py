@@ -1611,6 +1611,12 @@ OPERANDS = [
     "(reduce 1 as $i (.; any(empty; .)))",
     "(reduce .[]? as $i (.; isempty(empty)))",
     "(reduce .[]? as $i (.; isempty(.[]?)))",
+    "(reduce .[]? as $i (.; isempty(.a?)))",
+    "(reduce .[]? as $i (.; isempty(.[])))",
+    "(reduce .[]? as $i (.; isempty(select(false), .a)))",
+    "(reduce .[]? as $i (.; isempty(1, .a)))",
+    "(reduce .[]? as $i (.; isempty(.)))",
+    "(reduce .a? as $i (.; isempty(.[]?)))",
     "(reduce .a? as $i (.; any(empty; .)))",
     "(reduce 1 as $i (.a; any))",
     "(reduce 1 as $i (.; try any))",
@@ -1618,6 +1624,7 @@ OPERANDS = [
     "(reduce 1 as $i (.; def f: any; f))",
     "(foreach 1 as $i (.; any; .))",
     "(foreach .[]? as $i (.; any; .))",
+    "(foreach .[]? as $i (.; isempty(.[]?); .))",
     "(foreach 1 as $i (.; isempty(empty); .))",
 ]
 
