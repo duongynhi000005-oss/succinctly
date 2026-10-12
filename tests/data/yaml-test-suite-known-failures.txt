@@ -52,7 +52,6 @@ BF9H      lax:comments      comment placement not validated — #223
 C2SP      lax:flow          flow syntax not validated — #223
 CXX2      lax:anchors       anchor/alias rules not validated — #223
 DK3J      scalars           scalar content/folding differs from spec
-DK4H      lax:mapping       mapping/key rules not validated — #223
 EW3V      lax:mapping       mapping/key rules not validated — #223
 FP8R      scalars           scalar content/folding differs from spec
 G9HC      lax:indentation   indentation not validated — #223
@@ -68,7 +67,6 @@ MUS6/01   lax:documents     directive/document rules not validated — #223
 QLJ7      lax:documents     directive/document rules not validated — #223
 S4JQ      tags              non-specific tag (`!` alone) resolution: spec's "conventional resolution" forces `!!str`, but real yq v4.53.3 leaves the content's natural type untouched (`! 12` stays the number 12) — we follow yq, the same policy as FRK4/JEF9/02 — #224
 S98Z      lax:block-scalar  block scalar header not validated — #223
-T833      lax:flow          flow syntax not validated — #223
 U44R      lax:indentation   indentation not validated — #223
 U99R      lax:tags          tag containing a disallowed flow indicator (`!!str,`) absorbed as text (block context has no special meaning for `,`) rather than rejected — #224
 UGM3      structure         document/block structure differs from spec
