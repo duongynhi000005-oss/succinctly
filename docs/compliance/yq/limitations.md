@@ -429,7 +429,7 @@ are not) rather than either the whole-document-buffering approach an earlier att
 fix tried and abandoned (PR #1767, +65% peak RSS on a 100MB document) or silently emitting
 the raw byte.
 
-Two interactions remain open, neither closed by #1709 itself:
+Two interactions were left open by #1709 itself (the second since closed by #2004):
 
 1. This check only fires on bytes that are genuinely unescaped in the rendered output.
    `-o=json -0 '.a'` *without* an explicit `-r` prints a properly JSON-escaped `"b\u0000c"`
@@ -442,19 +442,17 @@ Two interactions remain open, neither closed by #1709 itself:
    and `-o=json -r -0` still raises, as yq does. (`-j` still implies `-r`; see the `-j`
    collision entry below and #1731.)
 
-2. **`--color`/`--colors` combined with `-0` loses the flush-then-error atomicity described
-   above.** Real yq's own `--colors -0` still flushes earlier valid results before erroring
-   on a later NUL-containing one — live-verified: `yq --colors -0 '.[]'` on `["hello",
-   "wor\0ld", "x"]` prints `hello\0` to stdout, then errors on the second element, exit 1.
-   succinctly's own `--colors -0` combination instead buffers the *entire* multi-result
-   render into one string (the pre-existing, `--color`-only mechanism `colorize_yaml`/
-   `colorize_json` need to re-lex ANSI spans across result boundaries) and scans that whole
-   buffer once before writing anything — so a NUL anywhere in the stream discards every
-   earlier, already-valid result too, printing nothing at all where real yq printed
-   `hello\0`. Fixing this properly needs the buffered/color rendering path restructured to
-   flush (and re-colorize) per result rather than once for the whole document — a
-   materially larger change than #1709's own scope, filed separately as
-   [#2004](https://github.com/rust-works/succinctly/issues/2004).
+2. **`--color`/`--colors` combined with `-0` keeps the flush-then-error atomicity**
+   ([#2004](https://github.com/rust-works/succinctly/issues/2004)). Real yq's own `--colors
+   -0` flushes earlier valid results before erroring on a later NUL-containing one —
+   live-verified: `yq --colors -0 '.[]'` on `["hello", "wor\0ld", "x"]` prints `hello\0` to
+   stdout, then errors on the second element, exit 1. succinctly buffers the whole multi-result
+   render for `--colors` (the pre-existing mechanism `colorize_yaml`/`colorize_json` need to
+   re-lex ANSI spans), and used to scan that buffer once before writing anything, so a NUL
+   anywhere discarded every earlier result too. It now writes the results that end before the
+   first NUL (colorized as a prefix of the buffered render — the colorizer resets its lexer
+   state at each recorded result boundary, so that is the same text) and then raises the same
+   error, with the same stdout and exit code as yq. The memory cost of coloring is unchanged.
 
 ### Anchor-on-alias at document-root level — rule 4(b)
 

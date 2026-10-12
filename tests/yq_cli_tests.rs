@@ -8020,6 +8020,39 @@ fn test_nul_output_colors_multidoc_separator_survives_1709() -> Result<()> {
     Ok(())
 }
 
+/// #2004: `--colors -0` writes every result before the first NUL-bearing one,
+/// then fails, as real yq does (`hello\0` then the NUL error, exit 1). The
+/// render is buffered whole for coloring, so this used to discard the clean
+/// earlier results too.
+#[test]
+fn test_nul_output_colors_flushes_earlier_results_then_stops_2004() -> Result<()> {
+    let colored = |s: &str| format!("\u{1b}[36m{s}\u{1b}[0m\0");
+    // NUL in the middle: the first result survives, nothing from the NUL on.
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr(
+        ".[]",
+        "- \"hello\"\n- \"wor\\0ld\"\n- \"x\"\n",
+        &["-0", "--colors"],
+    )?;
+    assert_eq!(code, 1, "stdout: {stdout:?}");
+    assert_eq!(stdout, colored("hello"));
+    assert!(stderr.contains("contains NUL char"), "{stderr:?}");
+    // NUL in the last: everything before it survives.
+    let (stdout, _stderr, code) =
+        run_yq_stdin_with_stderr(".[]", "- \"a\"\n- \"b\"\n- \"c\\0\"\n", &["-0", "--colors"])?;
+    assert_eq!(code, 1);
+    assert_eq!(stdout, format!("{}{}", colored("a"), colored("b")));
+    // NUL in the first: nothing is written.
+    let (stdout, _stderr, code) =
+        run_yq_stdin_with_stderr(".[]", "- \"\\0a\"\n- \"b\"\n", &["-0", "--colors"])?;
+    assert_eq!((stdout.as_str(), code), ("", 1));
+    // No NUL anywhere: unchanged.
+    let (stdout, _stderr, code) =
+        run_yq_stdin_with_stderr(".[]", "- \"a\"\n- \"b\"\n", &["-0", "--colors"])?;
+    assert_eq!(code, 0);
+    assert_eq!(stdout, format!("{}{}", colored("a"), colored("b")));
+    Ok(())
+}
+
 /// #1709 code review (4th round, live-verified): the `--colors` branch's
 /// separator write had no empty-buffer guard the way the non-color
 /// `NulChecked` path does, so a zero-result middle document (whose

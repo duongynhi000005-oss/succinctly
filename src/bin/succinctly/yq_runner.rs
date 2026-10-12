@@ -397,17 +397,12 @@ macro_rules! json_ascii {
 /// The `use_color` path keeps its existing whole-buffer shape (color
 /// re-lexing already requires materializing the whole rendered document, a
 /// pre-existing cost unrelated to `-0`); a `-0`+`--color` combination is
-/// checked for an embedded NUL over that same already-buffered content
-/// before writing, coarser-grained (whole document, not per-result) than
-/// the no-color path below -- bounded by the same memory this combination
-/// already pays for coloring, but NOT flush-then-error atomic the way the
-/// no-color path is: real yq's own `--colors -0` still flushes earlier
-/// valid results before erroring on a later NUL-containing one
-/// (live-verified), while this whole-buffer check discards every result in
-/// the render, including already-clean earlier ones, on any NUL anywhere
-/// in the stream. A real, currently-open divergence, not a documented
-/// design choice — see `docs/compliance/yq/limitations.md`'s `-0`
-/// multi-document separator entry and #2004.
+/// checked for an embedded NUL over that same already-buffered content,
+/// split at the recorded result boundaries so it is flush-then-error atomic
+/// like the no-color path (#2004): earlier clean results are written (each
+/// colorized on its own, which is the same text as the whole render's slice
+/// of it), then the NUL-bearing result stops the run, as in real yq's
+/// `--colors -0`.
 fn stream_maybe_colored<W: Write, T>(
     writer: &mut W,
     use_color: bool,
@@ -436,9 +431,29 @@ fn stream_maybe_colored<W: Write, T>(
         // unvalidated; that combination already can't be safely consumed
         // by a NUL-delimited reader once ANSI escapes are mixed in, so
         // `-0`'s own reason for existing doesn't really apply to it either.
-        if terminator == Terminator::Nul && separator.is_some() && buf.as_bytes().contains(&0) {
-            return Err(anyhow::anyhow!(NUL_OUTPUT_ERROR_MESSAGE));
-        }
+        //
+        // #2004: the scan is per result, not per document: real yq's `--colors
+        // -0` writes every earlier clean result before it fails on a later
+        // NUL-bearing one. The render is already buffered whole and
+        // `boundaries` records where each result ends, so the results before
+        // the first NUL are colorized as a prefix (one call, the same text as
+        // that slice of the whole render) and written, then the NUL stops the
+        // run.
+        let nul_at = if terminator == Terminator::Nul && separator.is_some() {
+            buf.find('\0')
+        } else {
+            None
+        };
+        // The results that end at or before the NUL; the one containing it,
+        // and everything after, is not written.
+        let (body, body_boundaries) = match nul_at {
+            Some(pos) => {
+                let clean = boundaries.iter().take_while(|&&b| b <= pos).count();
+                let end = if clean == 0 { 0 } else { boundaries[clean - 1] };
+                (&buf[..end], &boundaries[..clean])
+            }
+            None => (&buf[..], &boundaries[..]),
+        };
         // #1709: `separator` is only ever `Some` for a NUL-checked YAML
         // call site (its caller skipped its own eager
         // `emit_yaml_doc_separator` call for exactly this reason -- see
@@ -448,14 +463,23 @@ fn stream_maybe_colored<W: Write, T>(
         // `writer` -- never colorized, matching every other call site's
         // own separator write -- before the colorized body. A no-op for
         // every other `use_color` call (terminator != Nul, or JSON, both
-        // of which pass `None`).
+        // of which pass `None`). Skipped when the very first result holds
+        // the NUL: nothing of this document was written.
+        let writes_body = nul_at.is_none() || !body.is_empty() || !body_boundaries.is_empty();
         if let Some(sep) = separator {
-            if *sep.doc_streamed && !sep.no_doc {
-                write_doc_separator_marker(writer, terminator)?;
+            if writes_body {
+                if *sep.doc_streamed && !sep.no_doc {
+                    write_doc_separator_marker(writer, terminator)?;
+                }
+                *sep.doc_streamed = true;
             }
-            *sep.doc_streamed = true;
         }
-        write!(writer, "{}", colorize(&buf, &boundaries))?;
+        if writes_body {
+            write!(writer, "{}", colorize(body, body_boundaries))?;
+        }
+        if nul_at.is_some() {
+            return Err(anyhow::anyhow!(NUL_OUTPUT_ERROR_MESSAGE));
+        }
         match rendered {
             Ok(value) => Ok(Ok(value)),
             Err(StreamFailure::Decode(e)) => Ok(Err(e)),
@@ -10359,6 +10383,43 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2004: `stream_maybe_colored` colorizes the results before the first NUL as a prefix of
+    /// the buffered render, which is only sound if that is the same text as the corresponding
+    /// leading slice of the whole render. The colorizer resets its lexer state at every
+    /// recorded boundary, so it is -- including for results that open a span another result
+    /// closes.
+    #[test]
+    fn test_colorize_yaml_prefix_at_a_boundary_is_a_prefix_of_the_whole_2004() {
+        // Each case is the results, in order; the buffer is their concatenation (no terminator
+        // byte between them) and a boundary is recorded where each one ends.
+        for results in [
+            vec!["hello", "\"world\"", "x"],
+            vec!["a: 1\n", "b: 2\n", "- foo\n", "bar: 1\n"],
+            vec!["- foo\n", "bar: 1"],
+            vec!["\"quoted \\\" escape\": v\n", "k: 'it''s'\n"],
+        ] {
+            let buf = results.concat();
+            let boundaries: Vec<usize> = results
+                .iter()
+                .scan(0, |end, r| {
+                    *end += r.len();
+                    Some(*end)
+                })
+                .collect();
+            for terminator in [Terminator::Nul, Terminator::Newline, Terminator::None] {
+                let whole = colorize_yaml(&buf, terminator, &boundaries);
+                for k in 1..=boundaries.len() {
+                    let prefix =
+                        colorize_yaml(&buf[..boundaries[k - 1]], terminator, &boundaries[..k]);
+                    assert!(
+                        whole.starts_with(&prefix),
+                        "{results:?} {terminator:?} k={k}\nprefix: {prefix:?}\nwhole:  {whole:?}"
+                    );
+                }
+            }
+        }
+    }
 
     /// #2706: a write followed by a *static* navigation is split into the write and the steps
     /// the tail walks; every other shape keeps the route it had.
