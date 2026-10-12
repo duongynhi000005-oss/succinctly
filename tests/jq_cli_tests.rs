@@ -112256,14 +112256,6 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
         ),
         (
             doc,
-            r#"del(. as $orig | has("k") | try (($orig?) as {a:{b:$q}} | $q))"#,
-        ),
-        (
-            doc,
-            r#"del(. as $orig | has("k") | try ((label $l | $orig) as {a:{b:$q}} | $q))"#,
-        ),
-        (
-            doc,
             r#"del(. as $orig | has("k") | try (($orig as $p | $p) as {a:{b:$q}} | $q))"#,
         ),
         // The other forwarder arms: `last`, a rebind and a destructuring rebind's
@@ -112329,6 +112321,17 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
         (
             doc,
             r#"del(. as $orig | has("k") | try (first($orig) as {a:{b:$q}} | $q))"#,
+            "{\"a\":{}}\n",
+        ),
+        // #4320 (sixth part): so do `($orig?)` and `(label $l | $orig)`, wrappers the marker is read through.
+        (
+            doc,
+            r#"del(. as $orig | has("k") | try (($orig?) as {a:{b:$q}} | $q))"#,
+            "{\"a\":{}}\n",
+        ),
+        (
+            doc,
+            r#"del(. as $orig | has("k") | try ((label $l | $orig) as {a:{b:$q}} | $q))"#,
             "{\"a\":{}}\n",
         ),
         (
