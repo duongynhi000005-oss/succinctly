@@ -61169,6 +61169,20 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
             "",
             0,
         ),
+        (
+            doc,
+            r"del(foreach (((.|.), .) as {a:$a} ?// {b:$b} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach (def f: (.|.); f as {a:$a} ?// {b:$b} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
     ])?;
     Ok(())
 }

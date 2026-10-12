@@ -49379,9 +49379,11 @@ impl<'e> RegisterSpine<'e> {
             // #4128: `select(true) as {a:$a}` binds the register as `. as {a:$a}` does, so
             // under `through_reduce` any source that only hands the register on is the same
             // destructure. The `foreach` route takes a bare `.`, a `select(literal)` and a
-            // comma of them (#4150: `(., .) as {a:$a}` binds per leaf, [`comma_leaves`]); a
-            // pipe such as `(.|.) as {a:$a}` stays out, since the resolver reads it as a
-            // computed value and a `try`/`?` around it swallowed the resulting refusal.
+            // comma of them (#4150: `(., .) as {a:$a}` binds per leaf, [`comma_leaves`]) and, for
+            // a single pattern, a pipe of `.` (#4320: `(.|.) as {a:$a}`, which `resolve_as_pattern`
+            // reads as the register; #4128 routed it without that, and a `try`/`?` around the
+            // fold swallowed the resolver's refusal). A `?//` chain keeps a pipe out: see the
+            // `AsPattern` arm below.
             // #4187: a `?//` chain of destructuring patterns only. One with a bare `$var`
             // alternative (`. as {a:$a} ?// $a`) is left to the by-value drive: nothing in the
             // register sweep accepts a wrong answer through it, and routing it loses matches
@@ -49401,6 +49403,11 @@ impl<'e> RegisterSpine<'e> {
             } => {
                 // #4320: a pipe source (`(.|.)`) is the register for a single pattern only; a
                 // `?//` chain keeps the retry rules that do not prove such a head identical.
+                // The resolver's twin of this rule is `resolve_as_pattern`'s `patterns.len() == 1`
+                // on its pipe-of-registers head: change them together. Only a *direct* pipe source
+                // is excluded here: a pipe behind a comma or a `def` in a chain is routed, and
+                // refuses where the by-value drive used to delete (the message names the step, not
+                // the result, and a `try` around it catches where jq's does not).
                 if (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
                     && self.binds_register(expr)
                     && (patterns.len() == 1 || !matches!(unwrap_bind_source(expr), Expr::Pipe(_)))
@@ -49572,8 +49579,8 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
 /// is done only where the by-value drive is certainly wrong. A source that may
 /// preserve the register (`.`, `select(true)`, `first(.)`, `limit(1; .)`,
 /// `(.|.)`) destructures it without raising in jq, and the by-value drive
-/// already answers the same; the resolver recognises only a bare `.` as the
-/// register (the open-ended class of #3423), so routing those traded a wrong
+/// already answers the same; the resolver recognised then only a bare `.` as the
+/// register (the open-ended class of #3423; it reads more since #4320), so routing those traded a wrong
 /// accept for a wrong refusal (`path(reduce (select(true) as [$x] | $x) as $k
 /// (.; .))` is `[]` in jq and was refused). A bare `$var` bind performs no step
 /// and stays by value too.

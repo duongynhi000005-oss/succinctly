@@ -2060,12 +2060,15 @@ is the revert that established what the other one costs.
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
    too. A bound expression that is a pipe of `.` is read since
-   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s third part: `(.|.) as {a:$a}` (also `(.|.|.)`, and
-   a pipe whose stages are each the register, `. | $x` for a certified `$x`) is the register as `. as {a:$a}` is,
-   because `resolves_to_register` now reads a pipe of registers as the register (#4128's attempt routed the source
-   without it, so the resolver took the head for a computed value and a `try` around the fold swallowed its refusal);
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s third part: `(.|.) as {a:$a}` (also `(.|.|.)`) is
+   the register as `. as {a:$a}` is: the spine reads a pipe of `.`, and `resolve_as_pattern` reads a pipe whose stages
+   are each the register as the register (#4128's attempt routed the source without the second half, so the resolver
+   took the head for a computed value and a `try` around the fold swallowed its refusal); a pipe with another stage
+   (`. | $x`) is not routed;
    `del(foreach ((.|.) as {a:$a} | .) as $y (.; .; .))` raises with jq's message, also under `try ... catch`. For a single pattern only: a `?//` chain keeps #3279's retry rules, which
-   prove no such head identical (`(. | .) as {a:$v0} ?// $v0 | .c` retries in jq; pinned by
+   prove no such head identical (a pipe behind a comma or a `def` in a chain is routed all the same and refuses with the
+   step's message where it used to delete the document; `(.|.) as {a:$a} ?// {b:$b}` itself is still accepted, with the
+   later-alternative family) (`(. | .) as {a:$v0} ?// $v0 | .c` retries in jq; pinned by
    `test_alt_destructuring_of_a_passthrough_source_under_try_never_writes_3781` and
    `test_try_if_widening_does_not_leak_3279`, which the first version of this change broke). Over the 113 operands
    with a `?//` or a `(.|.)` (`--stage-only`, 99,603 rows) wrong accepts go from 327 to 215 and wrong answers from 141 to
