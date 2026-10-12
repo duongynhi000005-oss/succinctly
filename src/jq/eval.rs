@@ -50947,6 +50947,10 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
     };
     match unwrap_bind_source(source) {
         Expr::Identity | Expr::Builtin(Builtin::Select(_)) => Some(input_tracked),
+        // #4456: the nine type filters are `select(type == ...)`, and the resolver
+        // passes a tracked branch through them (or ends it) by the value's kind alone
+        // as it does for `select`, so they are exact leaves of the same kind.
+        Expr::Builtin(builtin) if is_type_filter(builtin) => Some(input_tracked),
         // #3423: a literal or construction is a value jq builds fresh, never the
         // register, and the resolver places it as computed (an untracked branch,
         // bound by value) -- the one thing the grammar needs of a leaf. It is what
@@ -51012,7 +51016,17 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
 /// resolves no path (#4295) -- a fact about the paths, so the resolver judges it and
 /// the grammar only admits the shape.
 fn is_transparent_leaf(expr: &Expr) -> bool {
-    is_input_returning_stage(expr) || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+    is_input_returning_stage(expr)
+        || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+        || is_walk_identity(expr)
+}
+
+/// `walk(.)` (#4456): of a scalar it is `. | .`, the input itself, which the resolver
+/// passes through; of an array or object it is rebuilt and refused. Like `del(f)` it
+/// is a bind-source leaf only, never a [`may_alias_register`] forwarder -- the
+/// forwarders pin it as a value the source derives (#3423).
+fn is_walk_identity(expr: &Expr) -> bool {
+    matches!(expr, Expr::Builtin(Builtin::Walk(f)) if is_identity_stage(f))
 }
 
 /// A builtin the path resolver accepts as the input itself for some inputs
@@ -51027,10 +51041,11 @@ fn is_transparent_leaf(expr: &Expr) -> bool {
 /// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
 /// lists them.
 ///
-/// `del(f)` (empty path set, #4295) is the one pass-through arm *not* here: whether it
-/// returns its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds
-/// a fresh value), so [`may_alias_register`] must not treat it as a forwarder. It is a
-/// bind-source leaf only, [`is_transparent_leaf`].
+/// `del(f)` (empty path set, #4295) and `walk(.)` of a scalar (#4456,
+/// [`is_walk_identity`]) are the pass-through arms *not* here: whether `del(f)` returns
+/// its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds a fresh
+/// value), so [`may_alias_register`] must not treat it as a forwarder. Both are
+/// bind-source leaves only, [`is_transparent_leaf`].
 fn is_input_returning_stage(expr: &Expr) -> bool {
     match expr {
         Expr::Builtin(
@@ -136271,6 +136286,25 @@ mod tests {
             ("(.a | tostring)", true),
             ("@text", true),
             ("tonumber", true),
+            // #4456: the type filters are exact leaves as `select` is, so a `try`, `?` or
+            // `//` around one is still on the grammar; `walk(.)` is judged per value like
+            // `tostring` (a container is rebuilt), so it is not.
+            ("strings", true),
+            ("(.a | numbers)", true),
+            ("(values, scalars)", true),
+            ("(booleans // .)", true),
+            ("try nulls", true),
+            ("(arrays | iterables)", true),
+            ("objects?", true),
+            // The filter keeps the input tracked, so a navigation after it is still placed.
+            ("(strings | .a)", true),
+            ("(strings | length)", false),
+            ("walk(.)", true),
+            ("(.a | walk(.))", true),
+            ("(walk(.) // .)", false),
+            ("try walk(.)", false),
+            ("walk(.a)", false),
+            ("walk(tostring)", false),
             ("ltrimstr(\"x\")", true),
             ("rtrimstr(\"x\")", true),
             ("delpaths([])", true),
@@ -136320,8 +136354,9 @@ mod tests {
     /// the pass-through arms of `resolve_node_sink`. Each stage here is accepted by
     /// the resolver on the document beside it (so the leaf is not dead) and sits on
     /// the bind-source grammar and on `may_alias_register`'s forwarders -- except
-    /// `del(f)`, which hands its input back only when `f` resolves no path, so it is a
-    /// grammar leaf and never a forwarder. The same stage on a document that gets a
+    /// `del(f)`, which hands its input back only when `f` resolves no path, and
+    /// `walk(.)`, which rebuilds a container (#3423), so they are grammar leaves and
+    /// never forwarders. The same stage on a document that gets a
     /// fresh result is still refused, which is what keeps the judgement per value.
     #[test]
     fn test_input_returning_stages_agree_with_resolver_and_grammar_4443() {
@@ -136333,19 +136368,18 @@ mod tests {
             ("rtrimstr(\"z\")", r#"{"x":"s"}"#, r#"{"x":"sz"}"#),
             ("delpaths([])", r#"{"x":"s"}"#, ""),
             ("setpath([]; .)", r#"{"x":"s"}"#, ""),
+            ("walk(.)", r#"{"x":"s"}"#, r#"{"x":[1]}"#),
             ("del(.[]?)", r#"{"x":"s"}"#, r#"{"x":[1]}"#),
         ] {
             let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
             assert!(is_transparent_leaf(&expr), "{stage}: not a grammar leaf");
             assert!(is_transparent_bind_source(&expr), "{stage}: not a source");
-            assert_eq!(
-                is_input_returning_stage(&expr),
-                !stage.starts_with("del("),
-                "{stage}"
-            );
+            // `del(f)` and `walk(.)` are grammar leaves, never forwarders.
+            let forwarder = !stage.starts_with("del(") && stage != "walk(.)";
+            assert_eq!(is_input_returning_stage(&expr), forwarder, "{stage}");
             assert_eq!(
                 may_alias_register(&expr, None),
-                !stage.starts_with("del("),
+                forwarder,
                 "{stage}: forwarder"
             );
             assert!(
@@ -136376,9 +136410,10 @@ mod tests {
     /// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`. `debug`,
     /// `stderr` and `input` are left out on purpose, as they write to the process.
     /// Every `UNMODELLED` stage is a builtin jq answers as the register and the
-    /// grammar leaves to the by-value route. For `walk(.)`, `values`, `scalars` and the
-    /// type filters that route refuses (`path(.b | strings as $y | $y)` is `["b"]` in
-    /// jq 1.7.1); `getpath([])` agrees with jq through it.
+    /// grammar leaves to the by-value route, which agrees with jq for `getpath([])`.
+    /// `walk(.)`, `values`, `scalars` and the type filters were listed until #4456,
+    /// when that route's refusal (`path(.b | strings as $y | $y)` is `["b"]` in jq
+    /// 1.7.1) was closed by admitting them to the grammar.
     #[test]
     fn test_resolver_pass_through_builtins_are_on_the_bind_source_grammar_4443() {
         const DOCS: [&str; 10] = [
@@ -136393,19 +136428,7 @@ mod tests {
             r#"{"x":[]}"#,
             r#"{"x":1.5}"#,
         ];
-        const UNMODELLED: [&str; 11] = [
-            "getpath([])",
-            "walk(.)",
-            "values",
-            "scalars",
-            "strings",
-            "numbers",
-            "booleans",
-            "nulls",
-            "arrays",
-            "objects",
-            "iterables",
-        ];
+        const UNMODELLED: [&str; 1] = ["getpath([])"];
         let corpus = [
             "tostring",
             "@text",
