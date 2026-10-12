@@ -60867,7 +60867,7 @@ fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
 /// a comma of them, an array pattern, a nested fold's source, and a `$x` that is a member rather than
 /// the register, which raises at its first step), decided by marker identity inside a fold body so a `$it` that is a
 /// different node (`reduce .[] as $it (.; foreach ($it as {a:$a} | .) ...)`, which jq answers) is
-/// not. Every row captured from
+/// not. Also a `(.|.)` bound expression (a pipe of `.`), which is the register as a bare `.` is. Every row captured from
 /// jq 1.7.1 with `-c`; the message is pinned only where succinctly names the same step (a
 /// constant body is jq's `near attempt to access element`, here the value-mode `Cannot index`,
 /// on `main` too).
@@ -61098,6 +61098,76 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
             "",
             "Cannot index array with string",
             5,
+        ),
+        (
+            doc,
+            r"del(foreach ((.|.) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"(foreach ((.|.) as {a:$a} | .) as $y (.; .; .)) = 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"(foreach ((.|.) as {a:$a} | .) as $y (.; .; .)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach ((.|.) as {a:$a} | .) as $y (.; .; .))]",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach ((.|.|.) as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(try (foreach ((.|.) as {a:$a} | .) as $y (.; .; .)) catch 1)",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach ((.|.|.) as $x | $x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach ((.|.) as [$q] | .) as $y (.; .; .))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            doc,
+            r"del(foreach ((.|.) as $v | .) as $y (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce ((.|.) as {a:$a} | .) as $y (.; .))",
+            "null\n",
+            "",
+            0,
         ),
     ])?;
     Ok(())

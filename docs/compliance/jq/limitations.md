@@ -2029,7 +2029,7 @@ is the revert that established what the other one costs.
    safe direction. Inside another fold's body the refusal fires whenever that fold's UPDATE is not a pass-through of its
    accumulator, so `del(reduce .[]? as $k (.; reduce (try (. as {a:$a} | .)) as $y (.; .)))` (jq answers `null`) is
    refused too. The `foreach` route takes a bare `.`, a `select(literal)` and a comma of them (`(., .) as {...}`, #4150);
-   a `(.|.) as {...}` pipe source is still read as a computed value by the resolver and stays as it was.
+   a `(.|.) as {...}` pipe source was read as a computed value by the resolver then and stayed as it was (it is the register since #4320's third part, below).
    [#4150](https://github.com/rust-works/succinctly/issues/4150) closes the same accept under `try`/`?`/`and`/`or`: a
    non-last `?//` alternative's refusal is not retried (the resolver cannot tell jq's path error from its guess), and an
    enclosing `try` used to swallow it, though jq retries and checks what the next alternative yields at the end of the
@@ -2039,8 +2039,7 @@ is the revert that established what the other one costs.
    register were still at the entry. 20 contrived rows in the sampled sweeps that jq answers (a `?//` bind under `try`/`?`
    whose later alternative yields and whose result jq's check then passes) are refused, in the safe direction. Still
    accepted where jq raises, identical on `main` ([#4320](https://github.com/rust-works/succinctly/issues/4320)): a `(.|.) as {...}` source (`del(foreach ((.|.) as {a:$a} | .) as
-   $y (.; .; .))` deletes the document; routing it first needs `resolve_as_pattern` to read `(.|.)` as the register,
-   since #4128's attempt regressed `del(try (... and true))`), and a destructure of a later bare alternative of a
+   $y (.; .; .))` deleted the document; closed by #4320's third part, below), and a destructure of a later bare alternative of a
    `?//` chain (`. as $x ?// $y | $y as {a:$a} | .`: `$y` is bound only when the body raises and jq retries;
    routing it made a `try` around a `reduce` UPDATE swallow the resolver's refusal, 26 new wrong accepts, so it is
    left as it was). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit
@@ -2060,7 +2059,19 @@ is the revert that established what the other one costs.
    read by certification since #4320's second part, below), and a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
-   too. A bound expression that is a call with no arguments is read since
+   too. A bound expression that is a pipe of `.` is read since
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s third part: `(.|.) as {a:$a}` (also `(.|.|.)`, and
+   a pipe whose stages are each the register, `. | $x` for a certified `$x`) is the register as `. as {a:$a}` is,
+   because `resolves_to_register` now reads a pipe of registers as the register (#4128's attempt routed the source
+   without it, so the resolver took the head for a computed value and a `try` around the fold swallowed its refusal);
+   `del(foreach ((.|.) as {a:$a} | .) as $y (.; .; .))` raises with jq's message, also under `try ... catch`. For a single pattern only: a `?//` chain keeps #3279's retry rules, which
+   prove no such head identical (`(. | .) as {a:$v0} ?// $v0 | .c` retries in jq; pinned by
+   `test_alt_destructuring_of_a_passthrough_source_under_try_never_writes_3781` and
+   `test_try_if_widening_does_not_leak_3279`, which the first version of this change broke). Over the 113 operands
+   with a `?//` or a `(.|.)` (`--stage-only`, 99,603 rows) wrong accepts go from 327 to 215 and wrong answers from 141 to
+   131 (the nine `(.|.)` operands alone, 112 to 0 and 10 to 0), 122 refusals or wrong answers become matches, and no
+   match is lost; over every fold operand that binds a pattern or a variable (247,611 rows, before the chain
+   exclusion) 460 to 348 and 187 to 177, no match lost. A bound expression that is a call with no arguments is read since
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s first part: `def f: .; f as {a:$a}`, also through a
    second `def`, a comma body or a comma of calls, or a `$x` bound around the definition inside the source, is the
    register as `. as {a:$a}` is (`RegisterSpine::binds_register` reads the body in the scope the `def` was written in,
