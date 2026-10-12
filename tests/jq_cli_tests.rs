@@ -788,6 +788,11 @@ fn test_all_absent_slice_is_a_syntax_error_in_jq_mode_4407() -> Result<()> {
         ".[:][0]",
         "path(.[:])",
         "del(.[:])",
+        ".[:] = [1]",
+        ".[:] |= .",
+        "try .[:] catch 1",
+        ". as $x | $x[:]",
+        ".a[:] | length",
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":[1,2]}"#))?;
         assert_eq!(code, 3, "{filter}: {stderr}");

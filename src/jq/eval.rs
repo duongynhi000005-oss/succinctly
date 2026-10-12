@@ -3424,7 +3424,8 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // rule -- `jv_slice(a, 0, len)` hands back `a` itself, not a
                 // copy, so a slice naming every element of a non-empty array
                 // must return the original value unchanged, the same as
-                // the syntactically fully-open spelling (`.[:]`/`.[0:]`)
+                // the syntactically fully-open spelling (`.[0:]`; `.[:]` too in
+                // yq mode, where jq's grammar does not apply, #4407)
                 // this fast path already special-cased -- widened here to
                 // any closed bound pair that happens to resolve to the
                 // same range (`.[0:2]` on a 2-element array, `.[0:5]` on
@@ -3488,7 +3489,7 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     || !super::eval_generic::embed_table_active()
                     || !super::eval_generic::scalar_identity_readable();
 
-                // Fast path: identity slice [:] returns original string without character counting
+                // Fast path: identity slice [0:] (`[:]` in yq mode) returns original string without character counting
                 if may_hand_back && start.is_none() && end.is_none() {
                     return QueryResult::One(value);
                 }
@@ -88231,7 +88232,7 @@ mod tests {
     fn test_yq_string_interpolation_raises_on_slot_decode_failure_1972() {
         yq_query!(
             &b"[1,2,\"\xff\xfe\",4]"[..],
-            r#""\(.[:null])""#,
+            r#""\(.[:])""#,
             QueryResult::Error(e) if e.is_decode_failure() => {
                 assert!(e.message.contains("invalid UTF-8"), "message: {}", e.message);
             }
@@ -88239,7 +88240,7 @@ mod tests {
         // Positive control: valid data is unaffected.
         yq_query!(
             br#"[1,2,"ok",4]"#,
-            r#""\(.[:null])""#,
+            r#""\(.[:])""#,
             QueryResult::Owned(OwnedValue::String(s)) => {
                 assert_eq!(s, r#"[1,2,"ok",4]"#);
             }
