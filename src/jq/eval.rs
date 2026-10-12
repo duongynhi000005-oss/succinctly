@@ -49023,12 +49023,15 @@ fn yields_only_the_register(e: &Expr) -> bool {
 }
 
 /// Whether `e`, the bound expression of a destructuring `foreach` source, is the register
-/// itself on every output: a bare `.`, a `select(literal)`, or a comma of those (#4150).
+/// itself on every output: a bare `.`, a `select(literal)`, a pipe of `.` (#4320), or a comma of
+/// those (#4150).
 fn bind_hands_on_the_register(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity => true,
         Expr::Builtin(Builtin::Select(_)) => yields_only_the_register(e),
         Expr::Comma(items) => items.iter().all(bind_hands_on_the_register),
+        // #4320: `(.|.)` is the register as `.` is: no stage moves it.
+        Expr::Pipe(items) => items.iter().all(is_identity_stage),
         _ => false,
     }
 }
@@ -49061,9 +49064,10 @@ fn bind_hands_on_the_register(e: &Expr) -> bool {
 /// The bound expression is a bare `.`, a `select(literal)` that hands it on (#4128), a comma of
 /// those (#4150), a variable the spine bound to the register (#4278), or a call with no
 /// arguments whose body is one of these (#4320), also behind
-/// `first`/`last`/`limit`/`?`/`label` ([`RegisterSpine::binds_register`]). A `(.|.)` bind stays
-/// out, since the resolver reads it as a computed value, and so does any other computed bound
-/// expression (#4320). A variable bound outside the source is read when `markers` lists it
+/// `first`/`last`/`limit`/`?`/`label` ([`RegisterSpine::binds_register`]), or a pipe of `.`
+/// (`(.|.)`, #4320: the resolver reads it as the register through
+/// [`resolves_to_register`], which #4128's attempt lacked). Any other computed bound expression
+/// stays out (#4320). A variable bound outside the source is read when `markers` lists it
 /// ([`fold_source_register_markers`]). The other [`source_destructures_register`] mode, through a nested
 /// `reduce`, is only for the places the register is not known to be at `.`.
 fn foreach_source_destructures_register(source: &Expr, markers: Vec<*const Tracked>) -> bool {
@@ -49475,9 +49479,11 @@ impl<'e> RegisterSpine<'e> {
             // #4128: `select(true) as {a:$a}` binds the register as `. as {a:$a}` does, so
             // under `through_reduce` any source that only hands the register on is the same
             // destructure. The `foreach` route takes a bare `.`, a `select(literal)` and a
-            // comma of them (#4150: `(., .) as {a:$a}` binds per leaf, [`comma_leaves`]); a
-            // pipe such as `(.|.) as {a:$a}` stays out, since the resolver reads it as a
-            // computed value and a `try`/`?` around it swallowed the resulting refusal.
+            // comma of them (#4150: `(., .) as {a:$a}` binds per leaf, [`comma_leaves`]) and, for
+            // a single pattern, a pipe of `.` (#4320: `(.|.) as {a:$a}`, which `resolve_as_pattern`
+            // reads as the register; #4128 routed it without that, and a `try`/`?` around the
+            // fold swallowed the resolver's refusal). A `?//` chain keeps a pipe out: see the
+            // `AsPattern` arm below.
             // #4187: a `?//` chain of destructuring patterns only. One with a bare `$var`
             // alternative (`. as {a:$a} ?// $a`) is left to the by-value drive: nothing in the
             // register sweep accepts a wrong answer through it, and routing it loses matches
@@ -49495,8 +49501,16 @@ impl<'e> RegisterSpine<'e> {
                 patterns,
                 body,
             } => {
+                // #4320: a pipe source (`(.|.)`) is the register for a single pattern only; a
+                // `?//` chain keeps the retry rules that do not prove such a head identical.
+                // The resolver's twin of this rule is `resolve_as_pattern`'s `patterns.len() == 1`
+                // on its pipe-of-registers head: change them together. Only a *direct* pipe source
+                // is excluded here: a pipe behind a comma or a `def` in a chain is routed, and
+                // refuses where the by-value drive used to delete (the message names the step, not
+                // the result, and a `try` around it catches where jq's does not).
                 if (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
                     && self.binds_register(expr)
+                    && (patterns.len() == 1 || !matches!(unwrap_bind_source(expr), Expr::Pipe(_)))
                 {
                     return Reach::Destructures;
                 }
@@ -49665,8 +49679,8 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
 /// is done only where the by-value drive is certainly wrong. A source that may
 /// preserve the register (`.`, `select(true)`, `first(.)`, `limit(1; .)`,
 /// `(.|.)`) destructures it without raising in jq, and the by-value drive
-/// already answers the same; the resolver recognises only a bare `.` as the
-/// register (the open-ended class of #3423), so routing those traded a wrong
+/// already answers the same; the resolver recognised then only a bare `.` as the
+/// register (the open-ended class of #3423; it reads more since #4320), so routing those traded a wrong
 /// accept for a wrong refusal (`path(reduce (select(true) as [$x] | $x) as $k
 /// (.; .))` is `[]` in jq and was refused). A bare `$var` bind performs no step
 /// and stays by value too.
@@ -51073,8 +51087,20 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // reuse instead). Unrecognized shapes get no fallback here -- unlike
     // the loop's own per-`bound` null/bool check below -- matching this
     // arm's pre-#3119 behavior for a bare `.`/`TrackedVar` head exactly.
-    let head_resolves_to_register =
-        register.is_some_and(|reg| resolves_to_register::<S>(head, trackable, reg, frame));
+    //
+    // #4320: a single pattern also takes a pipe each of whose stages is the register
+    // (`(.|.) as {a:$a}`, `. | $x` for a certified `$x`) as the register: the last stage's output
+    // is it, or the previous stage's. Not for a `?//` chain, whose retry rules (#3279) keep
+    // proving such a head identical off the table: `(. | .) as {a:$v0} ?// $v0 | .c` retries in
+    // jq and a head proven the register would not.
+    let head_resolves_to_register = register.is_some_and(|reg| {
+        resolves_to_register::<S>(head, trackable, reg, frame)
+            || (patterns.len() == 1
+                && S::TAG == EvalTag::Jq
+                && matches!(head, Expr::Pipe(stages) if stages
+                    .iter()
+                    .all(|stage| resolves_to_register::<S>(stage, trackable, reg, frame))))
+    });
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
     // last alternative never retries, so a single pattern skips the walk.
