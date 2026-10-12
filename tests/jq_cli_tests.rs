@@ -86750,6 +86750,13 @@ fn test_destructuring_moves_path_register_2649() -> Result<()> {
             "path(. as {a:$q} ?// {b:$r} | .a)",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":[1,2,3],\"b\":{\"c\":5}}",
         ),
+        // The body does not lead with a navigation, so the refusal is not retried (#4115) and
+        // the by-value probe of the later alternative (#4150) runs; jq raises on `5 | .a` too.
+        (
+            d,
+            "path(. as {a:$q} ?// {b:$r} | 5 | .a)",
+            "Invalid path expression near attempt to access element \"a\" of 5",
+        ),
         (
             d,
             "path(. as {a:$q} ?// {b:$r} | error(\"boom\"))",
