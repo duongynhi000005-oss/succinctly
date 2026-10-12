@@ -278,6 +278,8 @@ pub use encode_style::{
 };
 pub use error::YamlError;
 pub use index::YamlIndex;
+#[doc(hidden)] // shared with the `succinctly yq` DOM writer; not a supported API
+pub use light::deeper_yaml_indent;
 pub use light::{
     format_float_with_fraction, format_float_yq, format_float_yq_yaml, format_float_yq_yaml_nested,
     stream_json_sequence, stream_yaml_sequence, yq_float_is_scientific, ChompingIndicator,

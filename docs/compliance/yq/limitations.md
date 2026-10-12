@@ -1525,43 +1525,6 @@ with real jq 1.7.1 (`[["a"]]`). So the two flags are a recorded choice, not a bu
 entry (plus the cross-referencing doc comments on both functions) is what keeps a future
 reader from "fixing" the mismatch into a real divergence.
 
-### Stacked compact block-sequence items — one narrow, pre-existing width anomaly
-
-[#1485](https://github.com/rust-works/succinctly/issues/1485) fixed the general rule for a
-compact block-sequence item's inlined field/element (`- ` sharing its line with a mapping
-value's first field, #785): content nested *inside* that first field's own value steps from
-the item's own pre-compact indent (`recursion_base`) by an ordinary `indent_spaces` amount —
-not from the item's 2-column-wider visual column — with one width-dependent correction at
-real yq's own default (`-I=2`, where a single ordinary step wouldn't clear the compact visual
-column). This also fixed a **stacked** chain, where a block sequence is itself the compact
-value nested directly inside *another* compact sequence element (`- - b: ...`, a sequence
-whose sole element is itself a sequence whose sole element is a mapping): every level must
-keep forwarding the *original* pre-compact base through every compact level, not just its
-own immediate one.
-
-**One narrow anomaly survives, unfixed, at a specific (nesting depth, `-I`) intersection**:
-for a chain of exactly `D` stacked compact sequence levels, real yq's own column for the
-first nested field is non-monotonic in `-I` right at `-I = D + 1` — verified live against yq
-v4.53.3 across `-I=2` through `-I=6`, both before and after #1485's fix, and confirmed
-byte-identical on pre-#1485 `main` too (this is not something #1485 introduced or worsened).
-For `D = 2` (`printf -- '- - b:\n      c:\n        d: 1\n' | yq -I=<n> '.'`), the observed
-column of `c` is 6/6/8/5/6 for `-I` = 2/3/4/5/6 — genuinely non-monotonic (`-I=5`'s column is
-*smaller* than `-I=2`'s), not just a different linear step per width. The anomaly sits at
-`-I=3` (`D+1`): real yq's own column there (6) breaks what would otherwise be a strictly
-increasing sequence (2→6, 4→8, 5→…, 6→…) by repeating `-I=2`'s value instead of continuing
-upward to 7.
-
-Both succinctly output routes give column 7 at `-I=3` there (an ordinary, monotonic step
-matching the `-I=2`→`-I=4`→... progression), matching each other and matching pre-#1485
-`main`'s own (also non-matching) value — neither has ever modeled this specific anomaly. The
-pattern (`-I = stacked_depth + 1`) suggests a genuine upstream go-yaml quirk tied to some
-internal indent-tracking edge case rather than a spec-conformant rule, but the exact
-mechanism is not yet understood; tracked as
-[#1881](https://github.com/rust-works/succinctly/issues/1881) rather than blocking #1485's
-otherwise-verified fix (which is strictly more correct than what it replaced: it repairs a
-real regression at `-I=4` introduced mid-fix and two cases pre-#1485 `main` never got right
-at all, `-I=5`/`-I=6`).
-
 ### Bare `first` as a path step — sequences, scalars and `null` agree; a mapping's key and a comma over `null` do not (#3551)
 
 Real yq's bare `first` is a path step at the head of an expression (v4.53.3): on a sequence it

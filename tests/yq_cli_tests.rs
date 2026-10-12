@@ -622,6 +622,158 @@ fn test_exit_status_decode_failure_exits_nonzero_1805() -> Result<()> {
     Ok(())
 }
 
+/// #1881: real yq (go-yaml) opens a block child under a mapping value at the
+/// smallest multiple of `-I` above the current indent, and a compact `- ` adds a
+/// literal 2, so after `D` stacked compact sequence levels the columns are not
+/// monotonic in `-I` (`- - b:` / `c:` sits at 6, 6, 8, 5, 6 for `-I=2..6`). The
+/// expected text is yq v4.53.3's, for `D` stacked levels over `b: c: d: 1`, on
+/// both the streaming route (`.`) and the DOM route (`-P`).
+#[test]
+fn test_stacked_compact_seq_indent_rounds_up_to_the_indent_width_1881() -> Result<()> {
+    let cases: &[(usize, usize, &str)] = &[
+        (1, 2, "- b:\n    c:\n      d: 1\n"),
+        (1, 3, "- b:\n   c:\n      d: 1\n"),
+        (1, 4, "- b:\n    c:\n        d: 1\n"),
+        (1, 5, "- b:\n     c:\n          d: 1\n"),
+        (1, 6, "- b:\n      c:\n            d: 1\n"),
+        (1, 7, "- b:\n       c:\n              d: 1\n"),
+        (2, 2, "- - b:\n      c:\n        d: 1\n"),
+        (2, 3, "- - b:\n      c:\n         d: 1\n"),
+        (2, 4, "- - b:\n        c:\n            d: 1\n"),
+        (2, 5, "- - b:\n     c:\n          d: 1\n"),
+        (2, 6, "- - b:\n      c:\n            d: 1\n"),
+        (2, 7, "- - b:\n       c:\n              d: 1\n"),
+        (3, 2, "- - - b:\n        c:\n          d: 1\n"),
+        (3, 3, "- - - b:\n         c:\n            d: 1\n"),
+        (3, 4, "- - - b:\n        c:\n            d: 1\n"),
+        (3, 5, "- - - b:\n          c:\n               d: 1\n"),
+        (3, 6, "- - - b:\n            c:\n                  d: 1\n"),
+        (3, 7, "- - - b:\n       c:\n              d: 1\n"),
+        (4, 2, "- - - - b:\n          c:\n            d: 1\n"),
+        (4, 3, "- - - - b:\n         c:\n            d: 1\n"),
+        (4, 4, "- - - - b:\n            c:\n                d: 1\n"),
+        (4, 5, "- - - - b:\n          c:\n               d: 1\n"),
+        (4, 6, "- - - - b:\n            c:\n                  d: 1\n"),
+        (
+            4,
+            7,
+            "- - - - b:\n              c:\n                     d: 1\n",
+        ),
+    ];
+    for &(depth, indent, expected) in cases {
+        let doc = format!(
+            "{}b:\n{}  c:\n{}    d: 1\n",
+            "- ".repeat(depth),
+            "  ".repeat(depth),
+            "  ".repeat(depth)
+        );
+        let indent_arg = format!("-I={indent}");
+        for extra in [&[][..], &["-P"][..]] {
+            let mut args = vec![indent_arg.as_str()];
+            args.extend_from_slice(extra);
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", &doc, &args)?;
+            assert_eq!(code, 0, "D={depth} -I={indent} {extra:?}: {stderr}");
+            assert_eq!(stdout, expected, "D={depth} -I={indent} {extra:?}");
+        }
+    }
+    Ok(())
+}
+
+/// #1881, more shapes: the same round-up rule feeds the anchored compact item, a
+/// mapping chain under a key, a sequence under a mapping inside a chain, a deferred
+/// block scalar and a mixed chain. Expected text is yq v4.53.3's, at the widths where
+/// the old additive step disagreed (and `-I=4`, `5`), on both routes.
+#[test]
+fn test_compact_chain_indent_rounding_other_shapes_1881() -> Result<()> {
+    let cases: &[(&str, usize, &str)] = &[
+        (
+            "- &a\n  - b:\n      c: 1\n",
+            3,
+            "- &a\n  - b:\n      c: 1\n",
+        ),
+        (
+            "- &a\n  - b:\n      c: 1\n",
+            4,
+            "- &a\n  - b:\n        c: 1\n",
+        ),
+        ("- &a\n  - b:\n      c: 1\n", 5, "- &a\n  - b:\n     c: 1\n"),
+        (
+            "- - &a\n    b:\n      c:\n        d: 1\n",
+            3,
+            "- - &a\n    b:\n      c:\n         d: 1\n",
+        ),
+        (
+            "- - &a\n    b:\n      c:\n        d: 1\n",
+            4,
+            "- - &a\n    b:\n        c:\n            d: 1\n",
+        ),
+        (
+            "- - &a\n    b:\n      c:\n        d: 1\n",
+            5,
+            "- - &a\n    b:\n     c:\n          d: 1\n",
+        ),
+        (
+            "k:\n  - - x: 1\n      y:\n        z: 2\n",
+            3,
+            "k:\n   - - x: 1\n       y:\n         z: 2\n",
+        ),
+        (
+            "k:\n  - - x: 1\n      y:\n        z: 2\n",
+            4,
+            "k:\n    - - x: 1\n        y:\n            z: 2\n",
+        ),
+        (
+            "k:\n  - - x: 1\n      y:\n        z: 2\n",
+            5,
+            "k:\n     - - x: 1\n         y:\n          z: 2\n",
+        ),
+        (
+            "- - m:\n      - n:\n          o: 1\n",
+            3,
+            "- - m:\n      - n:\n         o: 1\n",
+        ),
+        (
+            "- - m:\n      - n:\n          o: 1\n",
+            4,
+            "- - m:\n        - n:\n            o: 1\n",
+        ),
+        (
+            "- - m:\n      - n:\n          o: 1\n",
+            5,
+            "- - m:\n     - n:\n          o: 1\n",
+        ),
+        ("- - |\n    hello\n", 3, "- - |\n    hello\n"),
+        ("- - |\n    hello\n", 4, "- - |\n    hello\n"),
+        ("- - |\n    hello\n", 5, "- - |\n    hello\n"),
+        (
+            "- a:\n    - b:\n        - c: 1\n          d:\n            e: 2\n",
+            3,
+            "- a:\n   - b:\n      - c: 1\n        d:\n         e: 2\n",
+        ),
+        (
+            "- a:\n    - b:\n        - c: 1\n          d:\n            e: 2\n",
+            4,
+            "- a:\n    - b:\n        - c: 1\n          d:\n            e: 2\n",
+        ),
+        (
+            "- a:\n    - b:\n        - c: 1\n          d:\n            e: 2\n",
+            5,
+            "- a:\n     - b:\n          - c: 1\n            d:\n               e: 2\n",
+        ),
+    ];
+    for &(doc, indent, expected) in cases {
+        let indent_arg = format!("-I={indent}");
+        for extra in [&[][..], &["-P"][..]] {
+            let mut args = vec![indent_arg.as_str()];
+            args.extend_from_slice(extra);
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", doc, &args)?;
+            assert_eq!(code, 0, "{doc:?} -I={indent} {extra:?}: {stderr}");
+            assert_eq!(stdout, expected, "{doc:?} -I={indent} {extra:?}");
+        }
+    }
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
@@ -7104,21 +7256,11 @@ fn test_compact_seq_item_deferred_block_scalar_indent_1485() -> Result<()> {
 
 /// #1485 (code review regression): a block sequence directly nested inside
 /// *another* compact sequence element (`- - b: ...`) is a *stacked* compact
-/// chain -- the inner sequence's own compact branch must keep forwarding
-/// the outer sequence's true pre-compact `recursion_base` all the way down,
-/// not reset it to its own (already compact-adjusted) `indent`. An earlier
-/// version of this fix did the latter, which happened to still match real
-/// yq at `-I=2`/`-I=4` (where it coincided with the correct value) but
-/// diverged at `-I=5`/`-I=6` -- caught only by probing a range of widths,
-/// not the issue's own single `-I=4` example. Verified live against yq
-/// v4.53.3.
-///
-/// `-I=3` is deliberately not covered here: real yq itself renders this
-/// exact shape inconsistently across indent widths for a stacked compact
-/// chain (non-monotonic in `-I`, confirmed identical in behaviour on
-/// pre-#1485 `main`), so `-I=3` here reproduces a narrow, pre-existing
-/// upstream quirk this fix does not newly introduce -- see
-/// `docs/compliance/yq/limitations.md`.
+/// chain. An earlier version of the fix reset the nesting base at each compact
+/// level, which happened to match real yq at `-I=2`/`-I=4` but diverged at
+/// `-I=5`/`-I=6` -- caught only by probing a range of widths. Since #1881 the
+/// depth is yq's own round-up rule; the `_1881` test below covers `-I=3` and
+/// deeper chains too. Verified live against yq v4.53.3.
 #[test]
 fn test_compact_seq_item_stacked_nested_indent_does_not_reset_1485() -> Result<()> {
     let yaml = "- - b:\n      c:\n        d: 1\n";
