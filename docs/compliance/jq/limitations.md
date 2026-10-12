@@ -4019,19 +4019,25 @@ answers `["b"]` — and classified the two residuals appended below):
   since the issue was filed: the forking `foreach` UPDATE (`#4041`/`#4059`) and
   `(. as $q | (try ..) | .)` (`#4063`) answer as jq does.
 
+  [#4123](https://github.com/rust-works/succinctly/issues/4123) answers the pipe nested inside a forwarder
+  (`if true then (.. | select(true)) else . end`, `first(.. | select(true))`, `try (...)`, `limit(1; ...)`, a
+  comma sibling, a no-argument `def`): `pipe_without_trailing_identity` now drops a trailing `.` *and* a
+  trailing `select(f)` even after a seed producer. The old guard (a pipe re-seeds, so the producer's statement
+  is not the outer stage's) did not hold: the producer's statement is relative to the register the pipe
+  entered, which is what the stage after the forwarder reads, and `select` hands its input through as the very
+  node it received. Over the 55 operands that generate the shapes (`--stage-only`, 46,563 rows) 562 refusals
+  became matches and 80 wrong answers (DIFF) became matches, with no regression; a 60,000-row full-context
+  sample of the new operands and a 40,000-row sample of the whole grid are clean. Pinned by
+  `test_recurse_seed_through_a_pipe_nested_in_a_forwarder_4123`. Five rows #4071 pinned as loud refusals
+  (a fold UPDATE `try (length|.) catch ($v|.b) | .` or `(1,($v|.b?)) | select(true)` followed by a stage) now answer as jq
+  does, writes included. The `if` whose branches hold no recursion
+  (`if false then .a else 1 end`) and the `reduce` UPDATE with a by-value `if` were already answered by #4124.
+
   **What still refuses**, each loudly (an exit 5, never a write that is silently lost) and pinned by
   `test_recurse_seed_residuals_stay_loud_3580`:
-  - a pipe (or `select`) nested inside a forwarder, such as `if true then (.. | select(true)) else .
-    end`, though the bare `(.. | select(true))` stage is answered by #3653's own rule: the nested
-    pipe re-seeds in its own stages, so the statement its first output carries is not the outer
-    stage's;
   - a fold inside an `[E]` collect (`[foreach (1,2) as $i (1; try ..; .)]`), which goes through the
     collect's own claim;
-  - an `if` whose branches hold no recursion at all (`if false then .a else 1 end`) and a `def` call
-    that takes an argument (`def f(a): ..; f(1)`): the first has no producer for the stage to read,
-    the second binds code the shape cannot see;
-  - a `reduce` UPDATE whose `if` has a by-value branch (`reduce (1,2) as $i (1; if false then .. else 1 end)`):
-    the fold reads its UPDATE's register through its own rule;
+  - a `def` call that takes an argument (`def f(a): ..; f(1)`), which binds code the shape cannot see;
   - a recursion behind a *destructuring* bind (`(. as [$q] | ..)`): the bind's pattern indexes before
     its body runs, so the stage is opaque on purpose.
 - **A terminal `null`/`true`/`false` is the root path only while nothing navigated
