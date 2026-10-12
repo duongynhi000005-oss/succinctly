@@ -45109,10 +45109,10 @@ fn foreach_states_register_per_emission<S: EvalSemantics>(expr: &Expr) -> bool {
 /// [`resolve_foreach`] therefore states `Unmoved` (the frame's register) on an emission
 /// whose step took no walk step and whose `UPDATE`, `EXTRACT`, source and `INIT` cannot
 /// move it, and a loss on every other one, so the stage never reads an absent statement
-/// as the carried copy standing (#3826) for an emission that moved it. Jq mode only.
+/// as the carried copy standing (#3826) for an emission that moved it. Jq mode only. Read through
+/// a `try` whose handler cannot navigate too ([`peel_fold_under_handler`], #4129).
 fn foreach_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> bool {
-    last_register_unmoved::<S>()
-        && matches!(peel_register_through_calls(expr), Expr::Foreach { .. })
+    last_register_unmoved::<S>() && matches!(peel_fold_under_handler(expr), Expr::Foreach { .. })
 }
 
 /// Whether `expr` is a `reduce` that states jq's register per result on an *untracked*
@@ -45125,14 +45125,33 @@ fn foreach_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> 
 /// in that backtracked loop too. [`resolve_reduce`] states
 /// nothing on such an emission, which [`resolve_seq_stage`] reads on an untracked entry as
 /// the carried copy standing (#3826); this only admits the stage to read it that way; jq
-/// mode only.
+/// mode only. Read through a `try` whose handler cannot navigate too
+/// ([`peel_fold_under_handler`], #4129).
 fn reduce_states_register_on_untracked_entry<S: EvalSemantics>(expr: &Expr) -> bool {
     last_register_unmoved::<S>()
         && matches!(
-            peel_register_through_calls(expr),
+            peel_fold_under_handler(expr),
             Expr::Reduce { input, init, update, .. }
                 if reduce_leaves_register_in_place(input, init, update)
         )
+}
+
+/// [`peel_register_through_calls`], and also a `try` whose handler cannot navigate (#4129): the
+/// fold underneath it states its register on an untracked entry
+/// ([`foreach_states_register_on_untracked_entry`],
+/// [`reduce_states_register_on_untracked_entry`]), and the handler's outputs state the register the
+/// `try` entered with ([`resolve_catch_sink`], #3133), which a handler that moves nothing leaves where
+/// it was. The stage then reads each result's own statement instead of
+/// [`cannot_move_register`]'s whole-stage answer, which is `false` for a fold that destructures
+/// (its pattern's steps move the register) and so refused the `$x` after a handler that jq answers.
+fn peel_fold_under_handler(expr: &Expr) -> &Expr {
+    match peel_register_through_calls(expr) {
+        Expr::Try {
+            expr: inner,
+            catch: Some(handler),
+        } if cannot_move_register(handler) => peel_fold_under_handler(inner),
+        other => other,
+    }
 }
 
 /// `stage` is a `last(f)`, which leaves jq's register where the stage entered
@@ -47753,9 +47772,11 @@ fn getpath_preserves_register<S: EvalSemantics>(
 /// reads as its body (since #3914). A `//` is also a producer when its right
 /// operand leaves the register alone ([`operand_leaves_register`], #3906): that alternate
 /// states the register the stage entered with ([`carry_frame_register`]). Anything else that hosts a producer -- a
-/// destructuring bind, whose pattern indexes before its body runs, a fold, a
-/// `def` call with arguments -- is *opaque*: the stage reads nothing, and the refusal it had
-/// before stays. A stage that hosts no producer has nothing to read.
+/// destructuring bind whose *body* hosts a producer (its pattern indexes before the body runs, so
+/// the producer reads a register the walk already moved; a producer in the source or a computed key
+/// states nothing into the sink, #4129), a fold, a `def` call with arguments -- is *opaque*: the
+/// stage reads nothing, and the refusal it had before stays. A stage that hosts no producer has
+/// nothing to read.
 ///
 /// True only when all of these hold, each load-bearing:
 ///
@@ -47875,8 +47896,8 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         | Expr::Label { body: inner, .. }
         // #3892: a bare-variable bind's source is a subexp in jq, and
         // `resolve_as_source_sink` resolves the body against this arm's own
-        // input and sink. A destructuring `AsPattern` stays opaque: its pattern
-        // indexes before the body runs.
+        // input and sink. A destructuring `AsPattern` is read separately, below: its
+        // pattern indexes before the body runs, so a producer in its body stays opaque.
         | Expr::As { body: inner, .. }
         | Expr::Try {
             expr: inner,
@@ -47966,6 +47987,15 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
             }
             calls.set(left - 1);
             entry_marker_shape_in(&def.body, calls)
+        }
+        // #4129: a destructuring bind states from its *body* alone. The source and the
+        // pattern's computed keys are subexps, evaluated by value, so a `.` there states
+        // nothing into the sink; only a producer in the body could (and one there reads a
+        // register the pattern's walk already moved, which is why it stays opaque). A body
+        // with none has nothing to misread, so a `try` around the bind is read for its
+        // handler's outputs alone (`try (. as [$a] | $a) catch 7`).
+        Expr::AsPattern { body, .. } if !any_subexpr(body, &mut is_entry_marker_producer) => {
+            EntryMarkers::None
         }
         other if any_subexpr(other, &mut is_entry_marker_producer) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
@@ -142492,6 +142522,82 @@ mod neutral_leaves_register_tests_4028 {
         ] {
             assert_eq!(marker_shape(src), shape, "entry_marker_shape({src})");
         }
+    }
+
+    // #4129: a destructuring bind is read from its body alone. Its source and the pattern's computed
+    // keys are subexps that state nothing into the sink, so a `.` there is not a producer; one in the
+    // body is, and reads a register the pattern's walk already moved, so it stays opaque.
+    #[test]
+    fn a_destructuring_bind_reads_by_its_body_4129() {
+        for (src, shape) in [
+            (". as [$a] | $a", "none"),
+            (". as {a:$a} | $a", "none"),
+            (". as [$a] ?// $a | 1", "none"),
+            (". as {(.a):$a} | $a", "none"),
+            // A producer in a computed key or in the source states nothing into the sink.
+            (". as {(try .a catch 1):$a} | $a", "none"),
+            ("(.. | .) as [$a] | $a", "none"),
+            (". as [$a] | .", "opaque"),
+            (". as [$a] ?// $a | ..", "opaque"),
+            (". as [$a] | try 1 catch 2", "opaque"),
+            (". as [$a] | (1, .)", "opaque"),
+            // The handler's outputs state the register whatever the body is, so a `try` over a
+            // bind that hosts no producer is read for them alone.
+            ("try (. as [$a] | $a) catch 7", "forwarded"),
+            ("try (. as {a:$a} ?// $a | 1) catch 7", "forwarded"),
+            ("try (. as [$a] | .) catch 7", "opaque"),
+            // A `try` with no handler has nothing to state.
+            ("try (. as [$a] | $a)", "none"),
+        ] {
+            assert_eq!(marker_shape(src), shape, "entry_marker_shape({src})");
+        }
+    }
+
+    // #4129: a fold that destructures states its register per result on an untracked entry, and does
+    // so under a `try` whose handler navigates nothing (the handler's outputs state the `try`'s
+    // entry). A handler that navigates, or yq mode, keeps the whole-stage answer.
+    #[test]
+    fn a_fold_under_a_handler_states_its_register_per_result_4129() {
+        let stated = |filter: &str| {
+            let expr = parse(filter).unwrap();
+            (
+                reduce_states_register_on_untracked_entry::<JqSemantics>(&expr),
+                foreach_states_register_on_untracked_entry::<JqSemantics>(&expr),
+            )
+        };
+        assert_eq!(stated("reduce . as [$a] (0; .)"), (true, false));
+        assert_eq!(stated("foreach . as [$a] (0; .; .)"), (false, true));
+        assert_eq!(
+            stated("try (reduce . as [$a] (0; .)) catch 7"),
+            (true, false)
+        );
+        assert_eq!(
+            stated("(try (reduce . as [$a] (0; .)) catch 7)?"),
+            (true, false)
+        );
+        assert_eq!(
+            stated("try (foreach . as {a:$a} (0; .; .)) catch 7"),
+            (false, true)
+        );
+        assert_eq!(
+            stated("try (try (reduce . as [$a] (0; .)) catch 7) catch 8"),
+            (true, false)
+        );
+        // A handler that navigates may have moved the register the output is read against.
+        assert_eq!(
+            stated("try (reduce . as [$a] (0; .)) catch .a"),
+            (false, false)
+        );
+        assert_eq!(
+            stated("try (foreach . as [$a] (0; .; .)) catch .a"),
+            (false, false)
+        );
+        // Not a fold.
+        assert_eq!(stated("try (. as [$a] | $a) catch 7"), (false, false));
+        let yq = parse("try (reduce . as [$a] (0; .)) catch 7").unwrap();
+        assert!(!reduce_states_register_on_untracked_entry::<YqSemantics>(
+            &yq
+        ));
     }
 
     /// [`entry_marker_shape`] of a program once its leading `def` is bound, as the resolver sees
