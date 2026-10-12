@@ -135856,6 +135856,210 @@ mod tests {
         }
     }
 
+    /// Whether `path(.x | stage)` over `doc` is accepted and names `.x` itself, i.e.
+    /// the resolver passed the stage's input through (#3460, #4016, #4295).
+    fn resolver_passes_through(doc: &str, stage: &str) -> bool {
+        let (values, error) = outputs_and_error(doc.as_bytes(), &format!("path(.x | {stage})"));
+        error.is_none() && values == [r#"["x"]"#]
+    }
+
+    /// #4443: `is_input_returning_stage` and `is_transparent_leaf` restate, by shape,
+    /// the pass-through arms of `resolve_node_sink`. Each stage here is accepted by
+    /// the resolver on the document beside it (so the leaf is not dead) and sits on
+    /// the bind-source grammar and on `may_alias_register`'s forwarders -- except
+    /// `del(f)`, which hands its input back only when `f` resolves no path, so it is a
+    /// grammar leaf and never a forwarder. The same stage on a document that gets a
+    /// fresh result is still refused, which is what keeps the judgement per value.
+    #[test]
+    fn test_input_returning_stages_agree_with_resolver_and_grammar_4443() {
+        for (stage, passes, fresh) in [
+            ("tostring", r#"{"x":"s"}"#, r#"{"x":5}"#),
+            ("@text", r#"{"x":"s"}"#, r#"{"x":5}"#),
+            ("tonumber", r#"{"x":5}"#, r#"{"x":"5"}"#),
+            ("ltrimstr(\"z\")", r#"{"x":"s"}"#, r#"{"x":"zs"}"#),
+            ("rtrimstr(\"z\")", r#"{"x":"s"}"#, r#"{"x":"sz"}"#),
+            ("delpaths([])", r#"{"x":"s"}"#, ""),
+            ("setpath([]; .)", r#"{"x":"s"}"#, ""),
+            ("del(.[]?)", r#"{"x":"s"}"#, r#"{"x":[1]}"#),
+        ] {
+            let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
+            assert!(is_transparent_leaf(&expr), "{stage}: not a grammar leaf");
+            assert!(is_transparent_bind_source(&expr), "{stage}: not a source");
+            assert_eq!(
+                is_input_returning_stage(&expr),
+                !stage.starts_with("del("),
+                "{stage}"
+            );
+            assert_eq!(
+                may_alias_register(&expr, None),
+                !stage.starts_with("del("),
+                "{stage}: forwarder"
+            );
+            assert!(
+                resolver_passes_through(passes, stage),
+                "{stage} on {passes}"
+            );
+            if !fresh.is_empty() {
+                assert!(
+                    !resolver_passes_through(fresh, stage),
+                    "{stage} on {fresh} gets a fresh value"
+                );
+            }
+        }
+    }
+
+    /// #4443, the other direction: a builtin the resolver passes through for some
+    /// input must be on the bind-source grammar, or be listed in `UNMODELLED` as a
+    /// known gap. A new pass-through arm that is not added to
+    /// `is_input_returning_stage` shows up as an accepted builtin off the grammar and
+    /// fails this test. `UNMODELLED` is pinned the opposite way (each entry must still
+    /// be off the grammar), so closing a gap forces the entry out, as the oracle
+    /// sweep's `stale-refuse-only` does.
+    ///
+    /// The corpus is what a hand-written list can reach: every builtin or format
+    /// spelling in it runs over the scalar and container documents in `DOCS`. Control
+    /// flow (`first`, `if`, `try`, `reduce`, `label`, an `as` body) is the grammar's
+    /// own structure, pinned by
+    /// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`. `debug`,
+    /// `stderr` and `input` are left out on purpose, as they write to the process.
+    /// Every `UNMODELLED` stage is a builtin jq answers as the register and the
+    /// grammar leaves to the by-value route. For `walk(.)`, `values`, `scalars` and the
+    /// type filters that route refuses (`path(.b | strings as $y | $y)` is `["b"]` in
+    /// jq 1.7.1); `getpath([])` agrees with jq through it.
+    #[test]
+    fn test_resolver_pass_through_builtins_are_on_the_bind_source_grammar_4443() {
+        const DOCS: [&str; 10] = [
+            r#"{"x":"s"}"#,
+            r#"{"x":"z"}"#,
+            r#"{"x":5}"#,
+            r#"{"x":null}"#,
+            r#"{"x":true}"#,
+            r#"{"x":[1]}"#,
+            r#"{"x":{"a":1}}"#,
+            r#"{"x":""}"#,
+            r#"{"x":[]}"#,
+            r#"{"x":1.5}"#,
+        ];
+        const UNMODELLED: [&str; 11] = [
+            "getpath([])",
+            "walk(.)",
+            "values",
+            "scalars",
+            "strings",
+            "numbers",
+            "booleans",
+            "nulls",
+            "arrays",
+            "objects",
+            "iterables",
+        ];
+        let corpus = [
+            "tostring",
+            "@text",
+            "tonumber",
+            "ltrimstr(\"z\")",
+            "rtrimstr(\"z\")",
+            "ltrimstr(\"\")",
+            "rtrimstr(\"\")",
+            "ltrimstr(1)",
+            "delpaths([])",
+            "delpaths([[]])",
+            "setpath([]; .)",
+            "setpath([]; 1)",
+            "setpath([\"a\"]; .)",
+            "del(.[]?)",
+            "del(.zz)",
+            "del(empty)",
+            "getpath([])",
+            "getpath([\"a\"])",
+            "walk(.)",
+            "walk(1)",
+            "values",
+            "scalars",
+            "strings",
+            "numbers",
+            "booleans",
+            "nulls",
+            "arrays",
+            "objects",
+            "iterables",
+            "recurse",
+            "..",
+            "tojson",
+            "ascii_downcase",
+            "ascii_upcase",
+            "trim",
+            "ltrim",
+            "rtrim",
+            "abs",
+            "floor",
+            "sqrt",
+            "length",
+            "sort",
+            "unique",
+            "reverse",
+            "flatten",
+            "add",
+            "min",
+            "max",
+            "keys",
+            "to_entries",
+            "from_entries",
+            "@json",
+            "@uri",
+            "@base64",
+            "@html",
+            "@sh",
+            "@csv",
+            "explode",
+            "implode",
+            "type",
+            "map(.)",
+            "map_values(.)",
+            "with_entries(.)",
+            "paths",
+            "any",
+            "all",
+            "toarray",
+            "pick(.a)",
+            "trimstr(\"z\")",
+            "sub(\"x\"; \"y\")",
+            "min_by(.)",
+            "unique_by(.)",
+            "group_by(.)",
+            "sort_by(.)",
+            "transpose",
+            "indices(1)",
+            "contains(.)",
+            "inside(.)",
+        ];
+        let mut violations = Vec::new();
+        for stage in corpus {
+            let passes = DOCS.iter().any(|doc| resolver_passes_through(doc, stage));
+            let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
+            let on_grammar = is_transparent_bind_source(&expr);
+            if UNMODELLED.contains(&stage) {
+                if !passes {
+                    violations.push(format!(
+                        "{stage}: no longer passes through, drop it from UNMODELLED"
+                    ));
+                }
+                if on_grammar {
+                    violations.push(format!(
+                        "{stage}: now on the grammar, drop it from UNMODELLED"
+                    ));
+                }
+            } else if passes && !on_grammar {
+                violations.push(format!(
+                    "{stage}: the resolver passes it through but the bind-source grammar does \
+                     not list it (add it to is_input_returning_stage, or to UNMODELLED with \
+                     the reason)"
+                ));
+            }
+        }
+        assert!(violations.is_empty(), "{violations:#?}");
+    }
+
     /// #3423: `may_alias_register` reads the forwarders (`,`, `if`, `//`, `try`,
     /// `first`/`last`/`limit`/`nth`, `label`, a rebind, `select`, a pipe) over the
     /// aliasing leaves (`.` and a `$var`), and nothing else: a value the source
