@@ -78534,6 +78534,9 @@ fn test_foreach_source_marker_behind_nested_wrappers_4320() -> Result<()> {
         "nth(0; $x)",
         "(label $f | $x)",
         "((first($x))?)",
+        "try (try $x)",
+        "last(last($x))",
+        "limit(1; label $f | $x)",
     ];
     let mut rows: Vec<PathRow3289> = Vec::new();
     for wrapper in wrappers {
@@ -78618,6 +78621,15 @@ fn test_foreach_source_marker_behind_nested_wrappers_4320() -> Result<()> {
         (
             r#"{"a":true}"#,
             r"del(. as $x | foreach (last($x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "jq: error",
+            5,
+        ),
+        // A comma whose first leaf emits nothing (`limit(0; $x)`) is not read as the marker: `first`
+        // emits the `1`, which raises at the pattern's first step (jq: `Invalid path expression`).
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (first(limit(0; $x), 1) as {a:$a} | .) as $k (.; .; .))",
             "",
             "jq: error",
             5,

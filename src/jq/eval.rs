@@ -49416,10 +49416,17 @@ fn marker_head(e: &Expr) -> Option<&Rc<Tracked>> {
     bare_marker(e).or_else(|| wrapped_marker(e))
 }
 
-/// [`marker_head`] of the first output of `e`: for a comma, its first leaf's.
+/// [`marker_head`] of the first output of `e`. A comma's first output is its first leaf's only
+/// when that leaf always emits one, which a bare marker does and a wrapped one need not
+/// (`first(limit(0; $x), 1)` emits `1`).
 fn first_leaf_marker(e: &Expr) -> Option<&Rc<Tracked>> {
     match unwrap_bind_source(e) {
-        Expr::Comma(items) => items.first().and_then(first_leaf_marker),
+        Expr::Comma(items) => items
+            .first()
+            .and_then(|first| match unwrap_bind_source(first) {
+                Expr::Comma(_) => first_leaf_marker(first),
+                leaf => bare_marker(leaf),
+            }),
         other => marker_head(other),
     }
 }
@@ -51356,7 +51363,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // proving such a head identical off the table: `(. | .) as {a:$v0} ?// $v0 | .c` retries in
     // jq and a head proven the register would not.
     //
-    // #4320: and a `$x` marker behind `first`/`last`/`limit`/`try` ([`wrapped_marker`]) is the
+    // #4320: and a `$x` marker behind the wrappers [`wrapped_marker`] names (`first`/`last`/`limit`/`nth`/`try`/`?`/`label`,
+    // nested, and `first` over a comma) is the
     // register when the marker is, again for a single pattern only.
     let head_resolves_to_register = register.is_some_and(|reg| {
         resolves_to_register::<S>(head, trackable, reg, frame)
