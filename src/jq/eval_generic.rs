@@ -23113,8 +23113,8 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
 
 /// A pipe that reads the key of a computed-slice element and nothing else of the path (#4286,
 /// #4408): `E[a:b][k] | key`, with any `tostring` before or after the `key`, and field steps
-/// (`.a`, `.a.b`) between the read and the `key`. The slice stage, the literal `k`, the field
-/// names and the stages from the first non-field stage on, when the pipe has that shape.
+/// (`.a`, `.a.b`) between the read and the `key`. The slice stage, the literal `k`, the field-step
+/// stages and the stages from the first non-field stage on, when the pipe has that shape.
 ///
 /// `E[a:b][k]` parses as a nested pipe of the slice and the index, so both the nested spelling
 /// (`[Pipe([slice, index]), key, ..]`) and the flat one (`[slice, index, key, ..]`) are read.
@@ -23126,7 +23126,7 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
 /// which is the only thing the fused read has to name. Any other stage after the read may ask
 /// for the slice as an ancestor (`parent`), a position or the element itself, so it keeps the
 /// walk.
-fn fusable_slice_key(exprs: &[Expr]) -> Option<(&Expr, i64, Vec<&str>, &[Expr])> {
+fn fusable_slice_key(exprs: &[Expr]) -> Option<SliceKeyRead<'_>> {
     let (pair, tail): (&[Expr], &[Expr]) = match exprs.split_first()? {
         (Expr::Pipe(inner), tail) if inner.len() == 2 => (inner.as_slice(), tail),
         _ if exprs.len() > 2 => exprs.split_at(2),
@@ -23141,14 +23141,7 @@ fn fusable_slice_key(exprs: &[Expr]) -> Option<(&Expr, i64, Vec<&str>, &[Expr])>
     if !matches!(**target, Expr::Identity) || !pure_bound(start) || !pure_bound(end) {
         return None;
     }
-    let mut fields = Vec::new();
-    let mut rest = tail;
-    while let Some((stage, after)) = rest.split_first() {
-        if !push_field_steps(stage, &mut fields) {
-            break;
-        }
-        rest = after;
-    }
+    let (steps, rest) = tail.split_at(tail.iter().take_while(|s| is_field_steps(s)).count());
     let keys = rest
         .iter()
         .filter(|stage| matches!(stage, Expr::Builtin(Builtin::Key)))
@@ -23156,28 +23149,70 @@ fn fusable_slice_key(exprs: &[Expr]) -> Option<(&Expr, i64, Vec<&str>, &[Expr])>
     let only_key_and_tostring = rest
         .iter()
         .all(|stage| matches!(stage, Expr::Builtin(Builtin::Key | Builtin::ToString)));
-    (keys == 1 && only_key_and_tostring).then_some((slice, *idx, fields, rest))
+    (keys == 1 && only_key_and_tostring).then_some(SliceKeyRead {
+        slice,
+        idx: *idx,
+        steps,
+        rest,
+    })
 }
 
-/// Append the names of a stage that is only field steps (`.a`, `.a.b`), and say whether it was
-/// one. Nothing is appended for a stage that is anything else.
-fn push_field_steps<'a>(stage: &'a Expr, names: &mut Vec<&'a str>) -> bool {
+/// What [`fusable_slice_key`] found in a pipe.
+struct SliceKeyRead<'a> {
+    /// The `E[a:b]` stage.
+    slice: &'a Expr,
+    /// The literal index `k`, as written.
+    idx: i64,
+    /// The field-step stages between the read and the first `key`/`tostring` (possibly none).
+    steps: &'a [Expr],
+    /// The stages from the first non-field one on: `key` once, and `tostring` around it.
+    rest: &'a [Expr],
+}
+
+/// Whether a stage is only field steps (`.a`, `.a.b`).
+fn is_field_steps(stage: &Expr) -> bool {
     match stage {
-        Expr::Field(name) => {
-            names.push(name);
-            true
-        }
-        Expr::Pipe(stages) if !stages.is_empty() => {
-            let before = names.len();
-            if stages.iter().all(|stage| push_field_steps(stage, names)) {
-                true
-            } else {
-                names.truncate(before);
-                false
-            }
-        }
+        Expr::Field(_) => true,
+        Expr::Pipe(stages) => !stages.is_empty() && stages.iter().all(is_field_steps),
         _ => false,
     }
+}
+
+/// Apply the field steps of `stages` ([`is_field_steps`]) to `element` in order, `None` when a
+/// step is over something jq cannot index by name (anything but an object or `null`); the
+/// second member is the last step's name.
+fn apply_field_steps(
+    stages: &[Expr],
+    mut element: OwnedValue,
+) -> Option<(OwnedValue, Option<&str>)> {
+    fn step<'a>(
+        stage: &'a Expr,
+        element: &mut OwnedValue,
+        last: &mut Option<&'a str>,
+    ) -> Option<()> {
+        match stage {
+            Expr::Field(name) => {
+                *element = match &*element {
+                    OwnedValue::Object(map) => {
+                        map.get(name.as_str()).cloned().unwrap_or(OwnedValue::Null)
+                    }
+                    OwnedValue::Null => OwnedValue::Null,
+                    _ => return None,
+                };
+                *last = Some(name);
+                Some(())
+            }
+            Expr::Pipe(stages) => stages
+                .iter()
+                .try_for_each(|stage| step(stage, element, last)),
+            _ => None, // patchcov: coverage tolerate-line reason="unreachable: every stage was admitted by `is_field_steps`"
+        }
+    }
+    let mut last = None;
+    for stage in stages {
+        step(stage, &mut element, &mut last)?;
+    }
+    Some((element, last))
 }
 
 /// Answer `E[a:b][k] | key` (and its `tostring` and field-step spellings,
@@ -23189,7 +23224,8 @@ fn push_field_steps<'a>(stage: &'a Expr, names: &mut Vec<&'a str>) -> bool {
 /// descriptor and `[k]` by `k` as written, so the element's key is `k` itself, whether or not
 /// it lands inside the slice; yq's slice keeps the position and keeps the walk. With field
 /// steps (#4408) the key is the last field's name, and the one element the steps read is
-/// converted (`null` when `k` lands outside the slice): a step over anything but an object or
+/// converted whole (`null` when `k` lands outside the slice), not just the fields the steps
+/// name: a step over anything but an object or
 /// `null` fails in jq, so it declines to the walk, which raises it. A target that is not a
 /// readable array, a bound that is not exactly one value and a document with no position all
 /// decline to the walk too, which re-derives whatever the decline stands for. `tostring` hands
@@ -23207,30 +23243,28 @@ fn try_fused_slice_key<S: EvalSemantics, V: DocumentValue>(
     if S::TAG != EvalTag::Jq || cursor.is_none() {
         return None;
     }
-    let (slice, k, fields, tail) = fusable_slice_key(exprs)?;
+    let SliceKeyRead {
+        slice,
+        idx: k,
+        steps,
+        rest,
+    } = fusable_slice_key(exprs)?;
     let (elements, range) = fused_slice_window::<S, V>(slice, value, cursor)?;
-    let mut answer = match fields.last() {
-        None => OwnedValue::Int(k),
-        Some(last) => {
-            let mut element = match fused_slice_landing::<S>(SliceRead::Index(k), &range)? {
-                SliceLanding::Value(owned) => owned,
-                SliceLanding::Element(position) => {
-                    let cursor = crate::jq::array_index::get_cursor_memoized(&elements, position)?;
-                    to_owned::<S, _>(&cursor.value()).ok()?
-                }
-            };
-            for name in &fields {
-                element = match &element {
-                    OwnedValue::Object(map) => map.get(*name).cloned().unwrap_or(OwnedValue::Null),
-                    OwnedValue::Null => OwnedValue::Null,
-                    _ => return None,
-                };
+    let mut answer = if steps.is_empty() {
+        OwnedValue::Int(k)
+    } else {
+        let element = match fused_slice_landing::<S>(SliceRead::Index(k), &range)? {
+            SliceLanding::Value(owned) => owned,
+            SliceLanding::Element(position) => {
+                let cursor = crate::jq::array_index::get_cursor_memoized(&elements, position)?;
+                to_owned::<S, _>(&cursor.value()).ok()?
             }
-            OwnedValue::String((*last).into())
-        }
+        };
+        let (_, last) = apply_field_steps(steps, element)?;
+        OwnedValue::String(last?.into())
     };
     let mut keyed = false;
-    for stage in tail {
+    for stage in rest {
         match stage {
             Expr::Builtin(Builtin::Key) => keyed = true,
             _ if keyed => answer = tostring_owned::<S>(answer),
@@ -44024,13 +44058,13 @@ mod tests {
 
     #[test]
     fn test_fusable_slice_key_gate_4286() {
-        // (index, field steps, stages from the first non-field one)
+        // (index, field-step stages, stages from the first non-field one)
         fn gate(src: &str) -> Option<(i64, usize, usize)> {
             let Expr::Pipe(stages) = crate::jq::parse(src).unwrap() else {
                 return None;
             };
             fusable_slice_key(stages.as_slice())
-                .map(|(_, k, fields, tail)| (k, fields.len(), tail.len()))
+                .map(|read| (read.idx, read.steps.len(), read.rest.len()))
         }
         // The nested spelling `.[a:b][k]` parses to, and the flat one, with `key` and `tostring`.
         assert_eq!(gate(".[$i:][0] | key"), Some((0, 0, 1)));
@@ -44047,7 +44081,8 @@ mod tests {
         assert_eq!(gate(".[$i:][-1] | key"), Some((-1, 0, 1)));
         assert_eq!(gate(".[$i:][0] | .a | key"), Some((0, 1, 1)));
         assert_eq!(gate(".[$i:][-1] | .a | key | tostring"), Some((-1, 1, 2)));
-        assert_eq!(gate(".[$i:][0] | .a.b | key"), Some((0, 2, 1)));
+        // `.a.b` is one stage holding two steps; the count is of stages.
+        assert_eq!(gate(".[$i:][0] | .a.b | key"), Some((0, 1, 1)));
         assert_eq!(gate(".[$i:][0] | .a | .b | key"), Some((0, 2, 1)));
         // A field step after `tostring` reads a string, and one after the `key` reads a path
         // component: neither is the element's own key.
