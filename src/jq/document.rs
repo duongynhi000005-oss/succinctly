@@ -1172,6 +1172,12 @@ pub trait DocumentCursor: Sized + Copy + Clone {
     /// materialization. Default implementation returns false (conservative
     /// assumption); see
     /// [`StreamableValue::is_falsy`](crate::jq::stream::StreamableValue::is_falsy).
+    ///
+    /// A cursor whose scalar fails to decode (`"x\q"`) also answers `false`
+    /// here, and that is harmless for `--exit-status` (#1805): every route
+    /// that classifies a result also streams it, and the streamer raises the
+    /// decode failure (`StreamFailure::Decode`) before the verdict can reach
+    /// exit 0, so no validating pre-pass is needed on this path.
     // patchcov: coverage tolerate reason="unreachable: both implementors (JsonCursor, YamlCursor) override this; the default exists as the conservative-`false` contract a future implementor inherits (#3222)"
     fn is_falsy(&self) -> bool {
         false
