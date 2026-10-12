@@ -1036,18 +1036,11 @@ fn write_indent<W: core::fmt::Write>(out: &mut W, width: usize, unit: char) -> c
     Ok(())
 }
 
-/// Build a new YAML block-style indent string one level deeper than
-/// `indent`: `indent_spaces` more copies of `unit` appended. The ordinary
-/// (non-compact) nesting step for `stream_owned_value_yaml` (#785) - see
-/// `compact_indent` for the other kind of step. Mirrors
-/// `crate::yaml::light::deeper_yaml_indent`.
+/// One block level deeper than `indent` -- the very same step the cursor
+/// writer takes (#1881: rounded up to the next multiple of the indent width),
+/// so the owned-value YAML streamer cannot drift from it (#785).
 fn deeper_indent(indent: &str, indent_spaces: usize, unit: char) -> String {
-    let mut next = String::with_capacity(indent.len() + indent_spaces);
-    next.push_str(indent);
-    for _ in 0..indent_spaces {
-        next.push(unit);
-    }
-    next
+    crate::yaml::deeper_yaml_indent(indent, indent_spaces, unit)
 }
 
 /// Build a new YAML block-style indent string for a real-yq "compact"

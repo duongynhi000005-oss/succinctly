@@ -278,11 +278,12 @@ pub use encode_style::{
 };
 pub use error::YamlError;
 pub use index::YamlIndex;
+#[doc(hidden)] // shared with the `succinctly yq` DOM writer; not a supported API
+pub use light::deeper_yaml_indent;
 pub use light::{
-    deeper_yaml_indent, format_float_with_fraction, format_float_yq, format_float_yq_yaml,
-    format_float_yq_yaml_nested, stream_json_sequence, stream_yaml_sequence,
-    yq_float_is_scientific, ChompingIndicator, YamlCursor, YamlElements, YamlField, YamlFields,
-    YamlNumber, YamlString, YamlValue,
+    format_float_with_fraction, format_float_yq, format_float_yq_yaml, format_float_yq_yaml_nested,
+    stream_json_sequence, stream_yaml_sequence, yq_float_is_scientific, ChompingIndicator,
+    YamlCursor, YamlElements, YamlField, YamlFields, YamlNumber, YamlString, YamlValue,
 };
 pub use locate::{locate_offset, locate_offset_detailed, LocateResult};
 pub(crate) use scalar::whole_float_as_int;

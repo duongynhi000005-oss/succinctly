@@ -2173,9 +2173,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             }
                             out.write_char('\n')?;
                             // #1485/#1881: rounded up from the field's own
-                            // (compact-adjusted) column, via
-                            // `compact_child_indent`.
-                            let child_indent = compact_child_indent(indent, indent_spaces, unit);
+                            // (compact-adjusted) column.
+                            let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
                             out.write_str(&child_indent)?;
                             value.stream_yaml_value(
                                 out,
@@ -2206,8 +2205,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // it changes no test outcome) and was removed.
                             //
                             // #1485/#1881: same step as the container
-                            // branch above, via `compact_child_indent`.
-                            let child_indent = compact_child_indent(indent, indent_spaces, unit);
+                            // branch above.
+                            let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
                             write_deferred_value(
                                 out,
                                 &value,
@@ -8727,7 +8726,9 @@ fn write_yaml_indent<Out: core::fmt::Write>(
 ///
 /// For an `indent` whose width is already a multiple of `indent_spaces` (every
 /// indent outside a compact block-sequence chain) that is exactly
-/// `indent_spaces` more copies of `unit`. After compact steps the width is
+/// `indent_spaces` more copies of `unit` (`indent_spaces == 0` adds nothing: a
+/// zero-width indent has no multiples to round up to, and the writers never
+/// pass it for block output). After compact steps the width is
 /// `2 * depth`, not a multiple, and the child snaps to the next multiple above
 /// it -- which is why real yq's columns are not monotonic in `-I` there
 /// (`- - b:` / `c:` sits at 6, 6, 8, 5, 6 for `-I=2..6`).
@@ -8758,16 +8759,6 @@ fn compact_yaml_indent(indent: &str) -> String {
         next.push(' ');
     }
     next
-}
-
-/// The indent for content nested one level inside a compact-rendered
-/// mapping field's own value: [`deeper_yaml_indent`] from `compact_indent`
-/// (the field's own compact-adjusted indent). That one rule covers what #1485
-/// special-cased for `-I <= 2` -- a step from the pre-compact base that would
-/// not clear the field's own column -- since rounding up to the next multiple
-/// of `-I` above the field's column always clears it (#1881).
-fn compact_child_indent(compact_indent: &str, indent_spaces: usize, unit: char) -> String {
-    deeper_yaml_indent(compact_indent, indent_spaces, unit)
 }
 
 /// Write a mapping field's key.
@@ -10030,6 +10021,7 @@ fn stream_yaml_single_quoted<Out: core::fmt::Write>(out: &mut Out, s: &str) -> c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yaml::{YamlError, YamlIndex};
 
     /// #1881: the block-child step rounds `indent` up to the next multiple of the indent width.
     #[test]
@@ -10047,6 +10039,7 @@ mod tests {
             (8, 4, 12),
             (5, 3, 6),
             (3, 1, 4),
+            (3, 0, 3),
         ] {
             let indent = " ".repeat(width);
             assert_eq!(
@@ -10059,7 +10052,6 @@ mod tests {
         assert_eq!(deeper_yaml_indent("  ", 1, '\t'), "  \t");
         assert_eq!(deeper_yaml_indent("", 1, '\t'), "\t");
     }
-    use crate::yaml::{YamlError, YamlIndex};
 
     /// #2438: [`yq_float_is_scientific`] is stated arithmetically because it
     /// runs once per document float on the DOM decode path, but the rule it

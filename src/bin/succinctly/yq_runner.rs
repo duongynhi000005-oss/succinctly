@@ -6138,7 +6138,7 @@ fn emit_yaml_value(
 /// value constructed via `reduce`/`foreach`/etc. with no adversarial
 /// document on either side.
 ///
-/// `recursion_base` (#1485): the indent of the *container this value belongs
+/// `owner_indent` (#1485, was `owner_indent`): the indent of the *container this value belongs
 /// to*, which a flow collection with comments closes at (`render_flow`'s
 /// `owner`) -- equal to `indent` everywhere except right after a real-yq
 /// "compact" positioning (the `Array` arm's two compact branches below, which
@@ -6153,7 +6153,7 @@ fn emit_yaml_value_at_depth(
     indent: &str,
     in_flow: bool,
     depth: usize,
-    recursion_base: &str,
+    owner_indent: &str,
 ) -> String {
     assert_value_tree_depth(depth);
     // An alias renders as `*name` and never writes the value it resolves
@@ -6237,7 +6237,7 @@ fn emit_yaml_value_at_depth(
                         FlowItem::new(item, v, elem_comments)
                     })
                     .collect();
-                let rendered = render_flow('[', ']', items, &ci, recursion_base);
+                let rendered = render_flow('[', ']', items, &ci, owner_indent);
                 with_container_tag(value, comments, rendered)
             } else {
                 // Block style sequence
@@ -6275,16 +6275,10 @@ fn emit_yaml_value_at_depth(
                                 // slot, so its value nests exactly as deep as an
                                 // unanchored element's would).
                                 let val_indent = compact_indent;
-                                // #1485 (code review): `recursion_base` is
-                                // *this invocation's own* `recursion_base`,
-                                // forwarded unchanged -- not `indent`, which
-                                // is only correct when this element was
-                                // never itself compact-positioned. A stacked
-                                // compact chain (an array directly inside
-                                // another compact array element) must keep
-                                // propagating the true pre-compact base
-                                // through every level -- see `light.rs`'s
-                                // identical fix for the full rationale.
+                                // `owner_indent` is forwarded unchanged: it only
+                                // says where a flow collection with comments
+                                // closes. The nesting depth of a block child is
+                                // `compact_child_indent`'s rounding (#1881).
                                 let val = emit_yaml_value_at_depth(
                                     v,
                                     elem_comments,
@@ -6292,7 +6286,7 @@ fn emit_yaml_value_at_depth(
                                     &val_indent,
                                     false,
                                     depth + 1,
-                                    recursion_base,
+                                    owner_indent,
                                 );
                                 let val =
                                     append_own_comment_line(val, elem_comments.own(), &val_indent);
@@ -6319,10 +6313,8 @@ fn emit_yaml_value_at_depth(
                                 // effect `stream_yaml_value`'s cursor-based
                                 // sibling gets for free from its per-field/
                                 // per-element loop only indenting 2nd+ items.
-                                // #1485 (code review): `recursion_base` is
-                                // *this invocation's own* `recursion_base`,
-                                // forwarded unchanged -- see the anchor branch
-                                // above for the full rationale.
+                                // `owner_indent` forwarded unchanged -- see the anchor
+                                // branch above.
                                 let inner = emit_yaml_value_at_depth(
                                     v,
                                     elem_comments,
@@ -6330,7 +6322,7 @@ fn emit_yaml_value_at_depth(
                                     &compact_indent,
                                     false,
                                     depth + 1,
-                                    recursion_base,
+                                    owner_indent,
                                 );
                                 // The element's own comment goes on its own
                                 // line rather than glued onto its last
@@ -6423,7 +6415,7 @@ fn emit_yaml_value_at_depth(
                         FlowItem::new(format!("{key}:{anchor} {val}"), v, field_comments)
                     })
                     .collect();
-                let rendered = render_flow('{', '}', entries, &ci, recursion_base);
+                let rendered = render_flow('{', '}', entries, &ci, owner_indent);
                 with_container_tag(value, comments, rendered)
             } else {
                 // Block style mapping
