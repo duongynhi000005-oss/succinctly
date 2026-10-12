@@ -67072,6 +67072,37 @@ fn test_foreach_destructuring_pattern_states_the_entry_register_per_step_4129() 
             "",
             0,
         ),
+        // Steps that differ inside one fold: the register element destructures (a walk step)
+        // and the constant falls to the bare alternative, in either order. Each emission states
+        // its own register, so a write through `$x` lands on the root once per emission.
+        (
+            "[1]",
+            r"path(. as $x | (foreach (., 5) as [$a] ?// $a (0; .; .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"(. as $x | (foreach (5, .) as [$a] ?// $a (0; .; .)) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(. as $x | (foreach (., 5) as [$a] ?// $a (0; .; .)) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(. as $x | (foreach (5, .) as {a:$a} ?// $a (0; .; .)) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
         // Controls, all jq 1.7.1's own refusals: an `UPDATE` or `EXTRACT` that navigates the
         // emitted `0`, a navigating `INIT`, a navigating source, and a stage that reads `.`
         // where the register is not.

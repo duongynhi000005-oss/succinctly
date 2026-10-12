@@ -572,7 +572,7 @@ Each turns a refusal into an answer and needs its own oracle rows:
   stage opaque. The two fold rows are the same idea at the fold's own register: a `reduce` admits a `try` around a tracked UPDATE
   (`fold_update_movement_tracked`), and `foreach` states `Unmoved(entry)` per emission whose UPDATE output was at the entry
   (`FoldRegister::resolve_sink` keeps the statement, `advance` carries `self` on it, `foreach_states_register_per_emission` admits the
-  stage on a trackable entry only: an untracked one reads an absent statement as "the carried copy stands", #3826). Still
+  stage on a trackable entry only: an untracked one reads an absent statement as "the carried copy stands", #3826; since #4129 a destructuring pattern no longer disqualifies the fold, only the steps that walk, which state nothing: the step that took no walk step states `Unmoved(entry)`, read from `walked.is_none()`, so a `each_fold_bind` that handed a bare `$var` a `walked` would flip it). Still
   refused where jq answers, pinned by `test_recurse_seed_residuals_stay_loud_3580`: a pipe nested in a forwarder, a fold inside an
   `[E]`, an `if` with no recursion in it, a `def` call that takes an argument, and a recursion behind a destructuring bind. (A literal
   ahead of the recursion in a comma answers since #3862; `nth(n; ..)`, a bare-variable bind and a `reduce` UPDATE of `recurse(f)`

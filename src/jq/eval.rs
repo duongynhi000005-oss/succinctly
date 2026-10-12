@@ -54229,13 +54229,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
     // inside the loop, so the register an emission carries is the one UPDATE's
     // output left. The statement is per emission; this only says it may be read.
-    // #4129: not the pattern, which is asked per step instead (`step_walked` below): a
-    // destructuring pattern moves the register only on the steps that walk.
+    // #4129: not the pattern, which is asked per step instead (`walked.is_none()` in the
+    // bind callback below): a destructuring pattern moves the register only on the steps
+    // that walk, and a bare `$var` never does ([`each_fold_bind`] hands it no `walked`).
     let update_states_entry_if_unwalked = S::TAG == EvalTag::Jq
         && trackable
         && !register_unmoved
         && foreach_body_cannot_move(input, init, extract);
-    let all_bare = patterns_all_bare(patterns);
     // #4130: on an untracked entry the stage reads the statement of every emission
     // that navigated nothing ([`foreach_states_register_on_untracked_entry`]), so each
     // one states it: the frame's register when the step provably left it there
@@ -54478,7 +54478,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // #4129: this step's emissions state the entry when no walk step
                         // moved the register off it.
                         let update_states_entry =
-                            update_states_entry_if_unwalked && (all_bare || walked.is_none());
+                            update_states_entry_if_unwalked && walked.is_none();
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "foreach")
                         {
