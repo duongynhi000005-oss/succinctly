@@ -533,6 +533,29 @@ fn test_yq_module_directives_are_rejected_2683() -> Result<()> {
     Ok(())
 }
 
+/// #2886: a stray comma in a YAML flow collection is a parse error, as in
+/// yq (go-yaml: `did not find expected node content`); it used to read as an
+/// empty-string key (`{,}`) or a null element (`[1,,2]`).
+#[test]
+fn test_yq_flow_stray_comma_is_a_parse_error_2886() -> Result<()> {
+    for doc in [
+        r#"{"a":{"b":{,}}}"#,
+        "{a: 1,,b: 2}",
+        "[,]",
+        "[1,,2]",
+        "x: [,]",
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", doc, &["-o=json", "-I=0"])?;
+        assert_ne!(code, 0, "{doc:?} -- stdout: {stdout:?}");
+        assert_eq!(stdout, "", "{doc:?}");
+        assert!(!stderr.is_empty(), "{doc:?}");
+    }
+    // A trailing comma is legal in both.
+    let (stdout, code) = run_yq_stdin(".", "{a: [1, 2,],}", &["-o=json", "-I=0"])?;
+    assert_eq!((stdout.as_str(), code), ("{\"a\":[1,2]}\n", 0));
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
@@ -52471,7 +52494,8 @@ fn test_truthiness_probes_validate_nothing_2692() -> Result<()> {
         ("#1194 shape is a valid YAML mapping", "{123: 1}"),
         ("JSON structural error is a valid plain scalar", "[xyz123]"),
         ("JSON trailing comma is valid YAML flow", "[1,]"),
-        ("JSON lone comma is valid YAML flow", "[,]"),
+        // `[,]` is not here: it is not valid YAML flow (#2886), and yq
+        // rejects it before any filter runs, `1+1` included.
         ("duplicate keys (valid)", "a: 1\na: 2\n"),
         ("flow trailing comma", "a: [1,]\n"),
         ("flow mapping trailing comma", "a: {b: 1,}\n"),
@@ -55042,12 +55066,12 @@ fn genuine_yaml_flow_mappings_keep_their_own_grammar_2777() -> Result<()> {
     let (stdout, code) = run_yq_stdin(".", "{a 1}", &["-o=json", "-I=0"])?;
     assert_eq!((stdout.trim(), code), (r#"{"a 1":null}"#, 0));
 
-    // `{,}` in genuine YAML reads as a `""` key bound to an implicit `null`
-    // (the pre-#2777 -- and pre-#2279 -- YAML flow-mapping rule, unrelated
-    // to #2777's own json_strict-gated leniency, which instead drops the
-    // whole entry and gives a clean `{}`).
+    // `{,}` in genuine YAML is a parse error (#2886: `,` cannot start a flow
+    // node, so go-yaml says `did not find expected node content`) -- not the
+    // `{"": null}` it used to read as, and unlike #2777's own json_strict-gated
+    // leniency, which instead drops the whole entry and gives a clean `{}`.
     let (stdout, code) = run_yq_stdin(".", "{,}", &["-o=json", "-I=0"])?;
-    assert_eq!((stdout.trim(), code), (r#"{"":null}"#, 0));
+    assert_eq!((stdout.trim(), code), ("", 1));
     Ok(())
 }
 
