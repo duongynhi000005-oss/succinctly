@@ -61,7 +61,6 @@ All features from the [jq Language Reference](jq-language.md) work with yq, incl
 - Variable binding (`as $var`)
 - Assignment operators (`=`, `|=`, `+=`, etc.)
 - Format strings (`@json`, `@csv`, `@base64`, etc.)
-- Module system (`import`, `include`)
 
 ### Object construction follows yq's grammar, not jq's (#2783)
 
