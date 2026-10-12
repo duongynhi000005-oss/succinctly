@@ -40373,6 +40373,80 @@ fn resolve_collect_live<'a, S: EvalSemantics>(
     forward_drained_result(flow, OwnedValue::Array(items.into()), register, sink)
 }
 
+/// Whether `indices`/`index`/`rindex` on this input are the path step `.[$i]` jq defines them as
+/// (#3890): an array, an object or `null`, in jq mode. A string input keeps the leaf route for
+/// `indices` (nothing is navigated when it is searched for a string), and `index`/`rindex` on one
+/// step the access of the answer.
+fn pattern_search_steps<S: EvalSemantics>(search: PatternSearch, value: &OwnedValue) -> bool {
+    S::TAG == EvalTag::Jq
+        && match value {
+            OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::Null => true,
+            // `index` and `rindex` take `.[0]` / `.[-1:][0]` of what `indices` answered, which is
+            // never the register: a string searched for a string answers its positions by
+            // value, and the access raises on them (`near attempt to access element 0 of [1]`).
+            OwnedValue::String(_) => !matches!(search, PatternSearch::Indices),
+            _ => false,
+        }
+}
+
+/// [`resolve_node_sink`]'s arm for `indices`/`index`/`rindex` on an input
+/// [`pattern_search_steps`] admits (#3890): resolve the lookup jq defines them as, so the
+/// register moves by its component. An array wraps a non-array pattern into the
+/// one-element array the lookup is keyed by; `index` and `rindex` then step `.[0]` and
+/// `.[-1:][0]` of the answer.
+#[allow(clippy::too_many_arguments)]
+fn resolve_pattern_search_step<'a, S: EvalSemantics>(
+    search: PatternSearch,
+    pattern: &Expr,
+    value: &'a OwnedValue,
+    trackable: bool,
+    snapshot: &Snapshot,
+    frame: &Frame,
+    keep: Keep,
+    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
+) -> ResolveFlow {
+    if matches!(value, OwnedValue::String(_)) {
+        // The positions come from the leaf (by value), then the access of them is path-checked.
+        let positions = Expr::Builtin(Builtin::Indices(Box::new(pattern.clone())));
+        let steps = match search {
+            PatternSearch::Rindex => {
+                vec![positions, Expr::slice(Some(-1), None), Expr::index(0)]
+            }
+            _ => vec![positions, Expr::index(0)],
+        };
+        let steps = Expr::Pipe(steps.into());
+        return resolve_node_sink::<S>(&steps, value, trackable, snapshot, frame, keep, sink);
+    }
+    let key = if matches!(value, OwnedValue::Array(_)) {
+        Expr::Pipe(
+            vec![
+                pattern.clone(),
+                Expr::if_then_else(
+                    Expr::Compare {
+                        op: CompareOp::Eq,
+                        left: Box::new(Expr::Builtin(Builtin::Type)),
+                        right: Box::new(Expr::Literal(Literal::String("array".into()))),
+                    },
+                    Expr::Identity,
+                    Expr::array(Expr::Identity),
+                ),
+            ]
+            .into(),
+        )
+    } else {
+        pattern.clone()
+    };
+    let lookup = Expr::index_by(Expr::Identity, key);
+    let steps = match search {
+        PatternSearch::Indices => lookup,
+        PatternSearch::Index => Expr::Pipe(vec![lookup, Expr::index(0)].into()),
+        PatternSearch::Rindex => {
+            Expr::Pipe(vec![lookup, Expr::slice(Some(-1), None), Expr::index(0)].into())
+        }
+    };
+    resolve_node_sink::<S>(&steps, value, trackable, snapshot, frame, keep, sink)
+}
+
 /// Emits each branch to `sink` as it is produced (#1952), so a bounded
 /// consumer answers [`Demand::Stop`] and the generator underneath is
 /// never asked for the branch after it — the path-mode twin of
@@ -40446,6 +40520,57 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 -1
             });
             resolve_node_sink::<S>(&component, value, trackable, snapshot, frame, keep, sink)
+        }
+        // #3890: jq defines `indices($i)` as `.[$i]` on an array (the pattern wrapped into a
+        // one-element array unless it already is one) and on an object or `null`, `index` as
+        // that then `.[0]`, `rindex` as that then `.[-1:][0]`. The lookup is a path step like
+        // any other, so on a tracked input it moves the register by that component
+        // (`path(.a | indices(1))` is `["a",[1]]`, `path(.a | index(1))` is `["a",[1],0]`), and
+        // on an untracked one it raises where the `Index` arm raises. Re-dispatching as the
+        // lookup reuses every `IndexExpr` rule, as the bare `first` arm above does for `.[0]`.
+        // A string input (searched by `_strindices`, or indexed by a non-string) keeps the leaf
+        // route. jq mode only: yq's `index` is not this definition.
+        Expr::Builtin(Builtin::Indices(pattern))
+            if pattern_search_steps::<S>(PatternSearch::Indices, value) =>
+        {
+            resolve_pattern_search_step::<S>(
+                PatternSearch::Indices,
+                pattern,
+                value,
+                trackable,
+                snapshot,
+                frame,
+                keep,
+                sink,
+            )
+        }
+        Expr::Builtin(Builtin::Index(pattern))
+            if pattern_search_steps::<S>(PatternSearch::Index, value) =>
+        {
+            resolve_pattern_search_step::<S>(
+                PatternSearch::Index,
+                pattern,
+                value,
+                trackable,
+                snapshot,
+                frame,
+                keep,
+                sink,
+            )
+        }
+        Expr::Builtin(Builtin::Rindex(pattern))
+            if pattern_search_steps::<S>(PatternSearch::Rindex, value) =>
+        {
+            resolve_pattern_search_step::<S>(
+                PatternSearch::Rindex,
+                pattern,
+                value,
+                trackable,
+                snapshot,
+                frame,
+                keep,
+                sink,
+            )
         }
         // #3865: jq defines `map(f)` as `[.[] | f]`, so in a path `f` runs on each
         // element with the register on it and path-checks whatever it navigates.
