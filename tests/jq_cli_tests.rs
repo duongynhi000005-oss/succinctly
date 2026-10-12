@@ -67863,7 +67863,7 @@ fn test_try_handler_over_destructuring_bind_or_fold_states_the_entry_register_41
             "",
             0,
         ),
-        // Controls that answer: a body that navigates, a fold whose UPDATE navigates.
+        // Control that answers: a body that navigates.
         (
             r#"[{"a":1}]"#,
             r"path(. as $x | {a:1} | (try (. as [$a] | .a) catch 7) | $x)",
@@ -67871,9 +67871,71 @@ fn test_try_handler_over_destructuring_bind_or_fold_states_the_entry_register_41
             "",
             0,
         ),
+        // A handler that raises, that yields nothing, or that yields twice; a fold that raises before it
+        // emits (the handler's outputs are the only results).
         (
             r#"[{"a":1}]"#,
-            r"path(. as $x | {a:{b:1}} | (try (foreach . as [$a] (0; .a?; .)) catch 7) | $x)",
+            r#"path(. as $x | {a:{b:1}} | (try (reduce . as [$a] (0; .)) catch error("x")) | $x)"#,
+            "",
+            r"x",
+            5,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (reduce . as [$a] (0; .)) catch empty) | $x)",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (try (foreach . as [$a] (0; .; .)) catch (7, 8)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[{"a":1}]"#,
+            r#"path(. as $x | {a:{b:1}} | (try (foreach (.,.) as {a:$a} ?// $a (0; error("z"); .)) catch 7) | $x)"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        // A `foreach` whose emissions are the stage's results, not the handler's: a navigating UPDATE or
+        // EXTRACT moved the register the emission carries, so `$x` is a path below the root or a
+        // refusal, exactly as it is with no `try` around the fold.
+        (
+            r"null",
+            r#"path(. as $x | .a? | (try (foreach . as {a:$a} ({"a":5}; .; .)) catch 7) | $x)"#,
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | .a? | (try (foreach . as {a:$a} (.; .; .a?)) catch 7) | $x)",
+            "[\"a\",\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"path(. as $x | .a? | (try (foreach . as {a:$a} ({"a":5}; .; .)) catch 7) | $x)"#,
+            "",
+            r#"Invalid path expression with result {"a":5}"#,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"path(. as $x | . | (try (foreach . as {a:$a} ({"a":5}; .; .)) catch 7) | $x)"#,
+            "",
+            r#"Invalid path expression with result {"a":5}"#,
+            5,
+        ),
+        // A producer in a computed pattern key is a subexpression and states nothing into the sink.
+        (
+            r"null",
+            r#"path(. as $x | {a:1} | (try (. as {(try "a" catch 1): $v} | $v) catch 7) | $x)"#,
             "[]\n",
             "",
             0,
