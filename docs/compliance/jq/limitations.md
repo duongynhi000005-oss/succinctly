@@ -690,10 +690,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `test_foreach_destructuring_pattern_states_the_entry_register_per_step_4129`. Over the 212
   `foreach` operands, `--stage-only` (185,211 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   REFUSE_WRONG went 4,464 to 4,424 and MATCH 180,267 to 180,307, with no regression and
-  ACCEPT_WRONG (303) and DIFF (177) unchanged. **A recorded
-  divergence, in the safe direction**: a `reduce` whose `UPDATE` jq answers by navigating the
-  accumulator (`path(.a | 5 | reduce null as {a:$q} (null; .b))`, jq `["a"]`) still refuses at the
-  result. The first
+  ACCEPT_WRONG (303) and DIFF (177) unchanged. Since
+  [#4131](https://github.com/rust-works/succinctly/issues/4131) a `reduce` whose `UPDATE` navigates
+  the accumulator is followed on that untracked entry when the register the stage carries is `null` or
+  a boolean (identical to an equal one by kind): `path(.a | 5 | reduce null as {a:$q} (null; .b))` on
+  `{"a":null}` is jq's `["a"]` (it refused at `.b`), a boolean accumulator raises jq's own `Cannot index
+  boolean with string "b"`, and `del`/`=` land on `.a`. Pinned by
+  `test_reduce_update_navigates_accumulator_on_untracked_null_register_4131`. **A recorded
+  divergence, in the safe direction**: a register that is
+  not `null`/boolean (a pointer identity the model cannot compare), a fold that mentions a frozen
+  `$var` (#3984), and an `UPDATE` that nests a `reduce`/`foreach` or a `try ... catch` around the
+  navigation (`reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b))`) still refuse where jq answers
+  (the nested fold's INIT is not read as the register). The first
   alternative's refusal on the untracked contexts where no register is carried (`var-rebind`,
   `untracked-*`) is unchanged. Over a seeded sample of 30,027 rows of the 20 `?//` fold operands
   (`--sample 30000 --seed 11`, `/usr/bin/jq` 1.7.1) #3999 moved REFUSE_WRONG 1,883 to 1,793 and
