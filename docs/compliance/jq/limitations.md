@@ -2068,8 +2068,8 @@ is the revert that established what the other one costs.
    accepted where jq raises, identical on `main` ([#4320](https://github.com/rust-works/succinctly/issues/4320)): a `(.|.) as {...}` source (`del(foreach ((.|.) as {a:$a} | .) as
    $y (.; .; .))` deleted the document; closed by #4320's third part, below), and a destructure of a later bare alternative of a
    `?//` chain (`. as $x ?// $y | $y as {a:$a} | .`: `$y` is bound only when the body raises and jq retries;
-   routing it made a `try` around a `reduce` UPDATE swallow the resolver's refusal, 26 new wrong accepts, so it is
-   left as it was). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit
+   routing it made a `try` around a `reduce` UPDATE swallow the resolver's refusal, 26 new wrong accepts, so it was
+   left as it was; closed at the top level by #4320's fourth part, below, and still accepted inside another fold's body). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit
    5) with a different message, on `main` too.
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
@@ -2163,6 +2163,19 @@ is the revert that established what the other one costs.
    `foreach` still answers the root where jq answers the walked register; and inside an outer `path()`
    (`try path(path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))) catch .` on `null`) the refusal's text names
    `["a"]` where jq's names `[]` (both raise).
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
+   alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
+   top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node
+   it is not at and raises, and the retry binds `$y` to the register: jq raises on every document but `null`, where the
+   first alternative's walk succeeds and the register moves onto `.a`. `RegisterSpine::chain_names` read the later name as
+   never the register, so the by-value drive answered the root and `del` deleted the document (exit 0). It now reads it as
+   the register when the fold is not inside another fold's body (`fold_body::depth() == 0`): a first version that did so
+   everywhere let a `try` around a `reduce` UPDATE swallow the resolver's refusal, the 26 wrong accepts #4278 saw. Over
+   the 21 source-chain operands (`--stage-only`, 17,907 rows) ACCEPT_WRONG 161 to 28 and DIFF 22 to 0, 142 more matches,
+   no new wrong accept; 16 matches are lost to a refusal (`.a? as $y | try (FOREACH) | try ($y | .b)` and a `try`/`?`
+   around it), in the safe direction. The 28 wrong accepts left are inside a `reduce`/`foreach` body, identical on
+   `main`. The refusals' wording differs from jq's (`Invalid path expression near attempt to access element "a"` where
+   jq says `Cannot index boolean`). Pinned by `test_foreach_source_later_bare_alternative_destructure_4320`.
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

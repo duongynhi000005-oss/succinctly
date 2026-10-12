@@ -49367,15 +49367,23 @@ impl<'e> RegisterSpine<'e> {
     /// The names a bind of `expr` to `patterns` binds, each with whether it may hold the
     /// register. A destructuring alternative's names hold members. The first bare `$var`
     /// alternative holds `expr` when it matches, the register if [`binds_register`] says so;
-    /// a later one only on a retry after the body raised (#4278), and is read as not the
-    /// register. A name more than one alternative binds is one variable whose value depends
+    /// a later one only on a retry after the body raised (#4278). It is read as the register
+    /// too at the top level (#4320): the earlier alternative's body then runs with it `null`,
+    /// so a destructure of it raises off the register and the retry destructures the register
+    /// itself; inside another fold's body it is still read as not. A name more than one alternative binds is one variable whose value depends
     /// on which matched, so it may hold the register if any binding of it may (`. as $a ?//
     /// {a:$a} | $a as {a:$b}`).
     ///
     /// [`binds_register`]: Self::binds_register
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
-        let mut register = self.binds_register(expr);
+        let register = self.binds_register(expr);
+        // #4320: a later bare alternative binds the register only after the body raised on
+        // the earlier one. At the top level the walk is then the register's (`. as $x ?//
+        // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
+        // body `.` is the accumulator, which the enclosing source may have moved.
+        let later_holds_register = register && fold_body::depth() == 0;
         let mut names: Vec<(&'e str, bool)> = Vec::new();
+        let mut first_bare = true;
         let mut bind =
             |name: &'e str, held: bool| match names.iter_mut().find(|(bound, _)| *bound == name) {
                 Some((_, any)) => *any |= held,
@@ -49384,8 +49392,8 @@ impl<'e> RegisterSpine<'e> {
         for pattern in patterns {
             match pattern {
                 Pattern::Var(name) => {
-                    bind(name, register);
-                    register = false;
+                    bind(name, register && (first_bare || later_holds_register));
+                    first_bare = false;
                 }
                 _ => visit_pattern_names(pattern, &mut |name| bind(name, false)),
             }
