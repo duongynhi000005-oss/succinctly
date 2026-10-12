@@ -1247,6 +1247,71 @@ fn test_flow_pair_value_on_the_next_line_4106() -> Result<()> {
     Ok(())
 }
 
+/// #2018: yq's `fromjson` runs its argument through go-yaml's quoted-scalar scanner, which rejects any
+/// `\u` escape that encodes a surrogate -- a lone high, a lone low and a valid pair alike -- naming where
+/// the quoted scalar starts and where the escape's first hex digit is. The JSON text reaches `fromjson`
+/// as data (a YAML block scalar with an explicit indent, so leading blanks survive), since a lone
+/// surrogate cannot be written in the filter itself. Messages
+/// captured from yq v4.53.3.
+#[test]
+fn test_fromjson_rejects_every_surrogate_escape_like_go_yaml_2018() -> Result<()> {
+    for (json, at) in [
+        (r#""x\ud83d\ude00y""#, "line 1: line 1, column 5"),
+        (r#""x\ud83d""#, "line 1: line 1, column 5"),
+        (r#""x\ude00""#, "line 1: line 1, column 5"),
+        (r#""\ud83d""#, "line 1: line 1, column 4"),
+        (r#""\ud83d\u0041""#, "line 1: line 1, column 4"),
+        (r#"["\ud83d\ude00"]"#, "line 1, column 2: line 1, column 5"),
+        (r#"  "x\ud83d""#, "line 1, column 3: line 1, column 7"),
+        (r#"{"k":"\ud83d"}"#, "line 1, column 6: line 1, column 9"),
+        (r#"{"\ud800": 1}"#, "line 1, column 2: line 1, column 5"),
+        // go-yaml counts characters, not bytes.
+        (r#"["é\ud83d"]"#, "line 1, column 2: line 1, column 6"),
+        (
+            r#"[ "😀", "\ud83d"]"#,
+            "line 1, column 8: line 1, column 11",
+        ),
+        // A `\n` starts a new line for both positions.
+        (
+            "{\n \"k\": \"\\ud83d\"\n}",
+            "line 2, column 7: line 2, column 10",
+        ),
+        (
+            "[\n  1,\n    \"ab\\ud83d\"]",
+            "line 3, column 5: line 3, column 10",
+        ),
+        ("\"a\nb\\ud83d\"", "line 1: line 2, column 4"),
+    ] {
+        let doc = format!(
+            "|2-\n{}\n",
+            json.lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr("fromjson", &doc, &["-o=json", "-I=0"])?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{json:?}: {stderr:?}");
+        assert!(
+            stderr.contains(&format!(
+                "yaml: while scanning a quoted scalar at {at}: found invalid Unicode character escape code"
+            )),
+            "{json:?}: {stderr:?}"
+        );
+    }
+    // Escapes outside the surrogate range still decode.
+    let (stdout, code) = run_yq_stdin(
+        "fromjson",
+        "'\"\\u00e9\\ud7ff\\ue000\\uffff\"'\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("\"é\u{d7ff}\u{e000}\u{ffff}\"\n", 0)
+    );
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]
@@ -38091,13 +38156,16 @@ fn test_yq_fromjson_low_surrogate_still_rejected_2008() -> Result<()> {
         run_yq_stdin_with_stderr(r#""\"x\\udc00y\"" | fromjson"#, "", &["-n"])?;
     assert_ne!(code, 0, "stderr: {stderr}");
 
-    // A valid surrogate pair is an unaffected control -- still decodes to
-    // the emoji in yq mode too (real yq itself actually rejects even valid
-    // pairs, a separate, pre-existing, much larger divergence tracked
-    // separately; this control only pins that #2008 didn't newly break it).
-    let (out, code) = run_yq_stdin(r#""\"\\ud83d\\ude00\"" | fromjson"#, "", &["-n"])?;
-    assert_eq!(code, 0);
-    assert_eq!(out.trim(), "😀");
+    // A valid surrogate pair used to be the unaffected control here; real yq rejects it
+    // too, and #2018 made `succinctly yq` do the same (see
+    // `test_fromjson_rejects_every_surrogate_escape_like_go_yaml_2018` for the wording).
+    let (out, stderr, code) =
+        run_yq_stdin_with_stderr(r#""\"\\ud83d\\ude00\"" | fromjson"#, "", &["-n"])?;
+    assert_eq!((out.as_str(), code), ("", 1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("found invalid Unicode character escape code"),
+        "stderr: {stderr}"
+    );
 
     Ok(())
 }
