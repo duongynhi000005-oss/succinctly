@@ -8281,6 +8281,20 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
         Some(self.key_string_kind())
     }
 
+    /// The branches of [`YamlValue::key_string_kind`] that spell `""` for want
+    /// of a scalar form, as opposed to a `String` (or an alias to one), whose
+    /// failure to decode is a different answer.
+    fn key_is_complex(&self) -> bool {
+        match self {
+            YamlValue::String(_) => false,
+            YamlValue::Alias {
+                target: Some(target),
+                ..
+            } => !matches!(target.value(), YamlValue::String(_)),
+            _ => true,
+        }
+    }
+
     fn as_object(&self) -> Option<Self::Fields> {
         match self {
             YamlValue::Mapping(fields) => Some(fields.clone()),

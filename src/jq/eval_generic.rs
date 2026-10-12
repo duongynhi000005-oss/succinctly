@@ -41104,6 +41104,51 @@ mod tests {
         );
     }
 
+    /// #1740: a complex YAML key stringifies to `""` (#222), so two different
+    /// ones looked like a repeated key and `JqSemantics`' duplicate-key collapse
+    /// merged them into one entry -- the same silent loss #1385 forbids for a key
+    /// that will not decode. They are not duplicates of each other, so both stay.
+    /// A genuine repeated key right beside them still collapses.
+    #[test]
+    fn test_yaml_generic_to_entries_never_collapses_complex_keys_under_jq_semantics_1740() {
+        use crate::yaml::YamlIndex;
+
+        for (yaml, expected) in [
+            (&b"? {}\n: 1\n? []\n: 2\n"[..], vec![1, 2]),
+            (&b"? {a: 1}\n: 1\n? {b: 2}\n: 2\n"[..], vec![1, 2]),
+            (&b"? [1]\n: 1\n? [2]\n: 2\n? {}\n: 3\n"[..], vec![1, 2, 3]),
+            // A genuine repeat is still a repeat; the complex key is untouched.
+            (&b"a: 1\n? {}\n: 2\na: 3\n"[..], vec![3, 2]),
+        ] {
+            let index = YamlIndex::build(yaml).unwrap();
+            let cursor = index.root(yaml);
+            let mapping_cursor = cursor
+                .first_child()
+                .expect("YAML document should have content");
+            let value = mapping_cursor.value();
+
+            let result = eval_using::<JqSemantics, _>(&Expr::Builtin(Builtin::ToEntries), value);
+            let owned = result.into_owned::<JqSemantics>().unwrap().unwrap();
+            let OwnedValue::Array(entries) = owned else {
+                panic!("to_entries yields an array");
+            };
+            let mut values: Vec<i64> = entries
+                .iter()
+                .map(|e| match e {
+                    OwnedValue::Object(o) => match o.get("value") {
+                        Some(OwnedValue::Int(v)) => *v,
+                        other => panic!("value {other:?}"),
+                    },
+                    other => panic!("entry {other:?}"),
+                })
+                .collect();
+            values.sort_unstable();
+            let mut expected = expected;
+            expected.sort_unstable();
+            assert_eq!(values, expected, "{:?}", String::from_utf8_lossy(yaml));
+        }
+    }
+
     /// #1168: `Expr::Array` had no native `eval_single` arm, so wrapping a
     /// cursor-native, duplicate-key-preserving builtin (`to_entries`, #443
     /// above) in `[...]` fell to the wildcard fallback, which materializes
