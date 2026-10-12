@@ -774,6 +774,35 @@ fn test_compact_chain_indent_rounding_other_shapes_1881() -> Result<()> {
     Ok(())
 }
 
+/// #2514: a numeric index *written* on a mapping addresses the key spelled from the
+/// number in real yq (`.a[0] = 1` adds `"0": 1`; `-1` and `1.5` likewise), through every
+/// write form; `succinctly jq` keeps jq's `Cannot index object with number`. #2459 is the
+/// read side. Expected text is yq v4.53.3's.
+#[test]
+fn test_numeric_index_write_on_a_mapping_creates_a_key_in_yq_mode_2514() -> Result<()> {
+    let doc = "a: {p: 1}\np: 7\n";
+    let cases: &[(&str, &str)] = &[
+        (".a[0] = 1", "{\"a\":{\"p\":1,\"0\":1},\"p\":7}\n"),
+        (".a[-1] = 1", "{\"a\":{\"p\":1,\"-1\":1},\"p\":7}\n"),
+        (".a[0] |= 5", "{\"a\":{\"p\":1,\"0\":5},\"p\":7}\n"),
+        (".a[0] += 1", "{\"a\":{\"p\":1,\"0\":1},\"p\":7}\n"),
+        ("del(.a[0])", "{\"a\":{\"p\":1},\"p\":7}\n"),
+        ("del(.a[-1])", "{\"a\":{\"p\":1},\"p\":7}\n"),
+        (".a[0].b = 1", "{\"a\":{\"p\":1,\"0\":{\"b\":1}},\"p\":7}\n"),
+        (".a[0][1] = 2", "{\"a\":{\"p\":1,\"0\":[null,2]},\"p\":7}\n"),
+        (".a[1.5] = 1", "{\"a\":{\"p\":1,\"1.5\":1},\"p\":7}\n"),
+        (".a[0,1] = 1", "{\"a\":{\"p\":1,\"0\":1,\"1\":1},\"p\":7}\n"),
+        (".a[0] = 1 | .a[\"0\"]", "1\n"),
+        (".z[0] = 1", "{\"a\":{\"p\":1},\"p\":7,\"z\":[1]}\n"),
+    ];
+    for &(filter, expected) in cases {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "`{filter}`: {stderr}");
+        assert_eq!(stdout, expected, "`{filter}`");
+    }
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
