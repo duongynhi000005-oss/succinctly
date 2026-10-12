@@ -77637,6 +77637,166 @@ fn test_foreach_source_destructuring_chain_on_the_register_refuses_4187() -> Res
     ])
 }
 
+/// #4417: a `?//` chain with a bare `$var` alternative as a `foreach` source, on a register that is
+/// `null`. The first alternative's walk cannot fail there (`null | .a` and `null | .[0]` are
+/// `null`), so jq runs it, its `INDEX` steps move the register onto the matched member, and the
+/// emitted state, a `null`, is `jv_identical` to it: `path(foreach (. as {a:$a} ?// $a | .) as $k
+/// (.; .; .))` is `["a"]`. The by-value drive never moves the register and answered the root, so
+/// `=`/`|=` wrote at `[]` (`9` where jq writes `{"a":9}`). Such a source is now placed by the
+/// resolver. A register that is not `null` is untouched: the chain is left to the by-value drive
+/// there, which raises where jq does. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_bare_alternative_chain_on_a_null_register_4417() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as {a:$a} ?// $z | $z) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as [$a] ?// $a | .) as $k (.; .; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as [$a] ?// {a:$a} ?// $b | .) as $k (.; .; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as {a:{b:$a}} ?// $a | .) as $k (.; .; .))",
+            "[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        // Both emissions of a comma body name the walked register.
+        (
+            "null",
+            r"path(foreach (. as {a:$a} ?// $a | ., .) as $k (.; .; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        // The write side lands on the member, not the root.
+        (
+            "null",
+            r"(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (. as {a:$a} ?// $a | 5) as $k (.; .; .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (. as [$a] ?// {a:$a} ?// $b | $b) as $k (.; .; .)) |= 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        // A navigating register `null` further down, and an INIT that is a `null` literal.
+        (
+            "[null]",
+            r"path(.[0] | foreach (. as [$a] ?// $a | .) as $k (.; .; .))",
+            "[0,0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as {a:$a} ?// $a | .) as $k (null; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // Inside another fold's UPDATE or EXTRACT, and with the bare alternative first.
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; .; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce 1 as $i (.; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as $a ?// {a:$a} | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls. A register that is not `null` keeps the root path, and a body that raises
+        // raises.
+        (
+            "{\"a\":[1]}",
+            r"path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":null}",
+            r"path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[null]",
+            r"path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(foreach (. as {a:$a} ?// $a | error("x")) as $k (.; .; .))"#,
+            "",
+            "x",
+            5,
+        ),
+        (
+            "null",
+            r"path(. as $x | 1 | foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
+}
+
 /// #4278: the fold-source carriers #4187 left. A destructure of the register behind a mixed `?//`
 /// chain, a plain bind that is a later pipe stage, an `if` branch, a no-argument `def` call, or a
 /// `$x` bound to the register moves jq's register onto `.a`, so the emitted `.` is no longer there
