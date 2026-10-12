@@ -3812,7 +3812,7 @@ fixed on its own terms (#2375); the second is still open:
   null, null, []]`). Tracked as
   [#2376](https://github.com/rust-works/succinctly/issues/2376).
 
-### A computed comma-bound slice's own prefix is never streamed in yq mode
+### A computed slice bound must produce exactly one number in yq mode (#2056, #4197)
 
 `.[(K1,K2,...):E]`/`.[S:(K1,K2,...)]` — a slice bound written as a parenthesized comma
 generator, computed rather than a single literal or expression — streams each
@@ -3821,19 +3821,24 @@ failure in jq mode (jq's own `S as $s | T as $t | E | .[$s:$t]` desugaring), con
 against jq 1.7.1: `path(.[(0,1,"x"):(2,3)])` on `[10,20,30]` prints all four
 `{start,end}` combinations of the two valid `start` values before raising on `"x"`.
 
-yq mode conservatively discards this prefix at every one of the three sites that
-resolve a computed bound (`each_slice_bound`, `each_slice_bound_generic`,
-`resolve_slice_bound` — the bridge-route read, CLI-route read, and
-`=`/`|=`/`del()`/`path()` write-path resolvers respectively, #2372/#2385) instead of
-streaming it — real yq has no clean model for a computed comma-bound at all, confirmed
-live against yq v4.53.3: `.[(0,"x"):3]` on `[10,20,30]` rejects the bound outright
-("expected to find 1 number, got 2 instead"), not the type-error message succinctly's
-own comma-bound generator model produces. Since real yq's own behavior for this input
-shape is "reject the query before evaluation," not "stream then error," there is no
-oracle output to match by streaming a prefix here — the conservative discard is the
-closer approximation of "no usable output" a real yq user would see, even though the
-specific error message differs (succinctly raises succinctly's own generator-model
-error; real yq raises its own parse-time rejection).
+yq mode has no prefix to stream: real yq wants exactly one number from each bound and rejects
+anything else before it slices, confirmed live against yq v4.53.3: `.[(0,"x"):3]` on
+`[10,20,30]` is `Error: expected to find 1 number, got 2 instead`, on every target kind
+(`null` and scalars included), for a read, `=`, `|=` and `del()` alike, with `?` not
+suppressing it, and the count is checked before any value is parsed (`.[(0,1,"x"):3]` is
+`got 3`, not a type error). `succinctly yq` raises the same text ([#2056](https://github.com/rust-works/succinctly/issues/2056)),
+at the three sites that resolve a computed bound (`each_slice_bound`, `each_slice_bound_generic`,
+`drive_slice_bound` — the bridge-route read, CLI-route read, and `=`/`|=`/`del()` write-path
+resolvers, #2372/#2385) and in the lazily-pulled path-context walks (`key`, `parent`).
+It is yq's slice operator that checks the count, once per node its left side produced, so the
+verdict is raised only once the target produced a node: an error the target raises comes first
+(`([1,2],[3,4],error("x"))[(0,1):(1,2)]` is `Error: x`), a target with no node never checks
+(`5 | .a[(0,1):2]` prints nothing), and a bound generator's own `error(...)` outranks the count
+(`.[(0,1,error("y")):3]` is `Error: y`). jq mode keeps its generator model and streams each
+bound's slice. One residual: `del()` through a key that is absent from the document still
+raises the count error where yq finds no node and leaves the document alone
+(`{"b":1} | del(.a[(0,1):2])`), because the write-path resolver reports an absent key as a
+`null` branch it cannot tell from a present one (#4197's empty-bound rule has the same edge).
 
 The same three sites keep their *eager* shape in yq mode after
 [#2546](https://github.com/rust-works/succinctly/issues/2546) made jq mode's bound pull
@@ -3862,8 +3867,8 @@ A bound with **no** output is not part of that divergence: yq raises `expected t
 got 0 instead` for it wherever the slice is read or written (`.b[select(false):]`, `.b[$typo:]`,
 `.b[1:select(false)] = [9]`, `del(.b[select(false):])`), on every target kind, and neither `?` nor
 `//` suppresses it, so `succinctly yq` raises the same text (#4197, confirmed live against yq
-v4.53.3). Only the zero count is raised; a bound with two or more values keeps the generator
-model described above. jq mode keeps its own rule (an empty bound is "no slice").
+v4.53.3). A bound with two or more values raises the same error with its count (#2056, above).
+jq mode keeps its own rule (an empty bound is "no slice").
 
 ### An integer-shaped overflow float gains a trailing `.0` on the value route (#2419)
 

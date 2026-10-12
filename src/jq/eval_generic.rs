@@ -22566,8 +22566,10 @@ fn slice_pair_generic<S: EvalSemantics, V: DocumentValue>(
 /// `Error: x`, not `y`), and a failed classification is raised before any
 /// value reaches the slice step -- outranked only by the generator's own
 /// escape (`.[(0,"x",error("y")):3]` is `Error: y`). A `ComputedSliceBound`
-/// therefore only ever reaches `sink` as `Ok` in yq mode. A bound that produces no
-/// value at all is an error there, not an empty pairing (#4197).
+/// therefore reaches `sink` as `Ok` in yq mode, except for one `Err` -- yq's count error for a
+/// bound that produced no value (#4197) or several (#2056), which the pair loop raises only
+/// once the target produced a node (`yq_slice_bound_count_verdict_generic`). The count is
+/// checked before any value is classified, as yq's `getSliceNumber` does.
 fn each_slice_bound_generic<S: EvalSemantics, V: DocumentValue>(
     bound: &Option<Box<Expr>>,
     value: V,
@@ -45016,8 +45018,9 @@ mod tests {
         let expr = crate::jq::parse(r#".a[(1,"x"):2]"#).unwrap();
         let result = eval_with_cursor_using::<YqSemantics, _>(&expr, index.root(json));
         match result {
+            // #2056: the count error, ahead of any conversion (yq v4.53.3).
             GenericResult::Error(e) => {
-                assert!(e.message.contains("integer"), "{}", e.message);
+                assert_eq!(e.message, "expected to find 1 number, got 2 instead");
             }
             other => panic!("expected Error, got {other:?}"),
         }

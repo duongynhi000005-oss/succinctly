@@ -28880,8 +28880,9 @@ fn slice_pair<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// the reasons `each_slice_bound_generic`'s own doc comment gives (real yq
 /// evaluates a bound in full before slicing; #2351's prefix discard;
 /// #2372's raise-before-any-slice classification): a `ComputedSliceBound`
-/// only ever reaches `sink` as `Ok` there. A bound that produces no value at all is an
-/// error there, not an empty pairing (#4197).
+/// reaches `sink` as `Ok` there, except for one `Err` -- yq's count error for a bound that
+/// produced no value (#4197) or several (#2056), which the pair loop raises only once the
+/// target produced a node (`yq_slice_bound_count_verdict`).
 fn each_slice_bound<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     bound: &Option<Box<Expr>>,
     value: StandardJson<'_, W>,
@@ -29143,7 +29144,8 @@ impl SliceTargetKind<'_> {
 ///
 /// yq mode ignores `kind`: a failed classification was already raised at
 /// the pull site (see [`ComputedSliceBound`]), so both bounds are `Ok` here
-/// and today's eager, target-blind shape is preserved unchanged.
+/// and today's eager, target-blind shape is preserved unchanged. The one `Err` a yq bound can
+/// carry, the count error (#2056), is raised by the pair loop before it gets here.
 pub(crate) fn resolve_computed_slice_bounds<S: EvalSemantics>(
     kind: SliceTargetKind<'_>,
     start: &ComputedSliceBound,
@@ -58606,10 +58608,11 @@ impl PathSliceBound {
 ///
 /// yq mode raises the failure at once, unchanged: real yq parses every
 /// bound before it looks at the target (see [`ComputedSliceBound`]) and
-/// has no clean model for a computed comma-bound at all (`.[(0,"x"):3]`
-/// on `[10,20,30]` rejects the bound outright, "expected to find 1
-/// number, got 2 instead", yq v4.53.3), so there is no oracle basis for
-/// carrying one bad value past another.
+/// wants exactly one number from each (`.[(0,"x"):3]` on `[10,20,30]` is
+/// "expected to find 1 number, got 2 instead", yq v4.53.3), so there is no
+/// oracle basis for carrying one bad value past another. A bound that did
+/// not produce exactly one value is handed to `sink` as an `Err` bound
+/// (#2056), which the pair loop raises once the target produced a node.
 ///
 /// #2351 review (Gap 1): jq-only, matching the read-mode gate.
 /// `eval_owned_multi_keep_partial` itself can't carry this gate -- it's a
@@ -97695,9 +97698,11 @@ mod tests {
     /// reaches it.
     #[test]
     fn test_slice_bound_conversion_failure_discarded_in_yq_mode_2372() {
+        // #2056: the count check comes before any value is converted, so the
+        // oracle's own message is the answer (yq v4.53.3).
         yq_query!(b"[10,20,30]", r#".[(1,"x"):3]"#,
             QueryResult::Error(e) => {
-                assert!(e.message.contains("integer"), "{}", e.message);
+                assert_eq!(e.message, "expected to find 1 number, got 2 instead");
             }
         );
     }
@@ -97922,9 +97927,10 @@ mod tests {
     /// rather than the pre-existing #2351 yq gate.
     #[test]
     fn test_slice_bound_path_context_conversion_failure_discarded_in_yq_mode_2372() {
+        // #2056: the count error, as in the plain evaluator (yq v4.53.3).
         yq_query!(b"[10,20,30]", r#".[(1,"x"):3] | key"#,
             QueryResult::Error(e) => {
-                assert!(e.message.contains("integer"), "{}", e.message);
+                assert_eq!(e.message, "expected to find 1 number, got 2 instead");
             }
         );
     }

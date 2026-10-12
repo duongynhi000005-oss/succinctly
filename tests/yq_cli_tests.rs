@@ -63962,3 +63962,29 @@ fn test_slice_bound_count_is_checked_only_once_the_target_reached_a_node_2056() 
     assert_eq!((code, stderr.trim()), (1, "Error: y"));
     Ok(())
 }
+
+/// #2056: the same count error on the null-input route, which evaluates through the bridged
+/// (owned-document) evaluator rather than the cursor one. Rows captured live from yq v4.53.3.
+#[test]
+fn test_slice_bound_with_several_values_on_the_null_input_route_2056() -> Result<()> {
+    let args = ["-n", "-o", "json", "-I=0"];
+    for filter in [
+        "[1,2,3] | .[(0,1):2]",
+        "[1,2,3] | .[0:(1,2)] |= []",
+        "[1,2,3] | del(.[(0,1):2])",
+        "[1,2,3] | .[(0,1):2] | key",
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "", &args)?;
+        assert_eq!(code, 1, "{filter}: stdout: {stdout:?}");
+        assert_eq!(stdout, "", "{filter}");
+        assert_eq!(
+            stderr.trim(),
+            "Error: expected to find 1 number, got 2 instead",
+            "{filter}"
+        );
+    }
+    // No node on the left side: nothing checks the bound.
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr("5 | .a[(0,1):2]", "", &args)?;
+    assert_eq!((code, stdout.as_str()), (0, ""), "{stderr:?}");
+    Ok(())
+}
