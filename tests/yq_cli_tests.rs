@@ -19883,9 +19883,9 @@ mod meta_assign_798 {
     /// ([`meta_path_from_value`]'s `None`); the real evaluation's own
     /// `TARGET |= .` then raises the ordinary out-of-range error for the
     /// same indexing, so the whole command still exits non-zero, just not
-    /// via the metadata write pass. Pre-existing divergence from real yq's
-    /// wording (`index [-1] out of range, array size is 0`), unrelated to
-    /// #798 -- reproduced by plain `.a[-1] = 5` on the same input.
+    /// via the metadata write pass. The message is yq's own, since #2335
+    /// (`index [-1] out of range, array size is 0`, v4.53.3) -- the same
+    /// as plain `.a[-1] = 5` on the same input.
     #[test]
     fn negative_index_target_missing_or_too_short_is_a_runtime_error_not_a_silent_skip() {
         for input in ["b: 1\n", "a: []\n"] {
@@ -19893,7 +19893,7 @@ mod meta_assign_798 {
                 run_yq_stdin_with_stderr(".a[-1] line_comment = \"x\"", input, &[]).unwrap();
             assert_eq!(code, 1, "[{input}] stderr: {err}");
             assert!(
-                err.contains("Out of bounds negative array index"),
+                err.contains("index [-1] out of range, array size is 0"),
                 "[{input}] stderr: {err}"
             );
         }
@@ -38636,7 +38636,7 @@ fn test_field_index_iterate_update_path_unaffected_by_1916_in_yq_mode() -> Resul
         run_yq_stdin_with_stderr(".[-10] |= select(false)", "[1, 2, 3]\n", args)?;
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("Out of bounds negative array index"),
+        stderr.contains("index [-10] out of range, array size is 3"),
         "stderr: {stderr}"
     );
 
@@ -64881,5 +64881,52 @@ fn test_nul_output_multi_file_aborts_at_first_failure_matching_yq_2002() -> Resu
         run_yq_stdin_with_stderr(".a", "a: good\n---\na: \"b\\0c\"\n---\na: good2\n", &["-0"])?;
     assert_eq!((code, stdout.as_str()), (1, "good\0"), "stderr: {stderr:?}");
     assert_eq!(stderr.lines().next(), Some(message));
+    Ok(())
+}
+
+/// #2335: a write through a negative index that is still out of range is yq's own
+/// `index [N] out of range, array size is L` -- the text its read side already used -- on every
+/// write route (`=`, `|=`, `+=`, `*=`, `?`, a deeper path, a comma target, `setpath`, and an index
+/// reached through an auto-vivified `null`), not jq's `Out of bounds negative array index`. `?`
+/// does not suppress it. In range (`.a.b[-3]`) is a plain write, and `succinctly jq` keeps jq's
+/// text. Every yq row captured live from yq v4.53.3 (exit 1).
+#[test]
+fn test_negative_index_write_error_uses_yq_wording_2335() -> Result<()> {
+    let doc = "a:\n  b: [1, 2, 3]\n  c: 1\n";
+    for (filter, text) in [
+        (".a.b[-5] = 9", "index [-5] out of range, array size is 3"),
+        (".a.b[-5] |= 9", "index [-5] out of range, array size is 3"),
+        (".a.b[-5] += 1", "index [-5] out of range, array size is 3"),
+        (".a.b[-5] *= 2", "index [-5] out of range, array size is 3"),
+        (".a.b[-5]? = 9", "index [-5] out of range, array size is 3"),
+        (".a.b[-5].x = 1", "index [-5] out of range, array size is 3"),
+        (
+            "(.a.b[-5], .a.c) = 1",
+            "index [-5] out of range, array size is 3",
+        ),
+        (
+            "setpath([\"a\",\"b\",-5]; 1)",
+            "index [-5] out of range, array size is 3",
+        ),
+        (".a.d[-2] = 1", "index [-2] out of range, array size is 0"),
+        (".x.y[-1] = 3", "index [-1] out of range, array size is 0"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 1, "{filter}: stdout: {stdout:?}");
+        assert_eq!(stdout, "", "{filter}");
+        assert_eq!(
+            stderr.lines().next(),
+            Some(format!("Error: {text}").as_str()),
+            "{filter}"
+        );
+    }
+    // In range after counting back from the end: an ordinary write.
+    let (stdout, stderr, code) =
+        run_yq_stdin_with_stderr(".a.b[-3] = 9", doc, &["-o=json", "-I=0"])?;
+    assert_eq!(
+        (code, stdout.as_str()),
+        (0, "{\"a\":{\"b\":[9,2,3],\"c\":1}}\n"),
+        "{stderr:?}"
+    );
     Ok(())
 }
