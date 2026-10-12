@@ -556,6 +556,41 @@ fn test_yq_flow_stray_comma_is_a_parse_error_2886() -> Result<()> {
     Ok(())
 }
 
+/// #1890: a yq-mode hyphenated identifier that starts with a builtin's name is
+/// that identifier, not the builtin: `def sin-approx` used to hit the `sin`
+/// gate (and, with `--jq-extensions`, parse as `sin - approx`).
+#[test]
+fn test_yq_hyphenated_name_is_not_a_builtin_prefix_1890() -> Result<()> {
+    let args = ["--jq-extensions", "-o=json", "-I=0"];
+    for (filter, want) in [
+        ("def sin-approx: 99; sin-approx", "99\n"),
+        ("def length-of-thing: 1; length-of-thing", "1\n"),
+        ("def not-x: 7; not-x", "7\n"),
+        (".sin-approx", "3\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "sin-approx: 3\n", &args)?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want, 0),
+            "`{filter}` -- stderr: {stderr:?}"
+        );
+    }
+    // The error for an undefined hyphenated call names the whole identifier.
+    let (_stdout, stderr, code) = run_yq_stdin_with_stderr("sin-approx", "a: 1\n", &args)?;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("sin-approx"), "{stderr:?}");
+    // `and`/`or` are operators, never a name start: yq reads `true and-1` as
+    // `true and -1` and prints `true`.
+    for filter in ["true and-1", "true or-1"] {
+        let (stdout, code) = run_yq_stdin(filter, "a: 1\n", &args)?;
+        assert_eq!((stdout.as_str(), code), ("true\n", 0), "`{filter}`");
+    }
+    // A spaced `-` is still subtraction.
+    let (stdout, code) = run_yq_stdin("length - 1", "[1, 2, 3]\n", &args)?;
+    assert_eq!((stdout.as_str(), code), ("2\n", 0));
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
