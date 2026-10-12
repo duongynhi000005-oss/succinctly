@@ -1224,6 +1224,29 @@ fn test_flow_plain_scalar_keeps_colon_content_1960() -> Result<()> {
     Ok(())
 }
 
+/// #4106: a flow-sequence pair whose value starts on the next line (`[k:\n  [c]]`) reads as the pair, for a
+/// collection value as for a scalar one — the `:` ends the line, which the pair lookahead takes as the pair
+/// colon (#1960). Answers captured from yq v4.53.3.
+#[test]
+fn test_flow_pair_value_on_the_next_line_4106() -> Result<()> {
+    for (input, expected) in [
+        ("a: [k:\n  [c]]\n", "{\"a\":[{\"k\":[\"c\"]}]}\n"),
+        ("[k:\n  [c]]\n", "[{\"k\":[\"c\"]}]\n"),
+        ("[k:\n  {c: 1}]\n", "[{\"k\":{\"c\":1}}]\n"),
+        ("[k:\n  v]\n", "[{\"k\":\"v\"}]\n"),
+        ("{k:\n  [c]}\n", "{\"k\":[\"c\"]}\n"),
+        ("a: [k:\n\n  [c]]\n", "{\"a\":[{\"k\":[\"c\"]}]}\n"),
+        ("a: [k:\n  &x [c]]\n", "{\"a\":[{\"k\":[\"c\"]}]}\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin(".", input, &["-o=json", "-I=0"])?,
+            (expected.to_string(), 0),
+            "{input:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]
