@@ -545,6 +545,13 @@ OPERANDS = [
     "(foreach (def f: .; (f, .) as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, f) as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, 7) as {a:$a} | .) as $k (.; .; .))",
+    # (#4320, seventh part) a call whose body returns a fresh value, or the register and a fresh
+    # value: jq raises at the pattern's first step, in a `reduce` UPDATE too (contrasts to the
+    # comma, nested-`def`, captured-`$x` and `try` calls above, which it answers there).
+    "(foreach (def f: {a:1}; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .|tostring; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; try f as {a:$a} | .) as $k (.; .; .))",
     # (#4320) a `$x` bound outside the `foreach` that is the register at it: certified by
     # marker identity, so it is the source's own destructure as `. as {a:$a}` is. The contrasts
     # are an outer `$x` bound to a member, a `reduce` (which backtracks its source), an outer

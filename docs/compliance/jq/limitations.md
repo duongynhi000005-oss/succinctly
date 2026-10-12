@@ -2136,7 +2136,9 @@ is the revert that established what the other one costs.
    accepts any source the fold driver routes as a destructure of the register, outside a `?//` chain; the `reduce`
    source is not call-specific, `reduce 1 as $k (.; reduce (. as {a:$a} | .) as $k (.; .))` is refused too, since a
    nested `reduce` has no `update_returns_its_input` arm and its source is driven by value, a refusal where jq answers,
-   not a wrong accept). A `$x` bound outside the
+   not a wrong accept). The vetter inherits the router's reading of a call, so a `def` whose body returns a fresh value
+   (`def f: {a:1}; f as {a:$a}`) is accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level
+   and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
    `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
    `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does, and so does a `$x` that is some other
    node (`.a as $x | del(foreach ($x as {b:$b} | .) ...)` raises at the pattern's first step in jq too). Outside every
