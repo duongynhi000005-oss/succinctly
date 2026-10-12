@@ -1420,6 +1420,11 @@ fn test_yq_setpath_checks_the_path_before_the_value_1380() -> Result<()> {
             "a: [1,2]\n",
             "index [-3] out of range, array size is 2",
         ),
+        (
+            r#"setpath(["a","-5"]; 9)"#,
+            "a: [1,2]\n",
+            "index [-5] out of range, array size is 2",
+        ),
     ] {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &args)?;
         assert_eq!((stdout.as_str(), code), ("", 1), "{filter}: {stderr:?}");
@@ -1443,6 +1448,11 @@ fn test_yq_setpath_checks_the_path_before_the_value_1380() -> Result<()> {
         (r#"setpath(["a",0]; 5)"#, "a: {}\n", r#"{"a":{"0":5}}"#),
         (r#"setpath(["a","b"]; 5)"#, "a: null\n", r#"{"a":{"b":5}}"#),
         (r"setpath([]; 3)", "a: 1\n", "3"),
+        // A string that spells an integer indexes an array, as yq's ParseInt does.
+        (r#"setpath(["a","1"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["a","-1"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["a","01"]; 9)"#, "a: [1,2]\n", r#"{"a":[1,9]}"#),
+        (r#"setpath(["c","0",0]; 9)"#, "c: [[1]]\n", r#"{"c":[[9]]}"#),
     ] {
         assert_eq!(
             run_yq_stdin(filter, doc, &args)?,

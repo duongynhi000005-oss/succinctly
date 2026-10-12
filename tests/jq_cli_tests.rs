@@ -93019,8 +93019,8 @@ fn test_array_key_in_path_and_write_position_3506() -> Result<()> {
 /// still refused with the same message everywhere it was.
 #[test]
 fn test_array_key_in_path_and_write_position_yq_mode_unchanged_3506() -> Result<()> {
-    // `setpath` is `--jq-extensions` surface there, and the array key is still
-    // refused through it (#3506 review).
+    // The array key is still refused through every write and path form in yq mode (#3506
+    // review); `setpath`, a real yq builtin, has its own check below (#1380).
     for filter in [".a[[1]] = 5", "del(.a[[1]])", ".a[[1]] |= 5", "[.a[[1]]]"] {
         let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
             .args(["yq", "--jq-extensions", "-o", "json", "-I", "0", filter])
