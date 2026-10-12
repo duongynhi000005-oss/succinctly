@@ -1394,6 +1394,20 @@ pub trait DocumentValue: Sized + Clone {
         key_display_string_kind(self)
     }
 
+    /// Whether this key has no scalar form at all -- a YAML mapping,
+    /// sequence, `null`, or an alias that does not resolve to a string (#222).
+    ///
+    /// Such a key stringifies to `""` ([`key_string`](Self::key_string)), which
+    /// is a placeholder rather than an identity: two different complex keys
+    /// are not a repeated key, so `key_hash_of` gives them no hash and a
+    /// duplicate-key collapse never merges them (#1740, the sibling of #1385's
+    /// "a key that will not decode is never a duplicate"). `false` for every
+    /// format whose keys are all strings, which is what lets the check fold
+    /// away on JSON's path.
+    fn key_is_complex(&self) -> bool {
+        false
+    }
+
     /// This value's raw source bytes when it is a string key whose span
     /// needs no decoding -- byte-identical to what
     /// [`key_string`](Self::key_string) would return.
@@ -2081,6 +2095,9 @@ pub(crate) fn key_hash_of<V: DocumentValue>(key: &V) -> Option<u64> {
 /// The hash of a key's decoded spelling, or `None` when it has no reliable
 /// identity -- [`key_hash_of`] past its raw-span fast path.
 fn decoded_key_hash<V: DocumentValue>(key: &V) -> Option<u64> {
+    if key.key_is_complex() {
+        return None;
+    }
     key.decoded_key_str()
         .ok()
         .flatten()
@@ -5812,6 +5829,51 @@ mod decoded_key_str_tests {
         }
     }
 
+    /// #1740: a YAML key with no scalar form has no hash, exactly as one that
+    /// will not decode has none (#1385), so a duplicate-key collapse cannot merge
+    /// two different complex keys that both spell `""`. The set of keys with no
+    /// hash is the set #2519's `display_key_kind` flags as a fallback.
+    #[test]
+    fn yaml_complex_key_has_no_hash_1740() {
+        // (document, field index, whether the key has no reliable identity)
+        let cases: &[(&[u8], usize, bool)] = &[
+            (b"a: 1\n", 0, false),
+            (b"\"\": 1\n", 0, false),
+            (b"\"a\\u0041b\": 1\n", 0, false),
+            (b"\"a\\qb\": 1\n", 0, true),
+            (b"a: &x foo\n*x : 1\n", 1, false),
+            (b"a: &x {p: 1}\n*x : 1\n", 1, true),
+            (b"a: &x [1]\n*x : 1\n", 1, true),
+            (b"? [1, 2]\n: 1\n", 0, true),
+            (b"? {a: 1}\n: 1\n", 0, true),
+            (b"?\n: 1\n", 0, false),
+        ];
+        for &(yaml, nth, no_hash) in cases {
+            let index = YamlIndex::build(yaml).expect("valid YAML");
+            let cursor = index.root(yaml);
+            let mapping = cursor.first_child().expect("document content");
+            let mut fields = mapping.value().as_object().expect("a mapping");
+            for _ in 0..nth {
+                let (_, rest) = fields.uncons().expect("enough fields");
+                fields = rest;
+            }
+            let (field, _) = fields.uncons().expect("enough fields");
+            let key = field.key();
+            assert_eq!(
+                key_hash_of(&key).is_none(),
+                no_hash,
+                "{}",
+                String::from_utf8_lossy(yaml)
+            );
+            assert_eq!(
+                key.key_is_complex(),
+                no_hash && key.string_decode_error().is_none(),
+                "{}",
+                String::from_utf8_lossy(yaml)
+            );
+        }
+    }
+
     /// #2519's negative control: JSON keeps the trait default, so its
     /// `display_key_kind` is `key_display_string_kind` exactly, flag and
     /// #1194 `None` included -- jq mode's collision rule is unchanged.
@@ -5857,7 +5919,9 @@ mod decoded_key_str_tests {
         // that probe is unchanged, but the tail has to agree *behind* it.
         let was_hash = if let Some(hash) = key.key_raw_unescaped().and_then(ascii_key_hash) {
             Some(hash)
-        } else if key.string_decode_error().is_some() {
+        } else if key.string_decode_error().is_some() || key.key_is_complex() {
+            // `key_is_complex` is the one deliberate departure from the
+            // pre-fusion body (#1740): a complex key's `""` is not an identity.
             None
         } else {
             key.key_string().map(|k| key_hash(k.as_bytes()))
