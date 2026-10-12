@@ -77859,6 +77859,39 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "",
             0,
         ),
+        // A chain of three, the bare alternatives after a destructuring one.
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (. as [$q] ?// $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach (. as [$q] ?// $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "[0,\"a\"]\n",
+            "",
+            0,
+        ),
+        // Inside another fold's body the later alternative is not read as the register: routing
+        // it there let this `try` swallow the resolver's refusal (#4278's 26 wrong accepts).
+        (
+            "null",
+            r"path(reduce .a? as $k (0; try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // The recorded divergence, in the safe direction: jq answers `{"a":true}` here (the `try`
+        // catches the retry's error); the routed source refuses.
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
         // Controls: the first bare alternative's destructure, a source that never destructures,
         // a destructure of another node, and the value-mode source.
         (

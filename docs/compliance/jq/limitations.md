@@ -2069,8 +2069,9 @@ is the revert that established what the other one costs.
    $y (.; .; .))` deleted the document; closed by #4320's third part, below), and a destructure of a later bare alternative of a
    `?//` chain (`. as $x ?// $y | $y as {a:$a} | .`: `$y` is bound only when the body raises and jq retries;
    routing it made a `try` around a `reduce` UPDATE swallow the resolver's refusal, 26 new wrong accepts, so it was
-   left as it was; closed at the top level by #4320's fourth part, below, and still accepted inside another fold's body). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit
-   5) with a different message, on `main` too.
+   left as it was; closed at the top level by #4320's fourth part, below, and still accepted inside another fold's
+   body). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit 5) with a
+   different message, on `main` too.
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
    {a:$a}`, whose bare alternative holds the register when it matches; a name two alternatives bind may hold it if
