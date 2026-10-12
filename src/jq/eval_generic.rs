@@ -22199,10 +22199,32 @@ fn each_slice_expr_generic<S: EvalSemantics, V: DocumentValue>(
         // #3293: a re-invocation after a stop is a `?//` retry inside
         // `start`; it supersedes whatever the retried-past call decided.
         stash.begin();
+        // #2056: yq's own start-bound count error; `end` is never evaluated.
+        if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &s) {
+            return yq_slice_bound_count_verdict_generic::<S, V>(
+                target,
+                value.clone(),
+                optional,
+                cursor,
+                count_error,
+                &stash,
+            );
+        }
         // #2225: `end` evaluated fresh for this `s`, not once overall.
         let mut end_sink = |e: ComputedSliceBound| -> Demand {
             // #3293: likewise for a retry inside `end`.
             stash.begin();
+            // #2056: yq's own end-bound count error.
+            if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &e) {
+                return yq_slice_bound_count_verdict_generic::<S, V>(
+                    target,
+                    value.clone(),
+                    optional,
+                    cursor,
+                    count_error,
+                    &stash,
+                );
+            }
             // #3520: a target that can fan out is pulled one output at a time,
             // so a consumer that stops after its first slice never runs the
             // target's later outputs (jq's `E as $t`).
@@ -22283,6 +22305,28 @@ fn each_slice_expr_generic<S: EvalSemantics, V: DocumentValue>(
 /// each target output is sliced and handed to `sink` as it is produced, so a
 /// stop ends the target's own generator. Returns the control that ended the
 /// pair, if any, and whether the consumer stopped.
+/// [`crate::jq::eval`]'s `yq_slice_bound_count_verdict` for the `DocumentValue` route: yq's
+/// verdict on a slice bound that did not produce exactly one number (#2056, #4197), raised only
+/// once `target` produced a node and after any error the target itself raised.
+fn yq_slice_bound_count_verdict_generic<S: EvalSemantics, V: DocumentValue>(
+    target: &Expr,
+    value: V,
+    optional: bool,
+    cursor: Option<V::Cursor>,
+    count_error: &EvalError,
+    stash: &StashedEscape,
+) -> Demand {
+    let (slices, escape) =
+        slice_pair_generic::<S, V>(target, &Ok(None), &Ok(None), value, optional, cursor);
+    if let Some(control) = escape {
+        return stash.stop(control);
+    }
+    if slices.is_empty() {
+        return Demand::Continue;
+    }
+    stash.stop(Control::Error(count_error.clone()))
+}
+
 fn slice_pair_streaming<S: EvalSemantics, V: DocumentValue>(
     target: &Expr,
     s: &ComputedSliceBound,
@@ -22550,13 +22594,23 @@ fn each_slice_bound_generic<S: EvalSemantics, V: DocumentValue>(
             Flow::Exhausted => {}
             escaped => return escaped,
         }
+        // #4197, #2056: yq wants exactly one number from a bound, and a stream
+        // that produced none, or several, is an error, not "no slice" or a
+        // fan-out. The count is checked before any value is classified, as
+        // yq's `getSliceNumber` does -- but it is yq's slice operator that
+        // checks it, once per node of its left side, so the verdict rides to
+        // the pair loop as an `Err` bound, which raises it only if the target
+        // produced a node (an `error` in the target outranks it, and a target
+        // with no node never evaluates the bound at all).
+        if collected.len() != 1 {
+            let count_error = Err(EvalError::slice_bound_count(collected.len()));
+            return match sink(count_error) {
+                Demand::Continue => Flow::Exhausted,
+                Demand::Stop => Flow::Stopped { pending: None },
+            };
+        }
         if let Some(Err(e)) = collected.iter().find(|b| b.is_err()) {
             return Flow::Escaped(Control::Error(e.clone()));
-        }
-        // #4197: yq wants exactly one number from a bound, and a stream that
-        // ended without producing one is an error, not "no slice".
-        if collected.is_empty() {
-            return Flow::Escaped(Control::Error(EvalError::slice_bound_empty()));
         }
         for b in collected {
             if sink(b) == Demand::Stop {
@@ -26318,19 +26372,41 @@ fn path_context_push_owned_children<V: DocumentValue>(
     }
 }
 
-/// #4197: yq wants exactly one number from a slice bound, so a bound stream that ended
-/// without producing a value is an error (`expected to find 1 number, got 0 instead`), not
-/// "this pairing produces nothing" -- jq's generator model, which jq mode keeps. The
-/// path-position walks that pull a bound lazily (`path_context_component_each_bound`,
-/// `owned_identity_computed_step`) end it with this; the eager collections
-/// (`each_slice_bound`, `each_slice_bound_generic`, `drive_slice_bound`) check the empty
-/// collection themselves. A stream that escaped or was stopped keeps its own verdict.
-fn yq_bound_needs_a_value<S: EvalSemantics>(produced: bool, flow: Flow) -> Flow {
-    match flow {
-        Flow::Exhausted if S::TAG == EvalTag::Yq && !produced => {
-            Flow::Escaped(Control::Error(EvalError::slice_bound_empty()))
+/// #4197, #2056: yq wants exactly one number from a slice bound, so a bound stream that
+/// produced none (`expected to find 1 number, got 0 instead`) or several (`got 2 instead`) is
+/// an error, not "this pairing produces nothing" or a fan-out -- jq's generator model, which jq
+/// mode keeps. The path-position walks that pull a bound lazily
+/// (`path_context_component_each_bound`, `owned_identity_computed_step`) run it through this;
+/// the eager collections (`each_slice_bound`, `each_slice_bound_generic`, `drive_slice_bound`)
+/// check the collection's length themselves.
+///
+/// In yq mode the stream is drained before the one value reaches `sink`: the count is only
+/// known at the end, and yq's own rule is to evaluate a bound in full before it slices. A
+/// stream that escaped or was stopped keeps its own verdict, and the values it produced are
+/// dropped with it (#2351).
+fn yq_bound_exactly_one<S: EvalSemantics>(
+    run: impl FnOnce(&mut dyn FnMut(OwnedValue) -> Demand) -> Flow,
+    sink: &mut dyn FnMut(OwnedValue) -> Demand,
+) -> Flow {
+    if S::TAG != EvalTag::Yq {
+        return run(sink);
+    }
+    let mut count = 0usize;
+    let mut first: Option<OwnedValue> = None;
+    let flow = run(&mut |v| {
+        count += 1;
+        if count == 1 {
+            first = Some(v);
         }
-        other => other,
+        Demand::Continue
+    });
+    match (flow, first) {
+        (Flow::Exhausted, Some(v)) if count == 1 => match sink(v) {
+            Demand::Continue => Flow::Exhausted,
+            Demand::Stop => Flow::Stopped { pending: None },
+        },
+        (Flow::Exhausted, _) => Flow::Escaped(Control::Error(EvalError::slice_bound_count(count))),
+        (other, _) => other,
     }
 }
 
@@ -26354,14 +26430,10 @@ fn path_context_component_each_bound<S: EvalSemantics, V: DocumentValue>(
     sink: &mut dyn FnMut(OwnedValue) -> Demand,
 ) -> Flow {
     match expr {
-        Some(e) => {
-            let mut produced = false;
-            let flow = path_context_component_flow::<S, V>(e, pos, &mut |v| {
-                produced = true;
-                sink(v)
-            });
-            yq_bound_needs_a_value::<S>(produced, flow)
-        }
+        Some(e) => yq_bound_exactly_one::<S>(
+            |sink| path_context_component_flow::<S, V>(e, pos, sink),
+            sink,
+        ),
         // No `?//` to retry, so the sink's stop is reported as one.
         None => match sink(OwnedValue::Null) {
             Demand::Continue => Flow::Exhausted,
@@ -34898,20 +34970,18 @@ fn owned_identity_computed_step<S: EvalSemantics, V: DocumentValue>(
             let drive_bound =
                 |bound: &Option<Expr>, sink: &mut dyn FnMut(OwnedValue) -> Demand| -> Flow {
                     match bound {
-                        Some(e) => {
-                            let mut produced = false;
-                            let flow = eval_each_owned::<S>(
-                                e,
-                                value,
-                                optional,
-                                Reentry::Against(id.root_witness()),
-                                &mut |v| {
-                                    produced = true;
-                                    sink(v)
-                                },
-                            );
-                            yq_bound_needs_a_value::<S>(produced, flow)
-                        }
+                        Some(e) => yq_bound_exactly_one::<S>(
+                            |sink| {
+                                eval_each_owned::<S>(
+                                    e,
+                                    value,
+                                    optional,
+                                    Reentry::Against(id.root_witness()),
+                                    sink,
+                                )
+                            },
+                            sink,
+                        ),
                         None => match sink(OwnedValue::Null) {
                             Demand::Continue => Flow::Exhausted,
                             Demand::Stop => Flow::Stopped { pending: None },

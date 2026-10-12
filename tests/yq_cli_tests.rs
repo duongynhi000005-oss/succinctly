@@ -3965,24 +3965,23 @@ fn test_yq_mode_wrong_arity_checkpoints_unaffected_by_2391() -> Result<()> {
     Ok(())
 }
 
-/// #2225 (review): the read-mode fix reaches yq mode too, not just jq mode
-/// -- `stderr` fires twice, once per start value, confirming `end` is
-/// re-evaluated fresh per `s` through `eval_generic::eval_slice_expr`
-/// regardless of which mode dispatches into it. Real yq's own grammar
-/// can't reproduce this repro's exact shape (its lexer rejects multi-
-/// valued slice bounds outright, and `input` needs `--jq-extensions`), so
-/// this is pinned against succinctly's own (already jq-oracle-verified via
-/// the sibling jq-mode tests) behavior, not a fresh oracle comparison.
+/// #2225 (review), superseded by #2056: `end` is re-evaluated fresh per start value in jq mode
+/// (pinned in `jq_cli_tests.rs`), but yq mode wants exactly one number from each bound, so a
+/// several-valued start is yq's `expected to find 1 number, got 2 instead` (yq v4.53.3) before
+/// `end` is looked at at all -- `stderr` never fires.
 #[test]
-fn test_yq_mode_slice_expr_end_bound_reevaluated_once_per_start_2225() -> Result<()> {
+fn test_yq_mode_slice_expr_end_bound_not_reached_after_start_count_error_2225() -> Result<()> {
     let (stdout, stderr, code) = run_yq_stdin_with_stderr(
         "[.a[(0,1):(stderr|2)]]",
         "a: [10,20,30]\n",
         &["-o", "json", "-I", "0"],
     )?;
-    assert_eq!(code, 0, "stdout: {stdout:?} stderr: {stderr:?}");
-    assert_eq!(stdout.trim_end(), "[[10,20],[20]]");
-    assert_eq!(stderr, "{\"a\":[10,20,30]}{\"a\":[10,20,30]}");
+    assert_eq!(code, 1, "stdout: {stdout:?} stderr: {stderr:?}");
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr.trim(),
+        "Error: expected to find 1 number, got 2 instead"
+    );
     Ok(())
 }
 
@@ -40205,11 +40204,23 @@ fn test_resolve_slice_bound_end_own_partial_prefix_discarded_in_yq_mode_2351_rev
 /// live-verified finding for the read-path siblings), so there's no oracle
 /// basis for streaming a prefix here. `del(.[(0,1,"x"):3])` (no `error(...)`
 /// at all -- this is a resolved-but-non-numeric bound, not a generator
-/// escape) on `[1,2,3]` prints only the conversion error.
+/// escape) on `[1,2,3]` prints nothing.
+///
+/// #2056: the error is yq's count check, which comes before any value is parsed
+/// (`getSliceNumber`, yq v4.53.3: `expected to find 1 number, got 3 instead`), so the
+/// non-numeric `"x"` is never classified; a lone non-numeric bound keeps the conversion error.
 #[test]
 fn test_resolve_slice_bound_type_error_discarded_in_yq_mode_2385() -> Result<()> {
     let (out, stderr, code) =
         run_yq_stdin_with_stderr("del(.[(0,1,\"x\"):3])", "[1, 2, 3]\n", &["-o", "json"])?;
+    assert_eq!(code, 1, "out: {out:?} stderr: {stderr:?}");
+    assert_eq!(out, "");
+    assert_eq!(
+        stderr.trim(),
+        "Error: expected to find 1 number, got 3 instead"
+    );
+    let (out, stderr, code) =
+        run_yq_stdin_with_stderr("del(.[(\"x\"):3])", "[1, 2, 3]\n", &["-o", "json"])?;
     assert_eq!(code, 1, "out: {out:?} stderr: {stderr:?}");
     assert_eq!(out, "");
     assert!(stderr.contains("must be integers"), "stderr: {stderr:?}");
@@ -57043,10 +57054,13 @@ fn test_drive_slice_bound_yq_mode_still_discards_escaped_prefix_2267() -> Result
 /// when both bounds were resolved before the loop began. The sibling
 /// `start`-bound failure exits through the outer match instead and is
 /// pinned by `test_drive_slice_bound_yq_mode_still_discards_escaped_prefix_2267`.
+///
+/// The start bound is single-valued (`0`): a several-valued one is yq's "expected to find 1
+/// number" error before the end bound is ever looked at (#2056).
 #[test]
 fn test_drive_slice_bound_yq_mode_end_bound_error_from_start_sink_2267() -> Result<()> {
     let (stdout, stderr, code) =
-        run_yq_stdin_with_stderr(r#"del(.[(0,1):("x")])"#, "- 1\n- 2\n- 3\n", &[])?;
+        run_yq_stdin_with_stderr(r#"del(.[0:("x")])"#, "- 1\n- 2\n- 3\n", &[])?;
     assert_ne!(code, 0, "stdout: {stdout:?} stderr: {stderr:?}");
     assert!(stdout.trim().is_empty(), "stdout: {stdout:?}");
     assert!(stderr.contains("must be integers"), "stderr: {stderr:?}");
@@ -63852,5 +63866,99 @@ fn test_m2_streaming_lazyseq_streams_past_materialization_ceiling_2187() -> Resu
         "stderr: {stderr:?}"
     );
     assert_eq!(stdout, "");
+    Ok(())
+}
+
+/// #2056: yq wants exactly one number from each slice bound, and a bound that produces several
+/// is `expected to find 1 number, got N instead` on every target kind (`null` and scalars
+/// included) and on every route -- read, `=`, `|=`, `del()` -- with `?` not suppressing it. The
+/// start bound is counted before the end, and the count before any value is parsed. Every row
+/// captured live from yq v4.53.3 (exit 1, empty stdout). The empty bound (`got 0`) is #4197.
+#[test]
+fn test_slice_bound_with_several_values_is_an_error_2056() -> Result<()> {
+    let filters: [(&str, &str); 14] = [
+        (".[(0,1):2]", "2"),
+        (".[0:(1,2)]", "2"),
+        (".[(0,1):]", "2"),
+        (".[:(0,1)]", "2"),
+        (".[(0,1):(2,3)]", "2"),
+        (".[(0,1,2):2]", "3"),
+        (".[(0,1,\"x\"):3]", "3"),
+        (".[(0,1):2]?", "2"),
+        (".[(0,1):2] = 5", "2"),
+        (".[(0,1):2] |= .", "2"),
+        (".[0:(1,2)] |= []", "2"),
+        ("del(.[(0,1):2])", "2"),
+        ("del(.[0:(1,2)])", "2"),
+        (".[(0,1):2] | key", "2"),
+    ];
+    for doc in ["{\"a\":1}", "[1,2,3]", "5", "\"hi\"", "null"] {
+        for (filter, count) in filters {
+            let (stdout, stderr, code) =
+                run_yq_stdin_with_stderr(filter, doc, &["-p", "json", "-o", "json", "-I=0"])?;
+            assert_eq!(code, 1, "{doc} | {filter}: stdout: {stdout:?}");
+            assert_eq!(stdout, "", "{doc} | {filter}");
+            assert_eq!(
+                stderr.trim(),
+                format!("Error: expected to find 1 number, got {count} instead"),
+                "{doc} | {filter}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// #2056: the control for the test above -- a bound that is parenthesised but single-valued is
+/// an ordinary slice, so the rows there are rejecting the count and not the computed bound.
+#[test]
+fn test_slice_bound_with_one_value_still_slices_2056() -> Result<()> {
+    for (filter, expected) in [
+        (".[(0):2]", "[1,2]\n"),
+        (".[1:(1+1)]", "[2]\n"),
+        (".[(1):]", "[2,3]\n"),
+        // yq leaves the document alone on a slice write (single-valued bounds included).
+        ("del(.[(0):2])", "[1,2,3]\n"),
+        (".[(0):2] = [9]", "[1,2,3]\n"),
+    ] {
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, "[1,2,3]", &["-p", "json", "-o", "json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "{filter}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #2056/#4197: the count is checked by yq's slice operator for each node its left side
+/// produced, so a left side that produces none never checks it (`5 | .a[...]` prints nothing,
+/// exit 0), and an error the left side raises comes first. `?` does not suppress the count.
+#[test]
+fn test_slice_bound_count_is_checked_only_once_the_target_reached_a_node_2056() -> Result<()> {
+    let json = ["-p", "json", "-o", "json", "-I=0"];
+    for (filter, expected) in [
+        (".a[(0,1):2]", ""),
+        (".a[select(false):2]", ""),
+        (".a[0:(1,2)] = 1", "5\n"),
+        ("del(.a[(0,1):2])", "5\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "5", &json)?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "5 | {filter}: {stderr:?}"
+        );
+    }
+    // The target raises first, so its error is the one reported.
+    let (_, stderr, code) = run_yq_stdin_with_stderr(".a[(0,1):2]", "[1,2,3]", &json)?;
+    assert_eq!(code, 1);
+    assert!(!stderr.contains("expected to find 1 number"), "{stderr:?}");
+    let (_, stderr, code) =
+        run_yq_stdin_with_stderr("([1,2],[3,4],error(\"x\"))[(0,1):(1,2)]", "null", &json)?;
+    assert_eq!((code, stderr.trim()), (1, "Error: x"));
+    // A generator error inside the bound is also reported ahead of the count.
+    let (_, stderr, code) = run_yq_stdin_with_stderr(".[(0,1,error(\"y\")):3]", "[1,2,3]", &json)?;
+    assert_eq!((code, stderr.trim()), (1, "Error: y"));
     Ok(())
 }

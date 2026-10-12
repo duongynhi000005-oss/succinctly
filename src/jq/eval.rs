@@ -28480,10 +28480,30 @@ fn each_slice_expr<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // #3293: a re-invocation after a stop is a `?//` retry inside
         // `start`; it supersedes whatever the retried-past call decided.
         stash.begin();
+        // #2056: yq's own start-bound count error; `end` is never evaluated.
+        if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &s) {
+            return yq_slice_bound_count_verdict::<W, S>(
+                target,
+                value.clone(),
+                optional,
+                count_error,
+                &stash,
+            );
+        }
         // #2225: T (`end`) evaluated fresh for this `s`, not once overall.
         let mut end_sink = |e: ComputedSliceBound| -> Demand {
             // #3293: likewise for a retry inside `end`.
             stash.begin();
+            // #2056: yq's own end-bound count error.
+            if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &e) {
+                return yq_slice_bound_count_verdict::<W, S>(
+                    target,
+                    value.clone(),
+                    optional,
+                    count_error,
+                    &stash,
+                );
+            }
             // #3520: a target that can fan out is pulled one output at a
             // time -- see `eval_generic::each_slice_expr_generic`.
             if S::TAG == EvalTag::Jq && !yields_at_most_one_value(target) {
@@ -28541,6 +28561,30 @@ fn each_slice_expr<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // #1528: otherwise `start`'s own trailing escape (or the consumer's stop)
     // is the verdict; `end`'s own escape is handled per-`s` above (#2225).
     stash.resume(flow, start.as_deref().is_some_and(direct_pattern_retry))
+}
+
+/// yq mode's verdict on a slice bound that did not produce exactly one number (#2056, #4197).
+///
+/// yq's slice operator evaluates `target`, then checks each bound's count for every node the
+/// target produced (`getSliceNumber`): an error raised by the target comes first, a target
+/// with no node never checks anything, and `?` does not suppress the count error. `target` is
+/// evaluated here through [`slice_pair`] with both sides open, which is exactly "did it reach a
+/// slice step".
+fn yq_slice_bound_count_verdict<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    target: &Expr,
+    value: StandardJson<'_, W>,
+    optional: bool,
+    count_error: &EvalError,
+    stash: &StashedEscape,
+) -> Demand {
+    let (slices, escape) = slice_pair::<W, S>(target, &Ok(None), &Ok(None), value, optional);
+    if let Some(control) = escape {
+        return stash.stop(control);
+    }
+    if slices.is_empty() {
+        return Demand::Continue;
+    }
+    stash.stop(Control::Error(count_error.clone()))
 }
 
 /// [`slice_pair`] for a target that can fan out, in jq mode (#3520): each
@@ -28863,13 +28907,23 @@ fn each_slice_bound<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             Flow::Exhausted => {}
             escaped => return escaped,
         }
+        // #4197, #2056: yq wants exactly one number from a bound, and a stream
+        // that produced none, or several, is an error, not "no slice" or a
+        // fan-out. The count is checked before any value is classified, as
+        // yq's `getSliceNumber` does -- but it is yq's slice operator that
+        // checks it, once per node of its left side, so the verdict rides to
+        // the pair loop as an `Err` bound, which raises it only if the target
+        // produced a node (an `error` in the target outranks it, and a target
+        // with no node never evaluates the bound at all).
+        if collected.len() != 1 {
+            let count_error = Err(EvalError::slice_bound_count(collected.len()));
+            return match sink(count_error) {
+                Demand::Continue => Flow::Exhausted,
+                Demand::Stop => Flow::Stopped { pending: None },
+            };
+        }
         if let Some(Err(e)) = collected.iter().find(|b| b.is_err()) {
             return Flow::Escaped(Control::Error(e.clone()));
-        }
-        // #4197: yq wants exactly one number from a bound, and a stream that
-        // ended without producing one is an error, not "no slice".
-        if collected.is_empty() {
-            return Flow::Escaped(Control::Error(EvalError::slice_bound_empty()));
         }
         for b in collected {
             if sink(b) == Demand::Stop {
@@ -58337,11 +58391,29 @@ fn resolve_slice_expr_sink<'a, S: EvalSemantics>(
     // at a time so each `s` reaches its own pairs before the next `s` is
     // asked for. Its own trailing escape is the one this function reports
     // last (#1528, below), after `E`'s and `T`'s.
+    // #2056: yq's verdict on a bound that did not produce exactly one number --
+    // raised only once the target produced a node, after any error the target
+    // itself raised, and not suppressed by `?`.
+    let count_verdict = |count_error: &EvalError, stash: &StashedEscape| -> Demand {
+        let (branches, this_escape) =
+            resolve_target_for_pair::<S>(target, value, trackable, snapshot, frame, keep);
+        if let Some(control) = this_escape {
+            return stash.stop(Control::from(control));
+        }
+        if branches.is_empty() {
+            return Demand::Continue;
+        }
+        stash.stop(Control::Error(count_error.clone()))
+    };
+
     let driven = drive_slice_bound::<S>(start, value, trackable, f64::floor, &mut |s| {
         // #3293: a re-invocation after a stop is a `?//` retry inside
         // `start`; it supersedes whatever the retried-past call decided.
         stash.begin();
         stopped_at = None;
+        if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &s.bound) {
+            return count_verdict(count_error, &stash);
+        }
         // `T` (`end`) evaluated fresh for this `s`, not once overall
         // (#2245). An empty `T` for this `s` contributes nothing and moves
         // on to the next `s` (verified live: a `T` that's empty only for
@@ -58358,6 +58430,9 @@ fn resolve_slice_expr_sink<'a, S: EvalSemantics>(
             // #3293: likewise for a retry inside `end`.
             stash.begin();
             stopped_at = None;
+            if let (EvalTag::Yq, Err(count_error)) = (S::TAG, &e.bound) {
+                return count_verdict(count_error, &stash);
+            }
             match resolve_pair(&s, &e, sink) {
                 Ok(Demand::Continue) => Demand::Continue,
                 Ok(Demand::Stop) => {
@@ -58586,10 +58661,19 @@ fn drive_slice_bound<S: EvalSemantics>(
         let (mut values, escape) = eval_owned_multi_keep_partial::<S>(expr, value);
         if escape.is_some() {
             values = Vec::new();
-        } else if values.is_empty() {
-            // #4197: yq wants exactly one number from a bound; a stream that
-            // ended without producing one is an error, not "no slice".
-            return Err(EvalError::slice_bound_empty().into());
+        } else if values.len() != 1 {
+            // #4197, #2056: yq wants exactly one number from a bound; a stream
+            // that produced none, or several, is an error, not "no slice" or a
+            // fan-out. It is raised by the slice step, once the target reached
+            // one, so it rides to the pair loop as an `Err` bound.
+            let bound = PathSliceBound {
+                bound: Err(EvalError::slice_bound_count(values.len())),
+                key: None,
+            };
+            return Ok(match sink(bound) {
+                Demand::Continue => Flow::Exhausted,
+                Demand::Stop => Flow::Stopped { pending: None },
+            });
         }
         let mut resolved = vec_with_capacity(values.len());
         for raw in values {
