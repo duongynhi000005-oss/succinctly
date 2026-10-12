@@ -706,15 +706,14 @@ impl EvalError {
 
     /// `expected a single result but found <n>`.
     ///
-    /// yq mode's refusal of a multi-output `setpath`/`delpaths` argument
-    /// (#1279). Real yq refuses these too, unlike its `has`/`test`/`sub`,
-    /// which quietly take the argument's first output — live-verified against
-    /// the pinned v4.53.3, which answers `SETPATH: expected single path but
-    /// found 2 results instead`. succinctly's wording is its own; matching
-    /// yq's exactly needs the per-slot spelling yq uses (`single path` vs
-    /// `single value on RHS`) and is tracked separately. What matters here is
-    /// that yq mode keeps *erroring* rather than starting to fan out or
-    /// silently truncate.
+    /// yq mode's refusal of a multi-output `delpaths` argument (#1279), and
+    /// of any `fanout_arg` gate that is not `setpath`. Real yq refuses these
+    /// too, unlike its `has`/`test`/`sub`, which quietly take the argument's
+    /// first output. succinctly's wording here is its own; `setpath` has the
+    /// per-slot spellings yq uses ([`Self::setpath_expects_single_path`] and
+    /// [`Self::setpath_expects_single_value`], #1380). What matters is that
+    /// yq mode keeps *erroring* rather than starting to fan out or silently
+    /// truncate.
     pub fn single_argument_result_required(found: usize) -> Self {
         Self::new(format!("expected a single result but found {found}"))
     }
@@ -746,6 +745,43 @@ impl EvalError {
     pub fn delpaths_rejects_type(tag: &str) -> Self {
         Self::new(format!(
             "DELPATHS: expected either a !!str or !!int in the path, found {tag} instead"
+        ))
+    }
+
+    /// `SETPATH: expected either a !!str or !!int in the path, found <tag> instead`.
+    ///
+    /// yq-mode-only, `setpath`'s twin of [`Self::delpaths_rejects_type`] (#1380). Real yq
+    /// checks every element of the path before it reads the value argument or navigates, and
+    /// accepts only `!!str` and `!!int`: a slice descriptor (`!!map`), `!!seq`, `!!bool`,
+    /// `!!null` and any `!!float` (`1.5`, and `1.0` too) hit this one message with their own
+    /// tag. Verified live against yq v4.53.3.
+    pub fn setpath_rejects_type(tag: &str) -> Self {
+        Self::new(format!(
+            "SETPATH: expected either a !!str or !!int in the path, found {tag} instead"
+        ))
+    }
+
+    /// `SETPATH: expected single path but found <n> results instead`.
+    ///
+    /// yq mode's refusal of a multi-output `setpath` path argument (#1380); the value slot's
+    /// twin is [`Self::setpath_expects_single_value`].
+    pub fn setpath_expects_single_path(found: usize) -> Self {
+        Self::new(format!(
+            "SETPATH: expected single path but found {found} results instead"
+        ))
+    }
+
+    /// `SETPATH: expected single value on RHS but found <n>`.
+    pub fn setpath_expects_single_value(found: usize) -> Self {
+        Self::new(format!(
+            "SETPATH: expected single value on RHS but found {found}"
+        ))
+    }
+
+    /// `SETPATH: expected path array, but got <tag> instead`.
+    pub fn setpath_expects_path_array(tag: &str) -> Self {
+        Self::new(format!(
+            "SETPATH: expected path array, but got {tag} instead"
         ))
     }
 

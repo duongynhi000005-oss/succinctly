@@ -69478,14 +69478,27 @@ fn set_value_at_path<S: EvalSemantics>(
                 );
                 Ok(OwnedValue::Object(entries.into()))
             }
+            // #1380: yq walks a key through a scalar without writing anything, as it does
+            // for `=`; only an array refuses a string key.
+            other if S::TAG == EvalTag::Yq && !matches!(other, OwnedValue::Array(_)) => Ok(other),
             other => Err(EvalError::cannot_index(other.type_name(), key)),
         },
         OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..) => {
             let mut arr = match value {
                 OwnedValue::Array(arr) => arr,
                 OwnedValue::Null => Vec::new().into(),
+                // #1380: an index through a scalar is a no-op in yq mode.
+                other if S::TAG == EvalTag::Yq => return Ok(other),
                 other => return Err(EvalError::cannot_index(other.type_name(), key)),
             };
+            if S::TAG == EvalTag::Yq {
+                // yq words a negative index below the start by the index and the length.
+                if let OwnedValue::Int(i) | OwnedValue::NumberLiteral(NumberRepr::Int(i), _) = key {
+                    if *i < 0 && i.saturating_add(arr.len() as i64) < 0 {
+                        return Err(EvalError::yq_negative_index_out_of_range(*i, arr.len()));
+                    }
+                }
+            }
             let index = resolve_setpath_index(key, arr.len())?;
             if index >= arr.len() {
                 pad_with_nulls(&mut arr, index)?;
@@ -69708,6 +69721,9 @@ fn builtin_setpath<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    if S::TAG == EvalTag::Yq {
+        return builtin_setpath_yq::<W, S>(path_expr, val_expr, value, optional);
+    }
     // The VALUE is the outer loop and the PATH the inner one -- the opposite
     // of `sub(re; str)` at the same arity, and the reason #1279's audit
     // insisted every multi-generator order be probed rather than inferred.
@@ -69743,31 +69759,109 @@ fn builtin_setpath<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     QueryResult::Error(EvalError::path_must_be_array())
                 };
             };
-            // #1953: a non-decode-failure to_owned error respects
-            // `optional`, the same as every other builtin refusal here.
-            let owned = match to_owned::<S, _>(&value) {
-                Ok(owned) => owned,
-                Err(e) => return suppress_or_raise(e, optional),
-            };
-            // #1351: `setpath(["b","p"]; 9)` through an alias lands on the
-            // shared node, like `.b.p = 9`.
-            let mut path = path;
-            alias_identity::redirect_concrete_path(&mut path, &owned);
-            let pre = alias_identity::active().then(|| owned.clone());
-            match set_value_at_path::<S>(owned, &path, new_val) {
-                Ok(mut result) => {
-                    if let Some(pre) = &pre {
-                        alias_identity::mirror_after_write(pre, &mut result);
-                    }
-                    QueryResult::Owned(result)
-                }
-                // An optional context swallows the refusal, as it does for
-                // every other builtin here.
-                Err(_) if optional => QueryResult::None,
-                Err(e) => e.into(),
-            }
+            setpath_write::<W, S>(&value, path, new_val, optional)
         },
     )
+}
+
+/// One `setpath` write: read the document, redirect an alias path, set, mirror.
+fn setpath_write<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    value: &StandardJson<'a, W>,
+    mut path: crate::jq::ArrayOf<OwnedValue>,
+    new_val: OwnedValue,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // #1953: a non-decode-failure to_owned error respects
+    // `optional`, the same as every other builtin refusal here.
+    let owned = match to_owned::<S, _>(value) {
+        Ok(owned) => owned,
+        Err(e) => return suppress_or_raise(e, optional),
+    };
+    // #1351: `setpath(["b","p"]; 9)` through an alias lands on the
+    // shared node, like `.b.p = 9`.
+    alias_identity::redirect_concrete_path(&mut path, &owned);
+    let pre = alias_identity::active().then(|| owned.clone());
+    match set_value_at_path::<S>(owned, &path, new_val) {
+        Ok(mut result) => {
+            if let Some(pre) = &pre {
+                alias_identity::mirror_after_write(pre, &mut result);
+            }
+            QueryResult::Owned(result)
+        }
+        // An optional context swallows the refusal, as it does for
+        // every other builtin here.
+        Err(_) if optional => QueryResult::None,
+        Err(e) => e.into(),
+    }
+}
+
+/// `setpath(path; value)` in yq mode (#1380): the path is read, counted and checked before the
+/// value argument is evaluated at all.
+///
+/// Real yq takes the path first -- `setpath([error("p")]; error("r"))` is `p` -- and refuses a
+/// path element that is not a `!!str` or an `!!int` (a slice descriptor, a float, a sequence, a
+/// boolean, a null) before it navigates anything. jq mode keeps its value-outermost order.
+fn builtin_setpath_yq<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    path_expr: &Expr,
+    val_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let (mut paths, trailing) =
+        stream_outputs::<_, S>(eval_single::<W, S>(path_expr, value.clone(), optional));
+    let found = paths.len();
+    if apply_arg_fanout(ArgFanout::RejectMany, &mut paths).is_err() {
+        // A count violation is only ever a symptom of an argument that also escaped, so the
+        // escape is reported in preference to the count (#1533).
+        return match trailing {
+            Some(control) => partial(Vec::new(), control),
+            None => QueryResult::Error(EvalError::setpath_expects_single_path(found)),
+        };
+    }
+    if let Some(control) = trailing {
+        return partial(Vec::new(), control);
+    }
+    let Some(path_owned) = paths.pop() else {
+        return QueryResult::None;
+    };
+    let OwnedValue::Array(path) = path_owned else {
+        return if optional {
+            QueryResult::None
+        } else {
+            QueryResult::Error(EvalError::setpath_expects_path_array(owned_yaml_type_tag(
+                &path_owned,
+            )))
+        };
+    };
+    if let Some(bad) = path.iter().find(|element| {
+        !matches!(
+            element,
+            OwnedValue::String(_)
+                | OwnedValue::Int(_)
+                | OwnedValue::NumberLiteral(NumberRepr::Int(_), _)
+        )
+    }) {
+        return QueryResult::Error(EvalError::setpath_rejects_type(
+            delpaths_component_type_tag(bad),
+        ));
+    }
+
+    let (mut values, trailing) =
+        stream_outputs::<_, S>(eval_single::<W, S>(val_expr, value.clone(), optional));
+    let found = values.len();
+    if apply_arg_fanout(ArgFanout::RejectMany, &mut values).is_err() {
+        return match trailing {
+            Some(control) => partial(Vec::new(), control),
+            None => QueryResult::Error(EvalError::setpath_expects_single_value(found)),
+        };
+    }
+    if let Some(control) = trailing {
+        return partial(Vec::new(), control);
+    }
+    match values.pop() {
+        Some(new_val) => setpath_write::<W, S>(&value, path, new_val, optional),
+        None => QueryResult::None,
+    }
 }
 
 /// Delete every path in `paths` from `value`, the way jq's `delpaths_sorted`
