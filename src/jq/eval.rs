@@ -49813,7 +49813,7 @@ impl<'e> RegisterSpine<'e> {
             // moved: a `reduce` UPDATE that jq answers (`path(reduce 1 as $k (.; foreach ((., 1) |
             // CHAIN) as $k (.; .; .)))` on `null`) would refuse.
             (true, true) if fold_body::depth() == 0 => Reach::Partial,
-            (true, true) | (false, true) => Reach::Opaque,
+            (true | false, true) => Reach::Opaque,
         }
     }
 
@@ -49935,7 +49935,11 @@ impl<'e> RegisterSpine<'e> {
                 for stage in stages {
                     match self.reach(stage) {
                         Reach::HandsOn => {}
-                        Reach::Partial => reach = Reach::Partial,
+                        // A second such stage fans the register out again, which the resolver
+                        // does not place (`foreach (., 1) as $j (.; .; .) | (., 1) | CHAIN`
+                        // aborted partway): the walk stops there.
+                        Reach::Partial if reach == Reach::HandsOn => reach = Reach::Partial,
+                        Reach::Partial => return Reach::Opaque,
                         other => return other,
                     }
                 }
@@ -51623,7 +51627,13 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // register when the marker is, again for a single pattern only.
     let head_resolves_to_register = register.is_some_and(|reg| {
         resolves_to_register::<S>(head, trackable, reg, frame)
-            || ((patterns.len() == 1 || patterns_all_destructuring_chain(patterns))
+            // #4424: a destructuring-only chain too, for a body that performs no step: the pipe is
+            // the register, no alternative is a bare `$var` to retry onto, and the refusal at the
+            // end of the path is jq's own (`del(try ((.|.) as {a:$a} ?// [$a] | .))` raises). A body
+            // that navigates can fail on the first alternative and retry onto the next, which jq
+            // swallows under `try`; a head proven the register would refuse it uncatchably.
+            || ((patterns.len() == 1
+                || (patterns_all_destructuring_chain(patterns) && body_performs_no_step(body)))
                 && S::TAG == EvalTag::Jq
                 && matches!(head, Expr::Pipe(stages) if stages
                     .iter()

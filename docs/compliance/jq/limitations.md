@@ -2226,14 +2226,21 @@ is the revert that established what the other one costs.
    does not backtrack its source). Two resolver changes go with it: an alternative that ran no step with a body that is
    only `.` hands the untracked seed on rather than running the body's own terminal check (the second output of `(., 1) |
    CHAIN`, `1`, is not the register and the end of the path checks it, not the body), and `resolve_as_pattern` proves a pipe
-   of registers as the head of a destructuring-only chain too (it has no bare alternative to retry onto), so the
-   `del(try (CHAIN))` / `del((CHAIN)?)` rows above refuse as jq does. Pinned by
+   of registers as the head of a destructuring-only chain whose body performs no step (it has no bare alternative to
+   retry onto, and the refusal at the end of the path is jq's own), so the `del(try (CHAIN))` / `del((CHAIN)?)` rows above
+   refuse as jq does. A body that navigates can fail on the first alternative and retry onto the next, which jq swallows
+   under `try`/`?`, so it keeps the unproven head (`del(try ((.|.) as {a:$a} ?// {b:$a} | .a))` on `{"a":1}` returns the
+   document in jq and here). Pinned by
    `test_foreach_source_register_through_def_comma_and_nested_foreach_4424`. Over the 255 `foreach` and pipe-chain operands (the 27 added here
    included; `--stage-only`, 219,555 rows, jq 1.7.1, candidate vs `main`): MATCH 212,590 -> 213,028, ACCEPT_WRONG 325 -> 139, DIFF
    252 -> 182, REFUSE_WRONG 6,388 -> 6,206, no lost match (the first run lost 8 `reduce` UPDATE rows to the comma routing, which
    is why it, like the destructuring-only half, is gated to outside every fold body). `scripts/jq-bind-origin-fuzz.py` (6,000
    programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch. **What it leaves**: the 21 destructuring-only
-   rows inside a `reduce`/`foreach` body (identical on `main`); a nested `foreach` whose EXTRACT is not `.`
+   rows inside a `reduce`/`foreach` body (identical on `main`); a `$`-parameter or closure parameter in the body
+   (`def f($x): CHAIN | $x; f(2)` answers the root where jq answers `["a"]`, and `def f($x): $x as {a:$a} ?// [$a] | .; f(.)`
+   is accepted where jq raises: the walk reads a parameter as not the register, and the resolver does not place the call's
+   arguments, both identical on `main`); two partial-register stages in a row (`(., 1) | (., 1) | CHAIN`: the walk stops at
+   the second, so the by-value drive answers the root, as on `main`); a nested `foreach` whose EXTRACT is not `.`
    (`foreach (., 1) as $j (.; .; $j) | CHAIN` answers the root twice where jq answers `["a"]` then `[]`); and
    `first(CHAIN)` / `limit(1; CHAIN)` as the source on a register that is not `null`, where jq's path mode emits the first
    output once and the by-value drive emits it twice (value mode emits it twice in both tools).

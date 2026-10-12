@@ -79168,6 +79168,16 @@ fn test_foreach_source_register_through_def_comma_and_nested_foreach_4424() -> R
             "",
             0,
         ),
+        // A body that navigates can fail on the first alternative and retry onto the next, which
+        // jq swallows under `try`/`?`: only a body that performs no step is the register's refusal.
+        (
+            r#"{"a":1}"#,
+            r"del(try ((.|.) as {a:$a} ?// {b:$a} | .a))",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        ("[1]", r"path(((.|.) as [$a] ?// [$a] | .[0])?)", "", "", 0),
     ])
 }
 
