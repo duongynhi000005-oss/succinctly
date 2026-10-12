@@ -49600,6 +49600,8 @@ impl<'e> RegisterSpine<'e> {
                     || (self.null_register && routes_destructuring_chain(patterns)))
                     && self.binds_register(expr)
                     && (patterns.len() == 1
+                        || self.null_register
+                        || patterns_all_destructuring_chain(patterns)
                         || (!matches!(unwrap_bind_source(expr), Expr::Pipe(_))
                             && wrapped_marker(expr).is_none()))
                 {

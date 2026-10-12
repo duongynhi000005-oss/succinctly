@@ -78115,6 +78115,93 @@ fn test_foreach_source_bare_alternative_chain_behind_register_stages_4420() -> R
     ])
 }
 
+/// #4424: a pipe source of a `?//` chain, `(.|.) as P ?// $v | body`, as a `foreach` source. The
+/// pipe of `.` is the register, so the chain meets it as a bare `.` does. On a `null` register the
+/// first alternative's walk cannot fail, jq moves the register onto the matched member, and the
+/// by-value drive answered the root (`|= 9` wrote `9` where jq writes `{"a":9}`). A chain of
+/// destructuring patterns only (`(.|.) as {a:$a} ?// [$a]`) was accepted on every document, where jq
+/// raises on each (`del` deleted it, `=` replaced it): it is placed by the resolver and refuses, or
+/// answers on `null`. A chain with a bare alternative keeps the by-value drive on a register that
+/// is not `null` (#3279's retry rules). Every jq side captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_pipe_head_of_a_chain_4424() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"[path(foreach ((.|.|.) as [$a] ?// {a:$a} ?// $b | .) as $k (.; .; .))]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A destructuring-only chain on a register that is not `null`: jq raises, as here.
+        (
+            "[true]",
+            r"path(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // Controls: a bare alternative off `null` keeps the root, as does a pipe that ends in a
+        // stage that is not the register.
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4320 (a marker behind `first`/`limit`/`last`/`try`): `. as $x | foreach (first($x) as {a:$a} | .) as
 /// $k (.; .; .)`. `first($x)` hands `$x`, the register, on unchanged, so the pattern's steps move
 /// jq's register as `$x as {a:$a}` does and the emitted state is no longer at it: jq raises on every
