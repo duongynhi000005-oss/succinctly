@@ -49088,9 +49088,15 @@ fn bind_hands_on_the_register(e: &Expr) -> bool {
 /// [`resolves_to_register`], which #4128's attempt lacked). Any other computed bound expression
 /// stays out (#4320). A variable bound outside the source is read when `markers` lists it
 /// ([`fold_source_register_markers`]). The other [`source_destructures_register`] mode, through a nested
-/// `reduce`, is only for the places the register is not known to be at `.`.
-fn foreach_source_destructures_register(source: &Expr, markers: Vec<*const Tracked>) -> bool {
-    source_destructures_register_with(source, false, markers)
+/// `reduce`, is only for the places the register is not known to be at `.`. `null_register` is
+/// whether jq's register is a trackable `null` at the fold ([`RegisterSpine::null_register`],
+/// #4420), the one register a `?//` chain with a bare `$var` alternative destructures.
+fn foreach_source_destructures_register(
+    source: &Expr,
+    markers: Vec<*const Tracked>,
+    null_register: bool,
+) -> bool {
+    source_destructures_register_with(source, false, markers, null_register)
 }
 
 /// [`foreach_source_destructures_register`], optionally reading through a nested
@@ -49105,7 +49111,7 @@ fn foreach_source_destructures_register(source: &Expr, markers: Vec<*const Track
 /// resolver, so the caller routes a source that holds one through it when the
 /// accumulator is not known to be the register.
 fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
-    source_destructures_register_with(source, through_reduce, Vec::new())
+    source_destructures_register_with(source, through_reduce, Vec::new(), false)
 }
 
 /// [`source_destructures_register`] with the `$x` markers of the source that are jq's register at
@@ -49115,9 +49121,11 @@ fn source_destructures_register_with(
     source: &Expr,
     through_reduce: bool,
     markers: Vec<*const Tracked>,
+    null_register: bool,
 ) -> bool {
     let mut walk = RegisterSpine {
         through_reduce,
+        null_register,
         vars: Vec::new(),
         defs: Vec::new(),
         memo: Vec::new(),
@@ -49262,6 +49270,19 @@ struct SpineDef<'e> {
 struct RegisterSpine<'e> {
     /// See [`source_destructures_register`].
     through_reduce: bool,
+    /// Whether jq's register is `null` where the walk starts (#4417, #4420). A `?//` chain with a
+    /// bare `$var` alternative then destructures it too, which it does not on any other register
+    /// (it is left to the by-value drive, see [`routes_destructuring_chain`]): the first
+    /// alternative's walk cannot fail on `null` (`null | .a` and `null | .[0]` are `null`), so jq
+    /// runs it and its `INDEX` steps move the register onto the matched member, where the
+    /// by-value drive never moves it. A `null` register is also the only one a moved register can
+    /// be `jv_identical` to the emitted state of, so it is the only document on which the two
+    /// answers show (`path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))` is `["a"]` on
+    /// `null`). The walk reads the chain behind every stage that hands the register on; one that is
+    /// the register on only some outputs (`(., 1) | CHAIN`) still answers the root on all of
+    /// them, and inside an outer `path()` jq reports `[]` where the resolver reports `["a"]` in the
+    /// refusal's text (both raise).
+    null_register: bool,
     /// The variables bound so far on the spine, innermost last, each with whether it may hold
     /// the register (#4278: `. as $x | $x as {a:$a}` destructures the register as `. as
     /// {a:$a}` does). A later binding of the same name shadows an earlier one.
@@ -49524,7 +49545,8 @@ impl<'e> RegisterSpine<'e> {
             // #4187: a `?//` chain of destructuring patterns only. One with a bare `$var`
             // alternative (`. as {a:$a} ?// $a`) is left to the by-value drive: nothing in the
             // register sweep accepts a wrong answer through it, and routing it loses matches
-            // the drive makes.
+            // the drive makes. #4417/#4420: except on a `null` register ([`Self::null_register`]),
+            // where the first alternative's walk cannot fail and the drive answers the root.
             // #4278: whatever the chain, its body runs after it, on the register where the
             // matched alternative left it, so a destructure in the body is the source's own
             // (`. as $x ?// [$q] | . as {a:$a} | .`). Its names are [`chain_names`]: the first
@@ -49545,7 +49567,9 @@ impl<'e> RegisterSpine<'e> {
                 // is excluded here: a pipe behind a comma or a `def` in a chain is routed, and
                 // refuses where the by-value drive used to delete (the message names the step, not
                 // the result, and a `try` around it catches where jq's does not).
-                if (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
+                if (routes_destructuring(patterns)
+                    || patterns_all_destructuring_chain(patterns)
+                    || (self.null_register && routes_destructuring_chain(patterns)))
                     && self.binds_register(expr)
                     && (patterns.len() == 1 || !matches!(unwrap_bind_source(expr), Expr::Pipe(_)))
                 {
@@ -49659,29 +49683,6 @@ impl<'e> RegisterSpine<'e> {
     }
 }
 
-/// Whether a `foreach` source is `. as P1 ?// ... ?// $v | body` with a destructuring alternative
-/// and a bare one (#4417): the chain [`routes_destructuring_chain`]'s comment leaves to the
-/// by-value drive. On a register that is `null` the first alternative's walk cannot fail
-/// (`null | .a` and `null | .[0]` are `null`), so jq runs it and its `INDEX` steps move the
-/// register onto the matched member, where the by-value drive never moves it. A `null` register is
-/// also the only one a moved register can be `jv_identical` to the emitted state of, so it is
-/// the only document on which the two answers show (`path(foreach (. as {a:$a} ?// $a | .) as $k
-/// (.; .; .))` is `["a"]` on `null`).
-///
-/// Only the direct shape: the same chain behind a comma or a pipe, or as the source of a nested
-/// `foreach`, still takes the by-value drive and answers the root. Inside an outer `path()`
-/// (`path(path(F))`) jq reports `[]` where the resolver now reports `["a"]` in the refusal's
-/// text; both raise.
-fn null_register_destructuring_chain(source: &Expr) -> bool {
-    matches!(
-        unwrap_paren(source),
-        Expr::AsPattern { expr, patterns, .. }
-            if routes_destructuring_chain(patterns)
-                && !patterns_all_destructuring_chain(patterns)
-                && matches!(unwrap_paren(expr), Expr::Identity)
-    )
-}
-
 /// A `?//` chain *every* alternative of which is an array or object pattern (#4187): the chains
 /// a bare-`.` bind source meets the register through. [`routes_destructuring_chain`] asks for
 /// *any* destructuring alternative, which a bind source does not (see its comment).
@@ -49697,7 +49698,7 @@ fn patterns_all_destructuring_chain(patterns: &[Pattern]) -> bool {
 /// a fold's *own* loop pattern is a chain over the register. [`patterns_all_destructuring_chain`]
 /// is the narrower question a bind source asks (#4187): the quantifiers differ on purpose, since
 /// a chain with a bare `$var` alternative as a source is better left to the by-value drive,
-/// except on a `null` register ([`null_register_destructuring_chain`], #4417).
+/// except on a `null` register ([`RegisterSpine::null_register`], #4417, #4420).
 fn routes_destructuring_chain(patterns: &[Pattern]) -> bool {
     patterns.len() > 1 && routes_fresh_destructuring(patterns)
 }
@@ -49720,7 +49721,7 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
             input, patterns, ..
         } => {
             routes_destructuring(patterns)
-                && foreach_source_destructures_register(input, markers.to_vec())
+                && foreach_source_destructures_register(input, markers.to_vec(), false)
         }
         _ => false,
     }
@@ -50023,13 +50024,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
                     )))
     }) || (S::TAG == EvalTag::Jq
         && foreach_source
-        && foreach_source_destructures_register(source, register_markers.clone()))
+        && foreach_source_destructures_register(
+            source,
+            register_markers.clone(),
+            ambient.trackable && matches!(ambient.value, OwnedValue::Null),
+        ))
         || destructures_unplaced_register
-        || (S::TAG == EvalTag::Jq
-            && foreach_source
-            && ambient.trackable
-            && matches!(ambient.value, OwnedValue::Null)
-            && null_register_destructuring_chain(source))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
         // output that *is* the register binds as the register-derived element

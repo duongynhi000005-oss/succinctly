@@ -2156,14 +2156,22 @@ is the revert that established what the other one costs.
    the by-value drive got wrong: on a register that is `null` the first alternative's walk cannot fail, jq moves the
    register onto the matched member and the emitted `null` is `jv_identical` to it, so `path(foreach (. as {a:$a} ?// $a
    | .) as $k (.; .; .))` is `["a"]` and `(...) |= 9` is `{"a":9}`, where the by-value drive answered `[]` and `9`.
-   `null_register_destructuring_chain` routes a bare-`.` source of that shape through the resolver when the fold's
-   ambient value is a trackable `null`; any other register keeps the by-value drive. Pinned by
-   `test_foreach_source_bare_alternative_chain_on_a_null_register_4417`. Over the 39 destructuring-fold operands
-   (`--stage-only`, 33,891 rows) the 10 DIFF rows on `main` went to 0 with no regression. **What it leaves**: only
-   the direct shape, so the chain behind a comma or a pipe (`(.,.) | . as {a:$a} ?// $a | .`) or as the source of a nested
-   `foreach` still answers the root where jq answers the walked register; and inside an outer `path()`
-   (`try path(path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))) catch .` on `null`) the refusal's text names
-   `["a"]` where jq's names `[]` (both raise).
+   The register spine walk (`RegisterSpine`) reads such a chain as a destructure of the register when the fold's
+   ambient value is a trackable `null`, so a bare-`.` source of that shape is routed through the resolver; any other
+   register keeps the by-value drive. Pinned by `test_foreach_source_bare_alternative_chain_on_a_null_register_4417`. Over
+   the 39 destructuring-fold operands (`--stage-only`, 33,891 rows) the 10 DIFF rows on `main` went to 0 with no regression.
+   [#4420](https://github.com/rust-works/succinctly/issues/4420) moves the same question from the one syntactic shape
+   (`null_register_destructuring_chain`, removed) to the walk, so the chain behind a comma, a pipe, an `if`, `try`,
+   `first`, a `label`, a no-argument `def` call, a plain bind or as the source of a nested `foreach` is placed too
+   (`path(foreach ((.,.) | . as {a:$a} ?// $a | .) as $k (.; .; .))` is `["a"]` twice, as in jq). Pinned by
+   `test_foreach_source_bare_alternative_chain_behind_register_stages_4420`. Over 114 destructuring-fold operands (`--stage-only`,
+   100,491 rows) DIFF went 103 -> 64 and MATCH 98,144 -> 98,183 with no regression. **What it leaves**: a chain behind a stage
+   that is the register on only some outputs (`(., 1) | . as {a:$a} ?// $a | .`, or a nested `foreach (., 1)` source) still
+   answers the root on both outputs where jq answers `["a"]` for the register's and `[]` for the other; a pipe-of-registers
+   bind source (`(.|.) as {a:$a} ?// $a | .`, which `resolve_as_pattern` reads as the register for a single pattern only) and a
+   call to a `def` with parameters (`def f($x): CHAIN; f(1)`) answer the root where jq answers `["a"]`; and inside an
+   outer `path()` (`try path(path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))) catch .` on `null`) the refusal's
+   text names `["a"]` where jq's names `[]` (both raise).
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node

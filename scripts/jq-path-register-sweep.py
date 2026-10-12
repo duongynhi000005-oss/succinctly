@@ -459,6 +459,24 @@ OPERANDS = [
     # (#4187) a `?//` chain on the bare register as a fold source: jq's register follows the first
     # alternative that matches and a failed one is retried from the fork, which the resolver's
     # per-alternative walk states; the by-value drive answered the root.
+    # (#4420) a `?//` chain with a bare `$var` alternative behind the stages that hand the register
+    # on (a comma, a pipe, an `if`, `try`, `first`, a `label`, a nested `foreach`): on a `null`
+    # register jq moves it onto the matched member, as for the bare source (#4417). The contrasts
+    # put a stage that is not the register in front (`1 |`, `(., 1) |`), bind the register first,
+    # or put the chain under a `reduce`, which backtracks its source.
+    "(foreach ((., .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
+    "(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",
+    "(foreach (try (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (label $l | (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach ((. as {a:$a} ?// $a | .), 1) as $k (.; .; .))",
+    "(foreach (1 | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (. as $x | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (.a | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(reduce (. | . as {a:$a} ?// $a | .) as $k (.; .))",
     "(foreach (. as {a:$a} ?// [$a] | .) as $k (.; .; .))",
     "(foreach (. as [$a] ?// {a:$a} | .) as $k (.; .; .))",
     "(foreach (. as {a:$a} ?// [$a] | $a) as $k (.; .; .))",

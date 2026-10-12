@@ -77925,6 +77925,196 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
     ])
 }
 
+/// #4420: the `null`-register `?//` chain of #4417 behind the stages that hand the register on -- a
+/// comma, a pipe, an `if`, `try`, `first`, a `label`, a no-argument `def` call, a plain bind or the
+/// source of a nested `foreach`. The register spine walk reads the chain as a destructure of the
+/// register when that register is `null`, so these are placed by the resolver as the bare source
+/// is, instead of answering the root. A register that is not `null`, a source whose chain follows a
+/// stage that is not the register (`1 |`), and a chain under a `reduce` keep the by-value drive.
+/// Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_bare_alternative_chain_behind_register_stages_4420() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach ((.,.) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)) as $j (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (try (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (first(. as {a:{b:$a}} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\",\"b\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (label $l | (. as [$a] ?// $a | .)) as $k (.; .; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach ((. as {a:$a} ?// $a | .), (. as [$a] ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (def f: . as {a:$a} ?// $a | .; f) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as $x | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach ((.,.) | . as {a:$a} ?// $a | .) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)) as $j (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (. | . as [$a] ?// $a | $a) as $k (.; .; .)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        // The chain first bare: the bind performs no step and the register stays at the root.
+        (
+            "null",
+            r"path(foreach ((.,.) | . as $a ?// {a:$b} | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        // Inside another fold's UPDATE or EXTRACT, under a `reduce`, and over an accumulator that left the register.
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; .; foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce 1 as $i (.; foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (0,1) as $i (.; 5; foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach (1 | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce (. | . as {a:$a} ?// $a | .) as $k (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":[1]}",
+            r"path(foreach ((.,.) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":[1]}",
+            r"path(foreach (foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)) as $j (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":[1]}",
+            r"path(foreach (.a | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":[1]}",
+            5,
+        ),
+        (
+            "null",
+            r#"path(foreach ((.,.) | . as {a:$a} ?// $a | error("x")) as $k (.; .; .))"#,
+            "",
+            "x",
+            5,
+        ),
+    ])
+}
+
 /// #4278: the fold-source carriers #4187 left. A destructure of the register behind a mixed `?//`
 /// chain, a plain bind that is a later pipe stage, an `if` branch, a no-argument `def` call, or a
 /// `$x` bound to the register moves jq's register onto `.a`, so the emitted `.` is no longer there
