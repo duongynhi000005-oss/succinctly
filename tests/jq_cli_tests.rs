@@ -78183,6 +78183,15 @@ fn test_foreach_source_pipe_head_of_a_chain_4424() -> Result<()> {
             "Invalid path expression",
             5,
         ),
+        // Inside a `reduce` UPDATE the destructuring-only chain keeps the by-value drive, which
+        // answers as jq does.
+        (
+            "[]",
+            r"path(reduce (1) as $i (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
         // Controls: a bare alternative off `null` keeps the root, as does a pipe that ends in a
         // stage that is not the register.
         (
