@@ -11,7 +11,7 @@ use alloc::{
 };
 
 use super::index::YamlIndex;
-use super::light::{YamlCursor, YamlValue};
+use super::light::{YamlCursor, YamlString, YamlValue};
 
 // ============================================================================
 // Path building utilities
@@ -174,9 +174,34 @@ fn find_key_for_value<W: AsRef<[u64]>>(
 }
 
 /// Extract the key string from a key cursor.
+///
+/// A key that does not decode (invalid UTF-8, or an invalid escape) is read
+/// lossily from its source text rather than dropped (#1759): returning `None`
+/// here fails the whole locate, with an error that hides the real cause, for
+/// the key itself, every value under it and every descendant. U+FFFD is the
+/// spelling `succinctly jq` prints for those bytes, and it forces the bracket
+/// form (`.[0]["b\u{fffd}c"]`), which is still a valid jq expression.
 fn extract_key_string<W: AsRef<[u64]>>(cursor: YamlCursor<'_, W>) -> Option<String> {
     match cursor.value() {
-        YamlValue::String(s) => s.as_str().ok().map(alloc::borrow::Cow::into_owned),
+        YamlValue::String(s) => Some(match s.as_str() {
+            Ok(decoded) => decoded.into_owned(),
+            Err(_) => {
+                let raw = s.raw_bytes();
+                let quote = match s {
+                    YamlString::DoubleQuoted { .. } => Some(b'"'),
+                    YamlString::SingleQuoted { .. } => Some(b'\''),
+                    _ => None,
+                };
+                let content = match quote {
+                    Some(q) => {
+                        let inner = raw.strip_prefix(&[q]).unwrap_or(raw);
+                        inner.strip_suffix(&[q]).unwrap_or(inner)
+                    }
+                    None => raw,
+                };
+                String::from_utf8_lossy(content).into_owned()
+            }
+        }),
         _ => None,
     }
 }
@@ -348,5 +373,43 @@ mod tests {
         assert_eq!(escape_jq_string("hello"), "hello");
         assert_eq!(escape_jq_string("hello\"world"), "hello\\\"world");
         assert_eq!(escape_jq_string("line1\nline2"), "line1\\nline2");
+    }
+
+    /// #1759: a key that does not decode is read lossily instead of failing
+    /// the whole locate, for the key, its value and every descendant.
+    #[test]
+    fn test_locate_key_that_does_not_decode_1759() {
+        for (yaml, expected) in [
+            // invalid UTF-8, each quoting style
+            (&b"a: 1\n\"b\xe4c\": 2\n"[..], "[\"b\u{fffd}c\"]"),
+            (&b"a: 1\n'b\xe4c': 2\n"[..], "[\"b\u{fffd}c\"]"),
+            (&b"a: 1\nb\xe4c: 2\n"[..], "[\"b\u{fffd}c\"]"),
+            // invalid escape: the raw escape text is kept, and `escape_jq_string` doubles the backslash
+            (&b"a: 1\n\"b\\qc\": 2\n"[..], "[\"b\\\\qc\"]"),
+        ] {
+            let index = YamlIndex::build(yaml).unwrap();
+            let key_at = yaml.iter().position(|&b| b == b'b').unwrap();
+            // The key itself, and its value (the byte after `: `).
+            let value_at = yaml.iter().rposition(|&b| b == b'2').unwrap();
+            for offset in [key_at, value_at] {
+                assert_eq!(
+                    locate_offset(&index, yaml, offset).as_deref(),
+                    Some(format!(".[0]{expected}").as_str()),
+                    "{:?} at {offset}",
+                    String::from_utf8_lossy(yaml)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_locate_below_a_key_that_does_not_decode_1759() {
+        let yaml = b"a: 1\n\"b\xe4c\":\n  d: 5\n";
+        let index = YamlIndex::build(yaml).unwrap();
+        let five = yaml.iter().rposition(|&b| b == b'5').unwrap();
+        assert_eq!(
+            locate_offset(&index, yaml, five).as_deref(),
+            Some(".[0][\"b\u{fffd}c\"].d")
+        );
     }
 }

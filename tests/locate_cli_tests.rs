@@ -150,27 +150,75 @@ fn yq_locate_warns_but_still_answers_on_invalid_utf8() -> Result<()> {
 }
 
 /// #1759 (found reviewing #1627/PR #1758): the warn-and-keep-answering fix
-/// only covers an invalid byte inside a *value* -- one inside a *mapping
-/// key* on the path to the requested offset still fails outright, since
-/// `path_to_bp` can't build a path expression without decoding every
-/// ancestor key. Pinning this as the current, documented behavior (not the
-/// desired end state -- see #1759) rather than leaving it unasserted.
+/// first covered only an invalid byte inside a *value*. One inside a *mapping
+/// key* made `path_to_bp` give up, so the key itself, every value under it
+/// and every descendant failed with a generic "Could not locate" error. The
+/// key is now read lossily (U+FFFD), which forces the bracket form.
 #[test]
-fn yq_locate_still_fails_when_invalid_utf8_is_in_an_ancestor_key() -> Result<()> {
+fn yq_locate_answers_when_invalid_utf8_is_in_a_key() -> Result<()> {
     let mut fixture = tempfile::NamedTempFile::new().expect("create temp fixture");
     std::io::Write::write_all(&mut fixture, b"a: 1\n\"b\xe4c\": 2\n").expect("write fixture");
     let path = fixture.path().to_str().expect("utf8 path");
 
-    let (_, stderr, code) = run(&["yq-locate", path, "--offset", "7"])?;
+    // The key (7), its value (12), and the same key by line/column.
+    for args in [
+        &["--offset", "7"][..],
+        &["--offset", "12"][..],
+        &["--line", "2", "--column", "4"][..],
+    ] {
+        let mut argv = vec!["yq-locate", path];
+        argv.extend_from_slice(args);
+        let (stdout, stderr, code) = run(&argv)?;
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert_eq!(stdout, ".[0][\"b\u{fffd}c\"]", "{args:?}");
+        assert!(stderr.contains("not valid UTF-8"), "{args:?}: {stderr}");
+    }
+    Ok(())
+}
 
-    assert_ne!(code, 0, "expected a failure, got: {stderr}");
-    assert!(
-        stderr.contains("not valid UTF-8"),
-        "expected a UTF-8 warning on stderr, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("Could not locate position"),
-        "expected a locate failure on stderr, got: {stderr}"
-    );
+/// #1759: the bad key is an *ancestor* of the requested offset, and is
+/// single-quoted (its own quote pair is not part of the key text).
+#[test]
+fn yq_locate_answers_below_a_key_with_invalid_utf8() -> Result<()> {
+    for (doc, offset, expected) in [
+        (
+            &b"a: 1\n\"b\xe4c\":\n  d: 5\n"[..],
+            "17",
+            ".[0][\"b\u{fffd}c\"].d",
+        ),
+        (
+            &b"a: 1\n'b\xe4c':\n  d: 5\n"[..],
+            "17",
+            ".[0][\"b\u{fffd}c\"].d",
+        ),
+        (
+            &b"a: 1\nb\xe4c:\n  d: 5\n"[..],
+            "15",
+            ".[0][\"b\u{fffd}c\"].d",
+        ),
+    ] {
+        let mut fixture = tempfile::NamedTempFile::new().expect("create temp fixture");
+        std::io::Write::write_all(&mut fixture, doc).expect("write fixture");
+        let path = fixture.path().to_str().expect("utf8 path");
+        let (stdout, stderr, code) = run(&["yq-locate", path, "--offset", offset])?;
+        assert_eq!(code, 0, "{doc:?}: {stderr}");
+        assert_eq!(stdout, expected, "{doc:?}");
+    }
+    Ok(())
+}
+
+/// #1759: `jq-locate` had the identical hole in `src/json/locate.rs`.
+#[test]
+fn jq_locate_answers_when_invalid_utf8_is_in_a_key() -> Result<()> {
+    let mut fixture = tempfile::NamedTempFile::new().expect("create temp fixture");
+    std::io::Write::write_all(&mut fixture, b"{\"a\":1,\"b\xe4c\":{\"d\":5}}")
+        .expect("write fixture");
+    let path = fixture.path().to_str().expect("utf8 path");
+
+    for (offset, expected) in [("9", ".[\"b\u{fffd}c\"]"), ("16", ".[\"b\u{fffd}c\"].d")] {
+        let (stdout, stderr, code) = run(&["jq-locate", path, "--offset", offset])?;
+        assert_eq!(code, 0, "offset {offset}: {stderr}");
+        assert_eq!(stdout, expected, "offset {offset}");
+    }
     Ok(())
 }
