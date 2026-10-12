@@ -7685,6 +7685,16 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         false
     }
 
+    /// Whether nothing but spaces sits between the start of the cursor's line and `start`, so
+    /// the node properties parsed from `start` open the line (#4271).
+    fn line_opens_with_properties_only(&self, start: usize) -> bool {
+        let mut line_start = start;
+        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
+            line_start -= 1;
+        }
+        self.input[line_start..start].iter().all(|&b| b == b' ')
+    }
+
     /// Dispatch the block-context node that begins at the cursor, treating
     /// `indent` as its indentation level.
     ///
@@ -7815,11 +7825,26 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.close_deeper_indents(indent);
                     // Consume any leading `&anchor` and/or `!tag`, in either
                     // order, for non-mapping-key cases
+                    let properties_start = self.pos;
                     self.parse_node_properties()?;
                     // Check what follows
                     match self.peek() {
                         Some(b'\n' | b'\r') | None => {
                             // Property with value on next line - will be parsed in next iteration
+                        }
+                        // #4271: the properties open a line of their own and the block scalar
+                        // header follows them (`&x |`, `!!str >`), under a `-` or `key:` that
+                        // left its value for this line -- the same slot, and the same
+                        // parent-relative content indent, as the bare header below (#4259).
+                        Some(b'|' | b'>')
+                            if !self.json_strict
+                                && self.type_stack.len() > 1
+                                && self.line_opens_with_properties_only(properties_start)
+                                && self.previous_content_line_defers_its_value() =>
+                        {
+                            self.attach_document_root_node(indent);
+                            let parent = self.innermost_block_indent();
+                            self.parse_block_scalar(parent)?;
                         }
                         // Keep this guard on one line: rustfmt splitting the
                         // `matches!` across lines gives the opening line its own

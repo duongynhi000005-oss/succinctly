@@ -1785,6 +1785,148 @@ fn test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865() -> Resu
     Ok(())
 }
 
+/// Pinned yq v4.53.3: a block scalar whose header follows node properties (`&x |`, `!!str >`) on a
+/// line of its own, below the owning `-` or `key:`, reads its text like the bare header of #4259.
+/// The properties used to send the value down the plain-scalar path, which measured its
+/// continuation against the header's own line: the text read as an empty string (and under a key,
+/// split into a stray entry), on every read and write (#4271). Every row was captured from the
+/// pinned binary.
+#[test]
+fn test_block_scalar_header_after_properties_on_its_own_line_4271() -> Result<()> {
+    for (input, filter, args, expected) in [
+        (
+            "-\n  !!str |\n  x\n- y\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x\\n\",\"y\"]\n",
+        ),
+        (
+            "-\n  !!str |\n  x\n- y\n",
+            ".",
+            &[][..],
+            "- !!str |\n  x\n- y\n",
+        ),
+        (
+            "a:\n  &x |\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\"}\n",
+        ),
+        ("a:\n  &x |\n  x\n", ".", &[][..], "a: &x |\n  x\n"),
+        (
+            "a:\n  &x |\n  x\n",
+            ".z = 1",
+            &[][..],
+            "a: &x |\n  x\nz: 1\n",
+        ),
+        (
+            "-\n  &x >\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x\\n\"]\n",
+        ),
+        ("-\n  &x >\n  x\n", ".", &[][..], "- &x >\n  x\n\n"),
+        (
+            "-\n  &x !!str |\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x\\n\"]\n",
+        ),
+        (
+            "-\n  &x !!str |\n  x\n",
+            ".",
+            &[][..],
+            "- &x !!str |\n  x\n",
+        ),
+        (
+            "-\n  !!str &x >\n  x\n  y\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "[\"x y\\n\"]\n",
+        ),
+        (
+            "-\n  !!str &x >\n  x\n  y\n",
+            ".",
+            &[][..],
+            "- &x !!str >\n  x y\n\n",
+        ),
+        (
+            "a:\n  &x |\n  x\nb: 1\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\n\",\"b\":1}\n",
+        ),
+        (
+            "a:\n  &x |\n  x\nb: 1\n",
+            ".",
+            &[][..],
+            "a: &x |\n  x\nb: 1\n",
+        ),
+        (
+            "a:\n  &x |\n  x\nb: 1\n",
+            ".z = 1",
+            &[][..],
+            "a: &x |\n  x\nb: 1\nz: 1\n",
+        ),
+        (
+            "a:\n  &x >\n  x\n  y\n\n  z\nb: 2\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x y\\nz\\n\",\"b\":2}\n",
+        ),
+        (
+            "a:\n  &x >\n  x\n  y\n\n  z\nb: 2\n",
+            ".",
+            &[][..],
+            "a: &x >\n  x y\n\n  z\n\nb: 2\n",
+        ),
+        (
+            "a:\n  &x >\n  x\n  y\n\n  z\nb: 2\n",
+            ".z = 1",
+            &[][..],
+            "a: &x >\n  x y\n\n  z\n\nb: 2\nz: 1\n",
+        ),
+        (
+            "a:\n  &x |-\n  x\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\"}\n",
+        ),
+        ("a:\n  &x |-\n  x\n", ".", &[][..], "a: &x |-\n  x\n"),
+        (
+            "a:\n  &x |-\n  x\n",
+            ".z = 1",
+            &[][..],
+            "a: &x |-\n  x\nz: 1\n",
+        ),
+        (
+            "a:\n  !!str |\n    x\n    y\n",
+            ".",
+            &["-o=json", "-I=0"][..],
+            "{\"a\":\"x\\ny\\n\"}\n",
+        ),
+        (
+            "a:\n  !!str |\n    x\n    y\n",
+            ".",
+            &[][..],
+            "a: !!str |\n  x\n  y\n",
+        ),
+        (
+            "a:\n  !!str |\n    x\n    y\n",
+            ".z = 1",
+            &[][..],
+            "a: !!str |\n  x\n  y\nz: 1\n",
+        ),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, input, args)?,
+            (expected.into(), String::new(), 0),
+            "{filter} {args:?} over {input:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]

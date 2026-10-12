@@ -6315,7 +6315,12 @@ impl<'a> YamlString<'a> {
         while line_start > 0 && !is_line_break(text[line_start - 1]) {
             line_start -= 1;
         }
-        if text[line_start..indicator_pos].iter().any(|&b| b != b' ') {
+        // Node properties (`&x`, `!!str`) may precede the header on its line (#4271); anything
+        // else (`key: |`, `- |`) is the same-line form.
+        if text[line_start..indicator_pos]
+            .split(|&b| b == b' ' || b == b'\t')
+            .any(|token| !token.is_empty() && !matches!(token[0], b'&' | b'!'))
+        {
             return None;
         }
         let mut end = line_start;
