@@ -63725,3 +63725,38 @@ fn test_deep_block_yaml_below_the_ceiling_still_evaluates_1817() -> Result<()> {
     }
     Ok(())
 }
+
+/// #2187: YAML's M2 streaming of a `LazySeq` (`map(.)`), a document (`.`) and its elements
+/// (`.[]`) has no nesting-depth guard on purpose. A 600-deep block-style sequence is past the
+/// 256 ceiling the materializing builtins enforce, yet all three stream it in full with exit 0,
+/// as real yq does (6,000 and 20,000 levels were also run live; depth is bounded by the square
+/// root of the document size, see `YamlCursor::stream_json_value`). `sort` on the same document
+/// materializes and gets the clean #1817 refusal, so this is not just a missing check.
+#[test]
+fn test_m2_streaming_lazyseq_streams_past_materialization_ceiling_2187() -> Result<()> {
+    let depth = 600;
+    let mut input = String::new();
+    for level in 0..depth {
+        input.push_str(&"  ".repeat(level));
+        input.push_str("-\n");
+    }
+    input.push_str(&"  ".repeat(depth));
+    input.push_str("1\n");
+    let nested = |levels: usize| format!("{}1{}\n", "[".repeat(levels), "]".repeat(levels));
+
+    for (filter, levels) in [("map(.)", depth), (".", depth), (".[]", depth - 1)] {
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, &input, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{filter}: stderr: {stderr:?}");
+        assert_eq!(stdout, nested(levels), "{filter}");
+    }
+
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr("sort", &input, &["-o=json", "-I=0"])?;
+    assert_eq!(code, 1, "stderr: {stderr:?}");
+    assert!(
+        stderr.contains("nesting depth exceeds limit of 256") && !stderr.contains("panicked"),
+        "stderr: {stderr:?}"
+    );
+    assert_eq!(stdout, "");
+    Ok(())
+}
