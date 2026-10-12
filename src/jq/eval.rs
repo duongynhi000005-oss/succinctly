@@ -36586,7 +36586,18 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
             _ => false,
         }
     }
-    cannot_move_register(e) || navigation(e, None)
+    // #4320: a source the fold driver routes through the resolver as a destructure of the register
+    // is checked against jq's register whole, however it spells the bound expression (a `def`
+    // with a comma, nested or `$x`-capturing body, `try f`, `. as $x | $x as ..`), so the nested
+    // `foreach` is vetted by the routing itself instead of by one hand-written shape. Not a
+    // `?//` chain, whose failed alternative leaves `null` (the same exclusion as above).
+    let no_chain = !any_subexpr(
+        e,
+        &mut |s| matches!(s, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
+    );
+    cannot_move_register(e)
+        || navigation(e, None)
+        || (no_chain && foreach_source_destructures_register(e, Vec::new(), false))
 }
 
 /// Whether `e` is a no-op in path position: `.`, or a pipe or parenthesised group of
