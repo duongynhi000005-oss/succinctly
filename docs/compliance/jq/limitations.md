@@ -11677,8 +11677,11 @@ jq emits events while it parses, so two things differ for the shapes below, both
   occurrence (`{"a":1,"a":2}` prints `[["a"],2]` and `[["a"]]`), where jq's `--stream` emits every occurrence
   (`docs/plan/jq-duplicate-key-collapse.md`).
 
-`--stream-errors` is not accepted. The expansion materializes every event, so `--stream` does not give jq's
-constant-memory streaming of a large document.
+`--stream-errors` is not accepted. The document is still parsed whole, so `--stream` does not give jq's
+constant-memory streaming of a large document: a program that reads `.` walks each document's events one at a time
+(`tostream_events_iter`, memory proportional to the depth on top of the document), and one that uses `-s` or
+`input`/`inputs` keeps every event (a 10.8 MB array of 120,000 records peaked at 622 MB with the events kept and
+310 MB walked one at a time, against jq's 2.4 MB).
 
 ## ANSI color bytes: succinctly emits one SGR per token, jq emits redundant repeats (#3110)
 
