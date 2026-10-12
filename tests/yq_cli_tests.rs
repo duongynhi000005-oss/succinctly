@@ -622,6 +622,63 @@ fn test_exit_status_decode_failure_exits_nonzero_1805() -> Result<()> {
     Ok(())
 }
 
+/// #1881: real yq (go-yaml) opens a block child under a mapping value at the
+/// smallest multiple of `-I` above the current indent, and a compact `- ` adds a
+/// literal 2, so after `D` stacked compact sequence levels the columns are not
+/// monotonic in `-I` (`- - b:` / `c:` sits at 6, 6, 8, 5, 6 for `-I=2..6`). The
+/// expected text is yq v4.53.3's, for `D` stacked levels over `b: c: d: 1`, on
+/// both the streaming route (`.`) and the DOM route (`-P`).
+#[test]
+fn test_stacked_compact_seq_indent_rounds_up_to_the_indent_width_1881() -> Result<()> {
+    let cases: &[(usize, usize, &str)] = &[
+        (1, 2, "- b:\n    c:\n      d: 1\n"),
+        (1, 3, "- b:\n   c:\n      d: 1\n"),
+        (1, 4, "- b:\n    c:\n        d: 1\n"),
+        (1, 5, "- b:\n     c:\n          d: 1\n"),
+        (1, 6, "- b:\n      c:\n            d: 1\n"),
+        (1, 7, "- b:\n       c:\n              d: 1\n"),
+        (2, 2, "- - b:\n      c:\n        d: 1\n"),
+        (2, 3, "- - b:\n      c:\n         d: 1\n"),
+        (2, 4, "- - b:\n        c:\n            d: 1\n"),
+        (2, 5, "- - b:\n     c:\n          d: 1\n"),
+        (2, 6, "- - b:\n      c:\n            d: 1\n"),
+        (2, 7, "- - b:\n       c:\n              d: 1\n"),
+        (3, 2, "- - - b:\n        c:\n          d: 1\n"),
+        (3, 3, "- - - b:\n         c:\n            d: 1\n"),
+        (3, 4, "- - - b:\n        c:\n            d: 1\n"),
+        (3, 5, "- - - b:\n          c:\n               d: 1\n"),
+        (3, 6, "- - - b:\n            c:\n                  d: 1\n"),
+        (3, 7, "- - - b:\n       c:\n              d: 1\n"),
+        (4, 2, "- - - - b:\n          c:\n            d: 1\n"),
+        (4, 3, "- - - - b:\n         c:\n            d: 1\n"),
+        (4, 4, "- - - - b:\n            c:\n                d: 1\n"),
+        (4, 5, "- - - - b:\n          c:\n               d: 1\n"),
+        (4, 6, "- - - - b:\n            c:\n                  d: 1\n"),
+        (
+            4,
+            7,
+            "- - - - b:\n              c:\n                     d: 1\n",
+        ),
+    ];
+    for &(depth, indent, expected) in cases {
+        let doc = format!(
+            "{}b:\n{}  c:\n{}    d: 1\n",
+            "- ".repeat(depth),
+            "  ".repeat(depth),
+            "  ".repeat(depth)
+        );
+        let indent_arg = format!("-I={indent}");
+        for extra in [&[][..], &["-P"][..]] {
+            let mut args = vec![indent_arg.as_str()];
+            args.extend_from_slice(extra);
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", &doc, &args)?;
+            assert_eq!(code, 0, "D={depth} -I={indent} {extra:?}: {stderr}");
+            assert_eq!(stdout, expected, "D={depth} -I={indent} {extra:?}");
+        }
+    }
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
