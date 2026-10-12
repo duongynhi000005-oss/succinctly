@@ -554,8 +554,9 @@ at all. The justification is the spec target, which is why the case belongs here
 
 ### A fused slice read does not validate the rest of the range (#4195)
 
-`E[a:b][k]` and `E[a:b] | length` over a computed slice read the range's resolved bounds and
-convert only the element they name, in yq mode as in jq mode. A malformed JSON value elsewhere
+`E[a:b][k]` and `E[a:b] | length` over a computed slice, and (since #4323) over a literal-bounded
+slice (`.[2:][0]`, `.a[2:][0]`), read the range's resolved bounds and convert only the
+element they name, in yq mode as in jq mode. A malformed JSON value elsewhere
 in the range (`[1,1.2.3,3]` read as `0 as $i | .[$i:][0]`) therefore does not raise, where the
 slice written out in full (`(.[$i:]) | .[0]`) still does. It is an input-validation posture,
 not an evaluator rule, and the same as `.[0]` and `length`; the table and the reasoning are in
