@@ -514,6 +514,26 @@ fn test_jq_terminal_iterate_assign_still_evaluates_the_rhs_1921() -> Result<()> 
     Ok(())
 }
 
+/// #1779 guard: `|=` observes only the update filter's *first* output in jq (`_modify`), so a
+/// trailing error is never reached -- yq mode evaluates the whole filter and raises it
+/// instead, which must not leak into `succinctly jq`. Verified against jq 1.7.1.
+#[test]
+fn test_jq_update_ignores_an_error_after_the_first_output_1779() -> Result<()> {
+    for (filter, expected) in [
+        (".a |= (1, error(\"x\"))", "{\"a\":1}\n"),
+        (".a[] |= (1, error(\"x\"))", "{\"a\":[1,1]}\n"),
+    ] {
+        let input = if filter.starts_with(".a[]") {
+            "{\"a\":[0,2]}"
+        } else {
+            "{\"a\":0}"
+        };
+        let (out, code) = run_jq_stdin(filter, input, &["-c"])?;
+        assert_eq!((out.as_str(), code), (expected, 0), "{filter}");
+    }
+    Ok(())
+}
+
 /// Helper to run jq command with input from stdin
 fn run_jq_stdin(filter: &str, input: &str, extra_args: &[&str]) -> Result<(String, i32)> {
     let (stdout, _, code) = run_jq_stdin_streams(filter, input, extra_args)?;
