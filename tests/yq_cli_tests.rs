@@ -64920,6 +64920,51 @@ fn test_negative_index_write_error_uses_yq_wording_2335() -> Result<()> {
             "{filter}"
         );
     }
+    // More routes, each captured from yq: an update that writes nothing, a nested fresh index,
+    // an array root, and `--eval-all`.
+    for (filter, args, input, text) in [
+        (
+            ".a.b[-5] |= select(false)",
+            vec![],
+            doc,
+            "index [-5] out of range, array size is 3",
+        ),
+        (
+            ".x[0][-1] = 3",
+            vec![],
+            doc,
+            "index [-1] out of range, array size is 0",
+        ),
+        (
+            ".[-5] = 9",
+            vec![],
+            "[1, 2, 3]\n",
+            "index [-5] out of range, array size is 3",
+        ),
+        (
+            "(.[-5], .[0]) = 1",
+            vec![],
+            "[1, 2, 3]\n",
+            "index [-5] out of range, array size is 3",
+        ),
+        (
+            ".a.b[-5] = 9",
+            vec!["--eval-all"],
+            doc,
+            "index [-5] out of range, array size is 3",
+        ),
+    ] {
+        let mut full = vec!["-o=json", "-I=0"];
+        full.extend(args);
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, input, &full)?;
+        assert_eq!(code, 1, "{filter}: stdout: {stdout:?}");
+        assert_eq!(stdout, "", "{filter}");
+        assert_eq!(
+            stderr.lines().next(),
+            Some(format!("Error: {text}").as_str()),
+            "{filter}"
+        );
+    }
     // In range after counting back from the end: an ordinary write.
     let (stdout, stderr, code) =
         run_yq_stdin_with_stderr(".a.b[-3] = 9", doc, &["-o=json", "-I=0"])?;
