@@ -2802,21 +2802,16 @@ by gating the new low-surrogate arm behind `S::TAG == EvalTag::Yq` (threaded as 
 `EvalSemantics` type parameter before): yq mode keeps erroring on a lone low surrogate,
 unchanged from before #2008; only jq mode gained the new leniency.
 
-That gate is deliberately narrow -- it does not make yq-mode `fromjson` match real yq's
-actual model, which rejects the entire surrogate-pairing mechanism, not just the lone-low
-case. A **valid** surrogate pair still silently decodes successfully in yq mode today
-(`succinctly yq -n '"\"\\ud83d\\ude00\"" | fromjson'` → the emoji, real yq → a parse
-error). A lone **high** surrogate was also wrongly *accepted* (substituted U+FFFD) in both
-jq and yq mode alike -- a separate, pre-existing bug unrelated to #2008's own scope
-(also caused real data loss: two `fromjson`-parsed object keys differing only by an
-unpaired high surrogate silently collapsed, last-value-wins) -- fixed in both modes by
-[#2013](https://github.com/rust-works/succinctly/issues/2013): `parse_json_string_value`'s
-high-surrogate arm now raises unconditionally (no mode gate needed there, since both real
-jq and real yq reject it -- unlike the lone-low case above, where the two oracles
-disagree). Fully aligning yq-mode `fromjson` with real yq's stricter, non-pairing model
-(the still-open valid-pair gap) is filed separately as
-[#2018](https://github.com/rust-works/succinctly/issues/2018), since it needs its own
-yq-mode branch checked ahead of all of jq's pairing logic, not an arm-by-arm patch.
+That gate was deliberately narrow, and it is superseded: [#2018](https://github.com/rust-works/succinctly/issues/2018)
+made yq-mode `fromjson` reject **every** `\uD800`-`\uDFFF` escape before any pairing runs, as go-yaml's
+quoted-scalar scanner does -- a lone high, a lone low and a **valid** high+low pair alike -- with yq's
+own wording, `yaml: while scanning a quoted scalar at line L[, column C]: line L, column N: found
+invalid Unicode character escape code`. `L`/`C` locate the opening quote (`, column C` is left off at
+column 1) and `N` the first hex digit of the escape, both counted in characters from the start of the
+string, a `\n` starting a new line. jq mode is not on this decoder (#3032) and still pairs surrogates
+as real jq does. An earlier PR ([#2013](https://github.com/rust-works/succinctly/issues/2013)) had
+already made a lone **high** surrogate an error in both modes, which also stopped two `fromjson`-parsed
+object keys differing only by an unpaired high surrogate from silently collapsing.
 
 ### `parent` doesn't auto-vivify the missing node it navigated through
 

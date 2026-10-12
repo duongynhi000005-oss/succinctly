@@ -22480,6 +22480,9 @@ fn builtin_fromjson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 match parse_complete_json(json_str, S::TAG == EvalTag::Yq) {
                     Ok(owned) => QueryResult::Owned(owned),
                     Err(_) if optional => QueryResult::None,
+                    Err(e) if e.starts_with(YQ_SCANNER_ERROR_PREFIX) => {
+                        QueryResult::Error(EvalError::new(e))
+                    }
                     Err(_) => QueryResult::Error(EvalError::invalid_numeric_literal(json_str)),
                 }
             }
@@ -22594,6 +22597,43 @@ fn parse_json_value(bytes: &[u8], pos: &mut usize) -> Result<OwnedValue, String>
     }
 }
 
+/// 1-based `(line, column)` of byte offset `at` in `bytes`, the way go-yaml marks it: a
+/// line is a `\n`-terminated run and a column counts characters, not bytes.
+fn yq_line_column(bytes: &[u8], at: usize) -> (usize, usize) {
+    let before = &bytes[..at.min(bytes.len())];
+    let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
+    let line_start = before
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let column = 1 + before[line_start..]
+        .iter()
+        .filter(|&&b| (b & 0xC0) != 0x80)
+        .count();
+    (line, column)
+}
+
+/// yq's message for a `\u` escape that encodes a surrogate (#2018), naming where the quoted
+/// scalar starts (`, column C` left off at column 1) and where the escape's first hex digit
+/// is, both as go-yaml counts them.
+fn yq_surrogate_escape_error(bytes: &[u8], quote_pos: usize, hex_pos: usize) -> String {
+    let (start_line, start_column) = yq_line_column(bytes, quote_pos);
+    let (line, column) = yq_line_column(bytes, hex_pos);
+    let start = if start_column == 1 {
+        format!("line {start_line}")
+    } else {
+        format!("line {start_line}, column {start_column}")
+    };
+    format!(
+        "{YQ_SCANNER_ERROR_PREFIX} a quoted scalar at {start}: line {line}, column {column}: \
+         found invalid Unicode character escape code"
+    )
+}
+
+/// Start of an error [`parse_json_string_value`] words as yq does, so `fromjson` reports it
+/// verbatim instead of as jq's `Invalid numeric literal`.
+const YQ_SCANNER_ERROR_PREFIX: &str = "yaml: while scanning";
+
 /// Parse a JSON string value
 ///
 /// The bounds check is not redundant with [`parse_json_value`]'s: an object's
@@ -22606,6 +22646,7 @@ fn parse_json_string_value(bytes: &[u8], pos: &mut usize) -> Result<OwnedValue, 
     if bytes[*pos] != b'"' {
         return Err("expected '\"'".to_string());
     }
+    let quote_pos = *pos;
     *pos += 1;
 
     let mut result = String::new();
@@ -22640,75 +22681,19 @@ fn parse_json_string_value(bytes: &[u8], pos: &mut usize) -> Result<OwnedValue, 
                         let codepoint =
                             u32::from_str_radix(hex, 16).map_err(|_| "invalid unicode escape")?;
 
-                        // Handle surrogate pairs
-                        if (0xD800..=0xDBFF).contains(&codepoint) {
-                            // High surrogate - look for low surrogate
-                            *pos += 4;
-                            if *pos + 6 <= bytes.len()
-                                && bytes[*pos] == b'\\'
-                                && bytes[*pos + 1] == b'u'
-                            {
-                                let hex2 = core::str::from_utf8(&bytes[*pos + 2..*pos + 6])
-                                    .map_err(|_| "invalid unicode escape")?;
-                                let low = u32::from_str_radix(hex2, 16)
-                                    .map_err(|_| "invalid unicode escape")?;
-                                if (0xDC00..=0xDFFF).contains(&low) {
-                                    // Valid surrogate pair
-                                    let combined =
-                                        0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
-                                    if let Some(c) = char::from_u32(combined) {
-                                        result.push(c);
-                                    }
-                                    *pos += 5; // Move past the low surrogate (will be incremented again below)
-                                } else {
-                                    // #2013: a lone high surrogate (this
-                                    // \u wasn't followed by a valid low
-                                    // surrogate) is an error, matching real
-                                    // jq (confirmed live) and this crate's
-                                    // own primary document decoder
-                                    // (`json::light::decode_escapes`'s
-                                    // sibling high-surrogate arm). No
-                                    // yq-mode split needed: real yq also
-                                    // rejects every surrogate escape
-                                    // unconditionally (#2018).
-                                    return Err("invalid unicode codepoint".to_string());
-                                }
-                            } else {
-                                // #2013: lone high surrogate, not followed
-                                // by any `\u` escape at all -- same fix as
-                                // above.
-                                return Err("invalid unicode codepoint".to_string());
-                            }
-                        } else if (0xDC00..=0xDFFF).contains(&codepoint) {
-                            // #2008: a lone low surrogate isn't a valid Rust
-                            // `char` (falls through `char::from_u32` below).
-                            // Real jq accepts it and substitutes U+FFFD, but
-                            // real yq's `fromjson` doesn't use jq's JSON
-                            // string grammar at all -- it decodes through
-                            // go-yaml's own quoted-scalar scanner, which
-                            // rejects *any* `\u` escape encoding a surrogate
-                            // codepoint outright, lone or (even) validly
-                            // paired (confirmed live against yq v4.53.3, incl.
-                            // a valid astral-plane pair). Matching that fully
-                            // is a larger, separate gap (#2013); this only
-                            // keeps yq's pre-#2008 behavior for the lone-low
-                            // case unchanged (error) rather than silently
-                            // picking up jq's leniency here too. #3032 moved
-                            // jq mode off this decoder entirely, so the
-                            // U+FFFD substitution jq wants never applies here
-                            // any more -- this function only ever runs in yq
-                            // mode now.
-                            return Err("invalid unicode codepoint".to_string());
-                        } else {
-                            // codepoint is <= 0xFFFF (4 hex digits) and
-                            // outside 0xD800-0xDFFF (both arms above already
-                            // cover that whole range), so it's always a
-                            // valid char and this can't fail.
-                            result.push(char::from_u32(codepoint).expect(
+                        // #2018: real yq's `fromjson` hands its argument to go-yaml's
+                        // quoted-scalar scanner, which rejects any `\u` escape that
+                        // encodes a surrogate -- a lone high, a lone low and a valid
+                        // high+low pair alike -- before any pairing could happen.
+                        if (0xD800..=0xDFFF).contains(&codepoint) {
+                            return Err(yq_surrogate_escape_error(bytes, quote_pos, *pos));
+                        }
+                        // Not a surrogate, so a valid `char`.
+                        result
+                            .push(char::from_u32(codepoint).expect(
                                 "non-surrogate u16-range codepoint is always a valid char",
                             ));
-                            *pos += 3; // Move past the hex digits (will be incremented again below)
-                        }
+                        *pos += 3; // Move past the hex digits (will be incremented again below)
                     }
                     c => return Err(format!("invalid escape sequence: \\{}", c as char)),
                 }
