@@ -36632,7 +36632,21 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
             _ => false,
         }
     }
-    cannot_move_register(e) || navigation(e, None)
+    // #4320: a source the fold driver routes through the resolver as a destructure of the register
+    // is checked against jq's register by the resolver, so the nested `foreach` is vetted by that
+    // routing instead of by one hand-written shape (`def f: .`). It is the router's syntactic
+    // answer with no outer markers and no `null` register, so a source the live router places
+    // only with either stays refused (the safe direction). It inherits the router's own reading
+    // of a call: a `def` whose body returns a fresh value is read as the register too, an
+    // accept jq does not make, identical on a build without this arm (#4452). Not a `?//` chain,
+    // whose failed alternative leaves `null` (the same exclusion as above).
+    let no_chain = !any_subexpr(
+        e,
+        &mut |s| matches!(s, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
+    );
+    cannot_move_register(e)
+        || navigation(e, None)
+        || (no_chain && foreach_source_destructures_register(e, Vec::new(), false))
 }
 
 /// Whether `e` is a no-op in path position: `.`, or a pipe or parenthesised group of

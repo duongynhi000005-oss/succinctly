@@ -61295,6 +61295,114 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
     Ok(())
 }
 
+/// #4320 (a `reduce` UPDATE): a `foreach` in a `reduce` UPDATE whose source binds a call that
+/// returns the register is vetted by the fold driver's own routing, not by one hand-written shape.
+/// `update_returns_its_input` read only a `def` whose body is `.`, so the same source with a comma
+/// body, a nested `def`, a `$x` captured by the `def` or a `try` was refused where jq answers
+/// (`path(reduce 1 as $k (.; foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))` is `[[]]`:
+/// jq backtracks the `reduce`, so the accumulator stays INIT's node), and `del`/`=`/`|=` through it
+/// lost their answer. The contrasts are an UPDATE whose earlier stage moved the register
+/// (`. as {a:$q} | foreach ...`), which jq raises at the source's first step, and a call that
+/// navigates. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_reduce_update_foreach_call_source_is_vetted_by_routing_4320() -> Result<()> {
+    let doc = r#"{"a":false,"b":null}"#;
+    assert_path_rows_3289(&[
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: .; def g: f; g as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (. as $x | def f: $x; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: .; try f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; foreach (. as $x | def f: $x; f as {a:$a} | .) as $y (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; foreach (def f: .; def g: f; g as {a:$a} | .) as $y (.; .; .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; foreach (def f: .; try f as {a:$a} | .) as $y (.; .; .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(try reduce 1 as $k (.; foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; . as {a:$q} | foreach (def f: .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; . as {a:$q} | foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (def f: .a; f as {a:$a} | .) as $y (.; .; .)))]",
+            "",
+            "near attempt to access element \"a\" of false",
+            5,
+        ),
+        (
+            "null",
+            r"[path(reduce 1 as $k (.; . as {a:$q} | foreach (def f: ., .; f as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #4017: a variable bound to the result of a stage that returns its input as the same
 /// `jv` (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
 /// `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`) is the register itself, so
@@ -78662,15 +78770,15 @@ fn test_foreach_source_plain_bind_before_a_destructure_refuses_4187() -> Result<
             "",
             0,
         ),
-        // The price: inside another fold's body the register is not known to be at `.`, so the
-        // source is refused (as the bare `. as {a:$a}` destructure is when the accumulator is
-        // not a pass-through) where jq answers `[[]]`. A loud refusal, not a wrong answer.
+        // Inside a `reduce` UPDATE jq answers `[[]]` (it backtracks the `reduce`). This was a
+        // refusal (the price of the vetter reading one shape) until #4320's seventh part vetted
+        // the nested `foreach` by the fold driver's own routing of its source.
         (
             r#"{"a":[1,2],"b":null}"#,
             r"[path(reduce range(2) as $i (.; foreach (. as $x | . as {a:$a} | .) as $y (.; .; .)))]",
+            "[[]]\n",
             "",
-            with_result,
-            5,
+            0,
         ),
     ])
 }

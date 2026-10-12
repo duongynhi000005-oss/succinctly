@@ -2131,7 +2131,14 @@ is the revert that established what the other one costs.
    gained, and 56 are lost to a refusal, all on the new operands and all inside a `reduce` UPDATE: `path(reduce 1 as $k
    (.; foreach (def f: .; f as {a:$a} | .) as $k (.; .; .)))` is `[]` in jq and answers here (the nested `foreach` is
    vetted by `foreach_source_is_path_checked`, which reads a `def` whose body is `.`), but the same with a comma body,
-   a nested `def`, a `$x` captured by the `def`, a `try` or a `reduce` source is refused. A `$x` bound outside the
+   a nested `def`, a `$x` captured by the `def`, a `try` or a `reduce` source is refused (the first four answer since
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s seventh part, `foreach_source_is_path_checked` now
+   accepts any source the fold driver routes as a destructure of the register, outside a `?//` chain; the `reduce`
+   source is not call-specific, `reduce 1 as $k (.; reduce (. as {a:$a} | .) as $k (.; .))` is refused too, since a
+   nested `reduce` has no `update_returns_its_input` arm and its source is driven by value, a refusal where jq answers,
+   not a wrong accept). The vetter inherits the router's reading of a call, so a `def` whose body returns a fresh value
+   (`def f: {a:1}; f as {a:$a}`) is accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level
+   and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
    `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
    `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does, and so does a `$x` that is some other
    node (`.a as $x | del(foreach ($x as {b:$b} | .) ...)` raises at the pattern's first step in jq too). Outside every
@@ -2182,9 +2189,10 @@ is the revert that established what the other one costs.
    `test_foreach_source_destructuring_chain_on_the_register_refuses_4187`. Over the 21 register-sweep operands for the two families (279,747 rows, final binary) 3,667 wrong accepts and 491
    wrong answers go to 203 and 34 (the bound-`$x` source above and the `?// $a` operand, identical on `main`), 2,714
    refusals become matches, and 442 matches are lost to a refusal, in nested `?//` binds and `reduce` sources, all in
-   the safe direction. A plain-bind source inside another fold's body is refused where jq answers
-   (`[path(reduce range(2) as $i (.; foreach (. as $x | . as {a:$a} | .) as $y (.; .; .)))]` is `[[]]` in jq), as a
-   bare destructure is when the accumulator is not a pass-through.
+   the safe direction. A plain-bind source inside another fold's body was refused where jq answers
+   (`[path(reduce range(2) as $i (.; foreach (. as $x | . as {a:$a} | .) as $y (.; .; .)))]` is `[[]]` in jq); a `reduce`
+   UPDATE that hands the accumulator on answers it since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s
+   seventh part, and a bare destructure is still refused when the accumulator is not a pass-through.
    [#4417](https://github.com/rust-works/succinctly/issues/4417) places the one chain with a bare `$var` alternative
    the by-value drive got wrong: on a register that is `null` the first alternative's walk cannot fail, jq moves the
    register onto the matched member and the emitted `null` is `jv_identical` to it, so `path(foreach (. as {a:$a} ?// $a
