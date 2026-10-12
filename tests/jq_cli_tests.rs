@@ -79117,6 +79117,15 @@ fn test_foreach_source_register_through_def_comma_and_nested_foreach_4424() -> R
             "",
             0,
         ),
+        // Inside a `reduce` UPDATE the partial-register comma keeps the by-value drive, which answers
+        // as jq does (routing it there refused).
+        (
+            "null",
+            r"path(reduce 1 as $k (.; (foreach ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
         (
             "[true]",
             r"del(foreach (def f($x): . as {a:$a} ?// [$a] | .; f(1)) as $k (.; .; .))",

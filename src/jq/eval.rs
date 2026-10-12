@@ -49809,8 +49809,11 @@ impl<'e> RegisterSpine<'e> {
         }
         match (hands_on, other) {
             (_, false) => Reach::HandsOn,
-            (true, true) => Reach::Partial,
-            (false, true) => Reach::Opaque,
+            // Only outside every fold body, where `.` may be an accumulator the enclosing source
+            // moved: a `reduce` UPDATE that jq answers (`path(reduce 1 as $k (.; foreach ((., 1) |
+            // CHAIN) as $k (.; .; .)))` on `null`) would refuse.
+            (true, true) if fold_body::depth() == 0 => Reach::Partial,
+            (true, true) | (false, true) => Reach::Opaque,
         }
     }
 
