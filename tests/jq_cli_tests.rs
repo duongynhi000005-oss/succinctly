@@ -87539,6 +87539,13 @@ fn test_destructuring_moves_path_register_2649() -> Result<()> {
             "path(. as {a:$q} ?// {b:$r} | .a)",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":[1,2,3],\"b\":{\"c\":5}}",
         ),
+        // The body does not lead with a navigation, so the refusal is not retried (#4115) and
+        // the by-value probe of the later alternative (#4150) runs; jq raises on `5 | .a` too.
+        (
+            d,
+            "path(. as {a:$q} ?// {b:$r} | 5 | .a)",
+            "Invalid path expression near attempt to access element \"a\" of 5",
+        ),
         (
             d,
             "path(. as {a:$q} ?// {b:$r} | error(\"boom\"))",
@@ -87567,16 +87574,20 @@ fn test_destructuring_moves_path_register_2649() -> Result<()> {
     // a write would then corrupt data through. Exit 5 and empty stdout are
     // the only assertions; each row is otherwise a pure jq answer, not a
     // succinctly one.
-    for (input, filter) in [
-        // jq: ["a"]
-        (d, "path(. as {a:$q} | .a as $z | $z)"),
-        // jq: ["a"]
-        (d, "path(. as {a:$q} ?// $z | .a)"),
-    ] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(code, 5, "`{filter}`: stdout={stdout} stderr={stderr}");
-        assert!(stdout.is_empty(), "`{filter}` must not print: {stdout}");
-    }
+    // jq: ["a"]
+    let refused = "path(. as {a:$q} | .a as $z | $z)";
+    let (stdout, stderr, code) = run_jq_full(&["-c", refused], Some(d))?;
+    assert_eq!(code, 5, "`{refused}`: stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "`{refused}` must not print: {stdout}");
+    // The other former refuse-only pin of this block answers since #4115: the body leads with
+    // a navigation of an ambient that is not the register the pattern moved to, which is
+    // jq's own path error and sends it to the `$z` alternative -- jq's `["a"]`.
+    let (stdout, stderr, code) = run_jq_full(&["-c", "path(. as {a:$q} ?// $z | .a)"], Some(d))?;
+    assert_eq!(
+        (stdout.trim_end(), code),
+        (r#"["a"]"#, 0),
+        "stderr={stderr}"
+    );
     // The artefact-guard pair this block once carried as "MUST stay a
     // refusal" answers since #3133: the `if` body's nested pipe now carries
     // the register the pattern moved to, so `$q[0]` navigates from it
@@ -124611,6 +124622,177 @@ fn test_destructuring_alt_bind_with_a_compound_body_states_its_register_per_bran
             0,
         ),
     ])
+}
+
+/// #4115: a destructure that *succeeds* moves jq's register onto the bound node
+/// (`["x",0]`, holding `true`) while the body still runs against the ambient `[true]`, so a
+/// body whose first step navigates the ambient fails jq's own `path_intact` check before it
+/// emits anything. That error is what sends jq to the next `?//` alternative, whose bare
+/// `$z` performs no step: the body re-runs at the register the stage entered, and
+/// `.[0]` is `["x",0]`. A bare postfix `?` does not catch it. Bodies that do not lead with
+/// a navigation step (`$q | .a`, `5 | .a`) and a `try`-scoped `(.[0])?` keep their
+/// behaviour. Every row captured from jq 1.7.1, on the stdin and `-n` routes.
+#[test]
+fn test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[0]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[0]?))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | (.[0]?, true)))",
+            "[\"x\",0]\n",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r#"{"x":{"a":true}}"#,
+            r"path(.x | (. as {a:$q} ?// $z | (.a?, .)))",
+            "[\"x\",\"a\"]\n[\"x\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":{"a":true}}"#,
+            r"path(.x | (. as {a:$q} ?// $z | .a | .))",
+            "[\"x\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[0:1]))",
+            "[\"x\",{\"start\":0,\"end\":1}]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $r ?// $z | .[0]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"del(.x | (. as [$q] ?// $z | .[0]))",
+            "{\"x\":[]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"(.x | (. as [$q] ?// $z | .[0])) = 5",
+            "{\"x\":[5]}\n",
+            "",
+            0,
+        ),
+        // A `//` leads with its left operand.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | (.[0]? // 1)))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":{"a":true}}"#,
+            r"path(.x | (. as {a:$q} ?// $z | (.a // .)))",
+            "[\"x\",\"a\"]\n",
+            "",
+            0,
+        ),
+        // A computed index or slice leads with a navigation step too.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[1-1]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | .[0:1+0]))",
+            "[\"x\",{\"start\":0,\"end\":1}]\n",
+            "",
+            0,
+        ),
+        // The last alternative has no next one to retry: its refusal is raised.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as {a:$a} ?// [$q] | .[0]))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        // The body does not lead with a navigation step: the refusal stays jq's.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | ($q | .a)))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | 5 | .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 5",
+            5,
+        ),
+        // Inside a `reduce` UPDATE jq's state slot is `null`, so the retried alternative fails
+        // the same way: no retry is modelled there.
+        (
+            r"[[]]",
+            r"path(reduce .[1+1] as $k (.; ((. as [$q] ?// $z | (.a?, $z)))))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [[]]",
+            5,
+        ),
+        // The `try`-scoped `?` swallows the error in jq.
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | (. as [$q] ?// $z | (.[0])?))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4115: inside a `foreach` UPDATE jq's state slot is `null`, so no retry is modelled there. jq
+/// prints `["x",0]` after raising `near attempt to access element 0 of true`; this refuses
+/// without printing (recorded in `limitations.md`).
+#[test]
+fn test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115() -> Result<()> {
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-c",
+            r"path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))",
+        ],
+        Some(r#"{"x":[true]}"#),
+    )?;
+    assert_eq!(code, 5, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.is_empty(), "must not print: {stdout}");
+    Ok(())
 }
 
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
