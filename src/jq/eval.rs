@@ -50652,7 +50652,7 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
         // and runs something else (`(5 | tostring // .)` would bind the register
         // where jq binds `"5"`). Its output is not statically tracked, which keeps a
         // navigation downstream of it off the grammar (`tostring | .[1:2]`).
-        leaf if is_input_returning_stage(leaf) => (!swallowed).then_some(false),
+        leaf if is_transparent_leaf(leaf) => (!swallowed).then_some(false),
         Expr::Comma(exprs) => all(&mut exprs.iter()),
         // A handler's output is untracked; one that may see the register as its
         // error payload ([`try_body_may_raise_alias`]) is not placed at all, so the
@@ -50689,13 +50689,29 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
     }
 }
 
+/// [`is_input_returning_stage`], plus `del(f)`, which hands its input back when `f`
+/// resolves no path (#4295) -- a fact about the paths, so the resolver judges it and
+/// the grammar only admits the shape.
+fn is_transparent_leaf(expr: &Expr) -> bool {
+    is_input_returning_stage(expr) || matches!(expr, Expr::Builtin(Builtin::Del(_)))
+}
+
 /// A builtin the path resolver accepts as the input itself for some inputs
 /// (#4017): `tostring`/`@text` of a string, `tonumber` of a number (#3460),
 /// `ltrimstr`/`rtrimstr` whose argument does not match (#4016), `delpaths([])` and
-/// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its
-/// result *is* the register (`path(.b | tostring as $y | $y)` is `["b"]`). These
-/// are the static shapes of `resolve_node_sink`'s pass-through arms; the arms
-/// judge the value, and refuse for an input that gets a fresh result.
+/// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
+/// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
+/// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
+/// `trim_returns_input` ... guard); the arms judge the value
+/// -- and the argument: a non-literal `ltrimstr` argument keeps the refusal -- and
+/// refuse for an input that gets a fresh result. A new pass-through arm there is owed
+/// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
+/// lists them.
+///
+/// `del(f)` (empty path set, #4295) is the one pass-through arm *not* here: whether it
+/// returns its input depends on `f`'s resolved paths, never its shape (`del(.zz)` builds
+/// a fresh value), so [`may_alias_register`] must not treat it as a forwarder. It is a
+/// bind-source leaf only, [`is_transparent_leaf`].
 fn is_input_returning_stage(expr: &Expr) -> bool {
     match expr {
         Expr::Builtin(
@@ -135629,6 +135645,12 @@ mod tests {
             ("rtrimstr(\"x\")", true),
             ("delpaths([])", true),
             ("setpath([]; .)", true),
+            ("del(.x?)", true),
+            ("del(.[]?)", true),
+            // The argument is the resolver's to judge (a non-literal one keeps the
+            // refusal there), not the grammar's.
+            ("ltrimstr(.a)", true),
+            ("ltrimstr(\"x\", \"y\")", true),
             ("(tostring, tonumber)", true),
             ("(select(.a) | tostring)", true),
             ("first(tostring)", true),
@@ -135650,6 +135672,7 @@ mod tests {
             ("setpath([\"a\"]; .)", false),
             ("setpath([]; 1)", false),
             ("ascii_downcase", false),
+            ("(del(.x?) // .)", false),
         ] {
             let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
             assert_eq!(is_transparent_bind_source(&expr), expected, "{filter}");
@@ -135716,6 +135739,9 @@ mod tests {
             ("(. | rtrimstr(\"x\"))", true),
             ("delpaths([])", true),
             ("setpath([]; .)", true),
+            // ...but not `del(f)`: it returns its input only when `f` resolves no path, which
+            // is a fact about the paths (`del(.zz)` builds a fresh value), not the shape.
+            ("(. | del(.x?))", false),
             ("(.a | tostring)", false),
             ("(1 | tostring)", false),
             ("delpaths([[\"a\"]])", false),

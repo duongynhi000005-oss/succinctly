@@ -61327,6 +61327,33 @@ fn test_bound_result_of_input_returning_stage_is_the_register_4017() -> Result<(
         (r"path(.n|(tostring?) as $y|$y)", "", 5),
         (r"path(.n|(try tostring catch .) as $y|$y)", "", 5),
         (r"(.n|(tostring // .) as $y|$y) = 9", "", 5),
+        // `del(f)` over an empty path set, and a trim argument that is only known at run
+        // time (matching or not): the resolver judges the set and the argument.
+        (r"path(.b|del(.x?) as $y|$y)", "[\"b\"]\n", 0),
+        (
+            r"(.n|del(.[]?) as $y|$y) = 4",
+            "{\"a\":[1,2],\"b\":\"s\",\"n\":4,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (
+            r"del(.b|del(.x?) as $y|$y)",
+            "{\"a\":[1,2],\"n\":2,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (r"path(.a|del(.[0]?) as $y|$y)", "", 5),
+        (r"path(.a|del(.[0]) as $y|$y)", "", 5),
+        (r#""s" as $c | path(.b|ltrimstr($c) as $y|$y)"#, "", 5),
+        (
+            r#""x" as $c | path(.b|ltrimstr($c) as $y|$y)"#,
+            "[\"b\"]\n",
+            0,
+        ),
+        (
+            r#""x" as $c | (.b|ltrimstr($c) as $y|$y) = 9"#,
+            "{\"a\":[1,2],\"b\":9,\"n\":2,\"t\":\"1\",\"c\":\"s\"}\n",
+            0,
+        ),
+        (r#""s" as $c | (.b|ltrimstr($c) as $y|$y) = 9"#, "", 5),
         // A navigation of the result stays refused.
         (r"del(.n|(tostring // .) as $y|$y)", "", 5),
         (r"path(.b|(tostring|.[0:1]) as $y|$y)", "", 5),
