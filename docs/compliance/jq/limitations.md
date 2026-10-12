@@ -2232,8 +2232,8 @@ is the revert that established what the other one costs.
    under `try`/`?`, so it keeps the unproven head (`del(try ((.|.) as {a:$a} ?// {b:$a} | .a))` on `{"a":1}` returns the
    document in jq and here). Pinned by
    `test_foreach_source_register_through_def_comma_and_nested_foreach_4424`. Over the 255 `foreach` and pipe-chain operands (the 27 added here
-   included; `--stage-only`, 219,555 rows, jq 1.7.1, candidate vs `main`): MATCH 212,590 -> 213,028, ACCEPT_WRONG 325 -> 139, DIFF
-   252 -> 182, REFUSE_WRONG 6,388 -> 6,206, no lost match (the first run lost 8 `reduce` UPDATE rows to the comma routing, which
+   included; `--stage-only`, 219,555 rows, jq 1.7.1, candidate vs `main`): MATCH 212,590 -> 212,920, ACCEPT_WRONG 325 -> 139, DIFF
+   252 -> 200, REFUSE_WRONG 6,388 -> 6,296, no lost match (the first run lost 8 `reduce` UPDATE rows to the comma routing, which
    is why it, like the destructuring-only half, is gated to outside every fold body). `scripts/jq-bind-origin-fuzz.py` (6,000
    programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch. **What it leaves**: the 21 destructuring-only
    rows inside a `reduce`/`foreach` body (identical on `main`); a `$`-parameter or closure parameter in the body
