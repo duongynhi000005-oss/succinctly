@@ -49451,19 +49451,51 @@ fn bare_marker(e: &Expr) -> Option<&Rc<Tracked>> {
     }
 }
 
-/// The `$x` marker a bind source hands on unchanged through `first`, `last`, `limit(n; ..)` (a
-/// count that cannot move the register) or a bare `try` (#4320). The one definition both the
-/// spine walk ([`RegisterSpine::binds_register`]) and the resolver's placement of the head
+/// The `$x` marker a bind source hands on unchanged through `first`, `last`, `limit(n; ..)` and
+/// `nth(n; ..)` (a count that cannot move the register), a bare `try`, `(..)?` and `label`,
+/// nested in each other (#4320). `first(M, ..)` is its comma's first leaf, the only output
+/// `first` emits ([`first_leaf_marker`]). The one definition both the spine walk
+/// ([`RegisterSpine::binds_register`]) and the resolver's placement of the head
 /// ([`resolve_as_pattern`]) read, so a source the walk routes is a source the resolver can place:
 /// a head it could not place refuses a pattern step as a guess, which a `try` cannot catch where
-/// jq's is its own. Not `nth`, `label`, `$x?` or a nested wrapper, which the resolver does not
-/// place, nor a comma inside the wrapper (`first($x, 1)`).
+/// jq's is its own. Not a comma inside any other wrapper (`limit(2; $x, 1)`, `last(1, $x)`,
+/// `try ($x, 1)`): its other leaves are not the register.
 fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
     match unwrap_bind_source(e) {
-        Expr::FirstExpr(inner) | Expr::LastExpr(inner) => bare_marker(inner),
-        Expr::Limit { n, expr } if cannot_move_register(n) => bare_marker(expr),
-        Expr::Try { expr, catch: None } => bare_marker(expr),
+        Expr::FirstExpr(inner) => first_leaf_marker(inner),
+        Expr::LastExpr(inner)
+        | Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        }
+        | Expr::Label { body: inner, .. } => marker_head(inner),
+        Expr::Limit { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner))
+            if cannot_move_register(n) =>
+        {
+            marker_head(inner)
+        }
         _ => None,
+    }
+}
+
+/// `e` as a `$x` marker, bare or behind [`wrapped_marker`]'s wrappers.
+fn marker_head(e: &Expr) -> Option<&Rc<Tracked>> {
+    bare_marker(e).or_else(|| wrapped_marker(e))
+}
+
+/// [`marker_head`] of the first output of `e`. A comma's first output is its first leaf's only
+/// when that leaf always emits one, which a bare marker does and a wrapped one need not
+/// (`first(limit(0; $x), 1)` emits `1`).
+fn first_leaf_marker(e: &Expr) -> Option<&Rc<Tracked>> {
+    match unwrap_bind_source(e) {
+        Expr::Comma(items) => items
+            .first()
+            .and_then(|first| match unwrap_bind_source(first) {
+                Expr::Comma(_) => first_leaf_marker(first),
+                leaf => bare_marker(leaf),
+            }),
+        other => marker_head(other),
     }
 }
 
@@ -49554,7 +49586,7 @@ impl<'e> RegisterSpine<'e> {
         // the register for a single pattern; a head it could not place would refuse a pattern
         // step as a guess a `try` around the fold cannot catch, where jq's is its own
         // (`del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) ...) | ...)`).
-        if let Some(marker) = bare_marker(e).or_else(|| wrapped_marker(e)) {
+        if let Some(marker) = marker_head(e) {
             return self.markers.contains(&Rc::as_ptr(marker));
         }
         match peel_value_wrappers(e) {
@@ -51457,7 +51489,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // proving such a head identical off the table: `(. | .) as {a:$v0} ?// $v0 | .c` retries in
     // jq and a head proven the register would not.
     //
-    // #4320: and a `$x` marker behind `first`/`last`/`limit`/`try` ([`wrapped_marker`]) is the
+    // #4320: and a `$x` marker behind the wrappers [`wrapped_marker`] names (`first`/`last`/`limit`/`nth`/`try`/`?`/`label`,
+    // nested, and `first` over a comma) is the
     // register when the marker is, again for a single pattern only.
     let head_resolves_to_register = register.is_some_and(|reg| {
         resolves_to_register::<S>(head, trackable, reg, frame)

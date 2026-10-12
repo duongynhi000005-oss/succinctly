@@ -552,6 +552,16 @@ OPERANDS = [
     "(. as $x | foreach ($x as [$q] | .) as $k (.; .; .))",
     "(. as $x | foreach (($x, $x) as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
+    # (#4320, sixth part) a `$x` behind a nested wrapper, `first` over a comma whose first leaf it
+    # is, `nth`, `label`, and the commas that emit a non-register leaf too (contrasts).
+    "(. as $x | foreach (first(first($x)) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (limit(1; first($x)) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (first($x, 1) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (nth(0; $x) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ((label $f | $x) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (((first($x))?) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (last($x, 1) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach ($x as {a:$a} | .a) as $k (.; .; $k))",
     "(. as $x | foreach ($x as $v | .) as $k (.; .; .))",
     "(. as $x | reduce ($x as {a:$a} | .) as $k (.; .))",

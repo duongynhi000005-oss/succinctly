@@ -2149,8 +2149,15 @@ is the revert that established what the other one costs.
    chain keeps the retry rules of #3279/#3781: `. as $x | first($x) as {a:$v} ?// $v | .a` is `[["a"]]` in jq), so the
    pattern's first step is placed and its refusal is exact (the `first($x)` rows of the #4278 table above: ACCEPT_WRONG 62 to 6 and DIFF 5 to 0 over the
    three operands that spell one, 2,691 `--stage-only` rows, 77 more matches and no match lost; the 6 left are inside a
-   `reduce` body or after a `{a:{b:1}} |`, identical on `main`). Still accepted: a comma inside the wrapper
-   (`first($x, 1)`), a nested wrapper (`first(first($x))`), and `nth`, `label` and `$x?` heads; an outer `$x` destructured inside a `foreach` UPDATE/EXTRACT or another fold's body, where `.` is not known to be the
+   `reduce` body or after a `{a:{b:1}} |`, identical on `main`). Since #4320's sixth part the wrappers nest
+   (`first(first($x))`, `limit(1; first($x))`), `nth(n; $x)`, `label` and `(..)?` are read too, and `first($x, 1)` is `first`
+   of its comma's first leaf (`wrapped_marker`, `marker_head`, `first_leaf_marker`); a comma inside any other wrapper
+   (`limit(2; $x, 1)`, `last(1, $x)`, `try ($x, 1)`) is still the comma-with-a-non-register-leaf shape below. Pinned by
+   `test_foreach_source_marker_behind_nested_wrappers_4320`. Over the 11 operands that spell a wrapper (`--stage-only`, 9,795 rows)
+   wrong accepts go from 390 to 54, wrong answers from 37 to 7, 366 more matches and no regression; `--sample 6000
+   --seed 7` over the whole grid is 0 regressions. The 54 left are the 6 rows per operand `first($x)` already had (inside a
+   `reduce` body or after a `{a:{b:1}} |`) and the 12 of `limit(2; $x, 1)`. Still accepted: a comma with a non-register
+   leaf in `limit`/`last`/`try`; an outer `$x` destructured inside a `foreach` UPDATE/EXTRACT or another fold's body, where `.` is not known to be the
    register (`path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))` raises in jq); a
    register an INIT moved; and an outer `$x` returned by a call whose `def` is written outside the source. Over every
    fold operand that binds a `$x`/`$it`/`$y` (`--stage-only`, 75,339 rows) wrong accepts go from 534 to 343 and wrong
