@@ -77273,7 +77273,7 @@ fn test_foreach_update_null_source_register_shapes_keep_the_register_4063() -> R
 /// captured from jq 1.7.1 with `-c`; the controls keep answering (a handler that cannot move
 /// the register, and no stage after the `try`).
 #[test]
-fn test_foreach_update_navigating_handler_then_stage_refuses_loudly_4071() -> Result<()> {
+fn test_foreach_update_navigating_handler_then_stage_answers_4071() -> Result<()> {
     let doc = r#"{"a":{"b":{"b":3}},"z":1}"#;
     let refused = "Invalid path expression near attempt to access element \"b\"";
     assert_path_rows_3289(&[
@@ -77345,7 +77345,7 @@ fn test_foreach_update_navigating_handler_then_stage_refuses_loudly_4071() -> Re
 /// builds `[$v|.b?]`) answer as jq does or refuse loudly. Every row captured from jq 1.7.1
 /// with `-c`.
 #[test]
-fn test_foreach_update_unprovable_register_stage_refuses_loudly_4071() -> Result<()> {
+fn test_foreach_update_unprovable_register_stage_4071() -> Result<()> {
     let doc = r#"{"a":{"b":{"b":3}},"z":1}"#;
     let refused = "Invalid path expression near attempt to access element \"b\"";
     assert_path_rows_3289(&[
@@ -102072,6 +102072,20 @@ fn test_recurse_seed_through_a_pipe_nested_in_a_forwarder_4123() -> Result<()> {
             "jq: error (at <stdin>:1): Invalid path expression near attempt to iterate through 1\n",
             5,
         ),
+        // A recursion that emits deeper nodes ahead of the trailing stage, on a tracked entry: only the
+        // seed states the entry register.
+        (r"path(. as $x | if true then (.. | .) else . end | $x)", "[]\n", "jq: error (at <stdin>:1): Invalid path expression with result {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
+        (r"del(. as $x | if true then (.. | .) else . end | $x | .c)", "", "jq: error (at <stdin>:1): Invalid path expression near attempt to access element \"c\" of {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
+        (r"(. as $x | if true then (.. | .) else . end | $x | .c) |= 9", "", "jq: error (at <stdin>:1): Invalid path expression near attempt to access element \"c\" of {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
+        (r"path(. as $x | first(.. | select(true)) | $x)", "[]\n", "", 0),
+        (r"del(. as $x | first(.. | select(true)) | $x | .c)", "{\"a\":{\"b\":{\"b\":null}}}\n", "", 0),
+        (r"(. as $x | first(.. | select(true)) | $x | .c) |= 9", "{\"a\":{\"b\":{\"b\":null}},\"c\":9}\n", "", 0),
+        (r"path(. as $x | (.. | select(.c?)) | $x)", "[]\n", "", 0),
+        (r"del(. as $x | (.. | select(.c?)) | $x | .c)", "{\"a\":{\"b\":{\"b\":null}}}\n", "", 0),
+        (r"(. as $x | (.. | select(.c?)) | $x | .c) |= 9", "{\"a\":{\"b\":{\"b\":null}},\"c\":9}\n", "", 0),
+        (r"path(. as $x | try (.. | .) | $x)", "[]\n", "jq: error (at <stdin>:1): Invalid path expression with result {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
+        (r"del(. as $x | try (.. | .) | $x | .c)", "", "jq: error (at <stdin>:1): Invalid path expression near attempt to access element \"c\" of {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
+        (r"(. as $x | try (.. | .) | $x | .c) |= 9", "", "jq: error (at <stdin>:1): Invalid path expression near attempt to access element \"c\" of {\"a\":{\"b\":{\"b\":null}},\"c\":2}\n", 5),
     ])
 }
 

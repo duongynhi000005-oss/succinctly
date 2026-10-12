@@ -3255,8 +3255,8 @@ is the revert that established what the other one costs.
    An UPDATE the resolver cannot prove leaves the register where the step entered, followed by an
    EXTRACT that refuses a frozen `$v` under a `try`, refuses loudly where jq answers
    ([#4071](https://github.com/rust-works/succinctly/issues/4071), pinned by
-   `test_foreach_update_navigating_handler_then_stage_refuses_loudly_4071` and
-   `test_foreach_update_unprovable_register_stage_refuses_loudly_4071`): a `try` whose handler
+   `test_foreach_update_navigating_handler_then_stage_answers_4071` and
+   `test_foreach_update_unprovable_register_stage_4071`): a `try` whose handler
    navigates `$v` (`try (length | .) catch ($v | .b) | .`; the handler runs only if the body raised,
    so the register is at the entry or one navigation below it), `select(true)`, a `def` call, and a
    comma into either. They used to leave the register unrecorded as lost, so EXTRACT's refusal of
@@ -4021,7 +4021,7 @@ answers `["b"]` — and classified the two residuals appended below):
 
   [#4123](https://github.com/rust-works/succinctly/issues/4123) answers the pipe nested inside a forwarder
   (`if true then (.. | select(true)) else . end`, `first(.. | select(true))`, `try (...)`, `limit(1; ...)`, a
-  comma sibling, a no-argument `def`): `pipe_without_trailing_identity` now drops a trailing `.` *and* a
+  comma sibling, a no-argument `def`): `pipe_without_trailing_forwarders` now drops a trailing `.` *and* a
   trailing `select(f)` even after a seed producer. The old guard (a pipe re-seeds, so the producer's statement
   is not the outer stage's) did not hold: the producer's statement is relative to the register the pipe
   entered, which is what the stage after the forwarder reads, and `select` hands its input through as the very
