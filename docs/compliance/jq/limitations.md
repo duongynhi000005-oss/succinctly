@@ -2142,7 +2142,7 @@ is the revert that established what the other one costs.
    the destructure (`. as $x | . as {a:$a} | .`, `source_destructures_register` stopped at the bind and never read its
    body: its source is a subexpression, so the body meets the register where the bind did) and a `?//` chain of
    destructuring patterns on the bare register (`. as {a:$a} ?// [$a] | .`; a chain with a bare `$var` alternative
-   stays with the by-value drive, which matches jq there, as the sweep's `?// $a` operands show). `del(foreach (. as $x | . as {a:$a} | .) as $y (.; .; .))`
+   stays with the by-value drive, which matches jq there except on a `null` register, #4417 below, as the sweep's `?// $a` operands show). `del(foreach (. as $x | . as {a:$a} | .) as $y (.; .; .))`
    used to delete the document and `(...) = 9` to replace it; both raise as jq does now, pinned by
    `test_foreach_source_plain_bind_before_a_destructure_refuses_4187` and
    `test_foreach_source_destructuring_chain_on_the_register_refuses_4187`. Over the 21 register-sweep operands for the two families (279,747 rows, final binary) 3,667 wrong accepts and 491
@@ -2158,7 +2158,11 @@ is the revert that established what the other one costs.
    `null_register_destructuring_chain` routes a bare-`.` source of that shape through the resolver when the fold's
    ambient value is a trackable `null`; any other register keeps the by-value drive. Pinned by
    `test_foreach_source_bare_alternative_chain_on_a_null_register_4417`. Over the 39 destructuring-fold operands
-   (`--stage-only`, 33,891 rows) the 10 DIFF rows on `main` went to 0 with no regression.
+   (`--stage-only`, 33,891 rows) the 10 DIFF rows on `main` went to 0 with no regression. **What it leaves**: only
+   the direct shape, so the chain behind a comma or a pipe (`(.,.) | . as {a:$a} ?// $a | .`) or as the source of a nested
+   `foreach` still answers the root where jq answers the walked register; and inside an outer `path()`
+   (`try path(path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))) catch .` on `null`) the refusal's text names
+   `["a"]` where jq's names `[]` (both raise).
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

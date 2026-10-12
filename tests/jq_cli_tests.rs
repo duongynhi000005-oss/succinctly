@@ -77708,6 +77708,35 @@ fn test_foreach_source_bare_alternative_chain_on_a_null_register_4417() -> Resul
             "",
             0,
         ),
+        // Inside another fold's UPDATE or EXTRACT, and with the bare alternative first.
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (1,2) as $i (.; .; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce 1 as $i (.; foreach (. as {a:$a} ?// $a | .) as $k (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as $a ?// {a:$a} | .) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
         // Controls. A register that is not `null` keeps the root path, and a body that raises
         // raises.
         (

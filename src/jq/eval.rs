@@ -49632,6 +49632,11 @@ impl<'e> RegisterSpine<'e> {
 /// also the only one a moved register can be `jv_identical` to the emitted state of, so it is
 /// the only document on which the two answers show (`path(foreach (. as {a:$a} ?// $a | .) as $k
 /// (.; .; .))` is `["a"]` on `null`).
+///
+/// Only the direct shape: the same chain behind a comma or a pipe, or as the source of a nested
+/// `foreach`, still takes the by-value drive and answers the root. Inside an outer `path()`
+/// (`path(path(F))`) jq reports `[]` where the resolver now reports `["a"]` in the refusal's
+/// text; both raise.
 fn null_register_destructuring_chain(source: &Expr) -> bool {
     matches!(
         unwrap_paren(source),
@@ -49656,7 +49661,8 @@ fn patterns_all_destructuring_chain(patterns: &[Pattern]) -> bool {
 /// first alternative that matches, which the resolver's per-alternative walk states. Read where
 /// a fold's *own* loop pattern is a chain over the register. [`patterns_all_destructuring_chain`]
 /// is the narrower question a bind source asks (#4187): the quantifiers differ on purpose, since
-/// a chain with a bare `$var` alternative as a source is better left to the by-value drive.
+/// a chain with a bare `$var` alternative as a source is better left to the by-value drive,
+/// except on a `null` register ([`null_register_destructuring_chain`], #4417).
 fn routes_destructuring_chain(patterns: &[Pattern]) -> bool {
     patterns.len() > 1 && routes_fresh_destructuring(patterns)
 }
