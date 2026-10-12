@@ -50917,6 +50917,10 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
     };
     match unwrap_bind_source(source) {
         Expr::Identity | Expr::Builtin(Builtin::Select(_)) => Some(input_tracked),
+        // #4456: the nine type filters are `select(type == ...)`, and the resolver
+        // passes a tracked branch through them (or ends it) by the value's kind alone
+        // as it does for `select`, so they are exact leaves of the same kind.
+        Expr::Builtin(builtin) if is_type_filter(builtin) => Some(input_tracked),
         // #3423: a literal or construction is a value jq builds fresh, never the
         // register, and the resolver places it as computed (an untracked branch,
         // bound by value) -- the one thing the grammar needs of a leaf. It is what
@@ -50988,7 +50992,7 @@ fn is_transparent_leaf(expr: &Expr) -> bool {
 /// A builtin the path resolver accepts as the input itself for some inputs
 /// (#4017): `tostring`/`@text` of a string, `tonumber` of a number (#3460),
 /// `ltrimstr`/`rtrimstr` whose argument does not match (#4016), `delpaths([])` and
-/// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
+/// `setpath([]; .)` (#4295), `walk(.)` of a scalar (#4456). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
 /// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
 /// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
 /// `trim_returns_input` ... guard); the arms judge the value
@@ -51007,6 +51011,9 @@ fn is_input_returning_stage(expr: &Expr) -> bool {
             Builtin::ToString | Builtin::ToNumber | Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_),
         )
         | Expr::Format(FormatType::Text) => true,
+        // #4456: `walk(.)` of a scalar is `. | .`, the input itself; of an array or
+        // object it is rebuilt, which the resolver refuses.
+        Expr::Builtin(Builtin::Walk(f)) => is_identity_stage(f),
         Expr::Builtin(Builtin::DelPaths(paths)) => is_empty_array_literal(unwrap_paren(paths)),
         Expr::Builtin(Builtin::SetPath(path, new_value)) => {
             is_empty_array_literal(unwrap_paren(path)) && is_identity_stage(new_value)
@@ -136241,6 +136248,25 @@ mod tests {
             ("(.a | tostring)", true),
             ("@text", true),
             ("tonumber", true),
+            // #4456: the type filters are exact leaves as `select` is, so a `try`, `?` or
+            // `//` around one is still on the grammar; `walk(.)` is judged per value like
+            // `tostring` (a container is rebuilt), so it is not.
+            ("strings", true),
+            ("(.a | numbers)", true),
+            ("(values, scalars)", true),
+            ("(booleans // .)", true),
+            ("try nulls", true),
+            ("(arrays | iterables)", true),
+            ("objects?", true),
+            // The filter keeps the input tracked, so a navigation after it is still placed.
+            ("(strings | .a)", true),
+            ("(strings | length)", false),
+            ("walk(.)", true),
+            ("(.a | walk(.))", true),
+            ("(walk(.) // .)", false),
+            ("try walk(.)", false),
+            ("walk(.a)", false),
+            ("walk(tostring)", false),
             ("ltrimstr(\"x\")", true),
             ("rtrimstr(\"x\")", true),
             ("delpaths([])", true),
@@ -136303,6 +136329,7 @@ mod tests {
             ("rtrimstr(\"z\")", r#"{"x":"s"}"#, r#"{"x":"sz"}"#),
             ("delpaths([])", r#"{"x":"s"}"#, ""),
             ("setpath([]; .)", r#"{"x":"s"}"#, ""),
+            ("walk(.)", r#"{"x":"s"}"#, r#"{"x":[1]}"#),
             ("del(.[]?)", r#"{"x":"s"}"#, r#"{"x":[1]}"#),
         ] {
             let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
@@ -136346,9 +136373,10 @@ mod tests {
     /// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`. `debug`,
     /// `stderr` and `input` are left out on purpose, as they write to the process.
     /// Every `UNMODELLED` stage is a builtin jq answers as the register and the
-    /// grammar leaves to the by-value route. For `walk(.)`, `values`, `scalars` and the
-    /// type filters that route refuses (`path(.b | strings as $y | $y)` is `["b"]` in
-    /// jq 1.7.1); `getpath([])` agrees with jq through it.
+    /// grammar leaves to the by-value route, which agrees with jq for `getpath([])`.
+    /// `walk(.)`, `values`, `scalars` and the type filters were listed until #4456,
+    /// when that route's refusal (`path(.b | strings as $y | $y)` is `["b"]` in jq
+    /// 1.7.1) was closed by admitting them to the grammar.
     #[test]
     fn test_resolver_pass_through_builtins_are_on_the_bind_source_grammar_4443() {
         const DOCS: [&str; 10] = [
@@ -136363,19 +136391,7 @@ mod tests {
             r#"{"x":[]}"#,
             r#"{"x":1.5}"#,
         ];
-        const UNMODELLED: [&str; 11] = [
-            "getpath([])",
-            "walk(.)",
-            "values",
-            "scalars",
-            "strings",
-            "numbers",
-            "booleans",
-            "nulls",
-            "arrays",
-            "objects",
-            "iterables",
-        ];
+        const UNMODELLED: [&str; 1] = ["getpath([])"];
         let corpus = [
             "tostring",
             "@text",

@@ -721,6 +721,13 @@ INPUT_RETURNING_SOURCES = [
     ("ltrimstr(\"\")", False), ("delpaths([])", False), ("setpath([]; .)", False),
     ("(tostring, tostring)", False), ("(select(true) | tostring)", False),
     ("(tostring | select(true))", False), ("first(tostring)", False), ("limit(1; tostring)", False),
+    # #4456: the type filters are `select(type == ...)` and `walk(.)` of a scalar is `.`.
+    ("strings", False), ("numbers", False), ("arrays", False), ("objects", False),
+    ("iterables", False), ("values", False), ("scalars", False), ("nulls", False),
+    ("booleans", False), ("walk(.)", False), ("(strings | tostring)", False),
+    ("(walk(.) | strings)", False), ("first(strings)", False), ("(strings, numbers)", False),
+    ("(strings // .)", False), ("(strings?)", False), ("(try strings catch .)", False),
+    ("(walk(.) // .)", False), ("(tostring | .[0:1])", False),
     ("(tostring | tostring)", False), ("(tostring | tonumber)", False), ("(tonumber | tostring)", False),
     ("(if true then tostring else . end)", False), ("(tostring | ltrimstr(\"z\"))", False),
     ("(. | tostring)", False), ("(tostring | .)", False), ("(tostring, .)", False),

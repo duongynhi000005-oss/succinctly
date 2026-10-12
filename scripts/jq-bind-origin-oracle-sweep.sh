@@ -1242,6 +1242,30 @@ input-returning-bind-del-empty-path-set-write	{"b":"s","n":1}	(.n|del(.[]?) as $
 input-returning-bind-del-nonempty-path-set	{"b":{"x":1}}	path(.b|del(.x?) as $y|$y)
 input-returning-bind-trim-runtime-arg	{"b":"s"}	"x" as $c | path(.b|ltrimstr($c) as $y|$y)
 input-returning-bind-trim-runtime-arg-match	{"b":"s"}	"s" as $c | path(.b|ltrimstr($c) as $y|$y)
+type-filter-bind-strings	{"b":"s"}	path(.b|strings as $y|$y)
+type-filter-bind-numbers	{"n":5}	path(.n|numbers as $y|$y)
+type-filter-bind-arrays	{"a":[1]}	path(.a|arrays as $y|$y)
+type-filter-bind-objects	{"o":{"k":1}}	path(.o|objects as $y|$y)
+type-filter-bind-iterables	{"o":{"k":1}}	path(.o|iterables as $y|$y)
+type-filter-bind-values	{"b":"s"}	path(.b|values as $y|$y)
+type-filter-bind-scalars	{"b":"s"}	path(.b|scalars as $y|$y)
+type-filter-bind-nulls	{"z":null}	path(.z|nulls as $y|$y)
+type-filter-bind-booleans-miss	{"z":null}	path(.z|booleans as $y|$y)
+type-filter-bind-write	{"b":"s"}	(.b|strings as $y|$y) |= "t"
+type-filter-bind-del	{"a":[1],"b":1}	del(.a|arrays as $y|$y)
+type-filter-bind-miss-write	{"n":5}	(.n|strings as $y|$y) = 9
+type-filter-bind-alt	{"b":"s"}	path(.b|(strings // .) as $y|$y)
+type-filter-bind-alt-write	{"n":5}	(.n|(strings // .) as $y|$y) = 9
+type-filter-bind-optional-write	{"b":"s"}	(.b|(strings?) as $y|$y) = 9
+type-filter-bind-try	{"b":"s"}	path(.b|(try strings) as $y|$y)
+type-filter-bind-navigate-after	{"a":[1]}	path(.a|arrays as $y|$y|.[0])
+type-filter-bind-result-navigates-refuses	{"a":[1]}	path(.a|arrays|.[0] as $y|$y)
+walk-identity-bind-string	{"b":"s"}	path(.b|walk(.) as $y|$y)
+walk-identity-bind-number	{"n":5}	path(.n|walk(.) as $y|$y)
+walk-identity-bind-write	{"b":"s"}	(.b|walk(.) as $y|$y) = 9
+walk-identity-bind-array-refuses	{"a":[1]}	path(.a|walk(.) as $y|$y)
+walk-identity-bind-array-write	{"a":[1]}	(.a|walk(.) as $y|$y) = 9
+walk-identity-bind-object-del	{"o":{"k":1}}	del(.o|walk(.) as $y|$y)
 CASES_EOF
 
 # Known refuse-only rows (jq answers, succinctly refuses), each with the

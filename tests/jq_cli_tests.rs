@@ -61506,6 +61506,71 @@ fn test_bound_result_of_input_returning_stage_is_the_register_4017() -> Result<(
     Ok(())
 }
 
+/// #4456: a variable bound to a type filter (`strings`, `numbers`, `booleans`, `nulls`,
+/// `arrays`, `objects`, `iterables`), `values`, `scalars` or `walk(.)` of a scalar is the
+/// register itself, so `$y` is accepted in path position as it is for `select(...)` and
+/// the #4017 stages. The filters never refuse (they end the branch or pass it through by
+/// the value's kind), so a `//`, `?` or `try` around one binds the same node; `walk(.)`
+/// of an array or object rebuilds it and stays refused. Every row is a live jq 1.7.1
+/// capture.
+#[test]
+fn test_bound_result_of_type_filter_is_the_register_4456() -> Result<()> {
+    const DOC: &str = r#"{"a":[1,2],"b":"s","n":2,"t":"1","z":null,"o":{"k":1}}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (r"path(.b|strings as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.n|numbers as $y|$y)", "[\"n\"]\n", 0),
+        (r"path(.a|arrays as $y|$y)", "[\"a\"]\n", 0),
+        (r"path(.o|objects as $y|$y)", "[\"o\"]\n", 0),
+        (r"path(.o|iterables as $y|$y)", "[\"o\"]\n", 0),
+        (r"path(.z|nulls as $y|$y)", "[\"z\"]\n", 0),
+        (r"path(.b|values as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|scalars as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|walk(.) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.n|walk(.) as $y|$y)", "[\"n\"]\n", 0),
+        (r"path(.z|booleans as $y|$y)", "", 0),
+        (
+            r#"(.b|strings as $y|$y) |= "t""#,
+            "{\"a\":[1,2],\"b\":\"t\",\"n\":2,\"t\":\"1\",\"z\":null,\"o\":{\"k\":1}}\n",
+            0,
+        ),
+        (
+            r"(.n|numbers as $y|$y) = 9",
+            "{\"a\":[1,2],\"b\":\"s\",\"n\":9,\"t\":\"1\",\"z\":null,\"o\":{\"k\":1}}\n",
+            0,
+        ),
+        (
+            r"del(.a|arrays as $y|$y)",
+            "{\"b\":\"s\",\"n\":2,\"t\":\"1\",\"z\":null,\"o\":{\"k\":1}}\n",
+            0,
+        ),
+        (
+            r"(.b|walk(.) as $y|$y) = 9",
+            "{\"a\":[1,2],\"b\":9,\"n\":2,\"t\":\"1\",\"z\":null,\"o\":{\"k\":1}}\n",
+            0,
+        ),
+        (r"path(.n|strings as $y|$y)", "", 0),
+        (r"path(.b|numbers as $y|$y)", "", 0),
+        (r"path(.a|walk(.) as $y|$y)", "", 5),
+        (r"path(.o|walk(.) as $y|$y)", "", 5),
+        (r"(.a|walk(.) as $y|$y) = 9", "", 5),
+        (r"del(.o|walk(.) as $y|$y)", "", 5),
+        (r"path(.b|(strings // .) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(strings?) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(try strings) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|strings as $y|$y|numbers)", "", 0),
+        (r"path(.b|strings as $y|.|$y)", "[\"b\"]\n", 0),
+        (r"path(.a|arrays as $y|$y|.[0])", "[\"a\",0]\n", 0),
+        (r"path(.a|arrays|.[0] as $y|$y)", "", 5),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4017: `ltrimstr`/`rtrimstr` return a non-string input as the same `jv` too, so a
 /// variable bound to one is the register; with the bound result unplaced, the `try`
 /// around its use caught the resolver's refusal, and the write jq makes was dropped
