@@ -838,19 +838,19 @@ impl EvalError {
         Self::new("Array/string slice indices must be integers")
     }
 
-    /// `expected to find 1 number, got 0 instead`: a yq slice bound that
-    /// produced no value (#4197).
+    /// `expected to find 1 number, got N instead`: a yq slice bound that did
+    /// not produce exactly one value (#4197 for none, #2056 for several).
     ///
     /// Real yq evaluates each bound of `.[S:T]` in full and wants exactly one
     /// number from it, wherever the slice is read or written and whatever the
     /// target is (`null` and scalars included), and neither `?` nor `//`
-    /// suppresses it: `.b[select(false):]`, `.b[$typo:]`, `.b[1:select(false)] = 9`
-    /// and `del(.b[select(false):])` all raise it (yq v4.53.3). jq's generator
-    /// model reads an empty bound as "no slice", which is jq mode's rule; only
-    /// the zero count is raised here, since a bound with two or more values
-    /// keeps yq mode's documented generator model (`docs/compliance/yq/limitations.md`).
-    pub fn slice_bound_empty() -> Self {
-        Self::new("expected to find 1 number, got 0 instead")
+    /// suppresses it: `.b[select(false):]`, `.b[$typo:]`, `.b[1:select(false)] = 9`,
+    /// `del(.b[select(false):])` and `.b[(0,1):2]` all raise it (yq v4.53.3), the
+    /// count check coming before the value is parsed. jq's generator model reads
+    /// an empty bound as "no slice" and a several-valued one as a fan-out, which
+    /// is jq mode's rule; this is only raised in yq mode.
+    pub fn slice_bound_count(count: usize) -> Self {
+        Self::new(format!("expected to find 1 number, got {count} instead"))
     }
 
     /// `A slice of an array can only be assigned another array`.
