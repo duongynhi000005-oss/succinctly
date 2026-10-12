@@ -60977,8 +60977,8 @@ fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
 /// different node (`reduce .[] as $it (.; foreach ($it as {a:$a} | .) ...)`, which jq answers) is
 /// not. Also a `(.|.)` bound expression (a pipe of `.`), which is the register as a bare `.` is. Every row captured from
 /// jq 1.7.1 with `-c`; the message is pinned only where succinctly names the same step (a
-/// constant body is jq's `near attempt to access element`, here the value-mode `Cannot index`,
-/// on `main` too).
+/// constant body is jq's `near attempt to access element` since #4452, before which it was the
+/// value-mode `Cannot index`).
 #[test]
 fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> Result<()> {
     let doc = r#"{"a":false,"b":null}"#;
@@ -61078,14 +61078,14 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
             doc,
             r"del(foreach (def f: 7; f as {a:$a} | .) as $y (.; .; .))",
             "",
-            "Cannot index number with string",
+            "Invalid path expression near attempt to access element \"a\" of 7",
             5,
         ),
         (
             doc,
             r"del(foreach (def f: .; def f: 7; f as {a:$a} | .) as $y (.; .; .))",
             "",
-            "Cannot index number with string",
+            "Invalid path expression near attempt to access element \"a\" of 7",
             5,
         ),
         (
@@ -61293,6 +61293,127 @@ fn test_foreach_source_bound_to_a_call_returning_the_register_refuses_4320() -> 
         ),
     ])?;
     Ok(())
+}
+
+/// #4452: a `foreach` source whose bound expression is a call to a `def` that builds its result
+/// (`def f: {a:1}; f as {a:$a} | .`, also through a second `def`, `keys`, `[.]`, or a comma
+/// next to a written-out fresh value) destructures a value that is never jq's register, so the
+/// pattern's tracked step raises whatever the register is. The by-value drive answered the root
+/// (`[path(...)]` was `[[]]`, `del` returned `null`, `=` wrote), and the resolver now places
+/// the source. Every row captured from jq 1.7.1 with `-c`; the message is pinned where
+/// succinctly names the same step. The contrasts are a bare `$v` bind (no step, jq answers),
+/// a definition shadowed by the register's before the call (the register's own refusal), the
+/// value-mode read of the same source, and a body that hands the register on next to a fresh
+/// value (`def f: ., {a:1}`), which stays by value so a `try` over a negated (value-mode)
+/// operand still catches jq's own error, as jq does.
+#[test]
+fn test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452() -> Result<()> {
+    let doc = r#"{"a":false,"b":null}"#;
+    let fresh = "Invalid path expression near attempt to access element \"a\" of {\"a\":1}";
+    assert_path_rows_3289(&[
+        (
+            doc,
+            r#"[path(foreach (def f: {"a":1}; f as {a:$a} | .) as $y (.; .; .))]"#,
+            "",
+            fresh,
+            5,
+        ),
+        (
+            doc,
+            r#"del(foreach (def f: {"a":1}; f as {a:$a} | .) as $y (.; .; .))"#,
+            "",
+            fresh,
+            5,
+        ),
+        (
+            doc,
+            r#"(foreach (def f: {"a":1}; f as {a:$a} | .) as $y (.; .; .)) = 9"#,
+            "",
+            fresh,
+            5,
+        ),
+        (
+            doc,
+            r#"(foreach (def f: {"a":1}; f as {a:$a} | .) as $y (.; .; .)) |= 9"#,
+            "",
+            fresh,
+            5,
+        ),
+        (
+            doc,
+            r#"[path(foreach (def f: {"a":1}; def g: f; g as {a:$a} | .) as $y (.; .; .))]"#,
+            "",
+            fresh,
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach (def f: keys; f as [$a] | .) as $y (.; .; .))]",
+            "",
+            "Invalid path expression near attempt to access element 0 of [\"a\",\"b\"]",
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach (def f: [.]; f as [$a] | .) as $y (.; .; .))]",
+            "",
+            "Invalid path expression near attempt to access element 0 of [{\"a\":false,\"b\":null}]",
+            5,
+        ),
+        (
+            doc,
+            r#"del(foreach (def f: 7, {"a":1}; f as {a:$a} | .) as $y (.; .; .))"#,
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 7",
+            5,
+        ),
+        // A fresh value written out next to the register: the same step raises on it.
+        (
+            doc,
+            r#"[path(foreach ((., {"a":1}) as {a:$a} | .) as $y (.; .; .))]"#,
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        // Inside a `reduce` UPDATE, where the document is rebuilt around the fold: the message
+        // names the register, not jq's fresh value (a message-only difference).
+        (
+            doc,
+            r#"del(reduce 1 as $k (.; foreach (def f: {"a":1}; f as {a:$a} | .) as $y (.; .; .)))"#,
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // Contrasts jq answers (or refuses for another reason).
+        (
+            doc,
+            r#"[path(foreach (def f: {"a":1}; f as $v | .) as $y (.; .; .))]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r#"[foreach (def f: {"a":1}; f as {a:$a} | $a) as $y (.; .; .)]"#,
+            "[{\"a\":false,\"b\":null}]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r#"[path(foreach (def f: {"a":1}; def f: .; f as {a:$a} | .) as $y (.; .; .))]"#,
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            doc,
+            r#"del(try (-(foreach (def f: ., {"a":1}; f as {a:$a} | .) as $y (.; .; .))))"#,
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+    ])
 }
 
 /// #4320 (a `reduce` UPDATE): a `foreach` in a `reduce` UPDATE whose source binds a call that

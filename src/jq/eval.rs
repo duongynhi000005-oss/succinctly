@@ -49770,6 +49770,64 @@ impl<'e> RegisterSpine<'e> {
         register
     }
 
+    /// Whether `e`, the bound expression of a destructuring bind, has a freshly built output
+    /// ([`yields_only_fresh_values`]): some output of a comma (`every` false), or every output
+    /// of one (`every` true), and a call with no arguments, which returns what its body does,
+    /// read in the scope the definition was written in (#4452). Such an output can never be
+    /// jq's register, so the pattern's tracked `INDEX` step raises on it whatever the register
+    /// is, and the by-value drive answers where jq raises. A comma of fresh leaves alone is
+    /// already routed by [`is_fold_source_destructuring`] (a context-free test); this reads what
+    /// that cannot: a definition in scope on the spine, and a fresh leaf next to the register.
+    ///
+    /// A call's body must be fresh on *every* output. A body that hands the register on next to
+    /// a fresh value (`def f: ., {a:1}`) is left to the routes it had: routed, the register
+    /// leaf is placed through the call, and in a context where `.` is not the register (`del(try
+    /// (-(foreach (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .; .))))`, where the negated
+    /// operand is a value-mode subexpression) the resolver refuses a step jq never runs.
+    fn binds_fresh(&mut self, e: &'e Expr, every: bool) -> bool {
+        match unwrap_bind_source(e) {
+            Expr::Comma(items) if every => items.iter().all(|item| self.binds_fresh(item, true)),
+            Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, false)),
+            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+                match self
+                    .defs
+                    .iter()
+                    .rposition(|def| def.name == name && def.arity == 0)
+                {
+                    Some(at) => {
+                        let SpineDef { body, vars, .. } = self.defs[at];
+                        body.is_some_and(|body| self.body_binds_fresh(body, vars, at + 1))
+                    }
+                    None => false,
+                }
+            }
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let body: &'e Expr = &def.body;
+                self.body_binds_fresh(body, 0, 0)
+            }
+            other => yields_only_fresh_values(other),
+        }
+    }
+
+    /// [`binds_fresh`](Self::binds_fresh) (every output) of a `def` body, scoped as
+    /// [`body_binds_register`](Self::body_binds_register) scopes it. Past the call budget it
+    /// answers `false`, which leaves the source to the routes it had before (#4452).
+    fn body_binds_fresh(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
+        let key: *const Expr = body;
+        if self.binding.contains(&key) || self.calls == 0 {
+            return false;
+        }
+        self.calls -= 1;
+        self.binding.push(key);
+        let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
+        let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
+        let fresh = self.binds_fresh(body, true);
+        self.vars.extend(vars_tail);
+        self.defs.extend(defs_tail);
+        self.binding.pop();
+        fresh
+    }
+
     /// The names a bind of `expr` to `patterns` binds, each with whether it may hold the
     /// register. A destructuring alternative's names hold members. The first bare `$var`
     /// alternative holds `expr` when it matches, the register if [`binds_register`] says so;
@@ -50003,6 +50061,12 @@ impl<'e> RegisterSpine<'e> {
                 // only outside every fold body, where `.` may be an accumulator the enclosing
                 // source moved: a `reduce` UPDATE that jq answers (`path(reduce (1) as $i (.;
                 // CHAIN))` on `[]`) would refuse.
+                // #4452: a single pattern over a bound expression with a fresh leaf (a call whose
+                // `def` builds its result, a fresh value beside the register in a comma): the step
+                // raises on the leaf whatever the register is, which only the resolver models.
+                if routes_destructuring(patterns) && self.binds_fresh(expr, false) {
+                    return Reach::Destructures;
+                }
                 if (routes_destructuring(patterns)
                     || patterns_all_destructuring_chain(patterns)
                     || (self.null_register && routes_destructuring_chain(patterns)))

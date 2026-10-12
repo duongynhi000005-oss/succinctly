@@ -603,6 +603,20 @@ OPERANDS = [
     "(foreach (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .|tostring; f as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: {a:1}; try f as {a:$a} | .) as $k (.; .; .))",
+    # (#4452) a call whose `def` builds its result (the sweep's first rows are #4320's seventh
+    # part): the contrasts are a body that may be the register (`tostring`), a shadowed
+    # definition, a bare `$v` alternative (no step), a `first`/`limit` that stops before the
+    # fresh leaf, and a comma of the register and a fresh value written out.
+    "(foreach (def f: keys; f as [$a] | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; def g: f; g as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; def f: {a:1}; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; def f: .; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; f as $v | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}, .; first(f) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}, .; limit(1; f) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach ((., {a:1}) as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))",
+    "(foreach (def f: [.]; f as [$a] | .) as $k (.; .; .))",
     # (#4320) a `$x` bound outside the `foreach` that is the register at it: certified by
     # marker identity, so it is the source's own destructure as `. as {a:$a}` is. The contrasts
     # are an outer `$x` bound to a member, a `reduce` (which backtracks its source), an outer
