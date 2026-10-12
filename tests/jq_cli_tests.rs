@@ -310,6 +310,22 @@ fn test_jq_numeric_index_write_on_an_object_still_errors_2514() -> Result<()> {
     Ok(())
 }
 
+/// #1157's jq-mode control: a slice write on an object is still jq's
+/// `Cannot index object with object` (exit 5); only yq mode no-ops it.
+#[test]
+fn test_jq_object_slice_assignment_still_errors_1157() -> Result<()> {
+    for filter in [".a[0:1] = [99]", ".a[0:1] |= [99]", ".a[0:1] += [1]"] {
+        let (stdout, stderr, code) =
+            run_jq_stdin_streams(filter, r#"{"a":{"x":1,"y":2}}"#, &["-c"])?;
+        assert_eq!(code, 5, "`{filter}` -- stdout: {stdout:?}");
+        assert!(
+            stderr.contains("Cannot index object with object"),
+            "`{filter}` -- stderr: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3025: a reindexed value must keep the source number seen by native reads.
 /// Expectations were captured from /usr/bin/jq 1.7.1-apple.
 #[test]
