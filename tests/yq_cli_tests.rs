@@ -63591,3 +63591,111 @@ fn test_path_try_keeps_its_route_in_yq_mode_4412() -> Result<()> {
     assert_eq!(run_yq_stdin("path(try .d)", bad, &args)?.1, 1);
     Ok(())
 }
+
+/// A block-style mapping `depth` levels deep (`a:` nested, a scalar leaf). The YAML parser's own
+/// 128 ceiling counts only flow/compact-inline nesting, so this parses at any depth and reaches
+/// the evaluator's 256 ceiling that a `-p json` input (capped at 128 at parse time) cannot.
+fn deep_block_mapping_yaml(depth: usize) -> String {
+    let mut yaml = String::new();
+    for level in 0..depth {
+        yaml.push_str(&"  ".repeat(level));
+        yaml.push_str("a:\n");
+    }
+    yaml.push_str(&"  ".repeat(depth));
+    yaml.push_str("1\n");
+    yaml
+}
+
+/// #1817/#2304: a block-style document past the evaluator's 256 ceiling is a diagnostic and
+/// exit 1 on every route that materializes it, never a panic (exit 101). Real yq has no ceiling
+/// and exits 0 (recorded in `docs/compliance/yq/limitations.md`); the message is the one `jq`
+/// mode reports.
+#[test]
+fn test_deep_block_yaml_is_a_clean_error_on_every_materializing_route_1817() -> Result<()> {
+    let deep = deep_block_mapping_yaml(300);
+    let routes: [(&str, &[&str]); 7] = [
+        ("sort", &[]),
+        (". as $x | $x", &[]),
+        ("to_entries", &[]),
+        (".", &["-P"]),
+        (".", &["--arg", "x", "1"]),
+        (".[0]", &["--slurp"]),
+        ("sort", &["--eval-all"]),
+    ];
+    for (filter, args) in routes {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, &deep, args)?;
+        assert_eq!(code, 1, "{filter} {args:?}: stderr: {stderr:?}");
+        assert!(
+            stderr.contains("nesting depth exceeds limit of 256") && !stderr.contains("panicked"),
+            "{filter} {args:?}: stderr: {stderr:?}"
+        );
+        assert_eq!(stdout, "", "{filter} {args:?}: nothing half-rendered");
+    }
+    Ok(())
+}
+
+/// #1817: the over-deep document in the middle of a stream does not take the documents on
+/// either side of it down with it -- both still print, the run exits 1.
+#[test]
+fn test_deep_block_yaml_in_a_stream_keeps_the_documents_around_it_1817() -> Result<()> {
+    let input = format!("a: 1\n---\n{}---\nb: 2\n", deep_block_mapping_yaml(300));
+    for (filter, args) in [
+        ("sort", &[][..]),
+        (". as $x | $x", &[][..]),
+        (".", &["-P"][..]),
+        (".", &["--arg", "x", "1"][..]),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, &input, args)?;
+        assert_eq!(code, 1, "{filter} {args:?}: stderr: {stderr:?}");
+        assert!(
+            stderr.contains("nesting depth exceeds limit of 256") && !stderr.contains("panicked"),
+            "{filter} {args:?}: stderr: {stderr:?}"
+        );
+        assert!(stdout.contains("a: 1\n"), "{filter} {args:?}: {stdout:?}");
+        assert!(stdout.contains("b: 2\n"), "{filter} {args:?}: {stdout:?}");
+    }
+    Ok(())
+}
+
+/// #1817: `--split-exp` writes the documents that evaluated and reports the one that did not.
+#[test]
+fn test_deep_block_yaml_in_a_split_exp_stream_writes_the_rest_1817() -> Result<()> {
+    let dir = TempDir::new()?;
+    let pattern = format!(
+        "\"{}/o_\" + ($index|tostring) + \".yml\"",
+        dir.path().display()
+    );
+    let input = format!("a: 1\n---\n{}---\nb: 2\n", deep_block_mapping_yaml(300));
+    let (_stdout, stderr, code) =
+        run_yq_stdin_with_stderr(".", &input, &["--split-exp", &pattern])?;
+    assert_eq!(code, 1, "stderr: {stderr:?}");
+    assert!(
+        stderr.contains("nesting depth exceeds limit of 256") && !stderr.contains("panicked"),
+        "stderr: {stderr:?}"
+    );
+    let mut written = Vec::new();
+    for entry in std::fs::read_dir(dir.path())? {
+        written.push(std::fs::read_to_string(entry?.path())?);
+    }
+    written.sort();
+    assert_eq!(written, ["a: 1\n", "b: 2\n"]);
+    Ok(())
+}
+
+/// The control for the three tests above: the same shape one ceiling below evaluates, so they
+/// are rejecting the depth and not the route.
+#[test]
+fn test_deep_block_yaml_below_the_ceiling_still_evaluates_1817() -> Result<()> {
+    let input = deep_block_mapping_yaml(200);
+    for (filter, args) in [
+        ("sort", &[][..]),
+        (". as $x | $x", &[][..]),
+        (".", &["-P"][..]),
+        (".[0]", &["--slurp"][..]),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, &input, args)?;
+        assert_eq!(code, 0, "{filter} {args:?}: stderr: {stderr:?}");
+        assert!(stdout.starts_with("a:\n"), "{filter} {args:?}: {stdout:?}");
+    }
+    Ok(())
+}

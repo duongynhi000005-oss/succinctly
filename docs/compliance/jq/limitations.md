@@ -5805,8 +5805,9 @@ materialize call directly, the identical panicking route `-e` always took. #2850
 together is unchanged from #1818's original guarantee: `-S`/`-a`/`-C` still cannot panic on
 over-deep input, now via a different, more direct mechanism than the one #2662 stepped past.
 
-`succinctly yq` still has no equivalent guard on either its default or materializing path at
-all (#1817) — untouched by #2850, which is jq-mode only. Confirmed live, also pre-existing and
+`succinctly yq` reports the same ceiling as a clean diagnostic and exit 1 on every route and
+continues the stream (#1817, #2304; [yq limitations](../yq/limitations.md)) — it was untouched by
+#2850, which is jq-mode only, and had no guard at all when this paragraph was written. Confirmed live, also pre-existing and
 unrelated to any of #1793/#1818/#2850: `print_json`'s own guard used to flush corrupted/truncated
 JSON to stdout before it fired (#1819). #1819 aligned its ceiling with the construction guards,
 and since #3265 the render it interrupts is buffered, so a 500-deep `.` prints nothing.
