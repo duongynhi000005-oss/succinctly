@@ -78115,6 +78115,147 @@ fn test_foreach_source_bare_alternative_chain_behind_register_stages_4420() -> R
     ])
 }
 
+/// #4320 (a marker behind `first`/`limit`/`last`/`try`): `. as $x | foreach (first($x) as {a:$a} | .) as
+/// $k (.; .; .)`. `first($x)` hands `$x`, the register, on unchanged, so the pattern's steps move
+/// jq's register as `$x as {a:$a}` does and the emitted state is no longer at it: jq raises on every
+/// document but `null`, where `null | .a` is `null` and the register lands on `.a`. The wrapper hid the
+/// marker from the source's spine walk, so the by-value drive answered the root (`del` deleted the
+/// document, `=` replaced it). The marker is now read through the wrappers that hand their operand's
+/// value on. Every jq side captured from jq 1.7.1 (the refusals' wording differs from jq's).
+#[test]
+fn test_foreach_source_marker_behind_a_value_wrapper_destructures_4320() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (last($x) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (limit(1; $x) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (try $x as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // `|=` and an array pattern.
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .)) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | foreach (first($x) as [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(. as $x | foreach (limit(1; $x) as [$a] | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"(. as $x | foreach (first($x) as [$a] | .) as $k (.; .; .)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        // On `null` the walk succeeds and the register lands on the member.
+        (
+            "null",
+            r"path(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A marker for another node than the register keeps raising at the first step.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (first($x) as {b:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // A `?//` chain with a wrapped marker keeps its retry rules (#3279/#3781): the head is not
+        // placed as the register there, and these answer as jq does.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(. as $x | first($x) as {a:$v} ?// $v | .a)]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | first($x) as {a:$v0} ?// $v0 | .a)",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(. as $x | first($x) as [$v] ?// $v | .[0]?)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // A count that navigates is not a wrapper the resolver places, and a wrapper it does not
+        // name (`nth`) keeps the by-value drive's catchable answer.
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (limit(.a; $x) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (nth(0; $x) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        // The pinned row of the #4320 comment: the `try` catches jq's own refusal, so the
+        // document is returned. The resolver's head is the register, so its refusal is exact.
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4278: the fold-source carriers #4187 left. A destructure of the register behind a mixed `?//`
 /// chain, a plain bind that is a later pipe stage, an `if` branch, a no-argument `def` call, or a
 /// `$x` bound to the register moves jq's register onto `.a`, so the emitted `.` is no longer there
@@ -111483,10 +111624,6 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
         ),
         (
             doc,
-            r#"del(. as $orig | has("k") | try (first($orig) as {a:{b:$q}} | $q))"#,
-        ),
-        (
-            doc,
             r#"del(. as $orig | has("k") | try (($orig?) as {a:{b:$q}} | $q))"#,
         ),
         (
@@ -111555,6 +111692,13 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
         (doc, r"del(((., 1)?) as $x | try $x.a)", "{}\n"),
         (doc, r"(((., 1) | .) as $x | try $x.a) = 9", "{\"a\":9}\n"),
         (doc, r"del(limit(1; ., 1) as $x | try $x.a)", "{}\n"),
+        // #4320: `first($orig)` hands the frozen `$orig` on, so its head is the register and
+        // the write lands as jq's does (it refused loudly before).
+        (
+            doc,
+            r#"del(. as $orig | has("k") | try (first($orig) as {a:{b:$q}} | $q))"#,
+            "{\"a\":{}}\n",
+        ),
         (
             doc,
             r"del(((select(true), 1) | .) as $x | try $x.a)",
