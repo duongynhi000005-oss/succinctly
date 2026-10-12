@@ -591,6 +591,37 @@ fn test_yq_hyphenated_name_is_not_a_builtin_prefix_1890() -> Result<()> {
     Ok(())
 }
 
+/// #1805: `--exit-status` never reports success for a result that is a scalar
+/// failing to decode. `DocumentCursor::is_falsy` answers `false` for such a
+/// cursor, but every route that classifies a result also streams it, and the
+/// streamer raises the failure first (yq: `found unknown escape character`,
+/// exit 1), so no validating pre-pass is needed on the `--exit-status` path.
+#[test]
+fn test_exit_status_decode_failure_exits_nonzero_1805() -> Result<()> {
+    let doc = "bad: \"x\\qy\"\n";
+    for filter in [".bad", ".", ".bad,.bad", "[.bad]", r#".bad // "d""#] {
+        for args in [&["-e", "-o=json", "-I=0"][..], &["-e"][..]] {
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
+            assert_eq!(code, 1, "`{filter}` {args:?} -- stdout: {stdout:?}");
+            assert!(
+                stderr.contains("invalid escape sequence"),
+                "`{filter}` {args:?} -- stderr: {stderr:?}"
+            );
+            // The identity fast path keeps the key prefix it already wrote (a
+            // documented trade); everything else prints nothing.
+            if filter != "." {
+                assert_eq!(stdout, "", "`{filter}` {args:?}");
+            }
+        }
+    }
+    // The decode failure is the cause of the exit, not a falsy verdict:
+    // without `-e` the same filter fails the same way.
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr(".bad", doc, &[])?;
+    assert_eq!(code, 1, "stdout: {stdout:?}");
+    assert!(stderr.contains("invalid escape sequence"), "{stderr:?}");
+    Ok(())
+}
+
 /// #3950: `transpose` pads short rows with `null` in yq mode too.
 ///
 /// Real yq's lexer rejects `transpose` (v4.53.3), so there is no yq answer to
