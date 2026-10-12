@@ -22837,7 +22837,12 @@ fn is_pure_fusable_slice(slice: &Expr) -> bool {
 /// stage is that pipe, and [`fusable_slice_read`] would not otherwise see the slice. The prefix is
 /// every stage before the slice (at least one) and must be pure, so the fused read may evaluate it
 /// and then decline; the bounds come from the last stage, a postfix `?` looked through. `None` for
-/// any other shape.
+/// any other shape. Out of line for the reason [`fused_slice_pipe_head`] gives: its result must not
+/// widen the native frames of the evaluator arms that ask (`eval_single`'s `IndexExpr` arm sits on
+/// the recursion path the stack-depth guard is calibrated against, and
+/// `test_literal_dollar_argument_matches_jq_3260` failed on ARM64 when a call here left a temporary
+/// in it).
+#[inline(never)]
 fn navigated_literal_slice(expr: &Expr) -> Option<(&[Expr], Option<i64>, Option<i64>)> {
     let Expr::Pipe(stages) = expr else {
         return None;
