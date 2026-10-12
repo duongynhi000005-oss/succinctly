@@ -49583,6 +49583,10 @@ enum Reach {
     Destructures,
     /// It hands the register on unmoved, so the next pipe stage meets it where this one did.
     HandsOn,
+    /// It hands the register on unmoved on some outputs and may move it on others (a comma such
+    /// as `(., 1)`): the next pipe stage meets the register on the first, so a destructure there is
+    /// the source's own (#4424), but the walk cannot say the rest of the pipe does.
+    Partial,
     /// Anything else: it may move the register, so the walk stops there.
     Opaque,
 }
@@ -49593,7 +49597,13 @@ enum Reach {
 /// [`RegisterSpine::defs`]), as jq binds it lexically (#4278).
 struct SpineDef<'e> {
     name: &'e str,
-    body: &'e Expr,
+    /// The number of parameters: `def f: ..` and `def f($x): ..` are different definitions (#4424).
+    arity: usize,
+    /// `None` for the shadow a parameter of a definition being read casts on the definition of
+    /// that name in scope (`def f(g): g;` calls its argument, not an outer `def g`): reads as
+    /// opaque.
+    body: Option<&'e Expr>,
+    params: &'e [Param],
     vars: usize,
 }
 
@@ -49609,9 +49619,9 @@ struct RegisterSpine<'e> {
     /// by-value drive never moves it. A `null` register is also the only one a moved register can
     /// be `jv_identical` to the emitted state of, so it is the only document on which the two
     /// answers show (`path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))` is `["a"]` on
-    /// `null`). The walk reads the chain behind every stage that hands the register on; one that is
-    /// the register on only some outputs (`(., 1) | CHAIN`) still answers the root on all of
-    /// them, and inside an outer `path()` jq reports `[]` where the resolver reports `["a"]` in the
+    /// `null`). The walk reads the chain behind every stage that hands the register on, and behind
+    /// one that is the register on only some outputs (`(., 1) | CHAIN`, [`Reach::Partial`], #4424);
+    /// inside an outer `path()` jq reports `[]` where the resolver reports `["a"]` in the
     /// refusal's text (both raise).
     null_register: bool,
     /// The variables bound so far on the spine, innermost last, each with whether it may hold
@@ -49674,10 +49684,14 @@ impl<'e> RegisterSpine<'e> {
             // #4320: a call with no arguments returns what its body does, read in the scope
             // the definition was written in.
             Expr::FuncCall { name, args, .. } if args.is_empty() => {
-                match self.defs.iter().rposition(|def| def.name == name) {
+                match self
+                    .defs
+                    .iter()
+                    .rposition(|def| def.name == name && def.arity == 0)
+                {
                     Some(at) => {
                         let SpineDef { body, vars, .. } = self.defs[at];
-                        self.body_binds_register(body, vars, at + 1)
+                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1))
                     }
                     None => false,
                 }
@@ -49778,6 +49792,19 @@ impl<'e> RegisterSpine<'e> {
     /// first `vars` spine variables and `defs` spine definitions in scope: what was bound where
     /// the definition was written.
     fn read_body(&mut self, body: &'e Expr, vars: usize, defs: usize) -> Reach {
+        self.read_body_with(body, vars, defs, &[])
+    }
+
+    /// [`read_body`](Self::read_body) of a definition with `params` (#4424): each is a closure
+    /// that casts a shadow on a definition of its name, and a `$`-style one also binds a variable
+    /// that is not the register.
+    fn read_body_with(
+        &mut self,
+        body: &'e Expr,
+        vars: usize,
+        defs: usize,
+        params: &'e [Param],
+    ) -> Reach {
         let key: *const Expr = body;
         if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
             return reach;
@@ -49790,7 +49817,22 @@ impl<'e> RegisterSpine<'e> {
         self.memo.push((key, Reach::HandsOn));
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
+        let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
+        for param in params {
+            self.defs.push(SpineDef {
+                name: param.name(),
+                arity: 0,
+                body: None,
+                params: &[],
+                vars: 0,
+            });
+            if param.is_dollar() {
+                self.vars.push((param.name(), false));
+            }
+        }
         let reach = self.reach(body);
+        self.vars.truncate(vars_base);
+        self.defs.truncate(defs_base);
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
         self.memo[at].1 = reach;
@@ -49813,15 +49855,26 @@ impl<'e> RegisterSpine<'e> {
     /// The reach of alternatives that each meet the register where their parent did (a comma's
     /// branches, an `if`'s): any that destructures, else hands-on only if all do.
     fn reach_any<I: IntoIterator<Item = &'e Expr>>(&mut self, branches: I) -> Reach {
-        let mut reach = Reach::HandsOn;
+        let (mut hands_on, mut other) = (false, false);
         for branch in branches {
             match self.reach(branch) {
                 Reach::Destructures => return Reach::Destructures,
-                Reach::Opaque => reach = Reach::Opaque,
-                Reach::HandsOn => {}
+                Reach::Opaque => other = true,
+                Reach::Partial => {
+                    hands_on = true;
+                    other = true;
+                }
+                Reach::HandsOn => hands_on = true,
             }
         }
-        reach
+        match (hands_on, other) {
+            (_, false) => Reach::HandsOn,
+            // Only outside every fold body, where `.` may be an accumulator the enclosing source
+            // moved: a `reduce` UPDATE that jq answers (`path(reduce 1 as $k (.; foreach ((., 1) |
+            // CHAIN) as $k (.; .; .)))` on `null`) would refuse.
+            (true, true) if fold_body::depth() == 0 => Reach::Partial,
+            (true | false, true) => Reach::Opaque,
+        }
     }
 
     /// What `e` does with the register as a fold source, or a stage of one. Past
@@ -49934,14 +49987,23 @@ impl<'e> RegisterSpine<'e> {
             // nothing, so the stage after it is the one that meets the register. #4278: so does
             // any stage [`reach`](Self::reach) reads as handing it on (a plain bind, an `if`, a
             // call whose body does); the walk stops at the first stage that may move it.
+            // #4424: past a stage that hands the register on only on some outputs (`(., 1)`) the
+            // next stage still meets it on those, so a destructure there is routed; a stage that
+            // is neither ends the walk as it does after a stage that moves the register.
             Expr::Pipe(stages) => {
+                let mut reach = Reach::HandsOn;
                 for stage in stages {
                     match self.reach(stage) {
                         Reach::HandsOn => {}
+                        // A second such stage fans the register out again, which the resolver
+                        // does not place (`foreach (., 1) as $j (.; .; .) | (., 1) | CHAIN`
+                        // aborted partway): the walk stops there.
+                        Reach::Partial if reach == Reach::HandsOn => reach = Reach::Partial,
+                        Reach::Partial => return Reach::Opaque,
                         other => return other,
                     }
                 }
-                Reach::HandsOn
+                reach
             }
             // #4278: the condition runs as a subexpression, so either branch meets the
             // register where the `if` did.
@@ -49962,23 +50024,38 @@ impl<'e> RegisterSpine<'e> {
                 ..
             } => {
                 let depth = self.defs.len();
-                if params.is_empty() {
-                    self.defs.push(SpineDef {
-                        name,
-                        body,
-                        vars: self.vars.len(),
-                    });
-                }
+                self.defs.push(SpineDef {
+                    name,
+                    arity: params.len(),
+                    body: Some(body),
+                    params,
+                    vars: self.vars.len(),
+                });
                 let reach = self.reach(then);
                 self.defs.truncate(depth);
                 reach
             }
-            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+            Expr::FuncCall { name, args, .. }
+                if args.is_empty()
+                    || self
+                        .defs
+                        .iter()
+                        .any(|def| def.name == name && def.arity == args.len()) =>
+            {
                 // The definition itself stays in scope in its body, for a recursive call.
-                match self.defs.iter().rposition(|def| def.name == name) {
+                match self
+                    .defs
+                    .iter()
+                    .rposition(|def| def.name == name && def.arity == args.len())
+                {
                     Some(at) => {
-                        let SpineDef { body, vars, .. } = self.defs[at];
-                        self.read_body(body, vars, at + 1)
+                        let SpineDef {
+                            body, vars, params, ..
+                        } = self.defs[at];
+                        match body {
+                            Some(body) => self.read_body_with(body, vars, at + 1, params),
+                            None => Reach::Opaque,
+                        }
                     }
                     None => Reach::Opaque,
                 }
@@ -49990,6 +50067,18 @@ impl<'e> RegisterSpine<'e> {
                 // as not the register) or definitions (its own calls are installed too).
                 let body: &'e Expr = &def.body;
                 self.read_body(body, 0, 0)
+            }
+            // #4424: a call to a definition with parameters runs its body where the call is, as
+            // a call with none does. Each argument is bound as `ARG as $p | BODY` is, a
+            // subexpression that moves nothing, and what a parameter holds is read as not the
+            // register (it is no spine variable, so `holds_register` says no), so a `$p as {a:$a}`
+            // in the body is not claimed. A closure parameter called in the body is no
+            // definition on the spine and reads as opaque.
+            Expr::DefCall { def, args, .. }
+                if !def.params.is_empty() && args.len() == def.params.len() =>
+            {
+                let (body, params): (&'e Expr, &'e [Param]) = (&def.body, &def.params);
+                self.read_body_with(body, 0, 0, params)
             }
             // A nested `foreach` does not backtrack its source; a nested `reduce` does, so it is
             // read only through a `reduce` ([`source_destructures_register`]).
@@ -50007,9 +50096,32 @@ impl<'e> RegisterSpine<'e> {
                     // nested loop pattern is (`foreach (foreach (. as [$a] | .) as $k (.; .; .))`).
                     || self.reach(input) == Reach::Destructures;
                 if destructures {
-                    Reach::Destructures
-                } else {
-                    Reach::Opaque
+                    return Reach::Destructures;
+                }
+                // #4424: a nested `foreach` over `.` whose INIT, UPDATE and EXTRACT are all `.`
+                // emits its accumulator, the register's own node, once per source output
+                // (`foreach (., 1) as $j (.; .; .)`), and does not backtrack its source, so the
+                // next stage meets the register as the source left it: where the source handed
+                // it on, this does too.
+                match fold {
+                    Expr::Foreach {
+                        input,
+                        patterns,
+                        init,
+                        update,
+                        extract,
+                    } if patterns_all_bare(patterns)
+                        && body_performs_no_step(init)
+                        && body_performs_no_step(update)
+                        && extract.as_deref().map_or(true, body_performs_no_step) =>
+                    {
+                        match self.reach(input) {
+                            Reach::HandsOn => Reach::HandsOn,
+                            Reach::Partial => Reach::Partial,
+                            _ => Reach::Opaque,
+                        }
+                    }
+                    _ => Reach::Opaque,
                 }
             }
             // #3956: a wrapper that emits what its operand does (`try E`, `E?`, `first(E)`,
@@ -51575,7 +51687,13 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // register when the marker is, again for a single pattern only.
     let head_resolves_to_register = register.is_some_and(|reg| {
         resolves_to_register::<S>(head, trackable, reg, frame)
-            || (patterns.len() == 1
+            // #4424: a destructuring-only chain too, for a body that performs no step: the pipe is
+            // the register, no alternative is a bare `$var` to retry onto, and the refusal at the
+            // end of the path is jq's own (`del(try ((.|.) as {a:$a} ?// [$a] | .))` raises). A body
+            // that navigates can fail on the first alternative and retry onto the next, which jq
+            // swallows under `try`; a head proven the register would refuse it uncatchably.
+            || ((patterns.len() == 1
+                || (patterns_all_destructuring_chain(patterns) && body_performs_no_step(body)))
                 && S::TAG == EvalTag::Jq
                 && matches!(head, Expr::Pipe(stages) if stages
                     .iter()
@@ -51738,19 +51856,39 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             // cannot supply one either
                             // (`cannot_move_register` is false for this
                             // pattern).
-                            Some(reg) if !trackable => resolve_seq_from_seed::<S>(
-                                core::slice::from_ref(&substituted),
-                                PathBranch::passthrough(
+                            Some(reg) if !trackable => {
+                                let seed = PathBranch::passthrough(
                                     PathPrefix::root(),
                                     Cow::Borrowed(value),
                                     false,
                                     snapshot.clone(),
                                 )
-                                .with_register(BranchRegister::Unmoved(Cow::Owned(reg.clone()))),
-                                frame,
-                                keep,
-                                sink,
-                            ),
+                                .with_register(BranchRegister::Unmoved(Cow::Owned(reg.clone())));
+                                // #4424: a body that is only `.` performs no step, so the
+                                // untracked source value is not checked here: the register is
+                                // unmoved and the NEXT step, or the end of the path, checks it
+                                // (#3853's reading, for an alternative that ran no step). The
+                                // body's own terminal check refused `(., 1) | CHAIN`'s second
+                                // output in a fold source, where jq answers `[]`.
+                                if S::TAG == EvalTag::Jq
+                                    && (fold_body::depth() == 0
+                                        || fold_body::acc_is_register_here())
+                                    && body_performs_no_step(&substituted)
+                                {
+                                    match sink(seed) {
+                                        Demand::Continue => ResolveFlow::Exhausted,
+                                        Demand::Stop => ResolveFlow::Stopped,
+                                    }
+                                } else {
+                                    resolve_seq_from_seed::<S>(
+                                        core::slice::from_ref(&substituted),
+                                        seed,
+                                        frame,
+                                        keep,
+                                        sink,
+                                    )
+                                }
+                            }
                             // Trackable (the register is `value` itself), or
                             // no register in hand: the body resolves exactly
                             // as the `As` arm's does.

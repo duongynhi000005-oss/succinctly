@@ -488,6 +488,39 @@ OPERANDS = [
     "(foreach (. as $x | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach (.a | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(reduce (. | . as {a:$a} ?// $a | .) as $k (.; .))",
+    # (#4424, second part) the register reaches the chain through a call to a `def` with
+    # parameters, a comma that is the register on only some outputs, or a nested `foreach` over
+    # `.`. The contrasts shadow the definition's name by a parameter, bind the argument and
+    # destructure it, put a non-register stage in front, or nest the fold under a `reduce`.
+    "(foreach (def f($x): . as {a:$a} ?// $a | .; f(1)) as $k (.; .; .))",
+    "(foreach (def f(g): . as {a:$a} ?// $a | g; f(.)) as $k (.; .; .))",
+    "(foreach (def f($x): . as {a:$a} ?// $a | $x; f(.a)) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} ?// $a | .; f(.)) as $k (.; .; .))",
+    "(foreach (def g: .a; def f(g): . as {a:$a} ?// $a | g; f(.)) as $k (.; .; .))",
+    "(foreach (def f($x): . as {a:$a} ?// [$a] | .; f(1)) as $k (.; .; .))",
+    "(foreach (def f($x): .a; f(1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(reduce (def f($x): . as {a:$a} ?// $a | .; f(1)) as $k (.; .))",
+    "(foreach ((1, .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((., .a) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((., 1) | . as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+    "(foreach ((., 1) | . as {a:$a} ?// $a | $a) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach . as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach .a as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(reduce ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .))",
+    # (#4424) a pipe source of a chain of destructuring patterns only, outside a fold: its first
+    # step is the register's whatever the pipe is, and the alternative that matches moves it. The
+    # contrasts keep a bare alternative, a stage that is not the register, and a body that
+    # navigates (which retries onto the next alternative).
+    "((.|.) as {a:$a} ?// [$a] | .)",
+    "((.|.) as {a:$a} ?// [$a] | $a)",
+    "((.|.) as [$a] ?// {a:$a} | .a)",
+    "((.|.) as {a:$a} ?// [$a] | .b)",
+    "((.|.) as {a:$a} ?// {b:$a} | .)",
+    "((.|1) as {a:$a} ?// [$a] | .)",
+    "((.|.) as {a:$a} ?// $a | .)",
+    "(((.|.) as {a:$a} ?// [$a] | .)?)",
     "(foreach (. as {a:$a} ?// [$a] | .) as $k (.; .; .))",
     "(foreach (. as [$a] ?// {a:$a} | .) as $k (.; .; .))",
     "(foreach (. as {a:$a} ?// [$a] | $a) as $k (.; .; .))",
