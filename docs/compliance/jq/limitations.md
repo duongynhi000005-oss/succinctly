@@ -2684,27 +2684,30 @@ is the revert that established what the other one costs.
    refuses where jq's retry answers, as `first`, `reverse` and `.[0:1]` already do there. Unlike the jq-mode-only rule above (which covers `map`, `any`, `all` and
    `flatten`, real yq builtins), this one is not gated: yq has no oracle for these three (its lexer
    rejects them), so it holds in both modes, reached in yq only through `--jq-extensions` (ADR-0018). Pinned in
-   `test_indices_family_raises_inside_path_on_the_evaluated_pattern_3347` and its siblings. Still
-   diverging, tracked: an array input on a *tracked* value, where jq answers a path through
-   an array key (`path(.a | indices(1))` is `["a",[1]]`), a tracked object or `null` whose key is a
-   real path step (`path(.a | indices("x"))` is `["a","x"]`), and a string `index`/`rindex` there
-   ([#3890](https://github.com/rust-works/succinctly/issues/3890)); all three still refuse, in the
-   safe direction. What #3890 fixed is the *value*: `indices`/`index`/`rindex` on `null` or an object
+   `test_indices_family_raises_inside_path_on_the_evaluated_pattern_3347` and its siblings. Since
+   [#3890](https://github.com/rust-works/succinctly/issues/3890) a *tracked* input is stepped too:
+   on an array, an object or `null`, `indices($i)` is the path step `.[$i]` / `.[[$i]]` (the
+   pattern wrapped into a one-element array unless it already is one), `index` then steps `.[0]` and
+   `rindex` `.[-1:][0]`, so `path(.a | indices(1))` is `["a",[1]]`, `index(1)` is `["a",[1],0]`,
+   `rindex(1)` is `["a",[1],{"start":-1,"end":null},0]` and `path(.a | indices("x"))` over an object or
+   `null` is `["a","x"]`. The resolver re-dispatches them as that lookup, as the bare `first` arm does
+   for `.[0]`, so a write through an array key raises as jq's does (`Cannot update field at array index
+   of array`) and one through an object key lands (`(.a | indices("x")) |= 5`). Swept over 20
+   `indices`/`index`/`rindex` operands, eight on the root and twelve behind a path step (266,427 rows,
+   base vs candidate; `scripts/jq-path-register-sweep.py --base main=<build of the parent commit>
+   --candidate <build>` with those operands, `--jobs 14 --timeout 8`): `ACCEPT_WRONG` 20 → 0,
+   `REFUSE_WRONG` 2,497 → 1,126, `DIFF` 10 → 0, `MATCH` 263,900 → 265,301, 0 regressions, 1,401 rows
+   improved; `scripts/jq-bind-origin-fuzz.py -n 6000 --seed 11`: 0 fabricated, 0 mismatched. The
+   1,126 rows that still refuse are `?//` bodies (a refusal inside one is not retried, as above) and two
+   `foreach`/`try` shapes that refuse on `main` too. Still diverging, wording only: a *tracked string's*
+   `index`/`rindex` raises `with result 1` where jq says `near attempt to access element 0 of [1]`.
+   What #3890's first slice fixed was the *value*: `indices`/`index`/`rindex` on `null` or an object
    are jq's `.[$i]` lookup (`{"a":1} | indices("a")` is `1`, `null | indices(true)` raises), where
    they answered `null` for any key, which in `path()` was the root's own `null` and so answered
    `[[]]` for `[path(indices(true))]` on `null` where jq raises
-   (`test_indices_family_looks_up_a_null_or_object_input_3890`). Swept over the eight `indices`/
-   `index`/`rindex` operands (106,587 rows, base vs candidate; `scripts/jq-path-register-sweep.py
-   --base main=<build of the parent commit> --candidate <build> --operand 'indices(true)' --operand
-   'index(true)' --operand 'rindex(null)' --operand 'indices([true])' --operand 'index("a")' --operand
-   'rindex("a")' --operand 'indices(true, null)' --operand 'indices(empty)' --jobs 6`):
-   `ACCEPT_WRONG` 210 → 0, `MATCH` 104,645 → 105,297, `REFUSE_WRONG` 1,712 → 1,280, `DIFF` 20 → 10.
-   The one cost is 14 rows that matched jq by accident: `index("a")`/`rindex("a")` on
-   `{"a":[true]}` was the wrong `null`, so `del((index("a") and (.a)?) // .a)` (and the
-   `.a? as $y | try (index("a") and .a) | ...` shape) short-circuited `and` and landed on jq's answer
-   by another road. With jq's own `true` the right operand runs against a register the resolver
-   does not yet move for `index`, so it refuses (exit 5, nothing written) where jq answers; the
-   same programs spelled `.a[0]` still match. They close with the tracked-navigation step above. A string searched for the empty
+   (`test_indices_family_looks_up_a_null_or_object_input_3890`); the 14 rows that matched jq only by
+   accident after it (`del((index("a") and (.a)?) // .a)` on `{"a":[true]}`) match for the right reason
+   now (`test_indices_family_steps_a_tracked_input_3890`). A string searched for the empty
    string has no match, by value and in these errors alike (`"abc" | indices("")` is `[]`, `index`
    and `rindex` are `null`, as in jq 1.7.1; it was `[0,1,2]`, `0` and `3` until
    [#3889](https://github.com/rust-works/succinctly/issues/3889)).

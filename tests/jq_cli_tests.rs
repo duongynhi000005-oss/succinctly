@@ -64110,32 +64110,159 @@ fn test_indices_family_looks_up_in_yq_extensions_3890() -> Result<()> {
     Ok(())
 }
 
-/// #3890 residual, pinned so it cannot move unnoticed: `index`/`rindex` on a tracked
-/// object are `.[$i] | .[0]` in jq, a register that walks `["a",0]`, which this resolver
-/// does not model (a tracked key is still a by-value leaf). Until it does, an `and`
-/// whose left operand is `index("a")` is judged by jq's own value (`true` here) and its
-/// right operand runs against a register the resolver thinks is still at the root, so it
-/// refuses where jq's `(.a)?` swallows the path error and `//` falls through. The shape
-/// *matched* before #3890 only because the wrong `null` made `and` short-circuit. The
-/// same program spelled `.a[0]`, which the resolver does move, answers as jq does. Swept:
-/// 14 rows of this one shape, `scripts/jq-path-register-sweep.py` over the `index`/
-/// `rindex` operands. This test flips to jq's `{}` when the tracked step lands, and
-/// should then move to the `Ok` table of `test_indices_family_looks_up_a_null_or_object_input_3890`.
+/// #3890: `indices`, `index` and `rindex` on a *tracked* input are the path step jq defines them as,
+/// `.[$i]` / `.[[$i]]` (and `.[0]` / `.[-1:][0]` of the answer for the other two), so they move
+/// jq's path register: `path(.a | indices(1))` is `["a",[1]]` and a write through an object or
+/// `null` key lands. Every row captured from `/usr/bin/jq` 1.7.1. A write through an array key
+/// raises in jq (`Cannot update field at array index of array`), as it does here.
 #[test]
-fn test_index_on_a_tracked_object_register_residual_3890() -> Result<()> {
-    let input = r#"{"a":[true]}"#;
-    let (stdout, stderr, code) =
-        run_jq_full(&["-c", r#"del((index("a") and (.a)?) // .a)"#], Some(input))?;
-    assert_eq!(code, 5, "#3890 residual: stdout {stdout:?}");
-    assert!(stdout.is_empty(), "#3890 residual: {stdout:?}");
-    assert!(
-        stderr.contains(r#"Invalid path expression near attempt to access element "a" of"#),
-        "#3890 residual: {stderr:?}"
-    );
-    // The contrast jq answers identically: a navigation the resolver does move.
-    let (stdout, stderr, code) = run_jq_full(&["-c", "del((.a[0] and (.a)?) // .a)"], Some(input))?;
-    assert_eq!(code, 0, "#3890 contrast: stderr {stderr:?}");
-    assert_eq!(stdout.trim(), "{}", "#3890 contrast");
+fn test_indices_family_steps_a_tracked_input_3890() -> Result<()> {
+    for (input, filter, expected) in [
+        (r#"{"a":[1,2,1]}"#, "path(.a | indices(1))", r#"["a",[1]]"#),
+        (r#"{"a":[1,2,1]}"#, "path(.a | index(1))", r#"["a",[1],0]"#),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "path(.a | rindex(1))",
+            r#"["a",[1],{"start":-1,"end":null},0]"#,
+        ),
+        (r#"{"a":[1,2,1]}"#, "path(.a | index(9))", r#"["a",[9],0]"#),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "path(.a | indices([1,2]))",
+            r#"["a",[1,2]]"#,
+        ),
+        (r#"{"a":[1,2,1]}"#, "path(.a | indices([]))", r#"["a",[]]"#),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "[path(.a | indices(1, 2))]",
+            r#"[["a",[1]],["a",[2]]]"#,
+        ),
+        (r#"{"a":[1,2,1]}"#, "[path(.a | indices(empty))]", "[]"),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "[path(.a | indices(1) | .[0])]",
+            r#"[["a",[1],0]]"#,
+        ),
+        (r#"{"a":[1,2,1]}"#, "path(.a | indices(1)?)", r#"["a",[1]]"#),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "[path(.a | index(1)?)]",
+            r#"[["a",[1],0]]"#,
+        ),
+        (
+            r#"{"a":[[1],[2]]}"#,
+            "[path(.a | indices([1]))]",
+            r#"[["a",[1]]]"#,
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            r#"path(.a | indices("x"))"#,
+            r#"["a","x"]"#,
+        ),
+        (
+            r#"{"a":{"x":[3]}}"#,
+            r#"path(.a | indices("x"))"#,
+            r#"["a","x"]"#,
+        ),
+        (r#"{"a":null}"#, "path(.a | indices(1))", r#"["a",1]"#),
+        (r#"{"a":null}"#, "path(.a.b | indices(1))", r#"["a","b",1]"#),
+        (
+            r#"{"a":null}"#,
+            r#"path(.a | indices("k"))"#,
+            r#"["a","k"]"#,
+        ),
+        ("[[1,2,1]]", "path(.[0] | indices(1))", "[0,[1]]"),
+        (
+            "[[1,2,1]]",
+            "path(.[0] | rindex(2))",
+            r#"[0,[2],{"start":-1,"end":null},0]"#,
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            r#"(.a | indices("x")) |= 5"#,
+            r#"{"a":{"x":5}}"#,
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            r#"del(.a | indices("x"))"#,
+            r#"{"a":{}}"#,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r#"del((index("a") and (.a)?) // .a)"#,
+            "{}",
+        ),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "path(.a | indices(1)) as $p | $p",
+            r#"["a",[1]]"#,
+        ),
+        ("[1,2,1]", "path(indices(1))", "[[1]]"),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(code, 0, "#3890: `{input} | {filter}`: stderr {stderr:?}");
+        assert_eq!(stdout.trim(), expected, "#3890: `{input} | {filter}`");
+    }
+    for (input, filter, message) in [
+        (
+            r#"{"a":[1,2,1]}"#,
+            "[path(.a | indices(1) | length)]",
+            "Invalid path expression with result 2",
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            r#"path(.a | index("x"))"#,
+            "Cannot index number with number",
+        ),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "del(.a | index(1))",
+            "Cannot update field at array index of array",
+        ),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "(.a | indices(1)) |= 5",
+            "Cannot update field at array index of array",
+        ),
+        (
+            r#"{"a":[1,2,1]}"#,
+            "(.a | index(1)) = 5",
+            "Cannot update field at array index of array",
+        ),
+        (
+            r#"{"a":{"x":1}}"#,
+            r#"(.a | index("x")) |= 7"#,
+            "Cannot index number with number",
+        ),
+        (
+            "[1,2,1]",
+            "[paths(indices(1))]",
+            "Cannot index number with number",
+        ),
+        (
+            r#"{"a":[1,2,1]}"#,
+            r#"[path(.a | indices(error("boom")))]"#,
+            "boom",
+        ),
+        (
+            r#"{"a":"abc"}"#,
+            r#"[path(.a | indices("b"))]"#,
+            "Invalid path expression with result [1]",
+        ),
+        (
+            r#"{"a":5}"#,
+            "[path(.a | indices(1))]",
+            "Cannot index number with number",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(code, 5, "#3890: `{input} | {filter}`: stdout {stdout:?}");
+        assert!(stdout.is_empty(), "#3890: `{input} | {filter}`: {stdout:?}");
+        assert!(
+            stderr.contains(message),
+            "#3890: `{input} | {filter}`: wanted {message:?}, got {stderr:?}"
+        );
+    }
     Ok(())
 }
 

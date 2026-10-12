@@ -1196,6 +1196,22 @@ OPERANDS = [
     "rindex(\"a\")",
     "indices(true, null)",
     "indices(empty)",
+    # (#3890) on a *tracked* input the same three are the path step `.[$i]` / `.[[$i]]` (and
+    # `index`/`rindex` then step `.[0]` / `.[-1:][0]` of the answer), so they move the register:
+    # `path(.a | indices(1))` is `["a",[1]]`. An array, an object, `null` and a string input; a
+    # pattern that is an array, a bool, a string, a fork, and none.
+    "(.a | indices(true))",
+    "(.a | index(true))",
+    "(.a | rindex(true))",
+    "(.a | indices([true]))",
+    "(.a | indices(\"a\"))",
+    "(.a | indices(true, null))",
+    "(.a | indices(empty))",
+    "(.[0] | index(1))",
+    "(.[0] | rindex([1]))",
+    "(.a | index(\"a\"))",
+    "(.a.b | indices(1))",
+    "(.a | indices(1) | .[0])",
     # (#3360) `from_entries` is `map({...}) | add`: it always iterates the array
     # `map` built, so jq raises on every value it produces. The `walk` rows are
     # the zero-output case (`f` yields nothing, but an input that reaches an
