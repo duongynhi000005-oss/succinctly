@@ -27,13 +27,13 @@ path:
 | Dimension                              | Result              | Meaning                                        |
 |----------------------------------------|---------------------|------------------------------------------------|
 | **Load** (valid YAML, output compared) | **267/279 = 95.7%** | Parses and produces the JSON the suite expects |
-| **Reject** (invalid YAML, must fail)   | **67/94 = 71.3%**   | Refused by the loader or the opt-in validator  |
+| **Reject** (invalid YAML, must fail)   | **69/94 = 73.4%**   | Refused by the loader or the opt-in validator  |
 | **Parse** (valid YAML, no JSON form)   | **29/29 = 100.0%**  | Parses without error                           |
 
 The **Reject** figure is what the conformance harness rejects with the opt-in
 validator enabled (loader OR validator, see below). The *default non-validating
 loader alone* rejects 16/94 (17.0%) by design — the opt-in validator
-([#223](https://github.com/rust-works/succinctly/issues/223)) closes 51 more.
+([#223](https://github.com/rust-works/succinctly/issues/223)) closes 53 more.
 
 [#224](https://github.com/rust-works/succinctly/issues/224) (tag support) moved the Load
 figure from 235/279 (84.2%) to 267/279, the largest single jump on this page, and closed
@@ -81,22 +81,22 @@ pass ([`src/yaml/validate.rs`](../../../src/yaml/validate.rs)) before indexing �
 the 78** documents below with zero false positives on the valid corpus (a guardrail test,
 `validator_accepts_all_valid_cases`, enforces that). The conformance harness treats a
 must-fail case as handled if the loader *or* the validator rejects it, which is why the
-Reject figure above is 67/94 rather than 16/94.
+Reject figure above is 69/94 rather than 16/94.
 
-The 27 documents the validator does not yet reject (marked `lax:*` in the manifest) need
+The 25 documents the validator does not yet reject (marked `lax:*` in the manifest) need
 deeper structural analysis — cross-line anchor binding, block-scalar content indentation,
 flow multi-line implicit keys, malformed tag syntax — and are tracked in
 [#223](https://github.com/rust-works/succinctly/issues/223) (`lax:tags` under #224, see
 below).
 
-The 27 documents still lax today (neither the loader nor the validator rejects them) break
+The 25 documents still lax today (neither the loader nor the validator rejects them) break
 down as:
 
 | Category           | Cases | What is not checked                                     |
 |---------------------|------|-----------------------------------------------------------|
-| `lax:mapping`      | 5     | Mapping and implicit-key rules                          |
+| `lax:mapping`      | 4     | Mapping and implicit-key rules                          |
 | `lax:indentation`  | 5     | Indentation consistency                                 |
-| `lax:flow`         | 4     | Flow collection syntax                                  |
+| `lax:flow`         | 3     | Flow collection syntax                                  |
 | `lax:anchors`      | 4     | Anchor and alias rules, incl. an unindented tag target (#224) |
 | `lax:documents`    | 3     | Directive and document-marker placement, incl. a mid-stream `%TAG` (#224) |
 | `lax:tags`         | 1     | Malformed tag syntax (disallowed flow indicators) — #224 |
@@ -112,8 +112,8 @@ The opt-in validation mode now exists ([#223](https://github.com/rust-works/succ
 mirroring the JSON side's `succinctly json validate` / `sjq --validate`. Validation is a
 separate pass run before indexing, so the default path pays nothing for it — see
 [`src/yaml/validate.rs`](../../../src/yaml/validate.rs). The 78 cases above were its
-acceptance criteria; it rejects 51 of them today (each `lax:*` line removed from the
-manifest is a case now rejected), with the 27 harder cases still tracked in #223 (`lax:tags`
+acceptance criteria; it rejects 53 of them today (each `lax:*` line removed from the
+manifest is a case now rejected), with the 25 harder cases still tracked in #223 (`lax:tags`
 under #224).
 
 ### What "accepted" means: the text is kept, not dropped
@@ -298,6 +298,12 @@ $ printf 'a: [1 2]\n' | succinctly yq -o json -I0 '.'
 
 The loader stops where it cannot continue, not where a rule is broken — which is why the
 `lax:flow` cases above survive it.
+
+A flow plain scalar does end at `:` followed by a blank, a line break or end-of-input
+([#1960](https://github.com/rust-works/succinctly/issues/1960)), so a flow mapping missing
+its comma (`{a: 1 b: 2}`) is rejected the way `yq` rejects it rather than absorbed into
+`a`'s value. That moved two corpus cases (`DK4H`, `T833`) out of the manifest. The same
+omission in a block mapping (`a: 1 b: 2`) and in a sequence (`[1 b:]`) is still lenient.
 
 ## Tags — resolved (#224)
 

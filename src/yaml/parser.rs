@@ -5543,8 +5543,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     } else {
                         None
                     };
-                    // In flow context, colon must be followed by space, or flow indicator
-                    return matches!(next, Some(b' ' | b'\t' | b',' | b']' | b'}') | None);
+                    // In flow context, colon must be followed by a blank, a line break,
+                    // end-of-input or a flow indicator to be the pair's colon. The break
+                    // is the same stop `parse_flow_unquoted_value` makes (#1960), so the
+                    // two agree on `[a:\n 1]`; any other `:` is key content (`[x:y: 1]`).
+                    if Self::is_ws_break_or_eoi(next) || matches!(next, Some(b',' | b']' | b'}')) {
+                        return true;
+                    }
+                    i += 1;
                 }
                 _ => i += 1,
             }
@@ -6411,7 +6417,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
         while let Some(b) = self.peek() {
             match b {
-                b':' | b',' | b'}' | b']' => break,
+                b',' | b'}' | b']' => break,
+                b':' if Self::is_ws_break_or_eoi(self.peek_at(1))
+                    || matches!(self.peek_at(1), Some(b',' | b'}' | b']')) =>
+                {
+                    break
+                }
+                b':' => self.advance(),
                 b'#' => {
                     // # starts a comment only after s-separate-in-line (space or
                     // tab), same rule as the block-key and flow-value arms
@@ -6538,7 +6550,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     }
 
     /// Parse an unquoted value in flow context.
-    /// Stops at `,`, `}`, `]`, `#` (comment), or newline.
+    /// Stops at `,`, `}`, `]`, `#` (comment), `:` followed by a blank, a line break or
+    /// end-of-input, or newline.
+    ///
+    /// The `:` stop is `yq`'s rule and YAML 1.2's `ns-plain-char`: `{a: 1 b: 2}` ends the
+    /// scalar at `1 b`, and the caller then raises `expected ',' or '}'` on the `:` where
+    /// it used to swallow `b: 2` into `a`'s value — which a write (`.a = 9`) then dropped
+    /// from the file (#1960). A `:` before a flow indicator is content, exactly as in
+    /// [`Self::parse_explicit_flow_unquoted_key`] (#402): `{a: 1:, b: 2}` keeps `"1:"`.
     /// Returns the absolute end position (with trailing whitespace trimmed).
     fn parse_flow_unquoted_value(&mut self) -> usize {
         let start = self.pos;
@@ -6546,6 +6565,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         while let Some(b) = self.peek() {
             match b {
                 b',' | b'}' | b']' => break,
+                b':' if Self::is_ws_break_or_eoi(self.peek_at(1)) => break,
                 b'#' => {
                     // # is a comment if preceded by whitespace
                     if self.pos > start && matches!(self.input[self.pos - 1], b' ' | b'\t') {
@@ -6568,6 +6588,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         || matches!(self.input[lookahead], b',' | b'}' | b']' | b'#')
                     {
                         // Delimiter, comment, or EOF - stop value here
+                        break;
+                    }
+                    // A continuation line opening with `: ` is a value indicator, not
+                    // scalar content (#1960): `{a: 1\n b\n : 2}` is an error in yq.
+                    if self.input[lookahead] == b':'
+                        && Self::is_ws_break_or_eoi(self.input.get(lookahead + 1).copied())
+                    {
                         break;
                     }
                     // Continue parsing on next line

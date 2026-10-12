@@ -1119,6 +1119,76 @@ fn test_unbound_variable_is_not_a_compile_error_here_2734() -> Result<()> {
     Ok(())
 }
 
+/// #1960: in flow context a plain scalar ends at `:` followed by a blank, a line break or
+/// end-of-input, so `{a: 1 b: 2}` is an error instead of `a: "1 b: 2"` — and a write
+/// (`.a = 9`) no longer drops the swallowed `b: 2` from the file with exit 0. Each row's
+/// expected answer was captured from yq v4.53.3.
+#[test]
+fn test_flow_plain_scalar_ends_at_colon_blank_1960() -> Result<()> {
+    for input in [
+        "{a: 1 b: 2}\n",
+        "{a: 1 b: 2, c: 3}\n",
+        "{a: 1 b:\t2}\n",
+        "{a: 1 b: }\n",
+        "{a: : x}\n",
+        "k: {a: 1 b: 2}\n",
+        "{a: 1\n b\n : 2}\n",
+        "{a: 1\n : 2}\n",
+    ] {
+        for filter in [".", ".a = 9"] {
+            let (stdout, stderr, code) =
+                run_yq_stdin_with_stderr(filter, input, &["-o=json", "-I=0"])?;
+            assert_eq!(code, 1, "{filter} on {input:?}: {stdout:?} {stderr:?}");
+            assert_eq!(stdout, "", "{filter} on {input:?}");
+            assert!(
+                stderr.contains("YAML parse error"),
+                "{filter} on {input:?}: {stderr:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// #1960: the rows next to the rejected ones keep their answers — a `:` before a flow
+/// indicator, inside a word, or after a quoted scalar is content (yq v4.53.3).
+#[test]
+// `{a:1}` reads as a format argument to this lint; it is the YAML under test.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_flow_plain_scalar_keeps_colon_content_1960() -> Result<()> {
+    for (input, expected) in [
+        ("{a: 1:, b: 2}\n", "{\"a\":\"1:\",\"b\":2}\n"),
+        ("{a: 1 b:}\n", "{\"a\":\"1 b:\"}\n"),
+        ("{a: 1 :}\n", "{\"a\":\"1 :\"}\n"),
+        ("{a: x:y}\n", "{\"a\":\"x:y\"}\n"),
+        ("{a: http://x}\n", "{\"a\":\"http://x\"}\n"),
+        ("{\"a\":1 \"b\":2}\n", "{\"a\":\"1 \\\"b\\\":2\"}\n"),
+        ("{a b: 1}\n", "{\"a b\":1}\n"),
+        ("{a: [1 b: 2]}\n", "{\"a\":[{\"1 b\":2}]}\n"),
+        ("{a: 1\n  2}\n", "{\"a\":\"1 2\"}\n"),
+        // A flow-sequence pair whose `:` ends the line (code-review of #1960).
+        ("[a:\n 1]\n", "[{\"a\":1}]\n"),
+        ("[\n  a:\n  , b\n]\n", "[{\"a\":null},\"b\"]\n"),
+        ("k: [a:\n]\n", "{\"k\":[{\"a\":null}]}\n"),
+        ("[ab :\n]\n", "[{\"ab\":null}]\n"),
+        ("[a, 1:\n 2]\n", "[\"a\",{\"1\":2}]\n"),
+        ("[a:\r\n 1]\r\n", "[{\"a\":1}]\n"),
+        // A `:` inside a plain key is content; only `: ` ends it.
+        ("[x:y: ]\n", "[{\"x:y\":null}]\n"),
+        ("[x:y : 1]\n", "[{\"x:y\":1}]\n"),
+        ("[a:1: x]\n", "[{\"a:1\":\"x\"}]\n"),
+        ("[a:1]\n", "[\"a:1\"]\n"),
+        ("{a:b: 2}\n", "{\"a:b\":2}\n"),
+        ("{a:1}\n", "{\"a:1\":null}\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin(".", input, &["-o=json", "-I=0"])?,
+            (expected.to_string(), 0),
+            "{input:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #2981/#3976: an unbound `$name` is a zero-output generator in every position, and the
 /// empty-operand rules then apply as for any other empty operand (yq v4.53.3).
 #[test]
