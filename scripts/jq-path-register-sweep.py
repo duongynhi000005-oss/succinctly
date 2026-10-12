@@ -1566,6 +1566,49 @@ OPERANDS = [
     "(foreach .[]? as $k (.; all(.; . as {a:$q} ?// $z | $q); .))",
     "(foreach .[]? as $k (.; any(. as [$q] ?// $z | .a; .); .))",
     "(reduce .[]? as $k (.; isempty(. as $q ?// $z | $k) or (.a)?))",
+    # (#3826) a verdict stage behind a zero-arity `def` call, whose body the resolver resolves in
+    # place (so its leaf states the register), and behind a `reduce`, which backtracks to INIT's
+    # register whatever its source and UPDATE navigate. Each is a bare pipe stage under
+    # `var-rebind` and the `untracked-*` contexts, an UPDATE under the `reduce-*` and `foreach-*`
+    # contexts, and a comma sibling, and a decided element (`[true]`, `{"a":true}`) is the row
+    # that must keep refusing because the verdict moved the register.
+    "(def f: any; f)",
+    "(def f: all; f)",
+    "(def f: any(.a); f)",
+    "(def f: any(.[]?; .a); f)",
+    "(def f: isempty(.[]?); f)",
+    "(def f: isempty(empty); f)",
+    "(def f: any(empty; .); f)",
+    "(def f: (any, any); f)",
+    "(def f: (any, .a); f)",
+    "(def f: first(any); f)",
+    "(def f: any; def g: f; g)",
+    "(def f: any; def g: (f, f); g)",
+    "(def f: any; def g: 1; f | g)",
+    "(def f: any; def f: .a; f)",
+    "(def f(g): any; f(.a))",
+    "(def f: f; 1)",
+    "(reduce 1 as $i (.; any))",
+    "(reduce 1 as $i (.; all))",
+    "(reduce (1,2) as $i (.; any))",
+    "(reduce empty as $i (.; any))",
+    "(reduce .[]? as $i (.; any))",
+    "(reduce .[]? as $i (.; all(.a)))",
+    "(reduce .a? as $i (.; any))",
+    "(reduce 1 as $i (.; isempty(.[]?)))",
+    "(reduce 1 as $i (.; isempty(empty)))",
+    "(reduce 1 as $i (.; any(.[]?; .a)))",
+    "(reduce 1 as $i (.; any(empty; .)))",
+    "(reduce .[]? as $i (.; isempty(empty)))",
+    "(reduce .[]? as $i (.; isempty(.[]?)))",
+    "(reduce .a? as $i (.; any(empty; .)))",
+    "(reduce 1 as $i (.a; any))",
+    "(reduce 1 as $i (.; try any))",
+    "(def f: reduce 1 as $i (.; any); f)",
+    "(reduce 1 as $i (.; def f: any; f))",
+    "(foreach 1 as $i (.; any; .))",
+    "(foreach .[]? as $i (.; any; .))",
+    "(foreach 1 as $i (.; isempty(empty); .))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs

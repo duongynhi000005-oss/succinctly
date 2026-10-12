@@ -1478,11 +1478,17 @@ is the revert that established what the other one costs.
      entry, where the register is carried by the stage and no leaf states it
      ([#3826](https://github.com/rust-works/succinctly/issues/3826)): `path(. as $x | 1 | isempty(empty) | $x)` is `[]`
      (the carried register stands unless the step states a loss), pinned by
-     `test_verdict_stage_on_an_untracked_entry_3826`. Shapes that still refuse where jq answers, in the safe
+     `test_verdict_stage_on_an_untracked_entry_3826`. The stage is read through a zero-arity `def` call into its body
+     (`def f: any; f | $x` is `[]`, chained `def`s and `(any, any)` bodies too: `resolve_node_sink` resolves the bound body
+     in place, so the body's leaf states the register) and through a `reduce`, which backtracks its source and `UPDATE`
+     to the post-INIT register (`reduce 1 as $i (.; any) | $x` is `[]` even when `any` decides), pinned by
+     `test_verdict_stage_behind_a_def_or_reduce_3826`; an `UPDATE` that iterates the accumulator after a source that
+     moved the register (`reduce .[] as $i (.; any)`), or on a second pass, still raises as in jq. Shapes that still refuse where jq answers, in the safe
      direction (a sample, not an exhaustive list), pinned by
      `test_any_all_pipe_stage_verdict_residuals_stay_refused_3757`: inside a compound stage (`(any, any)`,
-     `any // 1`, `any? // 1`), which is refused as a whole (#3644), behind a `def` call or a `reduce`
-     (`def f: any; f | $x`), which state no register, and on an untracked entry over a generator the allowlist
+     `any // 1`, `any? // 1`), which is refused as a whole (#3644), behind a `def` call with an argument
+     (`def f(g): any; f(.a) | $x`) or a `reduce` whose `UPDATE` is a verdict over a generator that navigates
+     (`reduce 1 as $i (.; isempty(.[]?)) | $x`), and on an untracked entry over a generator the allowlist
      cannot prove leaves the register in place (`1 | isempty(def f: 2; f)`: the step states a loss, which the stage
      does not override; `1 | isempty(first(2,3))` and `1 | any(first(2,3); .)` answer since
      [#3862](https://github.com/rust-works/succinctly/issues/3862), where each comma sibling states the register on
