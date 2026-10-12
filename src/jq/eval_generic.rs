@@ -24033,9 +24033,28 @@ fn path_expr_is_cursor_navigable(expr: &Expr) -> bool {
         // sign costs nothing here.
         Expr::Index { .. } => true,
         Expr::Paren(inner) | Expr::Optional(inner) => path_expr_is_cursor_navigable(inner),
+        // #4412: `try E` and `try E catch empty` are `E?`, which the walk already takes; before,
+        // they fell to the materializing route, which copies the input and wraps it in an `Rc`
+        // per `path(f)` call.
+        Expr::Try { expr, catch } => {
+            catch
+                .as_deref()
+                .map_or(true, crate::jq::eval::is_empty_handler)
+                && path_expr_is_cursor_navigable(expr)
+        }
         Expr::Pipe(exprs) => exprs.iter().all(path_expr_is_cursor_navigable),
         Expr::Comma(exprs) => exprs.iter().all(path_expr_is_cursor_navigable),
         _ => false,
+    }
+}
+
+/// The body and handler of the swallowing boundaries the cursor walks take: `E?`, and `try E`
+/// or `try E catch empty` ([`path_expr_is_cursor_navigable`] admits no other handler, #4412).
+fn swallowing_boundary_parts(expr: &Expr) -> Option<(&Expr, Option<&Expr>)> {
+    match expr {
+        Expr::Optional(inner) => Some((inner, None)),
+        Expr::Try { expr, catch } => Some((expr, catch.as_deref())),
+        _ => None,
     }
 }
 
@@ -24552,7 +24571,8 @@ fn path_walk_generic<S: EvalSemantics, V: DocumentValue>(
             Ok(())
         }
         Expr::Paren(inner) => path_walk_generic::<S, V>(inner, node, path, out),
-        Expr::Optional(inner) => {
+        boundary @ (Expr::Optional(_) | Expr::Try { .. }) => {
+            let (inner, catch) = swallowing_boundary_parts(boundary).expect("a boundary arm");
             // `?` swallows the error but *not* the outputs the branch had
             // already produced before it: `[1] | path((.[0],.a)?)` emits
             // `[0]` and then stops (jq 1.7.1). Discarding the whole branch
@@ -24575,7 +24595,7 @@ fn path_walk_generic<S: EvalSemantics, V: DocumentValue>(
             // #3722: a bare `.[]?` over a scalar settles here without stepping
             // it, so the `Cannot iterate` message the step would format and
             // this arm would drop is never built (see [`swallowed_path_leaf`]).
-            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, None, node) {
+            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
                 return settled;
             }
             let mut branch = Vec::new();
@@ -25063,7 +25083,8 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
             }
             Ok(())
         }
-        Expr::Optional(inner) => {
+        boundary @ (Expr::Optional(_) | Expr::Try { .. }) => {
+            let (inner, catch) = swallowing_boundary_parts(boundary).expect("a boundary arm");
             // Same rule as `path_walk_generic`'s own `Optional` arm: the
             // error is swallowed, the positions already reached are not --
             // except a `decode_failure` (#1620), which `?` never swallows.
@@ -25074,7 +25095,7 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
             //
             // #3722: a bare `.[]?` over a scalar settles here without stepping
             // it, as in `path_walk_generic` (see [`swallowed_path_leaf`]).
-            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, None, node) {
+            if let Some(settled) = swallowed_path_leaf::<S, V>(inner, catch, node) {
                 return settled;
             }
             let mut branch = Vec::new();
@@ -50741,6 +50762,35 @@ mod tests {
             let expr = stage(admitted);
             assert!(array_route_stage_is_pure_navigation(&expr), "{admitted}");
             assert!(path_expr_is_cursor_navigable(&expr), "{admitted}");
+        }
+        // #4412: `try E` and `try E catch empty` are `E?` for `path()`'s walker, but not for the
+        // array routes, whose soundness argument covers `?` and nothing else spelled like it.
+        for walker_only in [
+            "try .a",
+            "try .a catch empty",
+            "(try .a.b)",
+            "try (.a, .b)",
+            "try try .a",
+        ] {
+            let expr = stage(walker_only);
+            assert!(path_expr_is_cursor_navigable(&expr), "{walker_only}");
+            assert!(
+                !array_route_stage_is_pure_navigation(&expr),
+                "{walker_only}"
+            );
+        }
+        // A handler that does anything, or a body the walker does not take, keeps its route.
+        for refused in [
+            "try .a catch .",
+            "try .a catch \"x\"",
+            "try .a catch error",
+            "try .a catch (empty, empty)",
+            "try (.a + 1)",
+            "try first(.a)",
+            "try getpath([\"a\"])",
+        ] {
+            let expr = stage(refused);
+            assert!(!path_expr_is_cursor_navigable(&expr), "{refused}");
         }
         // A computed, effectful or specially routed stage is refused -- the
         // route's soundness argument covers none of them -- including the
