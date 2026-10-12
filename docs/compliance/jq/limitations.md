@@ -1053,8 +1053,10 @@ only; they are `.[0]` and `.[-1]`), each with a postfix `?` on the slice or on t
 through, since [#4317](https://github.com/rust-works/succinctly/issues/4317) `E[a:b][$k]` for a
 computed index that is one integer-valued number, and since
 [#4286](https://github.com/rust-works/succinctly/issues/4286) `.[a:b][k] | key` (with a `tostring`
-before or after the `key`; jq mode, a non-negative `k` inside the slice), converts only the element it
-names (the `key` read none at all), so a malformed value elsewhere in the range no longer raises.
+before or after the `key`; jq mode), and since [#4408](https://github.com/rust-works/succinctly/issues/4408)
+the same with an index of either sign, inside the slice or not, and with field steps (`.a`, `.a.b`)
+between the read and the `key`, converts only the element it names (the `key` read none at all, or just
+the one element the field steps read), so a malformed value elsewhere in the range no longer raises.
 
 Since [#4323](https://github.com/rust-works/succinctly/issues/4323) the same holds for a
 literal-bounded slice (`.[2:][0]`, `.[:-2][-1]`, `.[2:] | length`, `first`, `last` and `.[2:][$k]`,
@@ -1094,10 +1096,11 @@ closed bounds only, instead of being written out and indexed again for each read
 no malformed element to skip, so that route adds no row to the table above.
 
 Still unfused, and so still O(tail) per read: a computed index that is fractional, a string, `null` or
-fans out (the ordinary route answers or raises it), a `key` read with a negative or out-of-range index,
-with a `parent` or any other stage after it, or nested inside a larger path-context pipe (a comma,
-or a stage after it, walks the slice itself), `key` in yq mode, whose slice keeps the position, and
-the `| path` read of [#4356](https://github.com/rust-works/succinctly/issues/4356).
+fans out (the ordinary route answers or raises it), a `key` read with a `parent`, a `?`, a field step
+over an element that is not an object, a target other than `.` (`.a[$i:][0] | key`) or any other stage
+after it (a `key` read that is one branch of a comma, `((.[$i:][0] | key), 1)`, is fused on its own,
+which [#4408](https://github.com/rust-works/succinctly/issues/4408) measured), `key` in yq mode, whose
+slice keeps the position, and the `| path` read of [#4356](https://github.com/rust-works/succinctly/issues/4356).
 
 ## Where succinctly errors and jq does not
 

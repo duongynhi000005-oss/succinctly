@@ -126336,14 +126336,16 @@ fn test_fused_slice_read_does_not_convert_siblings_4195() -> Result<()> {
 /// #4286: `E[a:b][k] | key` (with a `tostring` before or after the `key`) answers `k` without
 /// building the slice, and must answer what the walk does -- values, errors and exit codes alike.
 /// The unfused spelling puts the slice in parentheses, which the fusion does not look through.
-/// The declines are the shapes the fused read leaves to the walk: an index outside the slice (jq
-/// keeps the index as written), a negative index, a target that is not a readable array, a
-/// bound that fans out, and every tail that reads more of the path than the index.
+/// The declines are the shapes the fused read leaves to the walk: a target that is not a readable
+/// array, a bound that fans out, a field step over an element that is not an object, and every
+/// tail that reads more of the path than its last component (#4408 widened the fusion to an index
+/// of either sign, inside the slice or not, and to field steps before the `key`).
 #[test]
 fn test_fused_slice_key_equals_the_unfused_spelling_4286() -> Result<()> {
     let docs = [
         "[]",
         "[1,2,3,4,5,6,7]",
+        r#"[{"a":{"b":1}},{"a":null},{"z":1},null,{"a":{"b":{"c":2}}}]"#,
         r#"[null,false,{"a":1},"s",[],[2,3]]"#,
         "null",
         r#"{"a":[1,2,3]}"#,
@@ -126363,6 +126365,13 @@ fn test_fused_slice_key_equals_the_unfused_spelling_4286() -> Result<()> {
         "key",
         "tostring | key",
         "key | tostring",
+        ".a | key",
+        ".a.b | key",
+        r#".["a"] | key"#,
+        ".a | .b | key",
+        ".z | key | tostring",
+        ".a | tostring | key",
+        "tostring | .a | key",
         "key | key",
         "key, 1",
         "parent",
@@ -126400,6 +126409,26 @@ fn test_fused_slice_key_values_4286() -> Result<()> {
         // Outside the slice: jq keeps the index as written, so this is the walk's answer.
         ("1 as $i | .[$i:][3] | key", "3\n"),
         ("1 as $i | .[$i:][-1] | key", "-1\n"),
+        ("1 as $i | .[$i:][-9] | key", "-9\n"),
+        // #4408: field steps before the `key` name the last field, whether or not the element
+        // exists in the slice (`null | .a` is `null`).
+        (
+            r#"[{"a":{"b":1}},{"a":{"b":2}}] | 1 as $i | .[$i:][0] | .a | key"#,
+            "\"a\"\n",
+        ),
+        (
+            r#"[{"a":{"b":1}},{"a":{"b":2}}] | 1 as $i | .[$i:][-1] | .a.b | key"#,
+            "\"b\"\n",
+        ),
+        (
+            r#"[{"a":{"b":1}},{"a":{"b":2}}] | 1 as $i | .[$i:][5] | .a | key"#,
+            "\"a\"\n",
+        ),
+        (
+            r#"[{"a":{"b":1}},{"a":{"b":2}}] | 1 as $i | .[$i:][0] | .z | key | tostring"#,
+            "\"z\"\n",
+        ),
+        (r#"[1,{"a":1}] | 1 as $i | .[$i:][0] | .a | key"#, "\"a\"\n"),
         (
             "1 as $i | [(.[$i:][0] | key), (.[$i:][1] | key)]",
             "[0,1]\n",
@@ -126527,8 +126556,8 @@ fn test_owned_array_slice_read_keeps_node_identity_answers_4286() -> Result<()> 
     Ok(())
 }
 
-/// #4286: a loop over a computed-slice read must not grow like the slice does. Each of the four
-/// reads below converted the whole tail of the array per read, so 6,000 reads over a 6,000-element
+/// #4286: a loop over a computed-slice read must not grow like the slice does. Each of the reads
+/// below converted the whole tail of the array per read, so 6,000 reads over a 6,000-element
 /// array cost seconds in a release build and many times that in a debug one; fused they cost
 /// milliseconds.
 /// The bound is far above the fused time and far below the unfused one, so it fails on the
@@ -126547,6 +126576,9 @@ fn test_computed_slice_read_loop_does_not_grow_with_the_slice_4286() -> Result<(
         ".xs | [range(length-1;-1;-1) as $i | .[$i:][0] | tostring | key] | length",
         ".xs as $a | [range($a|length) as $i | $a[$i:][0] | .a.b] | length",
         ".xs | map(.) as $a | [range($a|length) as $i | $a | .[$i:][0] | .a.b] | length",
+        // #4408: a negative index and field steps before the `key`.
+        ".xs | [range(length-1;-1;-1) as $i | .[$i:][-1] | key] | length",
+        ".xs | [range(length-1;-1;-1) as $i | .[$i:][0] | .a | key] | length",
     ] {
         let started = std::time::Instant::now();
         let (stdout, code) = run_jq_stdin(filter, &doc, &["-c"])?;

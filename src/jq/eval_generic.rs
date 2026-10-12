@@ -23111,18 +23111,22 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
     try_fused_slice_read::<S, V>(slice, SliceRead::Index(k), value, cursor)
 }
 
-/// A pipe that reads the key of a computed-slice element and nothing else of the path (#4286):
-/// `E[a:b][k] | key`, with any `tostring` before or after the `key`. The slice stage, the
-/// non-negative literal `k` and the stages after the read, when the pipe has that shape.
+/// A pipe that reads the key of a computed-slice element and nothing else of the path (#4286,
+/// #4408): `E[a:b][k] | key`, with any `tostring` before or after the `key`, and field steps
+/// (`.a`, `.a.b`) between the read and the `key`. The slice stage, the literal `k`, the field-step
+/// stages and the stages from the first non-field stage on, when the pipe has that shape.
 ///
 /// `E[a:b][k]` parses as a nested pipe of the slice and the index, so both the nested spelling
 /// (`[Pipe([slice, index]), key, ..]`) and the flat one (`[slice, index, key, ..]`) are read.
 /// Static; nothing is evaluated here. The target must be the input itself (`.[a:b]`), the
-/// bounds pure, and every later stage `key` (exactly one) or `tostring`: the walk's answer for
-/// those is the slice index alone, which is the only thing the fused read has to name. Any other
-/// stage after the read may ask for the slice as an ancestor (`parent`), a position or the
-/// element itself, so it keeps the walk.
-fn fusable_slice_key(exprs: &[Expr]) -> Option<(&Expr, i64, &[Expr])> {
+/// bounds pure, `k` an integer literal of either sign (the walk keeps the index as written in
+/// the path, so the key is `k` itself), and every later stage a field step (only before the
+/// first `key`/`tostring`: a field read after `tostring` is a read of a string), `key`
+/// (exactly one) or `tostring`: the walk's answer for those is the last path component alone,
+/// which is the only thing the fused read has to name. Any other stage after the read may ask
+/// for the slice as an ancestor (`parent`), a position or the element itself, so it keeps the
+/// walk.
+fn fusable_slice_key(exprs: &[Expr]) -> Option<SliceKeyRead<'_>> {
     let (pair, tail): (&[Expr], &[Expr]) = match exprs.split_first()? {
         (Expr::Pipe(inner), tail) if inner.len() == 2 => (inner.as_slice(), tail),
         _ if exprs.len() > 2 => exprs.split_at(2),
@@ -23134,29 +23138,99 @@ fn fusable_slice_key(exprs: &[Expr]) -> Option<(&Expr, i64, &[Expr])> {
     };
     let pure_bound =
         |bound: &Option<Box<Expr>>| bound.as_deref().map_or(true, is_pure_slice_operand);
-    if *idx < 0 || !matches!(**target, Expr::Identity) || !pure_bound(start) || !pure_bound(end) {
+    if !matches!(**target, Expr::Identity) || !pure_bound(start) || !pure_bound(end) {
         return None;
     }
-    let keys = tail
+    let (steps, rest) = tail.split_at(tail.iter().take_while(|s| is_field_steps(s)).count());
+    let keys = rest
         .iter()
         .filter(|stage| matches!(stage, Expr::Builtin(Builtin::Key)))
         .count();
-    let only_key_and_tostring = tail
+    let only_key_and_tostring = rest
         .iter()
         .all(|stage| matches!(stage, Expr::Builtin(Builtin::Key | Builtin::ToString)));
-    (keys == 1 && only_key_and_tostring).then_some((slice, *idx, tail))
+    (keys == 1 && only_key_and_tostring).then_some(SliceKeyRead {
+        slice,
+        idx: *idx,
+        steps,
+        rest,
+    })
 }
 
-/// Answer `E[a:b][k] | key` (and its `tostring` spellings, [`fusable_slice_key`]) from the
-/// slice's resolved range, without building the slice (#4286). The walk converts the target
-/// array and then the slice to owned values for it: every element, once per read.
+/// What [`fusable_slice_key`] found in a pipe.
+struct SliceKeyRead<'a> {
+    /// The `E[a:b]` stage.
+    slice: &'a Expr,
+    /// The literal index `k`, as written.
+    idx: i64,
+    /// The field-step stages between the read and the first `key`/`tostring` (possibly none).
+    steps: &'a [Expr],
+    /// The stages from the first non-field one on: `key` once, and `tostring` around it.
+    rest: &'a [Expr],
+}
+
+/// Whether a stage is only field steps (`.a`, `.a.b`).
+fn is_field_steps(stage: &Expr) -> bool {
+    match stage {
+        Expr::Field(_) => true,
+        Expr::Pipe(stages) => !stages.is_empty() && stages.iter().all(is_field_steps),
+        _ => false,
+    }
+}
+
+/// Apply the field steps of `stages` ([`is_field_steps`]) to `element` in order, `None` when a
+/// step is over something jq cannot index by name (anything but an object or `null`); the
+/// second member is the last step's name.
+fn apply_field_steps(
+    stages: &[Expr],
+    mut element: OwnedValue,
+) -> Option<(OwnedValue, Option<&str>)> {
+    fn step<'a>(
+        stage: &'a Expr,
+        element: &mut OwnedValue,
+        last: &mut Option<&'a str>,
+    ) -> Option<()> {
+        match stage {
+            Expr::Field(name) => {
+                *element = match &*element {
+                    OwnedValue::Object(map) => {
+                        map.get(name.as_str()).cloned().unwrap_or(OwnedValue::Null)
+                    }
+                    OwnedValue::Null => OwnedValue::Null,
+                    _ => return None,
+                };
+                *last = Some(name);
+                Some(())
+            }
+            Expr::Pipe(stages) => stages
+                .iter()
+                .try_for_each(|stage| step(stage, element, last)),
+            _ => None, // patchcov: coverage tolerate-line reason="unreachable: every stage was admitted by `is_field_steps`"
+        }
+    }
+    let mut last = None;
+    for stage in stages {
+        step(stage, &mut element, &mut last)?;
+    }
+    Some((element, last))
+}
+
+/// Answer `E[a:b][k] | key` (and its `tostring` and field-step spellings,
+/// [`fusable_slice_key`]) from the slice's resolved range, without building the slice (#4286).
+/// The walk converts the target array and then the slice to owned values for it: every
+/// element, once per read.
 ///
 /// jq mode only. There the slice step extends the path by the `{"start":..,"end":..}`
-/// descriptor and `[k]` by `k`, so the element's key is `k` itself; yq's slice keeps the
-/// position and keeps the walk. A `k` outside the slice, a target that is not a readable
-/// array, a bound that is not exactly one value and a document with no position all decline
-/// to the walk, which re-derives whatever the decline stands for. `tostring` hands the
-/// position on unchanged and `key` ends it, so a `tostring` after the `key` renders the number.
+/// descriptor and `[k]` by `k` as written, so the element's key is `k` itself, whether or not
+/// it lands inside the slice; yq's slice keeps the position and keeps the walk. With field
+/// steps (#4408) the key is the last field's name, and the one element the steps read is
+/// converted whole (`null` when `k` lands outside the slice), not just the fields the steps
+/// name: a step over anything but an object or
+/// `null` fails in jq, so it declines to the walk, which raises it. A target that is not a
+/// readable array, a bound that is not exactly one value and a document with no position all
+/// decline to the walk too, which re-derives whatever the decline stands for. `tostring` hands
+/// the position on unchanged and `key` ends it, so a `tostring` after the `key` renders the
+/// number.
 ///
 /// Like [`try_fused_slice_read`], the elements the read does not name are not converted.
 /// Out of line for the reason [`fused_slice_pipe_head`] gives.
@@ -23169,14 +23243,28 @@ fn try_fused_slice_key<S: EvalSemantics, V: DocumentValue>(
     if S::TAG != EvalTag::Jq || cursor.is_none() {
         return None;
     }
-    let (slice, k, tail) = fusable_slice_key(exprs)?;
-    let (_, range) = fused_slice_window::<S, V>(slice, value, cursor)?;
-    if k >= range.len() as i64 {
-        return None;
-    }
-    let mut answer = OwnedValue::Int(k);
+    let SliceKeyRead {
+        slice,
+        idx: k,
+        steps,
+        rest,
+    } = fusable_slice_key(exprs)?;
+    let (elements, range) = fused_slice_window::<S, V>(slice, value, cursor)?;
+    let mut answer = if steps.is_empty() {
+        OwnedValue::Int(k)
+    } else {
+        let element = match fused_slice_landing::<S>(SliceRead::Index(k), &range)? {
+            SliceLanding::Value(owned) => owned,
+            SliceLanding::Element(position) => {
+                let cursor = crate::jq::array_index::get_cursor_memoized(&elements, position)?;
+                to_owned::<S, _>(&cursor.value()).ok()?
+            }
+        };
+        let (_, last) = apply_field_steps(steps, element)?;
+        OwnedValue::String(last?.into())
+    };
     let mut keyed = false;
-    for stage in tail {
+    for stage in rest {
         match stage {
             Expr::Builtin(Builtin::Key) => keyed = true,
             _ if keyed => answer = tostring_owned::<S>(answer),
@@ -43970,37 +44058,55 @@ mod tests {
 
     #[test]
     fn test_fusable_slice_key_gate_4286() {
-        fn gate(src: &str) -> Option<(i64, usize)> {
+        // (index, field-step stages, stages from the first non-field one)
+        fn gate(src: &str) -> Option<(i64, usize, usize)> {
             let Expr::Pipe(stages) = crate::jq::parse(src).unwrap() else {
                 return None;
             };
-            fusable_slice_key(stages.as_slice()).map(|(_, k, tail)| (k, tail.len()))
+            fusable_slice_key(stages.as_slice())
+                .map(|read| (read.idx, read.steps.len(), read.rest.len()))
         }
         // The nested spelling `.[a:b][k]` parses to, and the flat one, with `key` and `tostring`.
-        assert_eq!(gate(".[$i:][0] | key"), Some((0, 1)));
-        assert_eq!(gate(".[$i:][3] | key"), Some((3, 1)));
-        assert_eq!(gate(".[$i:][0] | tostring | key"), Some((0, 2)));
-        assert_eq!(gate(".[$i:][0] | key | tostring"), Some((0, 2)));
-        assert_eq!(gate(".[$i:][0] | tostring | key | tostring"), Some((0, 3)));
-        assert_eq!(gate(".[$i:$j+1][1] | key"), Some((1, 1)));
-        assert_eq!(gate(".[$i:] | .[0] | key"), Some((0, 1)));
+        assert_eq!(gate(".[$i:][0] | key"), Some((0, 0, 1)));
+        assert_eq!(gate(".[$i:][3] | key"), Some((3, 0, 1)));
+        assert_eq!(gate(".[$i:][0] | tostring | key"), Some((0, 0, 2)));
+        assert_eq!(gate(".[$i:][0] | key | tostring"), Some((0, 0, 2)));
+        assert_eq!(
+            gate(".[$i:][0] | tostring | key | tostring"),
+            Some((0, 0, 3))
+        );
+        assert_eq!(gate(".[$i:$j+1][1] | key"), Some((1, 0, 1)));
+        assert_eq!(gate(".[$i:] | .[0] | key"), Some((0, 0, 1)));
+        // #4408: an index of either sign, as written, and field steps before the `key`.
+        assert_eq!(gate(".[$i:][-1] | key"), Some((-1, 0, 1)));
+        assert_eq!(gate(".[$i:][0] | .a | key"), Some((0, 1, 1)));
+        assert_eq!(gate(".[$i:][-1] | .a | key | tostring"), Some((-1, 1, 2)));
+        // `.a.b` is one stage holding two steps; the count is of stages.
+        assert_eq!(gate(".[$i:][0] | .a.b | key"), Some((0, 1, 1)));
+        assert_eq!(gate(".[$i:][0] | .a | .b | key"), Some((0, 2, 1)));
+        // A field step after `tostring` reads a string, and one after the `key` reads a path
+        // component: neither is the element's own key.
+        assert_eq!(gate(".[$i:][0] | tostring | .a | key"), None);
+        assert_eq!(gate(".[$i:][0] | key | .a"), None);
         // The target must be the input itself: a deeper one steps through positions of its own.
         assert_eq!(gate(".a[$i:][0] | key"), None);
         assert_eq!(gate("$x[$i:][0] | key"), None);
         // A bound that could fan out, fail or have an effect is not pure.
         assert_eq!(gate(".[(1,2):][0] | key"), None);
         assert_eq!(gate(".[input:][0] | key"), None);
-        // A negative index keeps jq's index-as-written / resolved-key split for the walk.
-        assert_eq!(gate(".[$i:][-1] | key"), None);
         // Exactly one `key`, and nothing else after the read: any other stage may read the
         // slice as an ancestor, a position or the element itself.
         assert_eq!(gate(".[$i:][0]"), None);
+        assert_eq!(gate(".[$i:][0] | .a"), None);
         assert_eq!(gate(".[$i:][0] | tostring"), None);
         assert_eq!(gate(".[$i:][0] | key | key"), None);
         assert_eq!(gate(".[$i:][0] | key | . + 1"), None);
         assert_eq!(gate(".[$i:][0] | parent"), None);
         assert_eq!(gate(".[$i:][0] | path"), None);
-        assert_eq!(gate(".[$i:][0] | .a | key"), None);
+        assert_eq!(gate(".[$i:][0] | .a? | key"), None);
+        // A literal string key parses to the same field step as `.a`.
+        assert_eq!(gate(".[$i:][0] | .[\"a\"] | key"), Some((0, 1, 1)));
+        assert_eq!(gate(".[$i:][0] | .a | parent | key"), None);
         assert_eq!(gate(".[$i:][0]? | key"), None);
         assert_eq!(gate(".[$i:] | length | key"), None);
         assert_eq!(gate(".[$i:][$k] | key"), None);
@@ -44035,10 +44141,46 @@ mod tests {
             key(".[1+0:][2] | key | tostring", true),
             Some(OwnedValue::String("2".into()))
         );
-        // A document with no position, an index outside the slice, an empty slice.
+        // A document with no position declines. An index outside the slice, or an empty slice,
+        // is still the index as written (#4408).
         assert_eq!(key(".[1+0:][2] | key", false), None);
-        assert_eq!(key(".[1+0:][3] | key", true), None);
-        assert_eq!(key(".[9+0:][0] | key", true), None);
+        assert_eq!(key(".[1+0:][3] | key", true), Some(OwnedValue::Int(3)));
+        assert_eq!(key(".[1+0:][-9] | key", true), Some(OwnedValue::Int(-9)));
+        assert_eq!(key(".[9+0:][0] | key", true), Some(OwnedValue::Int(0)));
+        // #4408: field steps name the last field; the one element they read is converted, and a
+        // step over a scalar declines for the walk to raise.
+        let docs = br#"[{"a":{"b":1}},{"a":null},7,null]"#;
+        let docs_index = JsonIndex::build(docs);
+        let docs_root = docs_index.root(docs);
+        let field_key = |src: &str| {
+            let Expr::Pipe(stages) = crate::jq::parse(src).unwrap() else {
+                panic!("a pipe: {src}"); // patchcov: coverage tolerate-line reason="unreachable: every source below parses to a pipe; this is the test's own malformed-fixture message (#4408)"
+            };
+            try_fused_slice_key::<JqSemantics, _>(
+                stages.as_slice(),
+                docs_root.value(),
+                Some(docs_root),
+            )
+        };
+        assert_eq!(
+            field_key(".[0+0:][0] | .a.b | key"),
+            Some(OwnedValue::String("b".into()))
+        );
+        assert_eq!(
+            field_key(".[0+0:][1] | .a.b | key | tostring"),
+            Some(OwnedValue::String("b".into()))
+        );
+        assert_eq!(
+            field_key(".[0+0:][3] | .z | key"),
+            Some(OwnedValue::String("z".into()))
+        );
+        // Outside the slice the element is `null`, and `null | .a` is `null`.
+        assert_eq!(
+            field_key(".[2+0:][-9] | .a | key"),
+            Some(OwnedValue::String("a".into()))
+        );
+        assert_eq!(field_key(".[0+0:][2] | .a | key"), None);
+        assert_eq!(field_key(".[0+0:][0] | .a.b.c | key"), None);
         // The yq slice keeps the position, so there is no index to answer.
         assert_eq!(
             {
