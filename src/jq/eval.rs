@@ -23941,7 +23941,7 @@ pub(crate) fn getpath_walk_owned_segments<'a, W: Clone + AsRef<[u64]>, S: EvalSe
             // was unusable here, a narrower regression than the pre-#1102
             // all-or-nothing error. Read-only, matching #1102's own scope --
             // `setpath`/`delpaths` deliberately don't get the same
-            // treatment (#1157's write-side scope, not this one's).
+            // treatment (they still reject a slice descriptor, as yq's do).
             (OwnedValue::Object(map), OwnedValue::Object(desc)) if S::TAG == EvalTag::Yq => {
                 let range = match SliceBounds::from_descriptor(desc) {
                     Ok(bounds) => bounds.resolve_object_children(map.len()),
@@ -29632,10 +29632,9 @@ pub(crate) fn is_yq_scalar_slice_assign_path(path_expr: &Expr) -> bool {
 /// *chained*, *single-path* case this function itself covers (drop the
 /// parent key, whatever the target's type) — the type-scoped restriction
 /// this doc comment used to describe here was a deliberate, but ultimately
-/// unnecessary, scope narrowing (tracked as #1162 until this fix; #1157, a
-/// separate open sibling gap for compound-assignment's own object-target
-/// no-op, is unaffected — this change only touches `del()`'s walker, not
-/// `through_slice`).
+/// unnecessary, scope narrowing (tracked as #1162 until this fix; this change
+/// only touches `del()`'s walker, not `through_slice`, which #1157 widened
+/// separately for compound assignment's own object-target no-op).
 ///
 /// A *comma-grouped multi-path* `del()` combining this rule with an
 /// Object-typed sibling target used to hard-error before this function was
@@ -34351,8 +34350,8 @@ struct SliceEditFlags {
     /// for both diverges from this mechanism, #1340 — see
     /// `eval_compound_assign`'s doc comment for the detail).
     scalar_noop: bool,
-    /// yq's slice-assignment no-op (#1101/#1116/#1142) for a *container*
-    /// (array/string) target — unconditional on the operator, unlike
+    /// yq's slice-assignment no-op (#1101/#1116/#1142/#1157) for a *container*
+    /// (array/string/mapping) target — unconditional on the operator, unlike
     /// `scalar_noop` above.
     container_noop: bool,
     /// Whether this call's own `edit` closure *is* the write (`*sub =
@@ -34512,21 +34511,24 @@ fn through_slice<E: From<EvalError>>(
         // (`.a[0:2].foo = v`, field access on an array) -- the attempt
         // against the throwaway fails the same way it would against the
         // real array, it just never gets spliced back on success.
-        OwnedValue::Array(_) | OwnedValue::String(_) | OwnedValue::Object(_) if container_noop => {
-            // An object target (#1157) is no-op'd too, and its throwaway is
-            // what yq's own slice would read: the object's alternating
-            // key/value child list (`slice_object_as_yq_children`, #1102),
-            // which never errors. Array/String keep the genuine
-            // `slice_owned_value` read. `expect`, not `unwrap_or(Null)`: the
-            // guard above has already narrowed `root` to Array/String, and
-            // `slice_owned_value` only ever returns `Ok(None)` for a target
-            // that's none of Array/Null/String -- unreachable here, and a
-            // silent `Null` fallback would hide that invariant breaking.
-            let mut throwaway = match root {
-                OwnedValue::Object(map) => slice_object_as_yq_children(map, start, end),
-                _ => slice_owned_value(root, start, end, optional)?
-                    .expect("Array/String target always yields Some from slice_owned_value"),
-            };
+        OwnedValue::Array(_) | OwnedValue::String(_) if container_noop => {
+            // `expect`, not `unwrap_or(Null)`: the guard above has already
+            // narrowed `root` to Array/String, and `slice_owned_value` only
+            // ever returns `Ok(None)` for a target that's neither
+            // Array/Null/String -- unreachable here; a silent `Null` fallback
+            // would hide that invariant breaking if this guard is ever
+            // widened.
+            let mut throwaway = slice_owned_value(root, start, end, optional)?
+                .expect("Array/String target always yields Some from slice_owned_value");
+            edit(&mut throwaway)?;
+            Ok(true)
+        }
+        // #1157: a mapping target is no-op'd too, with the throwaway yq's own
+        // slice would read: the mapping's alternating key/value child list
+        // (`slice_object_as_yq_children`, #1102), which never errors. Its own arm
+        // rather than a third case above, so neither throwaway needs a wildcard.
+        OwnedValue::Object(map) if container_noop => {
+            let mut throwaway = slice_object_as_yq_children(map, start, end);
             edit(&mut throwaway)?;
             Ok(true)
         }

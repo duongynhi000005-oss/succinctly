@@ -807,7 +807,8 @@ fn test_numeric_index_write_on_a_mapping_creates_a_key_in_yq_mode_2514() -> Resu
 /// literal or an array RHS -- and its discarded filter sees the mapping's alternating
 /// key/value child list (#1102's read rule), so the filter's own errors still surface.
 /// `-=`/`*=` with a scalar RHS raise (yq: `cannot multiply !!map with !!int`); the wording
-/// is not chased. Real yq v4.53.3 for every row.
+/// is not chased. Real yq v4.53.3 for the outcomes; the scalar-RHS rows and the filter-error
+/// rows pin only the exit code and a payload the filter itself raised.
 #[test]
 fn test_object_slice_assignment_is_a_noop_in_yq_mode_1157() -> Result<()> {
     let doc = "a: {x: 1, y: 2, z: 3}\nb: 5\n";
@@ -27006,8 +27007,8 @@ fn test_yq_slice_bound_must_be_integer_shaped_3415() -> Result<()> {
 /// all-or-nothing error, breaking `getpath(path(x)) == x` for an object
 /// target specifically. Fixed by giving `builtin_getpath` the matching
 /// `Object`+descriptor arm, read-only (matching #1102's own scope) --
-/// `setpath`/`delpaths` deliberately don't get the same treatment (#1157's
-/// write-side scope, not this one's).
+/// `setpath`/`delpaths` deliberately don't get the same treatment (they still
+/// reject a slice descriptor, as yq's do).
 #[test]
 fn test_object_slice_getpath_path_round_trip_1102() -> Result<()> {
     let (out, code) = run_yq_stdin(
@@ -27640,10 +27641,10 @@ fn test_object_slice_yaml_output_known_tag_gap_1102() -> Result<()> {
 // never actually written or serialized). `-=`/`*=` are NOT no-ops for a
 // *scalar* target -- they error instead, with Go-internal-looking messages
 // this crate deliberately does not replicate (not a stable compatibility
-// target). Object is still deliberately unaffected -- #1102 (see the new
-// section below) implements the read-side AST-child-layout rule #1157's
-// own write-side follow-up needs, but doesn't itself touch assignment --
-// but array/string targets are *not* unaffected any more: #1142 widened
+// target). Object was left unaffected here at first -- #1102 (see the new
+// section below) implements the read-side AST-child-layout rule, and #1157 later
+// widened this same no-op to a mapping target built on it -- and
+// array/string targets are *not* unaffected any more: #1142 widened
 // this same no-op to them too (any operator, including `-=`/`*=`, unlike
 // the scalar case), and #1116 (PR #1151) separately widened the *scalar*
 // case here to any chain depth, not just the bare-root shape this section
