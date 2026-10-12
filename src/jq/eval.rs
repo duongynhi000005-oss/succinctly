@@ -54002,6 +54002,18 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         // navigating, the accumulator stayed the register, and the stage's computed `false`
         // let an enclosing `//` fall through to its right operand where jq raised.
         Expr::Builtin(Builtin::IsEmpty(generator)) => update_navigates_within(generator, true),
+        // #4438: a nested `reduce`/`foreach` runs its INIT, then its source, from the
+        // accumulator -- the source is not a subexp, so `reduce .[1+1] as $k (.;
+        // (reduce .[]? as $i (.; .)))` path-checks the inner `.[]?` against the register the
+        // outer source moved, and raises. The inner UPDATE is not read: it runs only per
+        // source element. The source runs only when INIT yields, so it is read unless INIT is
+        // `empty`: any other INIT may yield (`first(.)`, `(.)?`, `f`), and reading a source
+        // that does not run costs an answer, where skipping one that does accepts.
+        Expr::Reduce { input, init, .. } | Expr::Foreach { input, init, .. } => {
+            update_navigates_within(init, false)
+                || (!matches!(unwrap_paren(init), Expr::Builtin(Builtin::Empty))
+                    && update_navigates_within(input, false))
+        }
         other => is_fold_source_navigation(other),
     }
 }

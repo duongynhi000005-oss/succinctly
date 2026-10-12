@@ -70203,6 +70203,159 @@ fn test_reduce_update_isempty_navigates_the_accumulator_4439() -> Result<()> {
     ])
 }
 
+/// #4438: a `reduce` (or `foreach`) nested as the `UPDATE` of an outer `reduce` runs its INIT and
+/// then its source from the outer accumulator, and neither is a subexp, so after an outer source
+/// that moved jq's register they are path-checked against the element: `reduce .[1+1] as $k (.;
+/// (reduce .[]? as $i (.; .)))` raises, and so does a navigating INIT. The outer fold read the
+/// nested one as inert, kept the accumulator at the register and accepted, so `del` of
+/// `reduce .[]? as $k (.; (reduce .a? as $i (.; 5)))` wrote `null` where jq raises. The source
+/// counts only behind an INIT that yields (`empty` never runs it), and a source that moved
+/// nothing leaves the answer alone. Every row captured from jq 1.7.1 (`/usr/bin/jq`), on the stdin
+/// and `-n` routes.
+#[test]
+fn test_nested_fold_in_reduce_update_navigates_the_accumulator_4438() -> Result<()> {
+    let iterate = "Invalid path expression near attempt to iterate through []";
+    let access = r#"Invalid path expression near attempt to access element "a" of []"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce .[]? as $i (.; .))))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce first as $k (.; (reduce .[]? as $i (.; .))))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce .[] as $i (.; .))))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce .[]? as $i (.; 5))))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce .a? as $i (.; .))))",
+            "",
+            access,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce 1 as $i (.a?; .))))",
+            "",
+            access,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (foreach .[]? as $i (.; .))))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; (reduce .a? as $i (.; 5))))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of [true]"#,
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce .[]? as $k (.; (reduce .[]? as $i (.; .))))",
+            "",
+            "Invalid path expression near attempt to iterate through [true]",
+            5,
+        ),
+        // The source runs behind any INIT that yields, not only `.`, a literal or a `$var`.
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i (first(.); .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i ((.)?; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; reduce .[]? as $i (. as $x | $x; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[]",
+            r"path(def f: .; reduce .[1+1] as $k (.; reduce .[]? as $i (f; .)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; (reduce .a? as $i (first(.); 5))))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of [true]"#,
+            5,
+        ),
+        // Controls: a source that navigates nothing, an inner fold that navigates nothing, and an
+        // INIT that yields nothing (so its source never runs).
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce 1 as $i (.; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce (1,2) as $i (.; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce empty as $i (.; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (reduce .[]? as $i (.; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"path(reduce .[1+1] as $k (.; (reduce .[]? as $i (empty; .))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
 /// #3749/#3757, what is still refused where jq answers, in the safe direction. A
 /// verdict stage over an untracked entry's generator the allowlist cannot prove leaves the
 /// register in place (`1 | isempty(def f: 2; f)`) and a `def` call with an argument are refused (a compound stage of them,
