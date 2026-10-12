@@ -54138,17 +54138,26 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         // and then a later item is the first output, so those are read too.
         Expr::Comma(items) if first_only => match items.split_first() {
             Some((head, rest)) => {
-                update_navigates_within(head, true)
-                    || (!matches!(
-                        unwrap_paren(head),
-                        Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_)
-                    ) && rest.iter().any(|item| update_navigates_within(item, true)))
+                comma_item_navigates(head, rest, true)
+                    || (!yields_for_certain(head) && {
+                        // Later items run only while no earlier one is certain to yield
+                        // (`first(empty, ., .k)` never runs `.k`).
+                        let reached = rest
+                            .iter()
+                            .position(yields_for_certain)
+                            .map_or(rest.len(), |i| i + 1);
+                        rest[..reached]
+                            .iter()
+                            .enumerate()
+                            .any(|(i, item)| comma_item_navigates(item, &rest[i + 1..], true))
+                    })
             }
             None => false,
         },
         Expr::Comma(items) => items
             .iter()
-            .any(|item| update_navigates_within(item, false)),
+            .enumerate()
+            .any(|(i, item)| comma_item_navigates(item, &items[i + 1..], false)),
         // #3797: a collect, the left of a `//`, `first(f)` and `last(f)` run their
         // body whatever it yields, and jq path-checks what it navigates, so
         // `[.k] | $x`, `(.k // .) | $x` and `first(.k) | $x` raise as `.k | $x` does.
@@ -54173,6 +54182,17 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         }
         Expr::Optional(inner) if is_postfix_optional_primitive(inner) => {
             update_navigates_within(inner, first_only)
+        }
+        // #4459: a `try` (or `(...)?`) runs its body whatever it yields, and after a source
+        // that moved the register that body's navigation of the accumulator raises a path
+        // error -- which the `try` then catches, so the step is empty (no `catch`) or the
+        // handler's output, not the body's value. Read as inert, the accumulator stayed the
+        // register, the body was evaluated by value, and `(reduce .[]? as $i (.; try
+        // isempty(.a) catch 1)) // .a` answered `["a"]` where jq raises on the handler's `1`.
+        // Reading the body as navigating sends the step through the live resolver, which
+        // catches that error itself. The handler runs only after a raise, so it is not read.
+        Expr::Try { expr: body, .. } | Expr::Optional(body) => {
+            update_navigates_within(body, first_only)
         }
         Expr::If {
             cond,
@@ -54218,6 +54238,32 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         }
         other => is_fold_source_navigation(other),
     }
+}
+
+/// [`update_navigates_within`] for one item of a comma in a `reduce` `UPDATE`, given the items
+/// `later` after it (#4459). A caught navigation (a `try`, or a `(...)?` that is not a bare postfix
+/// step) emits nothing, or its handler's output, when it raises. `reduce` keeps the *last* output
+/// of its `UPDATE`, so it adds nothing when a later sibling certainly yields: `reduce .[]? as $k
+/// (.; ((.k)?, .))` ends on `.` and is `[]` in jq, which reading the `(.k)?` as navigating would
+/// refuse. As the last item, or before siblings that may yield nothing, its handler's output is
+/// the step's, and it is read. Under `first(f)` it is always read: a skipped item is evaluated by
+/// value, and its by-value output would come first, where a later sibling cannot override it.
+fn comma_item_navigates(item: &Expr, later: &[Expr], first_only: bool) -> bool {
+    let caught = match unwrap_paren(item) {
+        Expr::Try { .. } => true,
+        Expr::Optional(inner) => !is_postfix_optional_primitive(inner),
+        _ => false,
+    };
+    let overridden = caught && !first_only && later.iter().any(yields_for_certain);
+    !overridden && update_navigates_within(item, first_only)
+}
+
+/// Whether a comma item yields an output whatever the input: `.`, a literal or a variable.
+fn yields_for_certain(item: &Expr) -> bool {
+    matches!(
+        unwrap_paren(item),
+        Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_)
+    )
 }
 
 /// Whether `reduce`'s accumulator is at jq's register for this step's UPDATE (#3780).

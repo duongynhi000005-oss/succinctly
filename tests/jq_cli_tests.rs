@@ -62194,12 +62194,12 @@ fn test_reduce_mid_step_register_position_matches_jq_2732_3780() -> Result<()> {
             "path(reduce .[] as $k (.; .a))",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
         ),
-        // a `try` around the navigation is not one `update_definitely_navigates`
-        // reads through, so it keeps #2732's message-only residual: jq quotes the
-        // caught `"x"`, this says `with result 1`. Both exit 5.
+        // a `try` around the navigation: its error is caught and the handler's `"x"` is
+        // the step's value, quoted as jq quotes it (#4459; before it ran the body by value
+        // and said `with result 1`, #2732's message-only residual). Both exit 5.
         (
             "path(reduce .[] as $k (.; try .a catch \"x\"))",
-            "Invalid path expression with result 1",
+            "Invalid path expression with result \"x\"",
         ),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":1}"#))?;
@@ -70797,6 +70797,193 @@ fn test_nested_fold_in_reduce_update_navigates_the_accumulator_4438() -> Result<
             r"path(reduce .[1+1] as $k (.; (reduce .[]? as $i (empty; .))))",
             "",
             "Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
+/// #4459: a `try` (or `(...)?`) around a `reduce` `UPDATE`'s navigation of the accumulator.
+/// After a source that moved jq's register the body's navigation raises a path error, which the
+/// `try` catches: no `catch` leaves the step empty, a `catch H` answers `H` run on the error
+/// message. The fold read the `try` as inert, kept the accumulator at the register and ran the
+/// body by value, so `(reduce .[]? as $i (.; try (.a | not) catch 1)) // .a` printed `["a"]` where
+/// jq raises on the handler's `1` (and `del` of it wrote), and `try .a` raised where jq answers
+/// `["a"]`. Controls: a body that navigates nothing, a source that moves nothing, nested `try`s.
+/// Every row captured from jq 1.7.1 (`/usr/bin/jq`), on the stdin and `-n` routes.
+#[test]
+fn test_reduce_update_try_body_navigation_is_caught_4459() -> Result<()> {
+    let doc = r#"{"a":true}"#;
+    let one = "Invalid path expression with result 1";
+    let access = r#"Invalid path expression near attempt to access element "a" of {"a":true}"#;
+    assert_path_rows_both_routes_3749(&[
+        // Accepted before: a computed falsy body, the handler's value is what the fold answers.
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try (.a | not) catch 1)) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"del((reduce .[]? as $i (.; try (.a | not) catch 1)) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try isempty(.[]?) catch 1)) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try ((.a | false) | .) catch 1)) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try (.a | not) catch error)) // .a)",
+            "",
+            access,
+            5,
+        ),
+        // The `try` inside the generator of an `isempty` UPDATE (#4462 review).
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; isempty(try .a))) // .a)",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            doc,
+            r"del((reduce .[]? as $i (.; isempty(try .a))) // .a)",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        // Refused before: the body's error is caught, jq falls through to the `//` alternative.
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try .a)) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try .[]?)) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; (.a)?)) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try .a catch false)) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try any catch (. | not))) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A caught item among a comma's siblings: `reduce` keeps the last output, so it counts
+        // unless a later sibling certainly yields (review of #4477).
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; (., try isempty(.a) catch 1))) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"del((reduce .[]? as $i (.; (., try isempty(.a) catch 1))) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; (empty, try isempty(.a) catch 1))) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; (try .a catch 1, try .b catch 2))) // .a)",
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; first((isempty(.a))?, 1, .a?))) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path(reduce .[]? as $i (.; (try .a catch 1, .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Still refused where jq answers `[]` (the caught item is last, the refusal is the safe
+        // direction): lifting it is a deliberate change.
+        (
+            doc,
+            r"path(reduce .[]? as $i (.; (., (.a)?)))",
+            "",
+            r#"Invalid path expression with result {"a":true}"#,
+            5,
+        ),
+        // Controls: nested `try`, a handler on a body that navigates nothing, and a source that
+        // moves nothing (the accumulator is still the register).
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try (try .a catch 1) catch 2)) // .a)",
+            "",
+            one,
+            5,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try (. | .) catch 1)) // .a)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path((reduce .[]? as $i (.; try error catch .)) // .a)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path(reduce 1 as $i (.; try .a catch 1))",
+            "",
+            "Invalid path expression with result true",
             5,
         ),
     ])
