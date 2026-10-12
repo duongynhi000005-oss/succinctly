@@ -49367,15 +49367,31 @@ impl<'e> RegisterSpine<'e> {
     /// The names a bind of `expr` to `patterns` binds, each with whether it may hold the
     /// register. A destructuring alternative's names hold members. The first bare `$var`
     /// alternative holds `expr` when it matches, the register if [`binds_register`] says so;
-    /// a later one only on a retry after the body raised (#4278), and is read as not the
-    /// register. A name more than one alternative binds is one variable whose value depends
-    /// on which matched, so it may hold the register if any binding of it may (`. as $a ?//
-    /// {a:$a} | $a as {a:$b}`).
+    /// a later one only on a retry after the body raised (#4278). It is read as the register
+    /// too outside every fold body (#4320): the earlier alternative's body then runs with it
+    /// `null`, so a destructure of it raises off the register and the retry destructures the
+    /// register itself. Inside a fold body it is still read as not.
+    ///
+    /// "First" counts bare `$var`s only: in `. as {a:$a} ?// $y` the `$y` is the first bare
+    /// alternative and holds the register as before, at any depth.
+    ///
+    /// A name more than one alternative binds is one variable whose value depends on which
+    /// matched, so it may hold the register if any binding of it may (`. as $a ?// {a:$a} |
+    /// $a as {a:$b}`).
     ///
     /// [`binds_register`]: Self::binds_register
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
-        let mut register = self.binds_register(expr);
+        let register = self.binds_register(expr);
+        // #4320: a later bare alternative binds the register only after the body raised on
+        // the earlier one. At the top level the walk is then the register's (`. as $x ?//
+        // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
+        // body `.` is the accumulator, which the enclosing source may have moved. Narrower than
+        // the `depth() == 0 || acc_is_register_here()` gates of the neighbouring routes on
+        // purpose: the marked body is where the 26 wrong accepts of #4278 were. The memo of a
+        // walk is per [`RegisterSpine`] and so per fold, and the depth is fixed for the walk.
+        let later_holds_register = register && fold_body::depth() == 0;
         let mut names: Vec<(&'e str, bool)> = Vec::new();
+        let mut first_bare = true;
         let mut bind =
             |name: &'e str, held: bool| match names.iter_mut().find(|(bound, _)| *bound == name) {
                 Some((_, any)) => *any |= held,
@@ -49384,8 +49400,8 @@ impl<'e> RegisterSpine<'e> {
         for pattern in patterns {
             match pattern {
                 Pattern::Var(name) => {
-                    bind(name, register);
-                    register = false;
+                    bind(name, register && (first_bare || later_holds_register));
+                    first_bare = false;
                 }
                 _ => visit_pattern_names(pattern, &mut |name| bind(name, false)),
             }
@@ -49479,10 +49495,12 @@ impl<'e> RegisterSpine<'e> {
             // meets the register where the bind did, and a destructure there is the source's
             // own. #4278: the variables it binds are tracked, so a later `$x as {a:$a}` of a
             // `$x` bound to the register is that destructure too. In a chain of bare `$var`s
-            // only the first is read as the register: it always matches, and the others hold
-            // `null` unless the body raises and jq retries, which routing them would model
-            // with a refusal a `try` around the fold then swallows (`. as $x ?// $y | $y as
-            // {a:$a}` under `try`, in a `reduce` UPDATE, raised in jq and answered here).
+            // ([`chain_names`](Self::chain_names)) the first is read as the register: it always
+            // matches. The others hold `null` unless the body raises and jq retries; they are
+            // read as the register only outside every fold body (#4320), because inside one,
+            // routing them models the retry with a refusal a `try` around the fold then
+            // swallows (`. as $x ?// $y | $y as {a:$a}` under `try`, in a `reduce` UPDATE,
+            // raised in jq and answered here).
             Expr::As { expr, var, body } => {
                 let register = self.binds_register(expr);
                 self.with_vars(&[(var.as_str(), register)], body)

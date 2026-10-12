@@ -77797,6 +77797,134 @@ fn test_foreach_source_bare_alternative_chain_on_a_null_register_4417() -> Resul
     ])
 }
 
+/// #4320 (later bare alternative): `. as $x ?// $y | $y as {a:$a} | .` as a `foreach` source. jq binds
+/// `$y` to `null` while the first alternative runs, so destructuring it steps the register off a
+/// node it is not at, which raises, and the retry binds `$y` to the register and destructures that.
+/// jq therefore raises on every document but `null`, where the first alternative's walk succeeds and
+/// moves the register onto `.a`. The by-value drive read `$y` as never the register and answered the
+/// root, so `del` deleted the document and `=` replaced it (exit 0). A later bare alternative of a
+/// chain that binds the register now holds it on the retry, so the source is placed by the
+/// resolver. Not inside another fold's body, where `.` is the accumulator. Every jq side captured
+/// from jq 1.7.1 (the refusals' wording differs from jq's, as the other source rows do).
+#[test]
+fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "true",
+            r"path(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "[true]",
+            r"(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (. as $x ?// $y | $y as {a:$a} | $a) as $k (.; .; .)) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // On `null` the first alternative's walk succeeds, and the register lands on the member.
+        (
+            "null",
+            r"path(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (. as $x ?// $y | $y as [$a] | .) as $k (.; .; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // A chain of three, the bare alternatives after a destructuring one.
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (. as [$q] ?// $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach (. as [$q] ?// $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+            "[0,\"a\"]\n",
+            "",
+            0,
+        ),
+        // Inside another fold's body the later alternative is not read as the register: routing
+        // it there let this `try` swallow the resolver's refusal (#4278's 26 wrong accepts).
+        (
+            "null",
+            r"path(reduce .a? as $k (0; try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // The recorded divergence, in the safe direction: jq answers `{"a":true}` here (the `try`
+        // catches the retry's error); the routed source refuses.
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // Controls: the first bare alternative's destructure, a source that never destructures,
+        // a destructure of another node, and the value-mode source.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (. as $x ?// $y | $x as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (. as $x ?// $y | 5) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (.a as $x ?// $y | $y as {b:$b} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[foreach (. as $x ?// $y | $y as {a:$a} | $a) as $k (.; .; .)]",
+            "[{\"a\":1}]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4278: the fold-source carriers #4187 left. A destructure of the register behind a mixed `?//`
 /// chain, a plain bind that is a later pipe stage, an `if` branch, a no-argument `def` call, or a
 /// `$x` bound to the register moves jq's register onto `.a`, so the emitted `.` is no longer there
