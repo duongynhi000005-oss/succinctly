@@ -53955,6 +53955,12 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         // accumulator that is an empty container, where `.[]` iterates nothing: the stage then
         // reads the register as moved and refuses a shape jq answers, the safe direction.
         Expr::Builtin(Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)) => true,
+        // #4439: jq defines `isempty(g)` as `first((g | false), true)`, so `g` runs from the
+        // accumulator and only its first output is read -- `reduce .[]? as $i (.;
+        // isempty(.[]?))` raises where `reduce .[]? as $i (.; .[]?)` does. Read as not
+        // navigating, the accumulator stayed the register, and the stage's computed `false`
+        // let an enclosing `//` fall through to its right operand where jq raised.
+        Expr::Builtin(Builtin::IsEmpty(generator)) => update_navigates_within(generator, true),
         other => is_fold_source_navigation(other),
     }
 }

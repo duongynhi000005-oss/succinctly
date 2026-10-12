@@ -70087,6 +70087,122 @@ fn test_verdict_stage_behind_a_def_or_reduce_3826() -> Result<()> {
     ])
 }
 
+/// #4439: `isempty(g)` as a `reduce` `UPDATE` navigates the accumulator through `g` like any
+/// other `UPDATE` does, so after a source that moved jq's register it is path-checked against
+/// the element (`reduce .[]? as $i (.; isempty(.[]?))` raises where `reduce .[]? as $i (.; 5)`
+/// does not). The fold read it as inert, kept the accumulator at the register, and answered a
+/// computed `false`, which a `//` drops: `(reduce ...) // .a` printed `["a"]` and `del` of it
+/// deleted `.a`, where jq raises. Controls: a source that moves nothing, a generator that
+/// navigates nothing and the bare postfix `?` keep jq's answers. Every row captured from jq
+/// 1.7.1 (`/usr/bin/jq`), on the stdin and `-n` routes.
+#[test]
+fn test_reduce_update_isempty_navigates_the_accumulator_4439() -> Result<()> {
+    let iterate = r#"Invalid path expression near attempt to iterate through {"a":true}"#;
+    let access = r#"Invalid path expression near attempt to access element "a" of {"a":true}"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(.[]?))) // .a)",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del((reduce .[]? as $i (.; isempty(.[]?))) // .a)",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce .[]? as $i (.; isempty(.[]?)))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(.[]))) // .a)",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(.a?))) // .a)",
+            "",
+            access,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(select(false), .a))) // .a)",
+            "",
+            access,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(first((reduce .[]? as $i (.; isempty(.[]?))), .a))",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; (isempty(.[]?) | not))) // .a)",
+            "",
+            iterate,
+            5,
+        ),
+        (
+            r"[[1],[]]",
+            r"path((reduce .[] as $i (.; isempty(.[]?))) // .[0])",
+            "",
+            "Invalid path expression near attempt to iterate through [[1],[]]",
+            5,
+        ),
+        // The postfix `?` around the fold is not caught as a path error, jq answers `.a`.
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(.[]?)))? // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // Controls: nothing navigates the accumulator, or the source moved nothing.
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(.))) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(1))) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path((reduce .[]? as $i (.; isempty(1, .a))) // .a)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $i (.; isempty(.[]?)))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+    ])
+}
+
 /// #3749/#3757, what is still refused where jq answers, in the safe direction. A
 /// verdict stage over an untracked entry's generator the allowlist cannot prove leaves the
 /// register in place (`1 | isempty(def f: 2; f)`) and a `def` call with an argument are refused (a compound stage of them,
