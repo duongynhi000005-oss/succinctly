@@ -49693,8 +49693,9 @@ impl<'e> RegisterSpine<'e> {
             // comma of them (#4150: `(., .) as {a:$a}` binds per leaf, [`comma_leaves`]) and, for
             // a single pattern, a pipe of `.` (#4320: `(.|.) as {a:$a}`, which `resolve_as_pattern`
             // reads as the register; #4128 routed it without that, and a `try`/`?` around the
-            // fold swallowed the resolver's refusal). A `?//` chain keeps a pipe out: see the
-            // `AsPattern` arm below.
+            // fold swallowed the resolver's refusal). A `?//` chain keeps a pipe out, except on a
+            // `null` register and for a destructuring-only chain outside every fold body (#4424):
+            // see the `AsPattern` arm below.
             // #4187: a `?//` chain of destructuring patterns only. One with a bare `$var`
             // alternative (`. as {a:$a} ?// $a`) is left to the by-value drive: nothing in the
             // register sweep accepts a wrong answer through it, and routing it loses matches
@@ -49716,15 +49717,25 @@ impl<'e> RegisterSpine<'e> {
                 // #4320: a pipe source (`(.|.)`) is the register for a single pattern only; a
                 // `?//` chain keeps the retry rules that do not prove such a head identical.
                 // The resolver's twin of this rule is `resolve_as_pattern`'s `patterns.len() == 1`
-                // on its pipe-of-registers head: change them together. Only a *direct* pipe source
-                // is excluded here: a pipe behind a comma or a `def` in a chain is routed, and
-                // refuses where the by-value drive used to delete (the message names the step, not
-                // the result, and a `try` around it catches where jq's does not).
+                // on its pipe-of-registers head. Only a *direct* pipe source is excluded here: a
+                // pipe behind a comma or a `def` in a chain is routed, and refuses where the
+                // by-value drive used to delete (the message names the step, not the result, and a
+                // `try` around it catches where jq's does not).
+                //
+                // #4424 lifts the exclusion where the resolver does not need the head proven
+                // identical: on a `null` register the pattern's first step succeeds whatever the
+                // head is (`resolve_as_pattern`'s per-bound `null_bool_identical`), and a chain of
+                // destructuring patterns only has no bare alternative to retry onto. The second
+                // only outside every fold body, where `.` may be an accumulator the enclosing
+                // source moved: a `reduce` UPDATE that jq answers (`path(reduce (1) as $i (.;
+                // CHAIN))` on `[]`) would refuse.
                 if (routes_destructuring(patterns)
                     || patterns_all_destructuring_chain(patterns)
                     || (self.null_register && routes_destructuring_chain(patterns)))
                     && self.binds_register(expr)
                     && (patterns.len() == 1
+                        || self.null_register
+                        || (patterns_all_destructuring_chain(patterns) && fold_body::depth() == 0)
                         || (!matches!(unwrap_bind_source(expr), Expr::Pipe(_))
                             && wrapped_marker(expr).is_none()))
                 {

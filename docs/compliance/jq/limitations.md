@@ -2179,10 +2179,22 @@ is the revert that established what the other one costs.
    100,491 rows) DIFF went 103 -> 64 and MATCH 98,144 -> 98,183 with no regression. **What it leaves**: a chain behind a stage
    that is the register on only some outputs (`(., 1) | . as {a:$a} ?// $a | .`, or a nested `foreach (., 1)` source) still
    answers the root on both outputs where jq answers `["a"]` for the register's and `[]` for the other; a pipe-of-registers
-   bind source (`(.|.) as {a:$a} ?// $a | .`, which `resolve_as_pattern` reads as the register for a single pattern only) and a
-   call to a `def` with parameters (`def f($x): CHAIN; f(1)`) answer the root where jq answers `["a"]`; and inside an
+   bind source on a register that is not `null` (`(.|.) as {a:$a} ?// $a | .`, which `resolve_as_pattern` reads as the
+   register for a single pattern only; on `null` it is placed since #4424, below) and a call to a `def` with parameters (`def f($x): CHAIN; f(1)`) answer the root where jq answers `["a"]`; and inside an
    outer `path()` (`try path(path(foreach (. as {a:$a} ?// $a | .) as $k (.; .; .))) catch .` on `null`) the refusal's
    text names `["a"]` where jq's names `[]` (both raise).
+   [#4424](https://github.com/rust-works/succinctly/issues/4424) places a pipe source of the chain
+   (`(.|.) as {a:$a} ?// $a | .`) on a `null` register (the pipe-of-registers exclusion for a chain is lifted there, where
+   the pattern's first step succeeds whatever the head is) and for a chain of destructuring patterns only
+   (`(.|.) as {a:$a} ?// [$a]`, no bare alternative to retry onto), which was accepted on every document where jq raises:
+   `del(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))` on `[true]` deleted the document and `=` replaced it. Pinned
+   by `test_foreach_source_pipe_head_of_a_chain_4424`. The destructuring-only half only outside every fold body
+   (`fold_body::depth() == 0`): inside a `reduce` UPDATE jq answers (`path(reduce (1) as $i (.; foreach ((.|.) as {a:$a} ?//
+   [$a] | .) as $k (.; .; .)))` is `[]` on `[]`) and routing it there refused, so the by-value drive keeps those. Over the 12
+   pipe-chain operands (added to the grid with this change, `--stage-only`, 10,683 rows) ACCEPT_WRONG 146 -> 33 and DIFF 23
+   -> 0, 136 more matches, none lost. The 33 left: 21 inside a `reduce`/`foreach` body, identical on `main`, and 12 are
+   `del(try (CHAIN))` / `del((CHAIN)?)` on an array, where the `try` returns the document unchanged and jq raises (it deleted
+   the document before). Still open: the `def f($x)` and partial-register comma shapes of the issue.
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node

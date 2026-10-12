@@ -466,6 +466,17 @@ OPERANDS = [
     # or put the chain under a `reduce`, which backtracks its source.
     "(foreach ((., .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach (. | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    # (#4424) a pipe source of the chain (`(.|.) as P ?// $v`): on a `null` register the pattern's
+    # first step succeeds, as for the bare source. The contrasts are a register that is not
+    # `null`, a chain of destructuring patterns only, a stage that is not the register, and a
+    # `reduce`, which backtracks its source.
+    "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((.|.|.) as [$a] ?// {a:$a} ?// $b | .) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))",
+    "(foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((.a|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .))",
     "(foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
     "(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",
     "(foreach (try (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
