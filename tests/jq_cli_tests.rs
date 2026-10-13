@@ -69879,13 +69879,13 @@ fn test_try_handler_over_a_destructure_with_a_producer_body_states_the_entry_reg
             "Invalid path expression near attempt to access element 0 of 1",
             5,
         ),
-        // A computed key forks the walk (#4527): a `foreach` UPDATE reads one statement for every
-        // branch, so a producer in the body stays opaque there. jq prints the first emission and raises
-        // on the second, we refuse the first (the safe direction); a `del`/`=` through it is refused.
+        // A computed key forks the walk, and each branch states its own register (#4527): jq prints
+        // the first emission of a `foreach` UPDATE and raises on the second, and a `del`/`=` through
+        // it is refused.
         (
             "[true]",
             r"path(. as $x | foreach (1,2) as $i (1; try (. as {(try . catch 1):$a} | .) catch 7 | $x; $x))",
-            "",
+            "[]\n",
             "Invalid path expression with result [true]",
             5,
         ),
@@ -69931,6 +69931,118 @@ fn test_try_handler_over_a_destructure_with_a_producer_body_states_the_entry_reg
             r"path(. as $x | 1 | ((. as [$a] | .), 1) | $x)",
             "",
             "Invalid path expression near attempt to access element 0 of 1",
+            5,
+        ),
+    ])
+}
+
+/// #4527: a computed pattern key that is an array, on an array input, is jq's subarray search: the
+/// step succeeds (the key is the path component whole, the value its positions) and moves the
+/// register. The pattern walk refused it ("Cannot index array with array") through a catchable error,
+/// so a `try` around the bind read the refusal as "the bind did not match" and handed back its
+/// handler's register, and a `foreach` UPDATE wrote through the `$x` after it
+/// (`del(. as $x | foreach (1,2) as $i (1; try ((.,1) | . as {(.):$a} | $a) catch 7 | $x; $x))` on
+/// `[[1]]` was `null`, jq raises). Every jq side captured from jq 1.7.1.
+#[test]
+fn test_pattern_key_that_is_an_array_is_a_subarray_search_in_path_position_4527() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The step itself: the key is the component whole, and the value is the positions.
+        ("[true]", r"path(. as {(.):$a} | $a)", "[[true]]\n", "", 0),
+        (
+            "[[1],[2]]",
+            r"path(. as {(.[0:1]):$a} | $a)",
+            "[[[1]]]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1],[2]]",
+            r"path(. as {(.[0:1]):$a} | $a | .[0])",
+            "[[[1]],0]\n",
+            "",
+            0,
+        ),
+        // The register moved, so a navigation of the ambient value or the frozen `$x` is refused,
+        // under a `try` with a handler or not.
+        (
+            "[true]",
+            r"path(. as {(.):$a} | .)",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | (. as {(.):$a} | $a) | $x)",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | (try (. as {(.):$a} | $a) catch 7) | $x)",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[true]",
+            r"del(. as $x | (try (. as {(.):$a} | $a) catch 7) | $x)",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[true]",
+            r"(. as $x | (try (. as {(.):$a} | $a) catch 7) | $x) = 9",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | (try (. as {(.):$a} | 1) catch 7) | $x)",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        // The same bind inside a `foreach` UPDATE: the first emission is jq's, the second raises, and
+        // a `del`/`=` through it is refused.
+        (
+            "[true]",
+            r"path(. as $x | foreach (1,2) as $i (1; try (. as {(.):$a} | $a) catch 7 | $x; $x))",
+            "[]\n",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"del(. as $x | foreach (1,2) as $i (1; try ((.,1) | . as {(.):$a} | $a) catch 7 | $x; $x))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[[true]]",
+            r"(. as $x | foreach (1,2) as $i (1; try ((.,1) | . as {(try . catch 1):$a} | $a) catch 7 | $x; $x)) = 9",
+            "",
+            "Invalid path expression with result [[true]]",
+            5,
+        ),
+        // Controls: the step is a subarray search only on an array input, and a stage the bind took
+        // the register past is the stage's own (the `1 |` ahead leaves the register where it was).
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as {(.):$a} | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(.a as {(.):$a} | $a)",
+            "",
+            "Invalid path expression near attempt to access element",
             5,
         ),
     ])

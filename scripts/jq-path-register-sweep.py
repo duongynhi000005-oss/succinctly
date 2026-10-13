@@ -498,6 +498,17 @@ OPERANDS = [
     "try (. as {(try . catch 1):$a} | .) catch 7",
     "try ((.,1) | . as {(.):$a} | ..) catch 7",
     "try ((.,1) | . as {(try . catch 1):$a} | .) catch 7",
+    # (#4527) a computed key that is an array on an array input is jq's subarray search: the step
+    # succeeds and moves the register, where a refusal read as "the bind did not match" let a `try`
+    # hand back its handler's register.
+    "try (. as {(.):$a} | $a) catch 7",
+    "try (. as {(.):$a} | 1) catch 7",
+    "try ((.,1) | . as {(.):$a} | $a) catch 7",
+    "(. as {(.):$a} | $a)",
+    "(. as {(.):$a} | .)",
+    "(. as {(.):$a} | $a, 1)",
+    "(. as {(.):$a} ?// $a | $a)",
+    "(. as {(.[0]):$a} | $a)",
     # (#4187) a plain bind in front of the destructure does not move the register (its source is a
     # subexpression), so the destructure behind it is the source's own; the contrasts bind a
     # different value, destructure something the bind produced, or follow it with a navigation.

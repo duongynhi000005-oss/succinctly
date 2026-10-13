@@ -48122,15 +48122,10 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // that took no step (`AtEntry` is put on nothing else) reads as the register the stage
         // entered with. A stage reading this shape therefore recovers the register of an output
         // exactly where it is the entry register, and a `try` around the bind is read for its
-        // handler's outputs plus whatever the body honestly states. Not for a pattern with a
-        // computed key: its walk forks, and a fold's UPDATE reads one statement for branches that
-        // need not agree (#4527), so a producer in such a body stays opaque.
-        Expr::AsPattern { patterns, body, .. }
-            if !patterns.iter().any(pattern_has_computed_key)
-                || !any_subexpr(body, &mut is_entry_marker_producer) =>
-        {
-            EntryMarkers::None
-        }
+        // handler's outputs plus whatever the body honestly states. A computed key forks the walk,
+        // and each branch states its own register, so it reads the same (#4527: an array key's
+        // step was refused where jq's succeeds, which made a bind look like it had not matched).
+        Expr::AsPattern { .. } => EntryMarkers::None,
         other if hosts_stating_producer(other) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
     }
@@ -80859,6 +80854,16 @@ impl PatternKey<'_> {
                 // spells it.
                 OwnedValue::Object(desc) if S::TAG != EvalTag::Yq => {
                     descriptor_path_component::<S>(desc, input)
+                }
+                // #4527: jq's subarray search, as `.[k]`'s own path step spells it
+                // ([`key_to_path_component`], #3506): the key is the component whole, and only an
+                // array target has one. [`Self::child`] already reads it, so refusing it here
+                // made the step fail where jq's succeeds and moves the register -- a `try`
+                // around the bind swallowed that as jq's own and read its handler's register.
+                OwnedValue::Array(_)
+                    if S::TAG != EvalTag::Yq && matches!(input, OwnedValue::Array(_)) =>
+                {
+                    Ok(Expr::ArrayKey(Box::new((*key).clone())))
                 }
                 other => Err(EvalError::cannot_index_with_type(
                     owned_type_name(input),
@@ -143817,11 +143822,10 @@ mod neutral_leaves_register_tests_4028 {
             ("try (.a | . as [$a] | $a) catch 7", "forwarded"),
             (".a | . as [$a] | $a", "none"),
             (".a | . as [$a] | .", "opaque"),
-            // A computed key forks the walk (#4527): a producer in the body stays opaque, a body
-            // without one is read as it was.
-            (". as {(.):$a} | .", "opaque"),
+            // A computed key forks the walk, and each branch states its own register (#4527).
+            (". as {(.):$a} | .", "none"),
             (". as {(.):$a} | $a", "none"),
-            ("try (. as {(.):$a} | .) catch 7", "opaque"),
+            ("try (. as {(.):$a} | .) catch 7", "forwarded"),
             ("try (. as {(.):$a} | $a) catch 7", "forwarded"),
             // A `try` with no handler has nothing to state.
             ("try (. as [$a] | $a)", "none"),
