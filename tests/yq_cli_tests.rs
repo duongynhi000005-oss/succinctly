@@ -38177,6 +38177,24 @@ fn test_pjson_invalid_utf8_is_substituted_for_json_output_1616() -> Result<()> {
     Ok(())
 }
 
+/// A bad byte *outside* a string is still a parse error with JSON output, as
+/// in yq: the substitution turns it into U+FFFD, which no JSON token starts
+/// with, so nothing is accepted that was not before (and `-i` writes nothing).
+#[test]
+fn test_pjson_invalid_utf8_outside_a_string_still_fails_1616() -> Result<()> {
+    for input in [
+        &b"{\"a\":1}\xff"[..],
+        &b"{\"a\":1,\xff\"b\":2}"[..],
+        &b"{\"a\":\xff}"[..],
+    ] {
+        let (out, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+        assert_eq!(code, 1, "{input:?}: stdout {out:?}");
+        assert!(err.contains("parse error"), "{input:?}: {err:?}");
+    }
+    Ok(())
+}
+
 /// The YAML encoder refuses a printed invalid string, as yq's does -- but only
 /// when the string is printed: a filter that never reaches it still succeeds,
 /// which a whole-input refusal would have broken.
