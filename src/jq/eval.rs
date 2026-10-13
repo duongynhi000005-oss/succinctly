@@ -40121,6 +40121,14 @@ fn resolve_iterate_sink<'a, S: EvalSemantics>(
         // null, null, []]`. Left as a follow-up (only `first`, real yq
         // surface, is currently affected) rather than folded into this
         // fix. Tracked as #2376.
+        //
+        // #4464: the placeholder that comment describes is always `null` (a missing key or an
+        // out-of-range index reads as one), so a *non-null* scalar is a genuinely resolved value
+        // and yq's `.[]` over it is the same silent no-op: `5 | del(.a, .[])` is `5`. `null`
+        // keeps the raise, for the placeholder reason above.
+        other if S::TAG == EvalTag::Yq && !matches!(other, OwnedValue::Null) => {
+            ResolveFlow::Exhausted
+        }
         other => ResolveFlow::Escaped(EvalError::cannot_iterate_with(S::TAG, other).into()),
     }
 }
