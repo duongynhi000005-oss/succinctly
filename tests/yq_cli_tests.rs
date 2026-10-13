@@ -27514,6 +27514,11 @@ fn test_yq_computed_float_slice_bound_in_exponent_form_is_refused_3970() -> Resu
             "`{filter}` -- stderr: {stderr:?}"
         );
     }
+    // The rule is yq's: a string target is refused the same way, and jq mode keeps flooring.
+    let (_, stderr, code) = run_yq_stdin_with_stderr(".[(1.0*1000000):]", "\"abc\"", &args)?;
+    assert_eq!(code, 1, "stderr: {stderr:?}");
+    let (stdout, code) = run_jq_stdin("[.[(1.0*1000000):]]", "[1,2,3]", &["-c"])?;
+    assert_eq!((stdout.as_str(), code), ("[[]]\n", 0));
     for (filter, want) in [
         ("[.[(1.0*999999):]]", "[[]]\n"),
         ("[.[(-1.0*999999):]]", "[[1,2,3]]\n"),
