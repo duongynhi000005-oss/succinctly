@@ -73979,16 +73979,16 @@ fn test_map_f_in_path_position_raises_where_jq_does_3865() -> Result<()> {
             "",
             0,
         ),
-        // Pinned refuse-only: under a `?//` destructuring alternative the entry is untracked,
-        // so the live `.[]` raises a refusal the retry does not catch, where jq's own
-        // catchable error retries the second alternative and writes nothing (the `.a` twin
-        // refused the same way before #3865).
+        // Under a `?//` destructuring alternative the entry is untracked, so the live `.[]`
+        // raises a refusal; it was pinned refuse-only (the retry did not take it) where jq's own
+        // catchable error retries the second alternative and writes nothing. Since #4487 the
+        // retry takes it and the row answers as jq does.
         (
             r#"[{"a":1}]"#,
             r"del(. as [$q] ?// $q | ([map(.a)] and (.a)?) | .c)",
+            "[{\"a\":1}]\n",
             "",
-            r#"Invalid path expression near attempt to iterate through [{"a":1}]"#,
-            5,
+            0,
         ),
         // Answers: `f` only navigates the elements it is given, or runs on none.
         (r#"[{"a":1}]"#, r"path(map(.a) | empty)", "", "", 0),
@@ -80593,7 +80593,7 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "true",
             r"path(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
             "",
-            "Invalid path expression",
+            "Cannot index boolean with string \"a\"",
             5,
         ),
         (
@@ -80607,7 +80607,7 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "[true]",
             r"(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) = 9",
             "",
-            "Invalid path expression",
+            "Cannot index array with string \"a\"",
             5,
         ),
         (
@@ -80663,14 +80663,14 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "Invalid path expression",
             5,
         ),
-        // The recorded divergence, in the safe direction: jq answers `{"a":true}` here (the `try`
-        // catches the retry's error); the routed source refuses.
+        // jq answers `{"a":true}` here (the `try` catches the retry's error). The routed source
+        // refused this until #4487 let the bind's own walk retry the next alternative.
         (
             r#"{"a":true}"#,
             r"del(.a? as $y | try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
             "",
-            "Invalid path expression",
-            5,
+            0,
         ),
         // Controls: the first bare alternative's destructure, a source that never destructures,
         // a destructure of another node, and the value-mode source.
@@ -132540,4 +132540,145 @@ fn test_negative_index_write_error_keeps_jq_wording_2335() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// #4487: a `?//` bind whose earlier alternative's body raises a path error jq does not catch -- a
+/// bare postfix `?` on a navigation, here behind an `and`/`or` operand, which runs on the input
+/// while jq's register sits where the pattern's walk left it -- retries the next alternative, as
+/// jq's `?//` does for any body error. The resolver declined to retry every untracked-navigation
+/// refusal and refused rows jq answers. The last alternative's error, a destructuring that fails
+/// in every alternative and an error jq does not turn into a retry (the terminal `with result`)
+/// still propagate. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_alternative_retries_on_an_uncaught_body_path_error_4487() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        ("[]", r"path(. as [$q] ?// $q | .a?)", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (1 and (.a?)))", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (.a? and 1))", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (1 and (.[]?)))", "", "", 0),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (0 and (.a?)), .)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"[path(. as [$q] ?// $q | (1 and (.a?)))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"del(. as [$q] ?// $q | (1 and (.a?)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"(. as [$q] ?// $q | (1 and (.a?))) |= 9",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q ?// $z | (1 and (.a?)))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(. as [[$q]] ?// $q | (1 and (.a?)))",
+            "",
+            "",
+            0,
+        ),
+        // The retried alternative's rows after the first alternative already emitted a path, and
+        // inside a `try`/collect, where a guess swallowed would lose the write.
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (., (1 and (.a?))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r#"try path(. as [$q] ?// $q | (1 and (.a?))) catch "c""#,
+            "",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"[path(try (. as [$q] ?// $q | (1 and (.a?))))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"del(try (. as [$q] ?// $q | (1 and (.a?))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"path(foreach (1,2) as [$q] ?// $q (.; .; (1 and (.a?))))",
+            "",
+            "",
+            0,
+        ),
+        // Inside a fold body the retry is not read (it accepted a `del` jq refuses).
+        (
+            "[true]",
+            r"del(reduce .[]? as $k (.; (. as [$q] ?// $z | (.a?, $z))))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // Controls: no `?//` (nothing retries), the last alternative's own error, an ordinary
+        // type error in the retried alternative, and the terminal refusal.
+        (
+            "[]",
+            r"path(. as [$q] | .a?)",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// [$z] | (1 and (.a?)))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (1 and (.a)))",
+            "",
+            "Cannot index array with string \"a\"",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (1 or (.a?)))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            "null",
+            r"path(. as [$q] ?// $q | (1 and (.a?)))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+    ])
 }
