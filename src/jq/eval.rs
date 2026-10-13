@@ -72985,13 +72985,61 @@ fn trailing_bare_iterate_prefix(sibling: &Expr) -> Option<(Vec<Expr>, bool)> {
     let prefix = &flat[..flat.len() - 1];
     prefix
         .iter()
-        .all(|e| matches!(e, Expr::Field(_) | Expr::Index { .. }))
+        .all(is_static_path_component)
         .then(|| (prefix.to_vec(), trailing_optional))
+}
+
+/// A literal `Field`/`Index` path component, however many `?`s are written on it (`.a?`): the
+/// only components the vivify pre-pass reads ahead of a `.[]`.
+fn is_static_path_component(e: &Expr) -> bool {
+    matches!(
+        unwrap_path_component(e).0,
+        Expr::Field(_) | Expr::Index { .. }
+    )
+}
+
+/// #2380: [`trailing_bare_iterate_prefix`]'s sibling for a `.[]` with path *after* it -- a static
+/// `Field`/`Index` prefix, one `.[]` (optionally `?`-suppressed), and a non-empty static
+/// `Field`/`Index`/`.[]` suffix, each optionally `?`-suppressed (`.missing[].x`,
+/// `.missing[].x?`, `.missing[].x[]`). Returns the prefix and the rest of the chain starting
+/// at the `.[]` component, exactly as written, so its own `?` stays where the writer put it for
+/// [`delete_at_path`] to read; `None` for every other shape, including the bare trailing `.[]`
+/// the function above owns.
+fn iterate_then_static_suffix(sibling: &Expr) -> Option<(Vec<Expr>, Vec<Expr>)> {
+    let mut flat = Vec::new();
+    push_path_components(&mut flat, sibling);
+    let at = flat
+        .iter()
+        .position(|c| matches!(unwrap_path_component(c).0, Expr::Iterate))?;
+    let (prefix, rest) = flat.split_at(at);
+    let is_static = is_static_path_component;
+    // The suffix may iterate again (`.missing[].x[]`) and carry its own `?` (`.missing[].x?`):
+    // the first `.[]` has nothing to iterate, so nothing after it is reached, and
+    // `delete_at_path` reads a `?` on a component where it stands.
+    let in_suffix = |e: &Expr| {
+        matches!(
+            unwrap_path_component(e).0,
+            Expr::Field(_) | Expr::Index { .. } | Expr::Iterate
+        )
+    };
+    (rest.len() > 1 && prefix.iter().all(is_static) && rest[1..].iter().all(in_suffix))
+        .then(|| (prefix.to_vec(), rest.to_vec()))
+}
+
+/// The shape [`vivify_del_comma_iterate_targets`] takes from a sibling: its static prefix, the
+/// chain from the `.[]` on, and the `optional` flag for [`delete_at_path`]. The bare trailing
+/// `.[]` (#2324, [`trailing_bare_iterate_prefix`]) carries its `?` as that flag; a `.[]` with
+/// path after it (#2380, [`iterate_then_static_suffix`]) keeps every `?` on the component it was
+/// written on.
+fn iterate_sibling_shape(sibling: &Expr) -> Option<(Vec<Expr>, Vec<Expr>, bool)> {
+    trailing_bare_iterate_prefix(sibling)
+        .map(|(prefix, optional)| (prefix, vec![Expr::Iterate], optional))
+        .or_else(|| iterate_then_static_suffix(sibling).map(|(prefix, rest)| (prefix, rest, false)))
 }
 
 /// #2324's own pre-pass: peel off every top-level `del()` comma branch shaped
 /// as a static `Field`/`Index` prefix followed by a bare trailing `.[]`
-/// ([`trailing_bare_iterate_prefix`]) whose prefix currently reads as `null`
+/// ([`iterate_sibling_shape`]) whose prefix currently reads as `null` or another non-container
 /// -- genuinely so in the document, or because a positive index along the
 /// way is out of range (an ordinary read answers `null` either way, no error
 /// -- only *iterating* a `null` raises).
@@ -73055,8 +73103,8 @@ fn trailing_bare_iterate_prefix(sibling: &Expr) -> Option<(Vec<Expr>, bool)> {
 /// null" (or a genuine "index out of range") this whole pre-pass exists to
 /// avoid for the shapes it *does* handle.
 ///
-/// A branch this doesn't recognize (a computed key, a slice, a mid-chain
-/// iterate, `Field`/`Index` on a value that isn't currently `null`) is left
+/// A branch this doesn't recognize (a computed key, a slice, a stage that isn't a
+/// static path, an iterate over a container) is left
 /// completely untouched and falls through to the unmodified
 /// `resolve_del_path_branches`/trie path exactly as before this fix --
 /// including the case where the prefix isn't even readable without an
@@ -73116,16 +73164,24 @@ fn vivify_del_comma_iterate_targets(
     let mut remaining = vec_with_capacity(siblings.len());
     let mut handled_any = false;
     for sibling in siblings {
-        let prefix = trailing_bare_iterate_prefix(sibling).filter(|(prefix, _)| {
-            matches!(peek_static_prefix(result, prefix), Ok(OwnedValue::Null))
+        // A prefix that reads `null` -- or any other non-container, which yq's `.[]` skips just
+        // the same (#2346) -- has nothing to iterate.
+        let matched = iterate_sibling_shape(sibling).filter(|(prefix, _, _)| {
+            // `peek_static_prefix` reads bare components; a `?` only suppresses an error it
+            // would report as `Err` (which declines the shape) or a miss that reads `null`.
+            let bare: Vec<Expr> = prefix
+                .iter()
+                .map(|c| unwrap_path_component(c).0.clone())
+                .collect();
+            matches!(peek_static_prefix(result, &bare), Ok(v) if !is_owned_container(v))
         });
-        let Some((prefix, trailing_optional)) = prefix else {
+        let Some((prefix, rest, trailing_optional)) = matched else {
             remaining.push(sibling.clone());
             continue;
         };
         handled_any = true;
         let mut components = prefix;
-        components.push(Expr::Iterate);
+        components.extend(rest);
         let branch_expr = if components.len() == 1 {
             components.into_iter().next().expect("len checked")
         } else {
@@ -127331,6 +127387,33 @@ mod tests {
 
         // A non-trailing-iterate shape still doesn't match at all.
         assert!(trailing_bare_iterate_prefix(&parse(".a").unwrap()).is_none());
+    }
+
+    #[test]
+    fn iterate_then_static_suffix_matches_only_a_static_chain_with_path_after_the_iterate_2380() {
+        // The prefix before the `.[]` and the chain from it on, as written.
+        let (prefix, rest) = iterate_then_static_suffix(&parse(".a.b[].x").unwrap())
+            .expect("a static suffix after the iterate");
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(rest, vec![Expr::Iterate, Expr::Field("x".to_string())]);
+
+        // A `?` on the iterate stays on the component, for `delete_at_path` to read.
+        let (_, rest) = iterate_then_static_suffix(&parse(".a[]?.x").unwrap()).expect("matches");
+        assert!(matches!(rest[0], Expr::Optional(_)));
+
+        // A second iterate in the suffix is fine; the first one has nothing to iterate.
+        assert!(iterate_then_static_suffix(&parse(".a[].x[]").unwrap()).is_some());
+        // So is a `?` on any suffix component, or on a prefix one.
+        assert!(iterate_then_static_suffix(&parse(".a[].x?").unwrap()).is_some());
+        assert!(iterate_then_static_suffix(&parse(".a?[].x").unwrap()).is_some());
+
+        // The bare trailing `.[]` is `trailing_bare_iterate_prefix`'s; a computed key, a slice
+        // or a non-path stage anywhere in the chain is not this shape.
+        assert!(iterate_then_static_suffix(&parse(".a[]").unwrap()).is_none());
+        assert!(iterate_then_static_suffix(&parse(".a").unwrap()).is_none());
+        assert!(iterate_then_static_suffix(&parse(".[.k][].x").unwrap()).is_none());
+        assert!(iterate_then_static_suffix(&parse(".a[][0:1]").unwrap()).is_none());
+        assert!(iterate_then_static_suffix(&parse(".a[] | length").unwrap()).is_none());
     }
 
     #[test]
