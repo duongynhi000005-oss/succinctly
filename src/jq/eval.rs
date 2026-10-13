@@ -29688,7 +29688,12 @@ enum YqDelSliceOutcome {
 /// - the path's *last* component isn't a slice at all (`del(.a[1:3][0])`,
 ///   `del(.a[1:3][0].x)`, `del(.a[1:3][])`, `del(.a[1:3][0:2][0])` -- a
 ///   trailing slice-run followed by anything non-slice makes the entire
-///   `del()` inert, not just that one step): [`YqDelSliceOutcome::Noop`].
+///   `del()` inert, not just that one step): [`YqDelSliceOutcome::Noop`] --
+///   except a field step after the run, which is an [`YqDelSliceOutcome::Error`]
+///   for any non-string target (#2333/#2344), and a path with an `Iterate` ahead
+///   of the run (`del(.a[][0:2].x)`), which is [`YqDelSliceOutcome::NotApplicable`]:
+///   each fanned-out element is its own target for `delete_at_path`'s per-element
+///   walk to classify (#2344).
 /// - the path ends in a slice-run of *any* length ≥ 2 (`del(.a[1:3][0:2])`,
 ///   `del(.a[1:3][0:2][0:1])`) and the residual prefix before that run is
 ///   itself slice-free and non-empty: [`YqDelSliceOutcome::DropParent`],
@@ -29853,23 +29858,18 @@ fn yq_del_slice_outcome(
 /// `del(.a[0:2].x?)` on `{"a":[1,2,3]}` stays unchanged in real yq, but this
 /// function's own first draft raised regardless of the `?`.
 ///
-/// `null` gets the identical error only when it is the *direct* target of
-/// the slice-run (`null | del(.[0:2].a)`) -- real yq's own null-as-array
-/// slice quirk has no actual elements behind it, so further navigation past
-/// that point falls through to the ordinary no-op instead (confirmed live:
-/// `null | del(.[0:2][0].a)` stays `null`). Modeled here by substituting an
-/// empty `Array` for a `Null` pre-slice value rather than special-casing it
-/// separately: an empty array slices to itself under any bounds, a trailing
-/// `Field` step on it hits the exact same "current is an `Array`" arm a real
-/// array does, and a trailing `Index` step on it always resolves
-/// out-of-bounds (`resolve_read_index` against `len() == 0`) and gives up --
-/// which is exactly "further navigation past that point falls through to
-/// the ordinary no-op." One walker, not two, for the same reason
-/// `yq_del_slice_outcome`'s own doc comment gives for not reusing
-/// `through_slice`: two hand-synchronized copies of "what a trailing
-/// `Field`/`Index` step does to a sliced value" is the "duplicated
-/// predicates diverge silently" shape (#106) this exact function's own
-/// multi-slice-run bug (below) was found to already be.
+/// Every target but a string gets the identical error (#2344): yq slices a mapping, an int, a
+/// bool or `null` to an empty sequence carrying the node's tag, exactly as it slices an array to
+/// a shorter one, and a field step after either parses the key as an index. This models the
+/// empty sequence by substituting an empty `Array` for the pre-slice value, so one walker serves
+/// all of them: a trailing `Field` step hits the same "current is an `Array`" arm a real array
+/// does, and a trailing `Index` step resolves out of bounds against `len() == 0` and gives up,
+/// which is the ordinary no-op (confirmed live: `null | del(.[0:2][0].a)` stays `null`, and so
+/// does `del(.a[0:2][0])` over `a: {y: 1}` -- a mapping slice's key/value layout, #1102, is not
+/// modelled here). A string is inert (a string scalar comes out of the slice). Two known gaps:
+/// a YAML timestamp or `!!binary` scalar is an `OwnedValue::String` here but not a string to yq,
+/// and a prefix step that itself mismatches the document (`del(.a[].b[0:2].x)` with `a: [[1]]`)
+/// is never type-checked -- see `docs/compliance/yq/limitations.md`.
 ///
 /// An `Array` target keeps the error live through arbitrarily deeper
 /// `Index` navigation, since real document data really is there to walk

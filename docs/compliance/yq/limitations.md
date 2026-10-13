@@ -3783,6 +3783,19 @@ The pre-pass also takes a prefix that reads as any other non-container (`{"s":5,
 del(.s[], .y)`, a string or a bool), which yq's `.[]` skips just the same (#2346): that
 shape raised `Cannot iterate over number (5)` before.
 
+### `del()` through a slice-run and a field tail: per element, two gaps ([#2344](https://github.com/rust-works/succinctly/issues/2344))
+
+`del(.a[0:2].x)` fails in yq for every target but a string: yq slices a mapping, int, bool,
+`null` or array to an empty sequence, and `.x` is then parsed as an index. A `.[]` ahead of
+the run (`del(.a[][0:2].x)`) is classified per element, and one failing element fails the call;
+`.x?` suppresses and a `[0]` tail stays a no-op. Two shapes still differ, both because the
+information is not in the value tree: an unquoted YAML timestamp (`a: 2024-01-01`) or a
+`!!binary` scalar is a string to succinctly but not to yq, so `del(.a[0:2].x)` no-ops here where
+yq fails (a *quoted* `"2024-01-01"` matches), and a prefix step that itself mismatches the
+document (`del(.a[].b[0:2].x)` over `a: [[1]]`, where `.b` is applied to an array) is never
+type-checked, so it no-ops where yq fails on `.b`. A `.[]` *after* the run
+(`del(.a[0:2][].x)`) is also still a no-op: [#4542](https://github.com/rust-works/succinctly/issues/4542).
+
 ### `.[]` over a non-container is now a silent no-op — two residual gaps remain (#2346)
 
 Real yq's `.[]` (iterate) produces zero output — not an error — for *any* non-container
