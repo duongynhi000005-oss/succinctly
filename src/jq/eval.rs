@@ -47810,12 +47810,14 @@ fn getpath_preserves_register<S: EvalSemantics>(
 /// source is a subexp; both since #3892) and a `def` call that takes no arguments, which
 /// reads as its body (since #3914). A `//` is also a producer when its right
 /// operand leaves the register alone ([`operand_leaves_register`], #3906): that alternate
-/// states the register the stage entered with ([`carry_frame_register`]). Anything else that hosts a producer -- a
-/// destructuring bind whose *body* hosts a producer (its pattern indexes before the body runs, so
-/// the producer reads a register the walk already moved; a producer in the source or a computed key
-/// states nothing into the sink, #4129), a fold, a `def` call with arguments -- is *opaque*: the
-/// stage reads nothing, and the refusal it had before stays. A stage that hosts no producer has
-/// nothing to read.
+/// states the register the stage entered with ([`carry_frame_register`]). A destructuring bind
+/// hosts nothing the stage must read (#4129, #4490): a producer in its source or a computed key
+/// states nothing into the sink, and one in its body states against the bind's own entry --
+/// [`resolve_as_pattern`] hands a body that follows a step a seed carrying the register the walk
+/// moved, so only a bind that took no step puts an `AtEntry` on an output. Anything else that
+/// hosts a producer -- a fold, a `def` call with arguments, a bind's body behind a navigating
+/// stage -- is *opaque*: the stage reads nothing, and the refusal it had before stays. A stage
+/// that hosts no producer has nothing to read.
 ///
 /// True only when all of these hold, each load-bearing:
 ///
@@ -47935,8 +47937,7 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         | Expr::Label { body: inner, .. }
         // #3892: a bare-variable bind's source is a subexp in jq, and
         // `resolve_as_source_sink` resolves the body against this arm's own
-        // input and sink. A destructuring `AsPattern` is read separately, below: its
-        // pattern indexes before the body runs, so a producer in its body stays opaque.
+        // input and sink. A destructuring `AsPattern` is read separately, below (#4129, #4490).
         | Expr::As { body: inner, .. }
         | Expr::Try {
             expr: inner,
@@ -48029,10 +48030,9 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         }
         // #4129: a destructuring bind states from its *body* alone. The source and the
         // pattern's computed keys are subexps, evaluated by value, so a `.` there states
-        // nothing into the sink; only a producer in the body could (and one there reads a
-        // register the pattern's walk already moved, which is why it stays opaque). A body
-        // with none has nothing to misread, so a `try` around the bind is read for its
-        // handler's outputs alone (`try (. as [$a] | $a) catch 7`).
+        // nothing into the sink; only a producer in the body could. A body with none has
+        // nothing to misread, so a `try` around the bind is read for its handler's outputs
+        // alone (`try (. as [$a] | $a) catch 7`).
         //
         // #4488: but the bare `$x` a `?//` chain falls back to is a producer of its own
         // ([`resolve_as_pattern`]'s `entry_sink`): no step ran for it, the fork that backtracked
@@ -48046,12 +48046,41 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         {
             EntryMarkers::Forwarded
         }
-        Expr::AsPattern { body, .. } if !any_subexpr(body, &mut is_entry_marker_producer) => {
+        // #4490: and a producer in the body states against the bind's own entry. A walk that
+        // took a step hands the body a seed carrying the register it moved
+        // ([`resolve_as_pattern`]), so an output states that one, never `AtEntry`; only a bind
+        // that took no step (`AtEntry` is put on nothing else) reads as the register the stage
+        // entered with. A stage reading this shape therefore recovers the register of an output
+        // exactly where it is the entry register, and a `try` around the bind is read for its
+        // handler's outputs plus whatever the body honestly states. Not for a pattern with a
+        // computed key: its walk forks, and a fold's UPDATE reads one statement for branches that
+        // need not agree (#4527), so a producer in such a body stays opaque.
+        Expr::AsPattern { patterns, body, .. }
+            if !patterns.iter().any(pattern_has_computed_key)
+                || !any_subexpr(body, &mut is_entry_marker_producer) =>
+        {
             EntryMarkers::None
         }
-        other if any_subexpr(other, &mut is_entry_marker_producer) => EntryMarkers::Opaque,
+        other if hosts_stating_producer(other) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
     }
+}
+
+/// Whether `expr` hosts a producer ([`is_entry_marker_producer`]) whose statement can reach the sink
+/// it is resolved against (#4490). A destructuring bind's source and computed keys are subexps,
+/// evaluated by value (#4129), so a `.` there states nothing: only the bind's body is searched.
+fn hosts_stating_producer(expr: &Expr) -> bool {
+    search_subexpr(expr, &mut |e| match e {
+        Expr::AsPattern { body, .. } => {
+            if hosts_stating_producer(body) {
+                Visit::Found
+            } else {
+                Visit::Skip
+            }
+        }
+        e if is_entry_marker_producer(e) => Visit::Found,
+        _ => Visit::Descend,
+    })
 }
 
 /// Whether a pipe's register statements are those of its last stage alone ([`entry_marker_shape`],
@@ -143637,15 +143666,29 @@ mod neutral_leaves_register_tests_4028 {
             // A producer in a computed key or in the source states nothing into the sink.
             (". as {(try .a catch 1):$a} | $a", "none"),
             ("(.. | .) as [$a] | $a", "none"),
-            (". as [$a] | .", "opaque"),
-            (". as [$a] ?// $a | ..", "opaque"),
-            (". as [$a] | try 1 catch 2", "opaque"),
-            (". as [$a] | (1, .)", "opaque"),
+            // #4490: a producer in the body states against the bind's own entry (a step hands the body
+            // a seed carrying the register it moved), so the bind hosts nothing the stage must read.
+            (". as [$a] | .", "none"),
+            (". as [$a] ?// $a | ..", "none"),
+            (". as [$a] | try 1 catch 2", "none"),
+            (". as [$a] | (1, .)", "none"),
             // The handler's outputs state the register whatever the body is, so a `try` over a
-            // bind that hosts no producer is read for them alone.
+            // bind is read for them, and for whatever the body honestly states.
             ("try (. as [$a] | $a) catch 7", "forwarded"),
             ("try (. as {a:$a} ?// $a | 1) catch 7", "forwarded"),
-            ("try (. as [$a] | .) catch 7", "opaque"),
+            ("try (. as [$a] | .) catch 7", "forwarded"),
+            ("try (. as [$a] | (., 1)) catch 7", "forwarded"),
+            // A bind behind a navigating stage: the pipe's outputs are placed by its stages, and a
+            // bind's source is a subexp. A producer in the body after the navigation stays opaque.
+            ("try (.a | . as [$a] | $a) catch 7", "forwarded"),
+            (".a | . as [$a] | $a", "none"),
+            (".a | . as [$a] | .", "opaque"),
+            // A computed key forks the walk (#4527): a producer in the body stays opaque, a body
+            // without one is read as it was.
+            (". as {(.):$a} | .", "opaque"),
+            (". as {(.):$a} | $a", "none"),
+            ("try (. as {(.):$a} | .) catch 7", "opaque"),
+            ("try (. as {(.):$a} | $a) catch 7", "forwarded"),
             // A `try` with no handler has nothing to state.
             ("try (. as [$a] | $a)", "none"),
         ] {

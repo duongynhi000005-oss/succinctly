@@ -459,6 +459,45 @@ OPERANDS = [
     "try (foreach . as [$a] (0; .; .)) catch 7",
     "try (foreach . as {a:$a} ?// $a (0; .; .)) catch 7",
     "try (reduce . as [$a] (0; .)) catch .a",
+    # (#4490) a producer in a destructure's body, and a bind behind a stage, under a `try` with a
+    # handler: the handler's output states the `try`'s entry register whatever the body does, and
+    # the body's own successful outputs must not be read as if they did. The contrasts put a
+    # producer (`.`, `..`, a comma, an `if`, a nested `try`) in the body after a walk that moved the
+    # register, a bind behind a navigating, identity or plain-bind stage, and a nested pattern.
+    "try (. as [$a] | (., 1)) catch 7",
+    "try (. as [$a] | if $a then . else 1 end) catch 7",
+    "try (. as [$a] ?// $a | .) catch 7",
+    "try (. as [[$a]] | .) catch 7",
+    "try (. as {a:$a} | .) catch 7",
+    "try (1 | . as [$a] | .) catch 7",
+    "try (.a? | . as [$a] | .) catch 7",
+    "try (.[0]? | . as [$a] | .) catch 7",
+    "try (. | . as [$a] | .) catch 7",
+    "try (. as $x | . as [$a] | .) catch 7",
+    "try (. as [$a] | try . catch 1) catch 7",
+    "try (. as [$a] | ..) catch 7",
+    "try (. as [$a] | first(.)) catch 7",
+    "try (. as {a:$a} ?// [$a] | .) catch 7",
+    "try (.a | . as [$a] | .) catch 7",
+    "try (.a | . as [$a] ?// $a | $a) catch 7",
+    # (#4490) the same bind outside a `try`, under each wrapper that forwards a branch: its own
+    # outputs state the register at the bind's entry, never one the walk moved.
+    "((. as [$a] | .), 1)",
+    "(1, (. as [$a] | .))",
+    "first(. as [$a] | .)",
+    "(. as [$a] | .)?",
+    "if . then (. as [$a] | .) else 1 end",
+    "((. as [$a] | .) // 1)",
+    "limit(2; . as [$a] | .)",
+    "(. as [$a] | ..)",
+    "(. as [$a] | (., 1))",
+    "(.a | . as [$a] | $a)",
+    # (#4527) a computed key forks the walk: a producer in the body stays opaque, and the same
+    # shapes inside a fold UPDATE are where a statement read once for every branch writes.
+    "try (. as {(.):$a} | .) catch 7",
+    "try (. as {(try . catch 1):$a} | .) catch 7",
+    "try ((.,1) | . as {(.):$a} | ..) catch 7",
+    "try ((.,1) | . as {(try . catch 1):$a} | .) catch 7",
     # (#4187) a plain bind in front of the destructure does not move the register (its source is a
     # subexpression), so the destructure behind it is the source's own; the contrasts bind a
     # different value, destructure something the bind produced, or follow it with a navigation.
