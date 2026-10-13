@@ -57918,6 +57918,126 @@ mod yq_text_equality_2785 {
         Ok(())
     }
 
+    /// #4054, #4387: yq runs the key filter of `sort_by`, `unique_by` and `group_by` through
+    /// `ReadOnlyClone`, where a key read that finds nothing is no output at all. An element lacking the
+    /// key therefore has a shorter key list (`[]` for `.k`, `[9]` for `.x, .y`) rather than one holding a
+    /// `null`, which ties with an explicit `null` and, for a multi-output key, shifts every later position.
+    /// Every row was captured live from yq v4.53.3 (`-p=json -o=json -I=0`), on the literal route.
+    #[test]
+    fn sort_family_key_filters_read_an_absent_key_as_no_output_4054() -> Result<()> {
+        for (input, filter, want) in [
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "sort_by(.k) | map(.n)",
+                r#"["u","w","x"]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "sort_by(.k, .n) | map(.n)",
+                r#"["w","x","u"]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "sort_by(.n, .k) | map(.n)",
+                r#"["u","w","x"]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "unique_by(.k) | map(.n)",
+                r#"["x","w"]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "unique_by(.k, .n) | map(.n)",
+                r#"["x","w","u"]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "group_by(.k) | map(map(.n))",
+                r#"[["x"],["w","u"]]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "group_by(.k, .n) | map(map(.n))",
+                r#"[["x"],["w"],["u"]]"#,
+            ),
+            (
+                r#"[{"k":3,"n":"x"},{"k":null,"n":"w"},{"n":"u"}]"#,
+                "sort_by(.z) | map(.n)",
+                r#"["x","w","u"]"#,
+            ),
+            (
+                r#"[{"x":2},{"x":1},{"y":9}]"#,
+                "sort_by(.x, .y)",
+                r#"[{"x":1},{"x":2},{"y":9}]"#,
+            ),
+            (
+                r#"[{"x":2},{"x":1},{"y":9}]"#,
+                "sort_by(.x)",
+                r#"[{"y":9},{"x":1},{"x":2}]"#,
+            ),
+            (
+                r#"[{"x":2},{"x":1},{"y":9}]"#,
+                "sort_by(.y)",
+                r#"[{"x":2},{"x":1},{"y":9}]"#,
+            ),
+            (
+                r#"[{"x":2,"y":1},{"x":1},{"y":9},{"x":1,"y":5},{"x":1,"y":2}]"#,
+                "sort_by(.x, .y)",
+                r#"[{"x":1},{"x":1,"y":2},{"x":1,"y":5},{"x":2,"y":1},{"y":9}]"#,
+            ),
+            (
+                r#"[{"x":2,"y":1},{"x":1},{"y":9},{"x":1,"y":5},{"x":1,"y":2}]"#,
+                "sort_by(.x, .y, .z)",
+                r#"[{"x":1},{"x":1,"y":2},{"x":1,"y":5},{"x":2,"y":1},{"y":9}]"#,
+            ),
+            (
+                r#"[{"x":2,"y":1},{"x":1},{"y":9},{"x":1,"y":5},{"x":1,"y":2}]"#,
+                "sort_by(.y, .x)",
+                r#"[{"x":1},{"x":2,"y":1},{"x":1,"y":2},{"x":1,"y":5},{"y":9}]"#,
+            ),
+            (
+                r#"{"a":{"k":2},"b":{},"c":{"k":1}}"#,
+                "sort_by(.k) | keys",
+                r#"["b","c","a"]"#,
+            ),
+            (
+                r#"{"a":{"k":2},"b":{},"c":{"k":1}}"#,
+                "sort_by(.k, .z) | keys",
+                r#"["b","c","a"]"#,
+            ),
+        ] {
+            let (stdout, stderr, code) =
+                super::run_yq_stdin_with_stderr(filter, input, &["-p=json", "-o=json", "-I=0"])?;
+            assert_eq!(
+                (stdout.trim(), code),
+                (want, 0),
+                "{filter} on {input}: {stderr}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The same keys read from a YAML document, which stays on the cursor route.
+    #[test]
+    fn sort_family_key_filters_read_an_absent_key_as_no_output_from_a_document_4054() -> Result<()>
+    {
+        let doc = "recs:\n  - {k: 3, n: x}\n  - {k: null, n: w}\n  - {n: u}\n  - {k: 1, n: v}\n";
+        for (filter, want) in [
+            (".recs | sort_by(.k) | map(.n)", r#"["u","w","v","x"]"#),
+            (".recs | sort_by(.k, .n) | map(.n)", r#"["w","v","x","u"]"#),
+            (".recs | unique_by(.k) | map(.n)", r#"["x","w","v"]"#),
+            (
+                ".recs | group_by(.k) | map(map(.n))",
+                r#"[["x"],["w","u"],["v"]]"#,
+            ),
+        ] {
+            let (stdout, code) = run_yq_stdin(filter, doc, &["-o=json", "-I=0"])?;
+            assert_eq!((stdout.trim(), code), (want, 0), "{filter}");
+        }
+        Ok(())
+    }
+
     /// #2799 (part 3): real yq's `sort`/`sort_by` use `sortableNodeArray.compare` and Go's
     /// `sort.Stable`: `null` first, bools next, two integers numerically, two numbers as floats,
     /// otherwise the node texts byte-wise (a container's is empty, so containers tie and sort

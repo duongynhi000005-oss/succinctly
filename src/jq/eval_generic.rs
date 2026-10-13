@@ -23852,6 +23852,13 @@ fn key_elements_generic<S: EvalSemantics, V: DocumentValue>(
     key: Option<&Expr>,
     optional: bool,
 ) -> Result<Vec<(SortKey, V::Cursor)>, Control> {
+    // #4054: yq runs a `_by` key filter read-only, so an absent key is no output (see
+    // `eval::by_key_scope`). Held across the loop: entering it per element is a thread-local
+    // write pair each.
+    let _scope = key
+        .is_some()
+        .then(|| S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(yq_read_only_context::enter))
+        .flatten();
     let mut keyed = vec_with_capacity(cursors.len());
     for cursor in cursors {
         let k = match key {
