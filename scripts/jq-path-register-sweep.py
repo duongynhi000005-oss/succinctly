@@ -2230,6 +2230,14 @@ CONTEXTS = [
     ("foreach-update-var-path", "path(foreach .a? as $k (0; {X}; $k))"),
     ("foreach-update-var-del", "del(foreach .a? as $k (0; {X}; $k))"),
     ("foreach-update-var-assign", "(foreach .a? as $k (0; {X}; $k)) = 9"),
+    # (#4550) a container INIT: the accumulator is a computed container, which jq's `path_intact`
+    # refuses at a pattern's first step whatever the register is, so `?//` retries it.
+    ("foreach-update-try-var-arr", "path(foreach .a? as $k ([]; try ({X}); $k))"),
+    ("foreach-update-try-dot-arr", "path(foreach .a? as $k ([]; try ({X}); .))"),
+    ("foreach-update-try-del-obj", "del(foreach .a? as $k ({}; try ({X}); .))"),
+    ("foreach-update-try-assign-arr", "(foreach .a? as $k ([1]; try ({X}); .)) = 9"),
+    ("reduce-update-try-path-arr", "path(reduce .a? as $k ([]; try ({X})))"),
+    ("reduce-update-try-del-obj", "del(reduce .a? as $k ({}; try ({X})))"),
     ("reduce-update-try-path", "path(reduce .a? as $k (0; try ({X})))"),
     ("reduce-update-try-del", "del(reduce .a? as $k (0; try ({X})))"),
     # (#4440) a `foreach` whose SOURCE and INIT cannot move jq's register, so the first step runs

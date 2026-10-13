@@ -70698,6 +70698,140 @@ fn test_fold_try_over_a_computed_key_alternative_chain_retries_a_step_that_canno
     ])
 }
 
+/// #4550: a fold's `try` over a `?//` bind of a container accumulator. The accumulator is a computed
+/// container, which jq's `path_intact` refuses at the pattern's first step whatever the register is, and
+/// `?//` retries onto the bare alternative; the walk's refusal was handed back as jq's own (no register
+/// was lost, so a `try` caught it) but not retried as jq's own, so the `try` swallowed what the `?//`
+/// should have retried and `path(reduce .a? as $k ([]; try (. as [$a] ?// $a | $a)))` answered `[]` where
+/// jq raises at the emission. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_4550() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(reduce .a? as $k ([]; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k ({}; try (. as {a:$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k ([1]; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([1]; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; try (. as {a:$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; try (. as {(.|tostring):$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; try (. as {(.):$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; try (. as [$a] ?// $a | $a); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(foreach .a? as $k ([]; try (. as [$a] ?// $a | $a); $k))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach .a? as $k ([]; try (. as [$a] ?// $a | $a); $k)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k (null; try (. as [$a] ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls: INIT `.` IS jq's register on the first step, so the first alternative's step
+        // passes `path_intact` and nothing is retried -- a container accumulator alone must not
+        // retry (the walk's provenance decides, not the value; #4354).
+        (
+            "null",
+            r"path(reduce .a? as $k (.; try (. as [$a] ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(reduce .a? as $k (.; try (. as [$a] ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to

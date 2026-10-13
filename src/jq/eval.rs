@@ -53067,12 +53067,29 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             // would repeat its effects) but the walk itself saw: jq raises that whatever its register
             // is, and `?//` retries it (#3998, as the folds' [`settle_fold_alternative`] reads it).
             let refused_could_succeed: core::cell::Cell<Option<bool>> = core::cell::Cell::new(None);
+            //
+            // #4550: or, in the step of an outermost fold whose accumulator the walk places off the
+            // register ([`fold_body::acc_off_register_here`]: a computed container, not INIT `.`),
+            // with no register in hand and none lost, so `bound` is not the one that was. jq's
+            // `path_intact` refuses a pattern step on such an accumulator whatever the register is,
+            // and the error handed back below is catchable as jq's own ([`guess_refusal_of`]), so it
+            // must retry as jq's own too: it did not, and a `try` swallowed what `?//` should have
+            // retried onto the bare alternative (`reduce .a? as $k ([]; try (. as [$a] ?// $a | $a))`).
+            // The mark is the walk's provenance, not the value: INIT `.` is a container that IS
+            // jq's register on the first step, and retrying there accepts what jq answers (#4354).
             let refusal_is_exact = || {
                 fresh_head
                     || register.is_some_and(|reg| bound != reg)
                     || (S::TAG == EvalTag::Jq
                         && (refused_could_succeed.get() == Some(false)
-                            || pattern_walk_fails_by_value::<S>(pattern, bound)))
+                            || pattern_walk_fails_by_value::<S>(pattern, bound)
+                            || (register.is_none()
+                                && fold_body::acc_off_register_here()
+                                && !could_be_lost_register(
+                                    &frame.register_loss,
+                                    bound_is_frozen,
+                                    bound,
+                                ))))
             };
             let seed = match register {
                 Some(reg) => PatternRegister {
@@ -56217,6 +56234,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && update_at_register
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
+                        // #4550: the converse -- an accumulator the walk does not place at the
+                        // register (a computed container, not INIT `.`) is off it, so a pattern
+                        // step on it is refused by `path_intact` whatever the register is.
+                        let _acc_off_register = (S::TAG == EvalTag::Jq
+                            && fold_body::depth() == 0
+                            && !acc_at_register
+                            && live_step_reg.is_none())
+                        .then(fold_body::acc_off_register);
                         // #4484: a navigating `reduce` source leaves jq's register on the element for
                         // the whole step, where a pattern step on the accumulator raises.
                         let _source_moved = source_moves_register.then(|| {
@@ -56742,6 +56767,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             state_at_register,
                             state_path.as_ref(),
                         );
+                        // #4550: the stored state is no node of the register, by provenance and by
+                        // identity -- not `active_at_register`, which a source that moves the step
+                        // register off the root also reads false for an INIT `.` that IS jq's
+                        // register on the first step (#4354).
+                        let state_off_register = S::TAG == EvalTag::Jq
+                            && fold_body::depth() == 0
+                            && !(state_at_register
+                                || reg.identical::<S>(&state, &state_snapshot, true));
                         // #4130: an emission of this step is at the entry register when the
                         // step took no walk step (a bare `$var`, or the one a failed
                         // destructure's restored fork reached) and nothing else in the loop
@@ -56958,6 +56991,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _acc_is_register =
                             (alt_bind_update_on_register && active_at_register && !live_stepped)
                                 .then(fold_body::acc_is_register);
+                        // #4550: see `resolve_reduce`'s `_acc_off_register`.
+                        let _acc_off_register =
+                            (state_off_register && !live_stepped).then(fold_body::acc_off_register);
                         let _foreach_body = fold_body::foreach_body();
                         let flow = active_reg.resolve_sink::<S>(
                             &bound_update,
@@ -65670,6 +65706,8 @@ mod fold_body {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known to be jq's register (#3953), 0 for none.
         static ACC_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth at which `.` is known NOT to be jq's register (#4550), 0 for none.
+        static OFF_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
         static MOVED: Cell<Moved> = const { Cell::new(Moved { depth: 0, onto_null: None }) };
         /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none.
@@ -65709,6 +65747,32 @@ mod fold_body {
     /// Whether the body being resolved is the one [`acc_is_register`] marked.
     pub(crate) fn acc_is_register_here() -> bool {
         depth() > 0 && ACC_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`acc_off_register`] mark.
+    pub(crate) struct OffGuard(u32);
+
+    /// Marks the body about to be entered (one level deeper than now) as one where `.` is
+    /// provably not jq's register (#4550): an outermost fold's step whose accumulator the walk
+    /// does not place at the register -- a computed container (`[]`, `{}`), not INIT `.`. A
+    /// pattern step on it fails jq's `path_intact` whatever the register is, so a refusal there
+    /// is jq's own verdict and a `?//` retries it. The converse of [`acc_is_register`], and set
+    /// only where the walk's provenance is exact: unset means unknown, never "on the register".
+    pub(crate) fn acc_off_register() -> OffGuard {
+        let previous = OFF_DEPTH.with(Cell::get);
+        OFF_DEPTH.with(|a| a.set(depth() + 1));
+        OffGuard(previous)
+    }
+
+    impl Drop for OffGuard {
+        fn drop(&mut self) {
+            OFF_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`acc_off_register`] marked.
+    pub(crate) fn acc_off_register_here() -> bool {
+        depth() > 0 && OFF_DEPTH.with(Cell::get) == depth()
     }
 
     /// Restores the previous [`source_moved`] mark.
@@ -65799,6 +65863,16 @@ mod fold_body {
     }
 
     pub(crate) fn acc_is_register_here() -> bool {
+        false
+    }
+
+    pub(crate) struct OffGuard;
+
+    pub(crate) fn acc_off_register() -> OffGuard {
+        OffGuard
+    }
+
+    pub(crate) fn acc_off_register_here() -> bool {
         false
     }
 
