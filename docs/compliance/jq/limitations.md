@@ -2399,9 +2399,11 @@ is the revert that established what the other one costs.
    on `{}` raises as jq does where the by-value drive answered `[]` (and `del` returned `null`, `|=` wrote), and on `null`
    prints `["a"]`. Over the 98 held-variable and `$x`-pattern `foreach`/`reduce` operands (`--stage-only`, 87,907 rows, 8
    added here) wrong accepts go from 552 to 292 and wrong answers from 42 to 17, with no match lost; the 260 wrong accepts
-   left are the same shapes inside a fold body, where a bare `$x` is also accepted. Still accepted: a held `$x` as a call
-   argument behind `first(.)`/`.?`/a comma (`def f($x): $x as {a:$a} | .; f(first(.))`), which needs `Reach::Partial`
-   for the comma. Pinned by `test_foreach_source_held_var_behind_a_pipe_or_if_4514`.
+   left are the same shapes inside a fold body, where a bare `$x` is also accepted. A navigation before the variable
+   (`.a | $x`) is the same verdict as jq's (the marker is certified against the register, and the sweep's contrast row
+   matches). Still accepted: a held `$x` as a call argument behind `first(.)`/`.?`/a comma (`def f($x): $x as {a:$a} | .;
+   f(first(.))`), which needs `Reach::Partial` for the comma; a comma of held pipes (`($x|.), ($x|.)`, which
+   `binds_variable` does not see); and a pipe whose last stage is itself a parenthesised pipe or a wrapper of `.`. Pinned by `test_foreach_source_held_var_behind_a_pipe_or_if_4514`.
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

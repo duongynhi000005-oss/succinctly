@@ -81657,6 +81657,22 @@ fn test_foreach_source_held_var_behind_a_pipe_or_if_4514() -> Result<()> {
             RAISES,
             5,
         ),
+        // A navigation before the variable moves jq's register off `$x`; the verdict is the same.
+        (
+            r#"{"a":{}}"#,
+            r"path(. as $x | foreach ((.a|$x) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        // An `if` of the plain register, which the default arm read as not the register.
+        (
+            "{}",
+            r"path(foreach ((if true then . else . end) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
         // On `null` the first step succeeds and the register moves onto `.a`.
         (
             "null",
