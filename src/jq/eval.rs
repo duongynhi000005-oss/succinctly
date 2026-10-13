@@ -29762,6 +29762,20 @@ fn yq_del_slice_outcome(
         // trailing slice(s) produced (or, for `null`'s own direct-target
         // quirk, on `null` itself) isn't inert there, it raises. See
         // `yq_del_slice_field_error`'s own doc comment.
+        //
+        // An `Iterate` ahead of the slice-run (`del(.a[][0:2].x)`, #2344) means there is no
+        // single value to classify here: each element of the fanned-out container is its own
+        // target, which `delete_at_path`'s `Iterate` arm re-classifies per element (through
+        // this function again, with the `Iterate` peeled off). Defer to it instead of
+        // answering for all of them from a prefix `navigate_owned_value` cannot walk.
+        let last_slice = steps.iter().rposition(|s| s.component.is_slice());
+        if last_slice.is_some_and(|at| {
+            steps[..at]
+                .iter()
+                .any(|s| matches!(s.component, Expr::Iterate))
+        }) {
+            return YqDelSliceOutcome::NotApplicable;
+        }
         if let Some(e) = yq_del_slice_field_error(&steps, root) {
             return YqDelSliceOutcome::Error(e);
         }
@@ -29888,13 +29902,17 @@ fn yq_del_slice_field_error(steps: &[DeleteStep], root: &OwnedValue) -> Option<E
         .collect();
     let pre_slice_value = navigate_owned_value(root, &prefix)?;
 
-    // Only `Array`/`Null` get this treatment -- `String` (#1219/#1321's own
-    // established no-op precedent) and anything else fall through
-    // unchanged, before ever applying a slice or walking the suffix.
+    // Only a `String` is inert (#1219/#1321's own established no-op precedent: it slices to a
+    // string scalar). yq slices every other node -- a mapping, an int, a bool, `null` -- to an
+    // empty *sequence* carrying the node's tag, so a field step after the slice-run parses the
+    // key as an index and raises just as it does for a real array (#2344, live-verified for
+    // `{"a":{"y":1}}`, `{"a":5}` and `{"a":true}` with `del(.a[0:2].x)`). An index tail
+    // into an empty sequence resolves out of bounds and gives up below, so it stays the no-op
+    // it was (a mapping slice's key/value layout, #1102, is not modelled here).
     let mut sliced = match pre_slice_value {
-        OwnedValue::Null => OwnedValue::array(),
+        OwnedValue::String(_) => return None,
         OwnedValue::Array(_) => pre_slice_value.clone(),
-        _ => return None,
+        _ => OwnedValue::array(),
     };
     for step in &steps[run_start..=last_slice_pos] {
         let Expr::Slice { start, end, .. } = &step.component else {
