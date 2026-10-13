@@ -568,6 +568,31 @@ would cover only the last two spellings, leaving `1_000` → `1000` and `0X2A` �
 perfectly consumable output that succinctly simply declines to match — with no justification
 at all. The justification is the spec target, which is why the case belongs here.
 
+### Invalid UTF-8 in a `-p json` document is judged by the whole input, not by what is printed (#1616)
+
+`-p json` with `-o json` substitutes one U+FFFD per invalid byte and succeeds, as real yq does;
+with any other output it refuses the document before reading it
+(`Error: yaml: cannot marshal invalid UTF-8 data as !!str`, exit 1, nothing on stdout). Three
+things differ from yq, each live-verified against v4.53.3 (`printf '{"a":"x\xe4y","b":1}'`):
+
+| input / filter                        | yq                                | succinctly                      |
+|---------------------------------------|-----------------------------------|---------------------------------|
+| `-p json -o json .`                   | `"a": "x\ufffdy"` (escaped)       | `"a": "x�y"` (raw U+FFFD)       |
+| `-p json .b` (YAML output)            | `1`                               | the error above                 |
+| `-p json .` on `{"x\xe4y":1}`         | `x�y: 1` (substituted key)        | the error above                 |
+
+- **A substituted value prints as the raw character, not `\ufffd`.** It is the same JSON value;
+  telling a substituted U+FFFD from a literal one through the index is not worth tracking.
+- **The refusal covers the whole document**, where yq refuses only when the offending string is
+  marshalled: a filter that never prints it (`.b`) succeeds in yq. The check is on the bytes, before
+  indexing, so it cannot see which values a filter will print.
+- **yq substitutes a bad key even on the YAML encoder**, and prints an unwrapped scalar's raw bytes
+  (`-p json .a` writes `x\xe4y`), output yq itself cannot read back; succinctly refuses both under
+  the one YAML-output rule.
+
+Also unchanged: invalid bytes *outside* a string become `�` plain scalars the YAML scanner accepts
+where yq reports a syntax error, and `--validate -p json` has no grammar check.
+
 ### A fused slice read does not validate the rest of the range (#4195)
 
 `E[a:b][k]` and `E[a:b] | length` over a computed slice, and (since #4323) over a literal-bounded

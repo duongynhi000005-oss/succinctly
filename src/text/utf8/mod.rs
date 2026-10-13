@@ -825,6 +825,45 @@ pub fn substitute_invalid_utf8_jq_style(input: &[u8]) -> String {
     out
 }
 
+/// Replace every invalid byte of `input` with U+FFFD, one replacement per
+/// invalid *byte* (#1616), the way Go's `bytes.ToValidUTF8`-style decoding and
+/// `encoding/json` do, which is what real yq's JSON reader applies to a
+/// string holding a stray byte.
+///
+/// Neither [`substitute_invalid_utf8_jq_style`] nor
+/// `String::from_utf8_lossy` gives this count: both collapse a truncated
+/// multi-byte sequence into one replacement (the WHATWG maximal-subpart
+/// rule), where Go emits one per byte. `\xE4\xBD` followed by `y` is one
+/// U+FFFD there and two here; `\xF0\x9F\x98` is one there and three here.
+///
+/// Returns raw bytes rather than a `String`: the caller is a byte stream
+/// that has not been decoded yet, and valid input comes back unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use succinctly::text::utf8::substitute_invalid_utf8_per_byte;
+///
+/// assert_eq!(substitute_invalid_utf8_per_byte(b"x\xE4y"), "x\u{FFFD}y".as_bytes());
+/// // A truncated 3-byte sequence is two bad bytes, so two replacements.
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"\xE4\xBDy"),
+///     "\u{FFFD}\u{FFFD}y".as_bytes()
+/// );
+/// // Valid input, multi-byte included, is untouched.
+/// assert_eq!(substitute_invalid_utf8_per_byte("h\u{e9}llo".as_bytes()), "h\u{e9}llo".as_bytes());
+/// ```
+pub fn substitute_invalid_utf8_per_byte(input: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(input.len());
+    for chunk in input.utf8_chunks() {
+        out.extend_from_slice(chunk.valid().as_bytes());
+        for _ in 0..chunk.invalid().len() {
+            out.extend_from_slice("\u{FFFD}".as_bytes());
+        }
+    }
+    out
+}
+
 /// The end of the invalid maximal subpart starting at `input[pos]` (which
 /// is not ASCII -- callers skip that case via [`skip_ascii`] before
 /// reaching here), or `None` if `input[pos]` instead leads a fully valid

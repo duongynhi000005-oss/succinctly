@@ -38141,6 +38141,145 @@ fn test_yq_accepts_multibyte_utf8_1242() -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// `-p json` and invalid UTF-8 (#1616). Real yq answers by *output* format: `-o json`
+// substitutes one U+FFFD per invalid byte and succeeds, the YAML encoder refuses
+// the string. Settled on the bytes before indexing (`json_utf8_gate`), so every
+// route -- the M2 stream, `--slurp`, `--eval-all`, `--inplace` -- agrees.
+// =============================================================================
+
+/// `-p json -o json` substitutes, in a value and in a key, and (unlike a
+/// YAML-sourced document, #1242) exits 0. The counts are Go's: one per invalid
+/// byte, so a truncated 3-byte sequence is two and a truncated 4-byte one is
+/// three.
+#[test]
+fn test_pjson_invalid_utf8_is_substituted_for_json_output_1616() -> Result<()> {
+    for (input, expected) in [
+        (&b"{\"a\":\"x\xe4y\"}"[..], "{\"a\":\"x\u{fffd}y\"}"),
+        (&b"{\"x\xe4y\":1}"[..], "{\"x\u{fffd}y\":1}"),
+        (&b"[\"\xe4\xbdy\"]"[..], "[\"\u{fffd}\u{fffd}y\"]"),
+        (
+            &b"[\"\xf0\x9f\x98y\"]"[..],
+            "[\"\u{fffd}\u{fffd}\u{fffd}y\"]",
+        ),
+        // The surrogate lead `ED` rejects `A0`, so all three bytes are bad.
+        (&b"[\"\xed\xa0\x80\"]"[..], "[\"\u{fffd}\u{fffd}\u{fffd}\"]"),
+        // Valid multi-byte text next to a bad byte is left alone.
+        (&b"[\"caf\xc3\xa9\xe4\"]"[..], "[\"caf\u{e9}\u{fffd}\"]"),
+    ] {
+        let (out, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
+/// The YAML encoder refuses an invalid string, and nothing reaches stdout
+/// first: the stream used to write `"a": ` before failing.
+#[test]
+fn test_pjson_invalid_utf8_is_refused_for_yaml_output_1616() -> Result<()> {
+    for input in [&b"{\"a\":\"x\xe4y\"}"[..], &b"{\"x\xe4y\":1}"[..]] {
+        for extra in [&["-p", "json"][..], &["-p", "json", "-o", "yaml"][..]] {
+            let (out, err, code) = run_yq_stdin_bytes_with_stderr(".", input, extra)?;
+            assert_eq!(code, 1, "{input:?} {extra:?}");
+            assert_eq!(out, "", "{input:?} {extra:?} wrote before failing");
+            assert_eq!(
+                err.trim(),
+                "Error: yaml: cannot marshal invalid UTF-8 data as !!str",
+                "{input:?} {extra:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Genuine YAML keeps #1242's unconditional rejection whatever the output, and
+/// valid JSON is untouched by the gate.
+#[test]
+fn test_pjson_utf8_gate_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
+    let (out, _, code) =
+        run_yq_stdin_bytes_with_stderr(".", b"a: \"x\xe4y\"\n", &["-o", "json", "-I", "0"])?;
+    assert_eq!((code, out.as_str()), (1, ""));
+
+    let (out, err, code) = run_yq_stdin_bytes_with_stderr(
+        ".",
+        "{\"a\":\"caf\u{e9} \u{1f600}\"}".as_bytes(),
+        &["-p", "json", "-I", "0"],
+    )?;
+    assert_eq!((code, err.as_str()), (0, ""), "stdout: {out:?}");
+    assert!(out.contains("caf\u{e9}"), "stdout: {out:?}");
+    Ok(())
+}
+
+/// `--slurp` and `--eval-all` build the document through `JsonIndex`, not the
+/// YAML scanner the stream uses; both get the same bytes.
+#[test]
+fn test_pjson_invalid_utf8_on_slurp_and_eval_all_1616() -> Result<()> {
+    for flag in ["--slurp", "--eval-all"] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(
+            ".",
+            b"{\"a\":\"x\xe4y\"}",
+            &["-p", "json", "-o", "json", "-I", "0", flag],
+        )?;
+        assert_eq!((code, err.as_str()), (0, ""), "{flag}");
+        let expected = if flag == "--slurp" {
+            "[{\"a\":\"x\u{fffd}y\"}]"
+        } else {
+            "{\"a\":\"x\u{fffd}y\"}"
+        };
+        assert_eq!(out.trim(), expected, "{flag}");
+
+        let (out, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", b"{\"a\":\"x\xe4y\"}", &["-p", "json", flag])?;
+        assert_eq!(code, 1, "{flag}");
+        assert_eq!(out, "", "{flag}");
+        assert!(
+            err.contains("cannot marshal invalid UTF-8"),
+            "{flag}: {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A file argument takes the same gate as stdin, and `--inplace` refuses to
+/// touch the file when the output would be YAML.
+#[test]
+fn test_pjson_invalid_utf8_from_files_and_inplace_1616() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = dir.path().join("in.json");
+    let path = path.to_str().unwrap();
+    let original = b"{\"a\":\"x\xe4y\"}".to_vec();
+    std::fs::write(path, &original)?;
+
+    let (out, code) = run_yq_file(".", path, &["-o", "json", "-I", "0"])?;
+    assert_eq!((code, out.trim()), (0, "{\"a\":\"x\u{fffd}y\"}"));
+    let (out, code) = run_yq_file(".", path, &[])?;
+    assert_eq!((code, out.as_str()), (1, ""));
+
+    // `-i` with YAML output is refused and the file is byte-identical.
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq", "-i", "-p", "json", ".b = 1", path])
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(std::fs::read(path)?, original);
+
+    // ...and with JSON output it is rewritten with the substitution.
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args([
+            "yq", "-i", "-p", "json", "-o", "json", "-I", "0", ".b = 1", path,
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(path)?.trim(),
+        "{\"a\":\"x\u{fffd}y\",\"b\":1}"
+    );
+    Ok(())
+}
+
 /// #1612's yq-mode cap, run through the real CLI process end-to-end --
 /// real yq's own explicit ~10MiB safety cap means `succinctly yq` must
 /// answer with yq's own specific wording (`would exceed 10485760 bytes`),
