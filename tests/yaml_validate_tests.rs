@@ -266,8 +266,10 @@ fn yq_validate_rejects_invalid_yaml_before_output() -> Result<()> {
 
 #[test]
 fn yq_without_validate_accepts_the_same_invalid_yaml() -> Result<()> {
-    // The default loader is non-validating: the same input succeeds without
-    // `--validate`, proving the flag is opt-in.
+    // The default loader is non-validating: an invalid document succeeds without
+    // `--validate`, proving the flag is opt-in. (This used to be `a: b: c: d`;
+    // the loader rejects that itself since #4463, so the example is now a
+    // duplicate `%YAML` directive, which only the validator catches.)
     //
     // #2016: routed through `spawn_with_signal_retry` -- see
     // `run_validate_stdin`'s own doc comment above for why.
@@ -277,9 +279,15 @@ fn yq_without_validate_accepts_the_same_invalid_yaml() -> Result<()> {
             command.args(["yq", "."]);
             command
         },
-        Some(b"a: b: c: d\n"),
+        Some(b"%YAML 1.2\n%YAML 1.1\n---\na: 1\n"),
     )?;
     assert_eq!(code, 0);
+    let (_stdout, stderr, code) = run_yq_validate_stdin("%YAML 1.2\n%YAML 1.1\n---\na: 1\n", ".")?;
+    assert_ne!(code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.contains("duplicate %YAML directive"),
+        "stderr: {stderr}"
+    );
     Ok(())
 }
 
