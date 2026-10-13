@@ -970,6 +970,38 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("failed to read file: {}", path.display()))
 }
 
+/// Substitutes invalid UTF-8 in a `-p json` document when the output is JSON
+/// (#1616); every other combination returns `bytes` untouched.
+///
+/// Real yq's JSON reader turns each invalid byte into U+FFFD, and what it does
+/// next depends on the *output* encoder: `-o json` prints the substituted text
+/// (`{"a":"x\ufffdy"}`, exit 0), while the YAML encoder refuses to marshal the
+/// string (`yaml: cannot marshal invalid UTF-8 data as !!str`). Only the first
+/// half needs the bytes rewritten. The refusal is left to the decode error the
+/// string already raises when it is printed, which is also what keeps
+/// `-p json '.b'` working on a document whose `.a` is bad -- a whole-input
+/// refusal here would fail it where yq prints `1`.
+///
+/// Done on the bytes, before indexing, rather than in `yaml/light.rs`: that
+/// scalar decoder is shared with genuine YAML documents, whose rejection
+/// (#1242) must stay unconditional and never learns the output format.
+///
+/// The index is built over the substituted buffer, so a byte offset
+/// (`at_offset`) counts each replacement as three bytes.
+fn substitute_json_utf8(
+    bytes: Vec<u8>,
+    format: InputFormat,
+    output_format: OutputFormat,
+) -> Vec<u8> {
+    if format != InputFormat::Json
+        || resolve_output_format(output_format, format) != OutputFormat::Json
+        || succinctly::text::utf8::validate_utf8(&bytes).is_ok()
+    {
+        return bytes;
+    }
+    succinctly::text::utf8::substitute_invalid_utf8_per_byte(&bytes)
+}
+
 /// For a YAML/Auto-format input, always rejects a non-UTF-8 byte stream
 /// outright (#1242) -- this half is unconditional, not gated on
 /// `--validate`, matching real yq's own refusal of a stray byte. Then, only
@@ -984,8 +1016,8 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
 /// (`-p json`) -- **neither half runs for JSON input**, not "runs
 /// elsewhere": `validate_json_input` above is `sjq`'s own flag, reached only
 /// from the `jq` subcommand, and is never called from this file. `-p json`
-/// therefore gets no encoding or grammar check of any kind today, a known
-/// silent-data-loss gap tracked as #1616.
+/// has no grammar check, and its encoding handling is the separate
+/// [`substitute_json_utf8`], which needs the output format this one does not.
 fn yaml_validate_guard(
     input: &[u8],
     format: InputFormat,
@@ -1126,6 +1158,7 @@ fn gather_input_sources(
     input_format: InputFormat,
     front_matter: Option<FrontMatterMode>,
     validate: bool,
+    output_format: OutputFormat,
 ) -> Result<(Vec<GatheredSource>, Option<i32>)> {
     let mut sources = Vec::new();
     if input_files.is_empty() {
@@ -1133,6 +1166,7 @@ fn gather_input_sources(
         let resolved_format = resolve_input_format(input_format, None);
         let (input_bytes, format, body) =
             apply_front_matter(raw_bytes, resolved_format, front_matter, "<stdin>")?;
+        let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
         if let Some(code) = yaml_validate_guard(&input_bytes, format, validate, None) {
             return Ok((sources, Some(code)));
         }
@@ -1147,6 +1181,7 @@ fn gather_input_sources(
             let resolved_format = resolve_input_format(input_format, Some(path));
             let (input_bytes, format, body) =
                 apply_front_matter(raw_bytes, resolved_format, front_matter, file_path)?;
+            let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
             if let Some(code) = yaml_validate_guard(&input_bytes, format, validate, Some(file_path))
             {
                 return Ok((sources, Some(code)));
@@ -8728,6 +8763,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         if input_files.is_empty() {
             let yaml_bytes = read_stdin()?;
             let fmt = resolve_input_format(args.input_format, None);
+            // #1616: a `-p json` document's invalid UTF-8, for JSON output.
+            let yaml_bytes = substitute_json_utf8(yaml_bytes, fmt, args.output_format);
             if let Some(code) = yaml_validate_guard(&yaml_bytes, fmt, args.validate, None) {
                 return Ok(code);
             }
@@ -8905,6 +8942,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     Err(e) => return flush_then_err(&mut writer, e),
                 };
                 let fmt = resolve_input_format(args.input_format, Some(path));
+                // #1616: see the stdin block above.
+                let yaml_bytes = substitute_json_utf8(yaml_bytes, fmt, args.output_format);
                 if let Some(code) =
                     yaml_validate_guard(&yaml_bytes, fmt, args.validate, Some(file_path))
                 {
@@ -9099,6 +9138,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             args.input_format,
             args.front_matter,
             args.validate,
+            args.output_format,
         )?;
         if let Some(code) = validate_exit_code {
             // #1564: --eval-all combines every source into one evaluation
@@ -9258,6 +9298,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 args.input_format,
                 args.front_matter,
                 args.validate,
+                args.output_format,
             )?;
             // #1564: unlike --eval-all/--slurp, each file's split output is
             // already written independently of the others (the loop below)
@@ -9445,6 +9486,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             args.input_format,
             args.front_matter,
             args.validate,
+            args.output_format,
         )?;
         if let Some(code) = validate_exit_code {
             // #1564: --slurp combines every source into one array (see
@@ -9674,6 +9716,9 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             let resolved_format = resolve_input_format(args.input_format, Some(path));
             let (input_bytes, format, front_matter_body) =
                 apply_front_matter(raw_bytes, resolved_format, args.front_matter, file_path)?;
+            // #1616: `-i` rewrites the file with the substitution only when
+            // its output is JSON.
+            let input_bytes = substitute_json_utf8(input_bytes, format, args.output_format);
             if let Some(code) =
                 yaml_validate_guard(&input_bytes, format, args.validate, Some(file_path))
             {
@@ -10166,6 +10211,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             args.input_format,
             args.front_matter,
             args.validate,
+            args.output_format,
         )?;
         // #1564: each file's results are collected/emitted independently
         // of the others (the two loops below) -- process whatever passed

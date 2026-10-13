@@ -38141,6 +38141,156 @@ fn test_yq_accepts_multibyte_utf8_1242() -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// `-p json` and invalid UTF-8 (#1616). Real yq turns each invalid byte into U+FFFD
+// and then lets the *output* encoder decide: `-o json` prints it, the YAML encoder
+// refuses to marshal the string. Only the first half rewrites bytes
+// (`substitute_json_utf8`, before indexing, so the stream, `--slurp`, `--eval-all`
+// and `--inplace` all agree); the refusal is the decode error the string already
+// raises when it is printed.
+// =============================================================================
+
+/// `-p json -o json` substitutes, in a value and in a key, and (unlike a
+/// YAML-sourced document, #1242) exits 0. The counts are Go's: one per invalid
+/// byte, so a truncated 3-byte sequence is two and a truncated 4-byte one is
+/// three. Each row was captured from yq v4.53.3.
+#[test]
+fn test_pjson_invalid_utf8_is_substituted_for_json_output_1616() -> Result<()> {
+    for (input, expected) in [
+        (&b"{\"a\":\"x\xe4y\"}"[..], "{\"a\":\"x\u{fffd}y\"}"),
+        (&b"{\"x\xe4y\":1}"[..], "{\"x\u{fffd}y\":1}"),
+        (&b"[\"\xe4\xbdy\"]"[..], "[\"\u{fffd}\u{fffd}y\"]"),
+        (
+            &b"[\"\xf0\x9f\x98y\"]"[..],
+            "[\"\u{fffd}\u{fffd}\u{fffd}y\"]",
+        ),
+        // The surrogate lead `ED` rejects `A0`, so all three bytes are bad.
+        (&b"[\"\xed\xa0\x80\"]"[..], "[\"\u{fffd}\u{fffd}\u{fffd}\"]"),
+        // Valid multi-byte text next to a bad byte is left alone.
+        (&b"[\"caf\xc3\xa9\xe4\"]"[..], "[\"caf\u{e9}\u{fffd}\"]"),
+    ] {
+        let (out, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
+/// A bad byte *outside* a string is still a parse error with JSON output, as
+/// in yq: the substitution turns it into U+FFFD, which no JSON token starts
+/// with, so nothing is accepted that was not before (and `-i` writes nothing).
+#[test]
+fn test_pjson_invalid_utf8_outside_a_string_still_fails_1616() -> Result<()> {
+    for input in [
+        &b"{\"a\":1}\xff"[..],
+        &b"{\"a\":1,\xff\"b\":2}"[..],
+        &b"{\"a\":\xff}"[..],
+    ] {
+        let (out, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+        assert_eq!(code, 1, "{input:?}: stdout {out:?}");
+        assert!(err.contains("parse error"), "{input:?}: {err:?}");
+    }
+    Ok(())
+}
+
+/// The YAML encoder refuses a printed invalid string, as yq's does -- but only
+/// when the string is printed: a filter that never reaches it still succeeds,
+/// which a whole-input refusal would have broken.
+#[test]
+fn test_pjson_invalid_utf8_is_refused_only_when_printed_for_yaml_output_1616() -> Result<()> {
+    let input = b"{\"a\":\"x\xe4y\",\"b\":1}";
+    for extra in [&["-p", "json"][..], &["-p", "json", "-o", "yaml"][..]] {
+        let (_, err, code) = run_yq_stdin_bytes_with_stderr(".", input, extra)?;
+        assert_eq!(code, 1, "{extra:?}");
+        assert!(err.contains("invalid UTF-8"), "{extra:?}: {err:?}");
+
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(".b", input, extra)?;
+        assert_eq!((code, out.trim(), err.as_str()), (0, "1", ""), "{extra:?}");
+    }
+    Ok(())
+}
+
+/// Genuine YAML keeps #1242's unconditional rejection whatever the output, and
+/// valid JSON is untouched.
+#[test]
+fn test_pjson_utf8_substitution_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
+    let (out, _, code) =
+        run_yq_stdin_bytes_with_stderr(".", b"a: \"x\xe4y\"\n", &["-o", "json", "-I", "0"])?;
+    assert_eq!((code, out.as_str()), (1, ""));
+
+    let (out, err, code) = run_yq_stdin_bytes_with_stderr(
+        ".",
+        "{\"a\":\"caf\u{e9} \u{1f600}\"}".as_bytes(),
+        &["-p", "json", "-o", "json", "-I", "0"],
+    )?;
+    assert_eq!((code, err.as_str()), (0, ""), "stdout: {out:?}");
+    assert_eq!(out.trim(), "{\"a\":\"caf\u{e9} \u{1f600}\"}");
+    Ok(())
+}
+
+/// `--slurp` and `--eval-all` build the document through `JsonIndex`, not the
+/// YAML scanner the stream uses; both get the same bytes.
+#[test]
+fn test_pjson_invalid_utf8_on_slurp_and_eval_all_1616() -> Result<()> {
+    for (flag, expected) in [
+        ("--slurp", "[{\"a\":\"x\u{fffd}y\"}]"),
+        ("--eval-all", "{\"a\":\"x\u{fffd}y\"}"),
+    ] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(
+            ".",
+            b"{\"a\":\"x\xe4y\"}",
+            &["-p", "json", "-o", "json", "-I", "0", flag],
+        )?;
+        assert_eq!((code, err.as_str()), (0, ""), "{flag}");
+        assert_eq!(out.trim(), expected, "{flag}");
+
+        let (_, err, code) =
+            run_yq_stdin_bytes_with_stderr(".", b"{\"a\":\"x\xe4y\"}", &["-p", "json", flag])?;
+        assert_eq!(code, 1, "{flag}");
+        assert!(err.contains("invalid UTF-8"), "{flag}: {err:?}");
+    }
+    Ok(())
+}
+
+/// A file argument takes the same path as stdin, and `--inplace` rewrites the
+/// file with the substitution only when its output is JSON; for YAML output
+/// the decode error leaves it byte-identical.
+#[test]
+fn test_pjson_invalid_utf8_from_files_and_inplace_1616() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = dir.path().join("in.json");
+    let path = path.to_str().unwrap();
+    let original = b"{\"a\":\"x\xe4y\"}".to_vec();
+    std::fs::write(path, &original)?;
+
+    let (out, code) = run_yq_file(".", path, &["-o", "json", "-I", "0"])?;
+    assert_eq!((code, out.trim()), (0, "{\"a\":\"x\u{fffd}y\"}"));
+    let (out, code) = run_yq_file(".", path, &[])?;
+    assert_eq!(code, 1, "stdout: {out:?}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq", "-i", "-p", "json", ".b = 1", path])
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(std::fs::read(path)?, original);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args([
+            "yq", "-i", "-p", "json", "-o", "json", "-I", "0", ".b = 1", path,
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(path)?.trim(),
+        "{\"a\":\"x\u{fffd}y\",\"b\":1}"
+    );
+    Ok(())
+}
+
 /// #1612's yq-mode cap, run through the real CLI process end-to-end --
 /// real yq's own explicit ~10MiB safety cap means `succinctly yq` must
 /// answer with yq's own specific wording (`would exceed 10485760 bytes`),

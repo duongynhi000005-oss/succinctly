@@ -825,6 +825,73 @@ pub fn substitute_invalid_utf8_jq_style(input: &[u8]) -> String {
     out
 }
 
+/// Replace every invalid byte of `input` with one U+FFFD (#1616).
+///
+/// That is Go's count -- a `utf8.DecodeRune` loop consumes one byte per
+/// `RuneError` -- which is what real yq's JSON reader applies to a string
+/// holding a stray byte.
+///
+/// Neither [`substitute_invalid_utf8_jq_style`] nor
+/// `String::from_utf8_lossy` gives this count: both collapse a truncated
+/// multi-byte sequence into one replacement (the WHATWG maximal-subpart
+/// rule), where Go emits one per byte. `\xE4\xBD` followed by `y` is one
+/// U+FFFD there and two here; `\xF0\x9F\x98` is one there and three here.
+///
+/// Returns raw bytes rather than a `String`: the caller is a byte stream
+/// that has not been decoded yet, and valid input comes back unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use succinctly::text::utf8::substitute_invalid_utf8_per_byte;
+///
+/// assert_eq!(substitute_invalid_utf8_per_byte(b"x\xE4y"), "x\u{FFFD}y".as_bytes());
+/// // A truncated 3-byte sequence is two bad bytes, so two replacements.
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"\xE4\xBDy"),
+///     "\u{FFFD}\u{FFFD}y".as_bytes()
+/// );
+/// // So is a sequence cut off by the end of the input: each remaining byte is bad.
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"ab\xF0\x9F\x98"),
+///     "ab\u{FFFD}\u{FFFD}\u{FFFD}".as_bytes()
+/// );
+/// // A surrogate's three bytes are three bad bytes (`ED` rejects `A0`).
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"\xED\xA0\x80"),
+///     "\u{FFFD}\u{FFFD}\u{FFFD}".as_bytes()
+/// );
+/// // Valid input, multi-byte included, is untouched.
+/// assert_eq!(substitute_invalid_utf8_per_byte("h\u{e9}llo".as_bytes()), "h\u{e9}llo".as_bytes());
+/// ```
+pub fn substitute_invalid_utf8_per_byte(input: &[u8]) -> alloc::vec::Vec<u8> {
+    // Not `<[u8]>::utf8_chunks`, which is 1.79 and the crate's floor is 1.73;
+    // `Utf8Error` carries the same two facts.
+    const REPLACEMENT: &[u8] = "\u{FFFD}".as_bytes();
+    let mut out = alloc::vec::Vec::with_capacity(input.len());
+    let mut rest = input;
+    while !rest.is_empty() {
+        match core::str::from_utf8(rest) {
+            Ok(_) => {
+                out.extend_from_slice(rest);
+                break;
+            }
+            Err(err) => {
+                let (valid, after) = rest.split_at(err.valid_up_to());
+                out.extend_from_slice(valid);
+                // `None` means the input ends inside a multi-byte sequence:
+                // every remaining byte is part of it, so each is replaced.
+                let bad = err.error_len().unwrap_or(after.len());
+                for _ in 0..bad {
+                    out.extend_from_slice(REPLACEMENT);
+                }
+                rest = &after[bad..];
+            }
+        }
+    }
+    out
+}
+
 /// The end of the invalid maximal subpart starting at `input[pos]` (which
 /// is not ASCII -- callers skip that case via [`skip_ascii`] before
 /// reaching here), or `None` if `input[pos]` instead leads a fully valid
