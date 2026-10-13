@@ -36691,6 +36691,8 @@ fn update_returns_its_input(e: &Expr) -> bool {
     match e {
         Expr::Identity => true,
         Expr::Paren(inner) => update_returns_its_input(inner),
+        // #4567: a `label` hands its body's outputs on; no arm here can `break`, so it is transparent.
+        Expr::Label { body, .. } => update_returns_its_input(body),
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
