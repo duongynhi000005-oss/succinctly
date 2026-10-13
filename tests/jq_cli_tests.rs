@@ -135288,3 +135288,141 @@ fn test_reduce_source_destructuring_a_fresh_bodied_call_4494() -> Result<()> {
         ),
     ])
 }
+
+/// #4522 (the residual of #4494): a `reduce` source that destructures a fresh value is routed
+/// through the resolver for the shapes #4494 left to the by-value drive, which answered where jq
+/// raises (and `del`, `=` and `|=` deleted or replaced the document): a `?//` chain of
+/// destructuring patterns, a `(def f: ...; f)` bound expression, a fresh value reached through a
+/// variable or a closure argument, and a `reduce` whose INIT is a path expression (the source's
+/// step raises whatever INIT left the register on). The controls jq answers stay answered: a
+/// chain with a bare alternative to retry onto, the register itself behind a variable or a
+/// closure argument, and the value-mode spelling. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+// The filters hold `{a:1}`, which clippy reads as a format argument.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_destructuring_a_fresh_value_residual_shapes_4522() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"b":null}"#;
+    const NEAR_A: &str = r#"Invalid path expression near attempt to access element "a" of {"a":1}"#;
+    const NEAR_0: &str = r#"Invalid path expression near attempt to access element 0 of {"a":1}"#;
+    assert_path_rows_both_routes_3749(&[
+        // A `?//` chain of destructuring patterns: the last alternative's step raises too.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as [$a] ?// {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as [$a] ?// {a:$a} | .) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as [$a] ?// [$b] | .) as $k (.; .))]",
+            "",
+            NEAR_0,
+            5,
+        ),
+        // The bound expression holds the `def`.
+        (
+            DOC,
+            r"[path(reduce ((def f: {a:1}; f) as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        // A fresh value reached through a variable.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x | $x as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as $x | $x as {a:$a} | .) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        // A fresh value reached through a closure argument, called as a stage or as a bind source.
+        (
+            DOC,
+            r"[path(reduce (def g(x): x; g(def f: {a:1}; f as {a:$a} | .)) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g(x): x as {a:$a} | .; g({a:1})) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        // INIT is a path expression: the source raises whatever INIT is.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .)) |= 9",
+            "",
+            NEAR_A,
+            5,
+        ),
+        // Controls: a bare alternative to retry onto, the register behind a variable or a closure
+        // argument, a closure argument that is the register, and the value-mode spelling.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as [$a] ?// $b | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (. as $x | $x as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g(x): x as {a:$a} | .; g(.)) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[reduce (def g(x): x; g(def f: {a:1}; f as {a:$a} | .)) as $k (.; .)]",
+            "[{\"a\":false,\"b\":null}]\n",
+            "",
+            0,
+        ),
+    ])
+}
