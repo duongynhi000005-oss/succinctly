@@ -647,7 +647,7 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   pinned by `test_fold_pattern_step_that_never_succeeds_retries_3998`; over the three sweep operands
   that reach the shape, 39,987 rows, 28 ACCEPT_WRONG and 7 DIFF became 0 and 3, no row worse). The
   figures below are #3840's, before that. Over the nine fold-pattern
-  operands of `scripts/jq-path-register-sweep.py` (119,907 rows) wrong answers fell from 126
+  operands of `scripts/jq-path-register-sweep.py` (119,907 rows) wrong answers fell from 156
   ACCEPT_WRONG and 32 DIFF to 14 and 10, at 118 more refusals. **Still left as it was**: a
   computed key whose value is `null`, a boolean or an array has no `NavKind`, so its guessed
   refusal stays catchable; and a guess on the *last* alternative is not asked at all. A pattern
@@ -2170,9 +2170,9 @@ is the revert that established what the other one costs.
    answers since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s eighth part, whose `reduce` arm vets
    the nested `reduce` as the `foreach` arm does (`nested_fold_keeps_state`: a single pattern, a no-op INIT and UPDATE,
    a source `foreach_source_is_path_checked` accepts). A `?//` chain on the nested `reduce` is still refused. Over the
-   151 `reduce` operands (131,043 `--stage-only` rows) 126 refusals become matches and none is lost). The vetter inherits the router's reading of a call, so a `def`
-   whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level
-   and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
+   158 `reduce` operands (137,259 `--stage-only` rows) 156 refusals become matches and none is lost. The vetter inherits
+   the router's reading of a call, so a `def` whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is
+   accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
    `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
    `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does, and so does a `$x` that is some other
    node (`.a as $x | del(foreach ($x as {b:$b} | .) ...)` raises at the pattern's first step in jq too). Outside every

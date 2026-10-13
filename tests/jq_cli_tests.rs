@@ -61637,7 +61637,7 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             doc,
             r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .a) as $k (.; .)))]",
             "",
-            "near attempt to access element \"a\" of",
+            invalid,
             5,
         ),
         (

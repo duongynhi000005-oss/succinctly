@@ -36601,7 +36601,9 @@ fn update_returns_its_input(e: &Expr) -> bool {
                 && extract.as_deref().map_or(true, body_performs_no_step)
         }
         // #4320: the nested `reduce` is vetted as the `foreach` is; its INIT is the accumulator it
-        // returns, and it needs no EXTRACT.
+        // returns, and it needs no EXTRACT. Its source is routed by `foreach_source_destructures_register`
+        // only for a `foreach`, so a call it reads as the register but a `reduce` source drives by
+        // value (`def f: {a:1}; f as {a:$a}`) stays a wrong accept, as it is without this arm (#4494).
         Expr::Reduce {
             input,
             patterns,
