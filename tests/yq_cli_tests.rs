@@ -65444,6 +65444,57 @@ fn test_to_unix_answers_an_int_4203() -> Result<()> {
     Ok(())
 }
 
+/// #4328: a computed-bound slice reads each element through its cursor, which alone carries an
+/// explicit YAML tag, so `!!str 2` and `!!str true` stay strings (they came out as the number 2 and
+/// the boolean true). Covers the slice itself, the fused `[k]` read, a nested tagged scalar, the
+/// indexed route (the same sequence sliced past #4035's width threshold) and a literal-bound control.
+/// Rows captured from yq v4.53.3.
+#[test]
+fn test_computed_slice_keeps_an_elements_explicit_tag_4328() -> Result<()> {
+    let doc = "- 1\n- !!str 2\n- !!str true\n- !!int \"7\"\n- [!!str 5, 6]\n- {k: !!str 8}\n";
+    let args = ["-o=json", "-I=0"];
+    for (filter, want) in [
+        (r"0 as $i | 3 as $j | .[$i:$j]", r#"[1,"2","true"]"#),
+        (r"0 as $i | .[$i:]", r#"[1,"2","true",7,["5",6],{"k":"8"}]"#),
+        (r"1 as $i | .[$i:][0]", r#""2""#),
+        (r"1 as $i | .[$i:][0] | tag", r#""!!str""#),
+        (r"0 as $i | .[$i:][4]", r#"["5",6]"#),
+        (r"0 as $i | .[$i:][5]", r#"{"k":"8"}"#),
+        (
+            r"0 as $i | .[$i:3] | map(type)",
+            r#"["!!int","!!str","!!str"]"#,
+        ),
+        (r".[0:3]", r#"[1,"2","true"]"#),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &args)?;
+        assert_eq!((stdout.trim(), code), (want, 0), "{filter}: {stderr}");
+    }
+    // A wide sequence sliced 150 times, so the later slices come from the index: every element
+    // keeps its tag, and equals the per-position read.
+    let mut wide = String::new();
+    for i in 0..150 {
+        match i % 3 {
+            0 => wide.push_str(&format!("- !!str {i}\n")),
+            1 => wide.push_str("- !!str true\n"),
+            _ => wide.push_str(&format!("- {i}\n")),
+        }
+    }
+    for sliced in [
+        "[keys[] as $i | ($i+1) as $j | .[$i:$j][0]]",
+        "[keys[] as $i | .[$i:] | .[0]]",
+        "[keys[] as $i | ($i+2) as $j | .[$i:$j] | .[0]]",
+    ] {
+        let (stdout, code) = run_yq_stdin(sliced, &wide, &args)?;
+        assert_eq!(code, 0, "{sliced}");
+        assert_eq!(
+            (stdout, code),
+            run_yq_stdin("[.[]]", &wide, &args)?,
+            "{sliced}"
+        );
+    }
+    Ok(())
+}
+
 /// #4287: a slice reads only its range -- by index once the sequence has proved wide (#4035), where
 /// the walk reads each element's value and the index each element's (resolved) cursor -- and must
 /// hold the elements the per-position reads name, for sequences that carry anchors, aliases, line

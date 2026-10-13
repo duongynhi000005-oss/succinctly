@@ -22799,10 +22799,9 @@ fn to_owned_array_slice<S: EvalSemantics, V: DocumentValue>(
         _ => None,
     };
     match crate::jq::array_index::slice_cursors(elements, window, |len| bounds.resolve(len)) {
-        Ok((cursors, range)) => cursors[range]
-            .iter()
-            .map(|cursor| to_owned::<S, _>(&cursor.value()))
-            .collect(),
+        // #4328: through the cursor, which alone carries an explicit tag (`!!str 2` stays the
+        // string `"2"`); a bare value has already lost it.
+        Ok((cursors, range)) => cursors[range].iter().map(to_owned_cursor::<S, _>).collect(),
         Err(_) => {
             let items = elements.collect_values();
             to_owned_all::<S, _>(items[bounds.resolve(items.len())].iter())
@@ -23033,7 +23032,7 @@ fn try_fused_slice_read<S: EvalSemantics, V: DocumentValue>(
         SliceLanding::Value(owned) => Some(owned),
         SliceLanding::Element(position) => {
             let cursor = crate::jq::array_index::get_cursor_memoized(&elements, position)?;
-            to_owned::<S, _>(&cursor.value()).ok()
+            to_owned_cursor::<S, _>(&cursor).ok()
         }
     }
 }
