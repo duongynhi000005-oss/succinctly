@@ -49750,6 +49750,10 @@ fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
             catch: None,
         }
         | Expr::Label { body: inner, .. } => marker_head(inner),
+        // #4514: `limit(1; $x, ..)` is its comma's first leaf, as `first` is.
+        Expr::Limit { n, expr: inner } if limit_takes_one(n) && is_comma(inner) => {
+            first_leaf_marker(inner)
+        }
         Expr::Limit { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner))
             if cannot_move_register(n) =>
         {
@@ -49757,6 +49761,33 @@ fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
         }
         _ => None,
     }
+}
+
+/// Whether a `limit` count is a literal that takes exactly the first output (#4514): positive
+/// and at most one (`limit(0.5; f)` takes `ceil(0.5)`), as [`update_navigates_within`] reads it.
+fn limit_takes_one(n: &Expr) -> bool {
+    match unwrap_paren(n) {
+        Expr::Literal(lit) => literal_to_owned(lit)
+            .as_f64()
+            .is_some_and(|n| n > 0.0 && n <= 1.0),
+        _ => false,
+    }
+}
+
+/// Whether `e` is a comma whose first output is `.`: its first leaf, through nested commas
+/// (`(., 1), 2`).
+fn comma_first_leaf_is_identity(e: &Expr) -> bool {
+    match unwrap_bind_source(e) {
+        Expr::Comma(items) => items
+            .first()
+            .is_some_and(|first| is_identity_stage(first) || comma_first_leaf_is_identity(first)),
+        _ => false,
+    }
+}
+
+/// Whether `e` is a comma, bare or in parentheses.
+fn is_comma(e: &Expr) -> bool {
+    matches!(unwrap_bind_source(e), Expr::Comma(_))
 }
 
 /// `e` as a `$x` marker, bare or behind [`wrapped_marker`]'s wrappers.
@@ -49885,11 +49916,14 @@ impl<'e> RegisterSpine<'e> {
         // #4514: `first(., 1)` is its comma's first leaf, the only output `first` emits, so it is
         // the register when that leaf is `.` (peeling `first` would leave the whole comma, whose
         // other leaves are not).
-        if let Expr::FirstExpr(inner) = unwrap_bind_source(e) {
-            if let Expr::Comma(items) = unwrap_bind_source(inner) {
-                if items.first().is_some_and(is_identity_stage) {
-                    return true;
-                }
+        // #4514: and so is `limit(1; ., 1)`.
+        if let Expr::FirstExpr(inner) | Expr::Limit { expr: inner, .. } = unwrap_bind_source(e) {
+            let takes_first = match unwrap_bind_source(e) {
+                Expr::Limit { n, .. } => limit_takes_one(n),
+                _ => true,
+            };
+            if takes_first && comma_first_leaf_is_identity(inner) {
+                return true;
             }
         }
         let peeled = peel_value_wrappers(e);

@@ -134099,3 +134099,170 @@ fn test_fold_under_an_alt_bind_retries_and_states_the_bare_alternative_4488() ->
     ];
     assert_path_rows_both_routes_3749(&rows)
 }
+
+/// #4514: `limit(1; ., 1)` is its comma's first leaf, as `first(., 1)` is (#4518): the register, so a
+/// `foreach` source that destructures it is the register's own destructure and raises where jq
+/// raises (`path(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))` on `{}` was `[]`, and
+/// `del`/`=` wrote). The same through a nested comma (`limit(1; (., 1), 2)`), a fractional count
+/// (`limit(0.5; ..)` takes `ceil(0.5)`) and a frozen `$x`. On `null` the destructure succeeds and
+/// jq answers. A `reduce` source is the contrast: it backtracks, so jq answers `[]`. Every row
+/// captured from jq 1.7.1 with `-c`; the message is pinned only as the common prefix.
+#[test]
+fn test_foreach_source_destructuring_limit_one_comma_first_leaf_4514() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{}",
+            "path(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "path(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(foreach (limit(1; ., 1) as [$a] | .) as $k (.; .; .))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "del(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "del(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "path(. as $x | foreach (limit(1; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "path(. as $x | foreach (limit(1; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(. as $x | foreach (limit(1; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "path(foreach (limit(1; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "path(foreach (limit(1; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach (limit(1; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "path(foreach (limit(0.5; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            "path(foreach (limit(0.5; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach (limit(0.5; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "path(reduce (limit(1; ., 1) as {a:$a} | .) as $k (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            "path(reduce (limit(1; ., 1) as {a:$a} | .) as $k (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(reduce (limit(1; ., 1) as {a:$a} | .) as $k (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
