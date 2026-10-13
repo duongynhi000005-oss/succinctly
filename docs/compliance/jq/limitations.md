@@ -1150,7 +1150,16 @@ fans out (the ordinary route answers or raises it), a `key` read with a `parent`
 over an element that is not an object, a target other than `.` (`.a[$i:][0] | key`) or any other stage
 after it (a `key` read that is one branch of a comma, `((.[$i:][0] | key), 1)`, is fused on its own,
 which [#4408](https://github.com/rust-works/succinctly/issues/4408) measured), `key` in yq mode, whose
-slice keeps the position, and the `| path` read of [#4356](https://github.com/rust-works/succinctly/issues/4356).
+slice keeps the position.
+
+`path(E[a:b][k])` is read from the slice's range as well ([#4356](https://github.com/rust-works/succinctly/issues/4356)),
+at both places that built the slice: the resolver (`fused_slice_index_branch`) and the path walk
+(`walk_fused_slice_index`). The path is the one the general route names, the slice's component as the bounds
+were spelled and then the index as written (`path(.[1:][-1])` ends in `-1`), and an index past either end of the
+slice is `null`. It applies to jq mode, a trackable array that is the stage's own input, bounds that never read `.`
+and produce one value each, and an integer-literal index; a float-spelled index, a generator bound, a target other
+than the stage's input, a bound that reads `.`, an untracked branch and yq keep the general route, still O(tail) per
+read.
 
 ## Where succinctly errors and jq does not
 
