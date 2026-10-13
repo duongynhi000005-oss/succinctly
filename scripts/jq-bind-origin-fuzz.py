@@ -711,9 +711,10 @@ def ambiguous_source_program(rng):
 # one of them builds a fresh value, so they could never emit the shape. The pool draws
 # the same builtin against both kinds of leaf (the document holds `"s"`, `1`, `null`,
 # `true`, containers), because which one returns its input is the per-value fact the
-# resolver judges. The second group are the traps: a `try`/`?`/`//` that would swallow
-# the resolver's refusal and run something else, a navigation of the result, and a
-# fresh value; none may be written through where jq refuses.
+# resolver judges. The second group are the traps: a `try`/`?`/`//` around the stage
+# (judged per value like an unwrapped stage since #4444, so a fresh result must not be
+# swallowed into a bind of the register), a navigation of the result, and a fresh value;
+# none may be written through where jq refuses.
 INPUT_RETURNING_PREFIX = [".a", ".c", ".d", ".x.a", ".x.c", ".arr[0]?"]
 INPUT_RETURNING_SOURCES = [
     ("tostring", False), ("@text", False), ("tonumber", False), ("ltrimstr(\"z\")", False),
@@ -741,6 +742,10 @@ INPUT_RETURNING_SOURCES = [
     ("((. + \"\")?)", False), ("(try (tostring | error) catch .)", False),
     ("(first(tostring, .) // 1)", False), ("(select(false) // tostring)", False),
     ("(select(false) // tostring | tostring)", False),
+    # #4444: a trim argument that is a comma of literals runs once per output.
+    ("ltrimstr(\"z\", \"s\")", False), ("rtrimstr(\"s\", \"z\")", False),
+    ("ltrimstr(\"z\", \"y\")", False), ("(ltrimstr(\"z\", \"s\") // .)", False),
+    ("first(ltrimstr(\"s\", \"z\"))", False),
 ]
 
 def input_returning_source_program(rng):

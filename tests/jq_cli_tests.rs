@@ -61764,22 +61764,105 @@ fn test_bound_input_returning_stage_does_not_drop_a_write_under_try_4017() -> Re
     Ok(())
 }
 
-/// #4017 residual: where a `//`, `?` or `try` could swallow the refusal the resolver
-/// raises for an input that is not returned as is, the bound result is not placed in
-/// path mode (it would bind the register where jq binds a fresh value), so the
-/// string-input twins refuse where jq answers. The safe direction; documented in
-/// `docs/compliance/jq/limitations.md`.
+/// #4444 (the #4017 residual): a `//`, `?` or `try` around an input-returning stage binds
+/// the register where the stage returns its input, and the fresh value where it builds
+/// one, exactly as an unwrapped stage does. The resolver places a fresh result as an
+/// untracked value, so there is no refusal for the construct to swallow. The fresh rows
+/// pin the other direction: the register must not be bound in place of the fresh value.
+/// Every row is a live jq 1.7.1 capture.
 #[test]
-fn test_bound_result_under_swallowing_construct_refuses_4017() -> Result<()> {
-    const DOC: &str = r#"{"b":"s"}"#;
-    for filter in [
-        r"path(.b|(tostring // .) as $y|$y)",
-        r"path(.b|(tostring?) as $y|$y)",
-        r"path(.b|(try tostring catch .) as $y|$y)",
-    ] {
+fn test_bound_result_under_swallowing_construct_is_judged_per_value_4444() -> Result<()> {
+    const DOC: &str = r#"{"b":"s","n":5,"a":[1]}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (r"path(.b|(tostring // .) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(tostring?) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(try tostring catch .) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(@text // .) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.n|(tonumber // .) as $y|$y)", "[\"n\"]\n", 0),
+        (r#"path(.b|(ltrimstr("x")?) as $y|$y)"#, "[\"b\"]\n", 0),
+        (
+            r"(.b|(tostring // .) as $y|$y) = 9",
+            "{\"b\":9,\"n\":5,\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"(.b|(tostring?) as $y|$y) |= "t""#,
+            "{\"b\":\"t\",\"n\":5,\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r"del(.b|(try tostring catch .) as $y|$y)",
+            "{\"n\":5,\"a\":[1]}\n",
+            0,
+        ),
+        // `del(f)` over an empty path set, and `walk(.)` of a scalar, are the same leaves.
+        (r"path(.b|(del(.x?) // .) as $y|$y)", "[\"b\"]\n", 0),
+        (r"path(.b|(walk(.)?) as $y|$y)", "[\"b\"]\n", 0),
+        // An input that gets a fresh result is still refused, and so is a container.
+        (r"path(.n|(tostring // .) as $y|$y)", "", 5),
+        (r"(.n|(tostring // .) as $y|$y) = 9", "", 5),
+        (r"path(.n|(tostring?) as $y|$y)", "", 5),
+        (r"path(.n|(try tostring catch .) as $y|$y)", "", 5),
+        (r"path(.a|(del(.[0]) // .) as $y|$y)", "", 5),
+        (r"path(.a|(walk(.) // .) as $y|$y)", "", 5),
+        (r"path(.a|(try walk(.) catch .) as $y|$y)", "", 5),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
-        assert_eq!(stdout, "", "`{filter}`: stderr: {stderr:?}");
-        assert_eq!(code, 5, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4444: `ltrimstr`/`rtrimstr` run once per output of their argument, each run its own
+/// judgement of the same input: the run whose edge does not match returns the input (the
+/// register), the one that matches builds a fresh value, and jq answers the first before
+/// refusing the second. A comma of literals is placed run by run; the rows that end in a
+/// refusal still print what came before it. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_trim_with_a_literal_generator_argument_is_placed_run_by_run_4444() -> Result<()> {
+    const DOC: &str = r#"{"b":"s","n":5}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (r#"path(.b|ltrimstr("x","s") as $y|$y)"#, "[\"b\"]\n", 5),
+        (r#"path(.b|rtrimstr(("x","s")) as $y|$y)"#, "[\"b\"]\n", 5),
+        (r#"path(.b|ltrimstr("x","s"))"#, "[\"b\"]\n", 5),
+        (r#"path(.b|ltrimstr("s","x") as $y|$y)"#, "", 5),
+        (r#"(.b|ltrimstr("x","s") as $y|$y) = 9"#, "", 5),
+        (
+            r#"path(.b|ltrimstr("x","y") as $y|$y)"#,
+            "[\"b\"]\n[\"b\"]\n",
+            0,
+        ),
+        (
+            r#"path(.b|ltrimstr(("y","x"),"z") as $y|$y)"#,
+            "[\"b\"]\n[\"b\"]\n[\"b\"]\n",
+            0,
+        ),
+        // A non-string input comes back whatever the argument.
+        (
+            r#"path(.n|ltrimstr("x",1) as $y|$y)"#,
+            "[\"n\"]\n[\"n\"]\n",
+            0,
+        ),
+        (
+            r#"(.b|(ltrimstr("x","y")) as $y|$y) = 9"#,
+            "{\"b\":9,\"n\":5}\n",
+            0,
+        ),
+        // An argument that is not a comma of literals reaches the same answer by value.
+        (
+            r#""y" as $c | path(.b|ltrimstr($c,"x") as $y|$y)"#,
+            "[\"b\"]\n[\"b\"]\n",
+            0,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
     }
     Ok(())
 }
