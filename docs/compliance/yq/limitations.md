@@ -5280,8 +5280,9 @@ yq (`!!int () cannot be added to a !!map (a)`) and is a no-op here, because `upd
 evaluated for a value. A third argument (`with(.a; . = 1; 2)`) is a parse error here; yq accepts
 it and returns its input untouched.
 
-`from_yaml` of text the semi-index does not reject still decodes where yq fails: `"a: b: c"` is
-`{"a":"b"}` here, `"--- \n..."` is `null`, and `"a: !!int x"` is the string `x` (the general
+`from_yaml` of text the semi-index does not reject still decodes where yq fails: `"--- \n..."` is
+`null` and `"a: !!int x"` is the string `x` (`"a: b: c"` used to be `{"a":"b"}` and is yq's
+`mapping values are not allowed in this context` since #4463) (the general
 minimal-validation trade-off of semi-indexing, not specific to the builtin).
 
 `from_json`/`from_yaml` decode through the same scalar resolution as input documents, so an

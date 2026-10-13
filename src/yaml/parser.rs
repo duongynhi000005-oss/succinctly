@@ -5307,6 +5307,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Double-quoted key
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5314,6 +5315,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Single-quoted key
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5437,6 +5439,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5450,6 +5453,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5516,6 +5520,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// rule (`a: "x" y: z`), as do the second line of a multi-line plain
     /// scalar and a trailing `:` (`a: b:`).
     fn reject_content_after_inline_value(&self) -> Result<(), YamlError> {
+        // The common case: the scalar ends the line.
+        match self.peek() {
+            None => return Ok(()),
+            Some(b) if Self::is_break(b) => return Ok(()),
+            Some(_) => {}
+        }
         let mut i = self.pos;
         while self
             .input
@@ -5528,11 +5538,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             None => Ok(()),
             Some(&b) if Self::is_break(b) => Ok(()),
             // A comment, which only counts after a blank.
-            Some(b'#')
-                if i > self.pos
-                    || self.pos == 0
-                    || Self::is_inline_whitespace(self.input[self.pos - 1]) =>
-            {
+            Some(b'#') if i > self.pos || Self::is_inline_whitespace(self.input[self.pos - 1]) => {
                 Ok(())
             }
             Some(_) => {
@@ -5567,6 +5573,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5583,6 +5590,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.reject_content_after_inline_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }

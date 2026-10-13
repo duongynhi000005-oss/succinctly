@@ -64,8 +64,8 @@ fn valid_yaml_exits_zero() -> Result<()> {
 
 #[test]
 fn invalid_yaml_exits_one() -> Result<()> {
-    // Nested mapping key `a: b: c` — rejected by the validator, accepted by the
-    // default loader.
+    // Nested mapping key `a: b: c` — rejected by the validator (the default loader
+    // rejects it too since #4463, but `yaml validate` runs the validator first).
     let (_, stderr, code) = run_validate_stdin("a: b: c: d\n", &["--no-color"])?;
     assert_eq!(code, 1);
     assert!(stderr.contains("nested mapping key"), "stderr: {stderr}");
