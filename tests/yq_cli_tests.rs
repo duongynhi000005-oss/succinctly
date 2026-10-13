@@ -3513,6 +3513,27 @@ fn test_yq_paths_filter_preserves_nested_duplicate_mapping_keys_1342() -> Result
     Ok(())
 }
 
+/// #1342: the filter still sees each node as `paths(f)` always showed it --
+/// an explicit tag resolved (`!!str 3` is a string, not an int), and no
+/// position (`key`/`line` read nothing there) -- so only the duplicate-key
+/// answer moves.
+#[test]
+fn test_yq_paths_filter_shows_the_node_as_before_on_a_duplicate_key_document_1342() -> Result<()> {
+    let yaml = "a: 1\na: 2\nc: !!str 3\n";
+    let flags = &["-o=json", "-I=0", "--jq-extensions"];
+    for (filter, expected) in [
+        (r#"[paths(type == "!!str")]"#, r#"[["c"]]"#),
+        (r#"[paths(type == "!!int")]"#, r#"[["a"],["a"]]"#),
+        (r#"[paths(key == "a")]"#, "[]"),
+        ("[paths(line > 0)]", "[]"),
+    ] {
+        let (output, code) = run_yq_stdin(filter, yaml, flags)?;
+        assert_eq!(code, 0, "{filter}: out: {output:?}");
+        assert_eq!(output.trim(), expected, "{filter}");
+    }
+    Ok(())
+}
+
 /// #1342: a consumer that stops early still stops the walk -- the arm is a
 /// native producer, not a collected list handed to `first`/`limit`.
 #[test]
