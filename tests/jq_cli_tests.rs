@@ -132856,3 +132856,141 @@ fn test_alternative_retries_on_an_uncaught_body_path_error_4487() -> Result<()> 
         ),
     ])
 }
+
+/// #4441: a `?//` bind whose destructure succeeds retries the next alternative when its body's
+/// first step raises jq's own path error, also when the body reaches that step through a wrapper
+/// (`first`, `limit`, `nth`, `try .. catch`, `label`, a rebind, a `def`, an `if`) rather than
+/// leading with it. #4115 retried only a body that *syntactically* led with a navigation
+/// (`body_leads_with_navigation`); #4487 reads any untracked navigation the body raises on a
+/// non-last alternative outside a fold body as jq's own, so the wrappers answer as the bare
+/// body does (`try .. catch` already did; the rest were refused on the build before #4487). The controls are a body whose retried alternative raises (jq's own type error,
+/// `first(.a)`), the last alternative's error, and a handler that does not navigate. Every row
+/// captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_alternative_retry_past_a_wrapped_leading_navigation_4441() -> Result<()> {
+    const X: &str = r#"{"x":[true]}"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | first(.[0])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | limit(2; .[0])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | nth(0; .[0])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | try .[0] catch 1))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | label $l | .[0]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | label $l | (.[0], break $l)))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | . as $w | .[0]))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | def f: .[0]; f))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | if . then .[0] else . end))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | first(.[0], .[1])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[1]]}"#,
+            r"path(.x | (. as [[$q]] ?// $z | first(.[0])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        // The write twins land on the retried alternative's path.
+        (
+            X,
+            r"del(.x | (. as [$q] ?// $z | first(.[0])))",
+            "{\"x\":[]}\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"(.x | (. as [$q] ?// $z | first(.[0]))) |= 9",
+            "{\"x\":[9]}\n",
+            "",
+            0,
+        ),
+        (
+            X,
+            r"[path(.x | (. as [$q] ?// $z | (first(.[0]))?))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Controls: the retried alternative raises its own type error, a handler that does not
+        // navigate, and the last alternative's error.
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | first(.a)))",
+            "",
+            "Cannot index array with string \"a\"",
+            5,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// $z | try .a catch 1))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            X,
+            r"path(.x | (. as [$q] ?// [$z] | first(.[0])))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+    ])
+}
