@@ -130746,6 +130746,89 @@ fn test_computed_slice_read_loop_does_not_grow_with_the_slice_4286() -> Result<(
     Ok(())
 }
 
+/// #4356: `path(E[a:b][k])` over an array is answered from the slice's range without building the
+/// slice, and must name exactly the path jq does: the slice's component as the bounds were spelled,
+/// then the index as written (`-1` stays `-1`, past either end of the slice is `null`), through
+/// `path`, `=`, `|=` and `del`, with the shapes that keep the general route (a non-array target, a
+/// float-spelled index, a generator bound) unchanged. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_path_of_a_computed_slice_read_names_the_slice_and_the_index_4356() -> Result<()> {
+    const DOC: &str = r#"{"xs":[10,20,30,40],"e":[],"s":"hey","n":null,"o":{"k":1},"r":[{"a":1},{"a":2}]}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (r#"1 as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":1,\"end\":null},0]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][-1])"#, "[\"xs\",{\"start\":1,\"end\":null},-1]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][9])"#, "[\"xs\",{\"start\":1,\"end\":null},9]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][-9])"#, "[\"xs\",{\"start\":1,\"end\":null},-9]\n", 0),
+        (r#"9 as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":9,\"end\":null},0]\n", 0),
+        (r#"(-2) as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":-2,\"end\":null},0]\n", 0),
+        (r#"1.7 as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":1.7,\"end\":null},0]\n", 0),
+        (r#"null as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":null,\"end\":null},0]\n", 0),
+        (r#"1 as $i | path(.xs[$i:3][1])"#, "[\"xs\",{\"start\":1,\"end\":3},1]\n", 0),
+        (r#"1 as $i | path(.xs[:$i+1][-1])"#, "[\"xs\",{\"start\":null,\"end\":2},-1]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][0.0])"#, "[\"xs\",{\"start\":1,\"end\":null},0.0]\n", 0),
+        (r#"1 as $i | path(.e[$i:][0])"#, "[\"e\",{\"start\":1,\"end\":null},0]\n", 0),
+        (r#"1 as $i | path(.r[$i:][0].a)"#, "[\"r\",{\"start\":1,\"end\":null},0,\"a\"]\n", 0),
+        (r#"1 as $i | path(.r[$i:][0].a.b?)"#, "", 0),
+        (r#"1 as $i | path(.n[$i:][0])"#, "[\"n\",{\"start\":1,\"end\":null},0]\n", 0),
+        (r#"1 as $i | path(.s[$i:][0])"#, "", 5),
+        (r#"1 as $i | path(.o[$i:][0])"#, "", 5),
+        (r#"1 as $i | [path(.xs[$i:][0], .xs[$i+1:][0])]"#, "[[\"xs\",{\"start\":1,\"end\":null},0],[\"xs\",{\"start\":2,\"end\":null},0]]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][0]?)"#, "[\"xs\",{\"start\":1,\"end\":null},0]\n", 0),
+        (r#"[range(0;3) as $i | path(.xs[$i:][1])]"#, "[[\"xs\",{\"start\":0,\"end\":null},1],[\"xs\",{\"start\":1,\"end\":null},1],[\"xs\",{\"start\":2,\"end\":null},1]]\n", 0),
+        (r#"[range(-2;3) as $i | path(.xs[:$i][-1])]"#, "[[\"xs\",{\"start\":null,\"end\":-2},-1],[\"xs\",{\"start\":null,\"end\":-1},-1],[\"xs\",{\"start\":null,\"end\":0},-1],[\"xs\",{\"start\":null,\"end\":1},-1],[\"xs\",{\"start\":null,\"end\":2},-1]]\n", 0),
+        (r#"1 as $i | (.xs[$i:][0]) = 5"#, "{\"xs\":[10,5,30,40],\"e\":[],\"s\":\"hey\",\"n\":null,\"o\":{\"k\":1},\"r\":[{\"a\":1},{\"a\":2}]}\n", 0),
+        (r#"1 as $i | (.xs[$i:][-1]) |= .+1"#, "{\"xs\":[10,20,30,41],\"e\":[],\"s\":\"hey\",\"n\":null,\"o\":{\"k\":1},\"r\":[{\"a\":1},{\"a\":2}]}\n", 0),
+        (r#"1 as $i | del(.xs[$i:][0])"#, "{\"xs\":[10,30,40],\"e\":[],\"s\":\"hey\",\"n\":null,\"o\":{\"k\":1},\"r\":[{\"a\":1},{\"a\":2}]}\n", 0),
+        (r#"1 as $i | del(.xs[$i:][9])"#, "{\"xs\":[10,20,30,40],\"e\":[],\"s\":\"hey\",\"n\":null,\"o\":{\"k\":1},\"r\":[{\"a\":1},{\"a\":2}]}\n", 0),
+        (r#"1 as $i | (.xs[$i:][9]) = 5"#, "{\"xs\":[10,20,30,40,null,null,null,null,null,null,5],\"e\":[],\"s\":\"hey\",\"n\":null,\"o\":{\"k\":1},\"r\":[{\"a\":1},{\"a\":2}]}\n", 0),
+        (r#"1 as $i | path(.xs[$i:][0] | tostring)"#, "", 5),
+        (r#"1 as $i | [paths(type=="number")] | length"#, "7\n", 0),
+        (r#"(1,2) as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":1,\"end\":null},0]\n[\"xs\",{\"start\":2,\"end\":null},0]\n", 0),
+        (r#"1 as $i | path(.xs[$i:(1,2)][0])"#, "[\"xs\",{\"start\":1,\"end\":1},0]\n[\"xs\",{\"start\":1,\"end\":2},0]\n", 0),
+        (r#"1 as $i | path(.xs[$i:][0:1][0])"#, "[\"xs\",{\"start\":1,\"end\":null},{\"start\":0,\"end\":1},0]\n", 0),
+        (r#"1 as $i | try path(.xs[$i:][0][0]) catch "E""#, "\"E\"\n", 0),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4356: a loop over `path(.[$i:][0])` must not grow like the slice does. Each read built the
+/// slice and wrote it out to index it again, so 10,000 reads over a 10,000-element array cost
+/// many seconds in a release build and far longer in a debug one; fused they cost well under a
+/// second (a debug build a few). Both halves are needed: the resolver's slice and the path walk's. The
+/// bound sits far above the fused time and far below the unfused one, so it fails on the
+/// regression and not on a loaded machine.
+#[test]
+fn test_path_of_a_computed_slice_read_loop_does_not_grow_with_the_slice_4356() -> Result<()> {
+    let doc = format!(
+        r#"{{"xs":[{}]}}"#,
+        (0..10000)
+            .map(|i| format!(r#"{{"a":{{"b":{i}}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for filter in [
+        ".xs | [range(length-1;-1;-1) as $i | path(.[$i:][0])] | length",
+        ".xs | [range(length-1;-1;-1) as $i | path(.[$i:][-1])] | length",
+        "[range(9999;-1;-1) as $i | path(.xs[$i:][0].a)] | length",
+    ] {
+        let started = std::time::Instant::now();
+        let (stdout, code) = run_jq_stdin(filter, &doc, &["-c"])?;
+        let elapsed = started.elapsed();
+        assert_eq!((stdout.as_str(), code), ("10000\n", 0), "{filter}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "{filter} took {elapsed:?}: the loop is quadratic again"
+        );
+    }
+    Ok(())
+}
+
 /// #4323: a literal-bounded slice read (`.[2:][0]`) is fused like the computed form, and must
 /// answer what the unfused spelling `(.[2:])[0]` does -- values, errors and exit codes alike --
 /// on every document shape, bound and read, with the one intended exception: a malformed sibling

@@ -59622,6 +59622,68 @@ fn resolve_static_tail<'a, S: EvalSemantics>(
     value_after_components::<S>(components, value).map_err(|e| (Vec::new(), e))
 }
 
+/// The branch `.[a:b][k]` reaches over `branch`, answered from the slice's resolved range without
+/// building the slice (#4356): a loop over reads at a moving bound was quadratic in the array.
+///
+/// `flat[stage_index]` must be a computed slice of the pipe's own input and `flat[stage_index + 1]`
+/// an integer-literal index (the first step of the static tail). The bounds must be closed (they
+/// never read `.`, so evaluating them here and then declining is not observable) and each must
+/// produce exactly one value; `branch` must be a trackable array. `None` leaves the pair to the
+/// general route, which re-derives whatever error or value the decline stands for. jq mode only:
+/// yq's negative-index and scalar rules differ.
+///
+/// The path is the one the general route names: the slice's resolved component (the bounds as
+/// they were spelled), then the index as written.
+fn fused_slice_index_branch<'a, S: EvalSemantics>(
+    flat: &[Expr],
+    stage_index: usize,
+    branch: &PathBranch<'a>,
+) -> Option<PathBranch<'a>> {
+    let (
+        Expr::SliceExpr { target, start, end },
+        index @ Expr::Index { idx, key: None },
+    ) = (flat.get(stage_index)?, flat.get(stage_index + 1)?)
+    else {
+        return None;
+    };
+    if S::TAG != EvalTag::Jq || !matches!(**target, Expr::Identity) || !branch.trackable {
+        return None;
+    }
+    let OwnedValue::Array(items) = branch.value.as_ref() else {
+        return None;
+    };
+    let bound = |bound: &Option<Box<Expr>>, round: fn(f64) -> f64| match bound {
+        None => Some(PathSliceBound::open()),
+        Some(expr) => Some(PathSliceBound::classify(eval_owned_closed::<S>(expr)?, round)),
+    };
+    let (s, e) = (bound(start, f64::floor)?, bound(end, f64::ceil)?);
+    let (start, end) =
+        resolve_computed_slice_bounds::<S>(SliceTargetKind::Sliceable, &s.bound, &e.bound).ok()?;
+    let range = slice::SliceBounds::from_literals(start, end).resolve(items.len());
+    let width = range.len() as i64;
+    let resolved = if *idx < 0 { width + *idx } else { *idx };
+    let value = if (0..width).contains(&resolved) {
+        let position = range.start + resolved as usize;
+        match &branch.value {
+            Cow::Borrowed(items) => match items {
+                OwnedValue::Array(items) => Cow::Borrowed(items.get(position)?),
+                _ => return None,
+            },
+            Cow::Owned(_) => Cow::Owned(items.get(position)?.clone()),
+        }
+    } else {
+        Cow::Owned(OwnedValue::Null)
+    };
+    let slice_step = Expr::Slice {
+        start,
+        end,
+        start_key: s.key,
+        end_key: e.key,
+    };
+    let path = PathPrefix::extend(&PathPrefix::extend(&branch.path, slice_step), index.clone());
+    Some(PathBranch::new(path, value, true))
+}
+
 /// Apply a purely-static path tail to one branch, extending its path with
 /// `tail` verbatim and threading its value through
 /// [`resolve_static_tail`].
@@ -60118,6 +60180,21 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
             ),
             None => flow,
         };
+    }
+
+    // #4356: `.[a:b][k]` over a trackable array, answered from the slice's range without
+    // building the slice -- see [`fused_slice_index_branch`].
+    if stage_index == last_dynamic {
+        if let Some(fused) = fused_slice_index_branch::<S>(flat, stage_index, &branch) {
+            return match apply_static_tail_one::<S>(fused, &flat[stage_index + 2..]) {
+                Ok(Some(b)) => match sink(b) {
+                    Demand::Continue => ResolveFlow::Exhausted,
+                    Demand::Stop => ResolveFlow::Stopped,
+                },
+                Ok(None) => ResolveFlow::Exhausted,
+                Err(e) => ResolveFlow::Escaped(e),
+            };
+        }
     }
 
     let element = &flat[stage_index];
@@ -69039,6 +69116,12 @@ fn walk_pipe<'v, S: EvalSemantics>(
         return walk_path::<S>(first, value, current_path, out, optional);
     }
 
+    // #4356: `.[a:b][k]` over an array, read from the slice's range without building the
+    // slice (the fallback below writes the slice out and indexes it again).
+    if let Some(reached) = walk_fused_slice_index::<S>(first, rest, &value, current_path) {
+        return walk_pipe::<S>(&rest[1..], reached.1, &reached.0, out, optional);
+    }
+
     // #2680: the stage's `Result` is held back rather than `?`-propagated
     // here. Positions it reached *before* failing come earlier in jq's
     // generator order than its own error, so they still have to be walked
@@ -69077,6 +69160,58 @@ fn walk_pipe<'v, S: EvalSemantics>(
         walk_pipe::<S>(rest, val, &path, out, optional)?;
     }
     stepped
+}
+
+/// The two steps `.[a:b][k]` take, answered from the slice's resolved range when `value` is an
+/// array and `k` an integer literal (#4356): the trail extended by the slice component and the
+/// index component, and the element the pair lands on (jq's `null` past either end of the
+/// slice). `None` declines to the general route -- another shape, a non-array, a float-spelled
+/// index, or yq, whose negative-index rules differ.
+///
+/// The slice is never built, so a loop over reads at a moving bound is not quadratic. The
+/// components are the ones the general route names: the slice's own, as written, then the index
+/// as written (`path(.[1:][-1])` keeps `-1`).
+fn walk_fused_slice_index<'v, S: EvalSemantics>(
+    first: &Expr,
+    rest: &[Expr],
+    value: &WalkNode<'v>,
+    current_path: &Rc<PathTrail>,
+) -> Option<(Rc<PathTrail>, WalkNode<'v>)> {
+    let (
+        Expr::Slice {
+            start,
+            end,
+            start_key,
+            end_key,
+        },
+        Some(index @ Expr::Index { idx, key: None }),
+    ) = (first, rest.first())
+    else {
+        return None;
+    };
+    let OwnedValue::Array(items) = value.value() else {
+        return None;
+    };
+    if S::TAG != EvalTag::Jq {
+        return None;
+    }
+    let range = slice::SliceBounds::from_literals(*start, *end).resolve(items.len());
+    let width = range.len() as i64;
+    let resolved = if *idx < 0 { width + *idx } else { *idx };
+    let reached = if (0..width).contains(&resolved) {
+        value.child_at(range.start + resolved as usize)
+    } else {
+        WalkNode::Null
+    };
+    let slice_step = PathTrail::extend(
+        current_path,
+        slice_component_value(*start, start_key.as_ref(), *end, end_key.as_ref()),
+    );
+    let _ = index;
+    Some((
+        PathTrail::extend(&slice_step, index_component_value(*idx, None)),
+        reached,
+    ))
 }
 
 /// Take one path step: `component` names it, and the value evaluator decides
