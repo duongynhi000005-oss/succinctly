@@ -2279,6 +2279,25 @@ is the revert that established what the other one costs.
    `main`. The refusals' wording differs from jq's (`Invalid path expression near attempt to access element "a"` where
    jq says `Cannot index boolean`). Pinned by `test_foreach_source_later_bare_alternative_destructure_4320`.
 
+   A `foreach` source whose bound expression is a call to a `def` that builds its result (`def f: {a:1}; f as {a:$a} | .`,
+   also through a second `def`, behind a pipe, `keys`, `[.]`, a comma of such calls, or a fresh value written next to the
+   register, `(., {a:1}) as {a:$a}`) raises in path position as jq does since
+   [#4452](https://github.com/rust-works/succinctly/issues/4452): the pattern's step runs on a value that is never the
+   register, and the by-value drive answered the root (`del` returned `null`, `=` wrote). `RegisterSpine::binds_fresh`
+   reads the call's body in the scope the `def` was written in, so the resolver places the source (the literal case is
+   `is_fold_source_destructuring`, a context-free test that cannot see through a call). Over the 18 `def`-call
+   operands (`--stage-only`, 16,011 rows) wrong accepts go from 2,392 to 928, wrong answers from
+   396 to 93 and refusals jq does not make from 1,161 to 372, 2,556 rows become matches, and none is lost. Still
+   accepted: a `def` whose body hands the register on next to a fresh value (`def f: ., {a:1};
+   f as {a:$a}`), because routing it makes the resolver refuse the register leaf where `.` is not jq's register
+   (`del(try (-(foreach (def f: ., {a:1}; f as {a:$a} | .) as $y (.; .; .))))`: a negated operand is a value-mode
+   subexpression and jq answers); the same call behind `first(f)` or `limit(1; f)`; a `reduce` source
+   (`reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)`), top-level or nested in another fold's body, where the
+   walk that routes it refuses loudly a value-mode operand jq answers (`del(try (-(reduce 1 as $k (.; reduce (def f:
+   {a:1}; f as {a:$a} | .) as $j (.; .)))))`); and a call read past the
+   spine's call budget (`SPINE_CALL_BUDGET`), where the walk stops reading bodies. Pinned by
+   `test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452`.
+
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
    | `.a as $y \| path(.a \| $y)`                             | `["a"]`                     | value-mode binding — `eval_as` never resolves its source in path position; the *positional* half of #3037 (its root-of-invocation half is closed)                                                                                                          |
