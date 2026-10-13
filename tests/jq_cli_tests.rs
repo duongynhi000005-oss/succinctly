@@ -68778,6 +68778,35 @@ fn test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499()
             "",
             0,
         ),
+        // A pipe-bodied middle fold hands the live register on too.
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (1 | reduce (1,2) as $j (1; try .a)); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
         // Controls. A register that is not `null`/boolean stays refused, as jq refuses it (a pointer identity this model cannot compare), and a boolean one yields nothing.
         (
             r#"{"a":0}"#,

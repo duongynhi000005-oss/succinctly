@@ -1612,6 +1612,13 @@ OPERANDS = [
     "(reduce (1,2) as $i (1; reduce (1,2) as $j (1; try .a)))",
     "(foreach (1,2) as $i (null; foreach (1,2) as $j (null; .a; .); .))",
     "(foreach (1,2) as $i (0; foreach (1,2) as $j (1; try .a; .); .))",
+    # (#4499 review) a pipe-bodied middle fold, and a fold sibling or nested fold reading a frozen `$k`
+    # (#3984 withholds the register there, so a marker cannot re-establish against it).
+    "(foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .))",
+    "(foreach (1,2) as $i (1; (1 | reduce (1,2) as $j (1; try .a)); .))",
+    "(foreach .a? as $k (0; (foreach (1,2) as $i (1; try ($k | .b?); .), 1); .))",
+    "(foreach .a? as $k (0; (foreach (1,2) as $i (1; try ($k | .b?); .), foreach (1,2) as $j (1; try .a; .)); .))",
+    "(foreach .a? as $k (0; foreach (1,2) as $i (1; reduce (1,2) as $j (1; try ($k | .b?)); .); .))",
     # (#4445, #4480, #4492) a fold over a `null` accumulator on an untracked entry, and a fold
     # nested in another fold's UPDATE: the live `null`/boolean register is the accumulator by kind,
     # whatever shape UPDATE has, and the inner fold's caught step still emits.

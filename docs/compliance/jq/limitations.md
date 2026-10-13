@@ -746,15 +746,17 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`(foreach (1,2) as $i (1; try .a; .), 1)` in an `UPDATE`: jq forks the comma at its entry, so
   `["a","a"]` prints before the `1` raises) and a fold two levels down (`foreach .a? as $k (0; foreach
   (1,2) as $i (1; reduce (1,2) as $j (1; try .a); .); .)`, which needs the untracked middle register
-  to hand the live one on) follow the live register too. Pinned by
-  `test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499`. Over the 15
-  operands added to `scripts/jq-path-register-sweep.py` for it (`--stage-only`, 12,888 rows) ACCEPT_WRONG
-  went 2 to 0 and DIFF 42 to 0, with no regression and all 114 flips to MATCH, and a seeded 40,027-row
-  sample of all 469 fold operands moved 11 rows, all to MATCH. **Still divergent**
+  to hand the live one on; a pipe-bodied middle fold included) follow the live register too, when it
+  is `null` or a boolean. Pinned by
+  `test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499`. Over the 20
+  operands added to `scripts/jq-path-register-sweep.py` for it (`--stage-only`, 17,163 rows) ACCEPT_WRONG
+  went 2 to 0 and DIFF 43 to 1, with no regression and all 210 flips to MATCH, and a seeded 40,027-row
+  sample of all 474 fold operands moved 160 rows, all to MATCH. **Still divergent**
   ([#4499](https://github.com/rust-works/succinctly/issues/4499), narrowed): a nested fold that reads
   an outer frozen `$var` (`foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .)`, #3984
   withholds the register) and `isempty(FOLD)` (the operand's fold still counts as fanning out) lose the
-  caught step or refuse where jq answers.
+  caught step or refuse where jq answers; a fold sibling that reads a frozen `$var` is kept out of the
+  uniform siblings for the same reason.
 
 ## A fold over the register itself (#3790)
 
