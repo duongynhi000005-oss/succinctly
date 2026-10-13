@@ -48203,6 +48203,10 @@ fn sibling_sees_register_uniformly(expr: &Expr) -> bool {
         Expr::Alternative(left, right) => {
             sibling_sees_register_uniformly(left) && sibling_sees_register_uniformly(right)
         }
+        // #4499: a fold is one flow that reads the register from the frame it is entered with
+        // (`FoldRegister::enter`), as a pipe's stages do, so a comma of folds and pipes sees the
+        // register the same way on every side (jq forks the comma at its entry).
+        Expr::Foreach { .. } | Expr::Reduce { .. } => true,
         other => cannot_move_register(other) || is_navigation_node(other),
     }
 }
@@ -48865,6 +48869,17 @@ impl FoldRegister {
         // Widening the other
         // direction (re-establishing in `resolve_node`'s own arms) is
         // #2046's documented scope limit, not this fix's.
+        // #4499: an untracked fold register that still knows jq's live register value (the stage
+        // it was entered on carries it, [`FoldRegister::live_register`]) hands that value to the
+        // body it resolves, as a trackable one hands its own below. A fold nested two levels down
+        // in an UPDATE has an untracked register at the middle level, and dropping the live one
+        // there left the innermost fold none: its caught step on a `null` accumulator was refused,
+        // swallowed by the `try` inside it, and dropped (`foreach .a? as $k (0; foreach (1,2) as
+        // $i (1; reduce (1,2) as $j (1; try .a); .); .)` on `null`). The position stays unknown
+        // (`Frame::unknown`), so only the value is read, never a marker certified against it.
+        let live_register = (S::TAG == EvalTag::Jq && !fans_out(expr))
+            .then(|| self.live_register())
+            .flatten();
         let update_frame = if self.trackable {
             self.frame.clone()
         } else {
@@ -48946,7 +48961,11 @@ impl FoldRegister {
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
             let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
-            let update_frame = update_frame.with_register(carries.then_some(&self.value));
+            let update_frame = update_frame.with_register(if carries {
+                Some(&self.value)
+            } else {
+                live_register
+            });
             resolve_node_sink::<S>(
                 expr,
                 &input,
@@ -142807,7 +142826,16 @@ mod touched_edge_cases_2999 {
             ("reduce (1,2) as $i (1; try .a)", false),
             ("-(foreach (1,2) as $i (1; try .a; .))", false),
             ("try (foreach (1,2) as $i ((1,2); (.a, .b); .))", false),
-            ("(foreach (1,2) as $i (1; try .a; .), 1)", true),
+            // #4499: a fold is a uniform sibling, like a pipe: it reads the register from the frame.
+            ("(foreach (1,2) as $i (1; try .a; .), 1)", false),
+            (
+                "(foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; .a; .))",
+                false,
+            ),
+            ("(foreach (1,2) as $i (1; try .a; .), ($w | .b))", false),
+            ("(foreach (1,2) as $i (1; try .a; .), now)", false),
+            ("(foreach (1,2) as $i (1; try .a; .), f)", true),
+            ("(foreach (1,2) as $i (1; try .a; .), min)", true),
             ("isempty(foreach (1,2) as $i (1; .a; .))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");
