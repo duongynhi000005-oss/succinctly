@@ -36597,31 +36597,34 @@ fn update_returns_its_input(e: &Expr) -> bool {
             update,
             extract,
         } => {
-            patterns.len() == 1
-                && body_performs_no_step(init)
-                && body_performs_no_step(update)
+            nested_fold_keeps_state(input, patterns, init, update)
                 && extract.as_deref().map_or(true, body_performs_no_step)
-                && foreach_source_is_path_checked(input)
         }
-        // #4320: the nested `reduce`'s source runs on the register as a `foreach`'s does, and the
-        // same vetter decides whether the resolver checks it; INIT is the accumulator it returns.
+        // #4320: the nested `reduce` is vetted as the `foreach` is; its INIT is the accumulator it
+        // returns, and it needs no EXTRACT.
         Expr::Reduce {
             input,
             patterns,
             init,
             update,
-        } => {
-            patterns.len() == 1
-                && body_performs_no_step(init)
-                && body_performs_no_step(update)
-                && foreach_source_is_path_checked(input)
-        }
+        } => nested_fold_keeps_state(input, patterns, init, update),
         _ => false,
     }
 }
 
-/// Whether a nested `foreach` or `reduce` SOURCE is one the resolver checks against jq's register as
-/// jq does (#3953): it moves nothing, or it is plain navigation or a single-pattern
+/// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one
+/// pattern (a `?//` chain's failed alternative leaves `null`), an INIT and UPDATE that move
+/// nothing, so the fold's state is the accumulator throughout, and a SOURCE the resolver checks
+/// as jq does ([`foreach_source_is_path_checked`]). A `foreach` also needs a no-op EXTRACT.
+fn nested_fold_keeps_state(input: &Expr, patterns: &[Pattern], init: &Expr, update: &Expr) -> bool {
+    patterns.len() == 1
+        && body_performs_no_step(init)
+        && body_performs_no_step(update)
+        && foreach_source_is_path_checked(input)
+}
+
+/// Whether a nested `foreach` or `reduce` SOURCE is one the resolver checks against jq's
+/// register as jq does (#3953): it moves nothing, or it is plain navigation or a single-pattern
 /// destructure of `.` that [`drive_fold_source_with`] routes through the resolver. A
 /// destructure hidden under `first`, `limit`, `select`, `//`, `if`, `try` or a nested
 /// fold is driven by value, so a register an earlier stage of the UPDATE moved is never

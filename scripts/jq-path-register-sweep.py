@@ -630,6 +630,8 @@ OPERANDS = [
     "(reduce (.[] as $a | .) as $k (.; .))",
     "(reduce (try (. as {a:$a} | .)) as $k (.; .))",
     "(reduce ((.|.) as {a:$a} | .) as $k (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))",
+    "(reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .))",
     "(. as {a:$q} | reduce (. as {b:$b} | .) as $k (.; .))",
     "(. as {a:$q} | reduce (def f: .; f as {b:$b} | .) as $k (.; .))",
     "(foreach (def f: .; try f as {a:$a} | .) as $k (.; .; .))",

@@ -61682,6 +61682,22 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             invalid,
             5,
         ),
+        // A `?//` chain stays refused (jq answers `null`/`[[]]`: a failed alternative leaves `null`
+        // in the vetter's model, so it is not read as handing the accumulator through).
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .)))]",
+            "",
+            invalid,
+            5,
+        ),
         (
             "null",
             r"[path(reduce 1 as $k (.; . as {a:$q} | reduce (. as {b:$b} | .) as $k (.; .)))]",

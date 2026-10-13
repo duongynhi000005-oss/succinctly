@@ -2165,13 +2165,13 @@ is the revert that established what the other one costs.
    a nested `def`, a `$x` captured by the `def`, a `try` or a `reduce` source is refused (the first four answer since
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s seventh part, `foreach_source_is_path_checked` now
    accepts any source the fold driver routes as a destructure of the register, outside a `?//` chain; the `reduce`
-   source is not call-specific, `reduce 1 as $k (.; reduce (. as {a:$a} | .) as $k (.; .))` was refused too, since a
-   nested `reduce` had no `update_returns_its_input` arm, a refusal where jq answers, not a wrong accept; it answers
-   since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s eighth part, whose `reduce` arm vets the
-   nested `reduce` as the `foreach` arm does: a single pattern, a no-op INIT and UPDATE, and a source
-   `foreach_source_is_path_checked` accepts; a `?//` chain on the nested `reduce` is still refused; over the 129 `reduce` operands, 112,275 `--stage-only` rows, 126
-   refusals become matches and none is lost). The vetter inherits the router's reading of a call, so a `def` whose body returns a fresh value
-   (`def f: {a:1}; f as {a:$a}`) is accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level
+   source is not call-specific: `reduce 1 as $k (.; reduce (. as {a:$a} | .) as $k (.; .))` was refused too, a
+   refusal where jq answers and not a wrong accept, because a nested `reduce` had no `update_returns_its_input` arm; it
+   answers since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s eighth part, whose `reduce` arm vets
+   the nested `reduce` as the `foreach` arm does (`nested_fold_keeps_state`: a single pattern, a no-op INIT and UPDATE,
+   a source `foreach_source_is_path_checked` accepts). A `?//` chain on the nested `reduce` is still refused. Over the
+   129 `reduce` operands (112,275 `--stage-only` rows) 126 refusals become matches and none is lost). The vetter inherits the router's reading of a call, so a `def`
+   whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level
    and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
    `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
    `. as $x | del(foreach ($x as {a:$a} | .) as $y (.; .; .))` raises as jq does, and so does a `$x` that is some other
