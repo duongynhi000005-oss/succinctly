@@ -29688,7 +29688,12 @@ enum YqDelSliceOutcome {
 /// - the path's *last* component isn't a slice at all (`del(.a[1:3][0])`,
 ///   `del(.a[1:3][0].x)`, `del(.a[1:3][])`, `del(.a[1:3][0:2][0])` -- a
 ///   trailing slice-run followed by anything non-slice makes the entire
-///   `del()` inert, not just that one step): [`YqDelSliceOutcome::Noop`].
+///   `del()` inert, not just that one step): [`YqDelSliceOutcome::Noop`] --
+///   except a field step after the run, which is an [`YqDelSliceOutcome::Error`]
+///   for any non-string target (#2333/#2344), and a path with an `Iterate` ahead
+///   of the run (`del(.a[][0:2].x)`), which is [`YqDelSliceOutcome::NotApplicable`]:
+///   each fanned-out element is its own target for `delete_at_path`'s per-element
+///   walk to classify (#2344).
 /// - the path ends in a slice-run of *any* length ≥ 2 (`del(.a[1:3][0:2])`,
 ///   `del(.a[1:3][0:2][0:1])`) and the residual prefix before that run is
 ///   itself slice-free and non-empty: [`YqDelSliceOutcome::DropParent`],
@@ -29762,6 +29767,20 @@ fn yq_del_slice_outcome(
         // trailing slice(s) produced (or, for `null`'s own direct-target
         // quirk, on `null` itself) isn't inert there, it raises. See
         // `yq_del_slice_field_error`'s own doc comment.
+        //
+        // An `Iterate` ahead of the slice-run (`del(.a[][0:2].x)`, #2344) means there is no
+        // single value to classify here: each element of the fanned-out container is its own
+        // target, which `delete_at_path`'s `Iterate` arm re-classifies per element (through
+        // this function again, with the `Iterate` peeled off). Defer to it instead of
+        // answering for all of them from a prefix `navigate_owned_value` cannot walk.
+        let last_slice = steps.iter().rposition(|s| s.component.is_slice());
+        if last_slice.is_some_and(|at| {
+            steps[..at]
+                .iter()
+                .any(|s| matches!(s.component, Expr::Iterate))
+        }) {
+            return YqDelSliceOutcome::NotApplicable;
+        }
         if let Some(e) = yq_del_slice_field_error(&steps, root) {
             return YqDelSliceOutcome::Error(e);
         }
@@ -29839,23 +29858,18 @@ fn yq_del_slice_outcome(
 /// `del(.a[0:2].x?)` on `{"a":[1,2,3]}` stays unchanged in real yq, but this
 /// function's own first draft raised regardless of the `?`.
 ///
-/// `null` gets the identical error only when it is the *direct* target of
-/// the slice-run (`null | del(.[0:2].a)`) -- real yq's own null-as-array
-/// slice quirk has no actual elements behind it, so further navigation past
-/// that point falls through to the ordinary no-op instead (confirmed live:
-/// `null | del(.[0:2][0].a)` stays `null`). Modeled here by substituting an
-/// empty `Array` for a `Null` pre-slice value rather than special-casing it
-/// separately: an empty array slices to itself under any bounds, a trailing
-/// `Field` step on it hits the exact same "current is an `Array`" arm a real
-/// array does, and a trailing `Index` step on it always resolves
-/// out-of-bounds (`resolve_read_index` against `len() == 0`) and gives up --
-/// which is exactly "further navigation past that point falls through to
-/// the ordinary no-op." One walker, not two, for the same reason
-/// `yq_del_slice_outcome`'s own doc comment gives for not reusing
-/// `through_slice`: two hand-synchronized copies of "what a trailing
-/// `Field`/`Index` step does to a sliced value" is the "duplicated
-/// predicates diverge silently" shape (#106) this exact function's own
-/// multi-slice-run bug (below) was found to already be.
+/// Every target but a string gets the identical error (#2344): yq slices a mapping, an int, a
+/// bool or `null` to an empty sequence carrying the node's tag, exactly as it slices an array to
+/// a shorter one, and a field step after either parses the key as an index. This models the
+/// empty sequence by substituting an empty `Array` for the pre-slice value, so one walker serves
+/// all of them: a trailing `Field` step hits the same "current is an `Array`" arm a real array
+/// does, and a trailing `Index` step resolves out of bounds against `len() == 0` and gives up,
+/// which is the ordinary no-op (confirmed live: `null | del(.[0:2][0].a)` stays `null`, and so
+/// does `del(.a[0:2][0])` over `a: {y: 1}` -- a mapping slice's key/value layout, #1102, is not
+/// modelled here). A string is inert (a string scalar comes out of the slice). Two known gaps:
+/// a YAML timestamp or `!!binary` scalar is an `OwnedValue::String` here but not a string to yq,
+/// and a prefix step that itself mismatches the document (`del(.a[].b[0:2].x)` with `a: [[1]]`)
+/// is never type-checked -- see `docs/compliance/yq/limitations.md`.
 ///
 /// An `Array` target keeps the error live through arbitrarily deeper
 /// `Index` navigation, since real document data really is there to walk
@@ -29888,13 +29902,17 @@ fn yq_del_slice_field_error(steps: &[DeleteStep], root: &OwnedValue) -> Option<E
         .collect();
     let pre_slice_value = navigate_owned_value(root, &prefix)?;
 
-    // Only `Array`/`Null` get this treatment -- `String` (#1219/#1321's own
-    // established no-op precedent) and anything else fall through
-    // unchanged, before ever applying a slice or walking the suffix.
+    // Only a `String` is inert (#1219/#1321's own established no-op precedent: it slices to a
+    // string scalar). yq slices every other node -- a mapping, an int, a bool, `null` -- to an
+    // empty *sequence* carrying the node's tag, so a field step after the slice-run parses the
+    // key as an index and raises just as it does for a real array (#2344, live-verified for
+    // `{"a":{"y":1}}`, `{"a":5}` and `{"a":true}` with `del(.a[0:2].x)`). An index tail
+    // into an empty sequence resolves out of bounds and gives up below, so it stays the no-op
+    // it was (a mapping slice's key/value layout, #1102, is not modelled here).
     let mut sliced = match pre_slice_value {
-        OwnedValue::Null => OwnedValue::array(),
+        OwnedValue::String(_) => return None,
         OwnedValue::Array(_) => pre_slice_value.clone(),
-        _ => return None,
+        _ => OwnedValue::array(),
     };
     for step in &steps[run_start..=last_slice_pos] {
         let Expr::Slice { start, end, .. } = &step.component else {

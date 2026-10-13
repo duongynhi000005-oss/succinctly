@@ -31765,6 +31765,85 @@ fn test_2333_del_slice_array_field_tail_errors() -> Result<()> {
     Ok(())
 }
 
+/// #2344: `del()` through a mid-path `.[]` classifies each element on its own: a `.x` after a
+/// slice-run raises for every non-string element (yq slices a mapping, int, bool, `null` or array
+/// to an empty sequence, so the key is parsed as an index) and no-ops for a string; one erroring
+/// element fails the call, `.x?` suppresses, and the `del_iterate_slice_*_2344` goldens pin the
+/// no-op shapes byte for byte.
+#[test]
+fn test_2344_del_iterate_then_slice_field_tail_errors_per_element() -> Result<()> {
+    for input in [
+        r#"{"a":[[1,2,3],{"y":1}]}"#,
+        r#"{"a":[[1,2,3]]}"#,
+        r#"{"a":[{"y":1}]}"#,
+        r#"{"a":[5]}"#,
+        r#"{"a":[null]}"#,
+        r#"{"a":[true]}"#,
+        r#"{"a":["s",5]}"#,
+        r#"{"a":[[1,2,3],5,{"b":[1,2]}]}"#,
+    ] {
+        let (out, stderr, code) =
+            run_yq_stdin_with_stderr("del(.a[][0:2].x)", input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (1, ""),
+            "[{input}] stderr: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("array") && stderr.contains('x'),
+            "[{input}] stderr: {stderr:?}"
+        );
+    }
+    // Nested iterate: each innermost element is its own target.
+    let (out, stderr, code) = run_yq_stdin_with_stderr(
+        "del(.a[][][0:1].x)",
+        r#"{"a":[[[1,2],[3]],[["x"]]]}"#,
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!((code, out.as_str()), (1, ""), "stderr: {stderr:?}");
+    // A comma sibling does not rescue the call, in either position.
+    for filter in ["del(.a[][0:2].x, .c)", "del(.c, .a[][0:2].x)"] {
+        let (out, stderr, code) =
+            run_yq_stdin_with_stderr(filter, r#"{"a":[{"y":1}],"c":1}"#, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (1, ""),
+            "[{filter}] stderr: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #2344: the same classification for a slice with no `.[]` ahead of it (the gap #2333 left):
+/// a mapping, int or bool target slices to an empty sequence in yq, so `.x` raises as it does for
+/// an array; a string stays inert.
+#[test]
+fn test_2344_del_slice_field_tail_errors_for_every_non_string_target() -> Result<()> {
+    for input in [r#"{"a":{"y":1}}"#, r#"{"a":5}"#, r#"{"a":true}"#] {
+        let (out, stderr, code) =
+            run_yq_stdin_with_stderr("del(.a[0:2].x)", input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (1, ""),
+            "[{input}] stderr: {stderr:?}"
+        );
+        assert!(stderr.contains('x'), "[{input}] stderr: {stderr:?}");
+    }
+    // `?` suppresses it; an index tail into the empty sequence stays a no-op.
+    for (filter, input) in [
+        ("del(.a[0:2].x?)", r#"{"a":5}"#),
+        ("del(.a[0:2][0])", r#"{"a":{"y":1}}"#),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (0, format!("{input}\n").as_str()),
+            "[{filter}]"
+        );
+    }
+    Ok(())
+}
+
 /// #2333: the error propagates even when the array-targeting field access
 /// isn't the step immediately after the slice — `.a[0:2][0].x` slices,
 /// indexes into the (real) sliced array, and *that* element turns out to
