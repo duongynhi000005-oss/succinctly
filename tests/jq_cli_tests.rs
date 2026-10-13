@@ -134464,14 +134464,25 @@ fn test_foreach_source_destructuring_limit_one_comma_first_leaf_4514() -> Result
 #[test]
 fn test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497() -> Result<()> {
     let doc: &'static str = r#"{"a":true}"#;
-    for source in [
-        "try first(CHAIN)",
-        "first(CHAIN)?",
-        "nth(0; CHAIN)",
-        "try nth(0; CHAIN)",
-        "try limit(1; CHAIN)",
-        "first(first(CHAIN))",
-        "first(. as $x | CHAIN)",
+    // (source, jq's output): `nth(1; ..)` and deeper wait for an output the chain's break never lets
+    // through, so they print nothing.
+    for (source, expected) in [
+        ("try first(CHAIN)", "[]\n"),
+        ("first(CHAIN)?", "[]\n"),
+        ("nth(0; CHAIN)", "[]\n"),
+        ("try nth(0; CHAIN)", "[]\n"),
+        ("try limit(1; CHAIN)", "[]\n"),
+        ("first(first(CHAIN))", "[]\n"),
+        ("first(. as $x | CHAIN)", "[]\n"),
+        // Behind a bind of another source, nested wrappers, and the counts that are not `0`/`1`.
+        ("first(.b as $x | CHAIN)", "[]\n"),
+        ("first((1,2) as $x | CHAIN)", "[]\n"),
+        ("try first(try first(CHAIN))", "[]\n"),
+        ("first(try first(CHAIN))", "[]\n"),
+        ("first(first(CHAIN)?)", "[]\n"),
+        ("try nth(1; CHAIN)", ""),
+        ("nth(2; CHAIN)", ""),
+        ("try limit(2; CHAIN)", "[]\n"),
     ] {
         // The rows hold `&'static str`, so the formatted program is leaked (a test, a few bytes).
         let program: &'static str = Box::leak(
@@ -134481,7 +134492,7 @@ fn test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497() -> Resul
             )
             .into_boxed_str(),
         );
-        assert_path_rows_both_routes_3749(&[(doc, program, "[]\n", "", 0)])?;
+        assert_path_rows_both_routes_3749(&[(doc, program, expected, "", 0)])?;
     }
     assert_path_rows_both_routes_3749(&[
         // The writes through the same source.
