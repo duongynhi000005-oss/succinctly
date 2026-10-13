@@ -5194,8 +5194,8 @@ Float and number formatting ([#1071](https://github.com/rust-works/succinctly/is
 [#1358](https://github.com/rust-works/succinctly/issues/1358)), error-message rendering
 (succinctly's previews format via jq's rules rather than yq's verbatim echo —
 [#1055](https://github.com/rust-works/succinctly/issues/1055)), comment placement
-([#1079](https://github.com/rust-works/succinctly/issues/1079),
-[#1080](https://github.com/rust-works/succinctly/issues/1080)) — #1085's gap (a floated
+([#1079](https://github.com/rust-works/succinctly/issues/1079); chained anchored keys,
+[#1080](https://github.com/rust-works/succinctly/issues/1080), are fixed) — #1085's gap (a floated
 anchor comment and a key's own comment couldn't coexist) is fixed on the streaming/get-form
 route and, since [#2806](https://github.com/rust-works/succinctly/issues/2806), on the DOM
 route too, for a key whose value is a block container or a scalar (`-P` and every write form
