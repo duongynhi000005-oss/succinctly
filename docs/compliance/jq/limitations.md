@@ -11976,7 +11976,14 @@ anything else (`if`, `first(.a)`, `$q | .a`, a `try`-scoped `(.a)?`) keeps the o
 still be refused where jq retries. Inside a `reduce`/`foreach` UPDATE or EXTRACT no retry is modelled either: jq hands the fold's state slot back as `null` there,
 so the retried alternative does not start at the register the stage entered (`path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))` on
 `[[]]` raises in jq, and `path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))` on `{"x":[true]}` prints `["x",0]` after raising, where
-this refuses without printing it, `test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115`). The rule is `jq` mode only,
+this refuses without printing it, `test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115`). That is the bind
+*inside* the fold's body; a `?//` chain that is the fold's own loop pattern retries on its UPDATE's untracked navigation refusal (the
+navigated state is not the register, which is jq's own path error, and the next alternative runs on the state `null`), at the top
+level only, not inside another fold's body (`path(foreach . as [$a] ?// $a ({"a":5}; .a; .))` on `null` is `["a"]`, #4488). The bare
+`$x` a `?//` chain falls back to runs no pattern step, so its outputs state the register at the bind's entry when the body navigates
+nothing, and a `reduce` UPDATE leaves it there whichever alternative destructured, which a fold's UPDATE reads (`path(foreach .a? as $k (0;
+(. as [$a] ?// $a | 0); $k))` on `null` is `["a"]`, #4488; `test_fold_under_an_alt_bind_retries_and_states_the_bare_alternative_4488`).
+The rule is `jq` mode only,
 and `yq` mode keeps its by-value rules (ADR-0018). An answer that is a valid path is printed before the raise of the
 retry that follows it, as jq does (`test_any_all_path_answer_precedes_retry_raise_3827`).
 

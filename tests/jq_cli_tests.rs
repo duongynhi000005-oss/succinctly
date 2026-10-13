@@ -133667,3 +133667,220 @@ fn test_foreach_source_def_parameter_bound_to_the_register_4485() -> Result<()> 
         ),
     ])
 }
+
+/// #4488: a `foreach`/`reduce` under a `?//` bind, in two parts, both from jq's backtracking.
+///
+/// The fold's own UPDATE refusing a navigation of a value that is not the register (a literal INIT)
+/// is jq's path error, which sends the chain to its next alternative with the state `null`
+/// (`LOADVN` emptied it). It used to propagate as a catchable refusal, so a `try` around the fold
+/// answered its handler (`path(. as $x | . | (try (foreach ...) catch 7) | $x)` was `[]` where jq
+/// answers `["a"]`) and `del`/`=`/`|=` raised where jq writes.
+///
+/// A chain that *is* a fold's UPDATE falls back to its bare `$x` with the register where the step
+/// left it (the failed alternatives were backtracked), and a `reduce` UPDATE leaves it there
+/// whichever alternative destructured. EXTRACT's `$k` was refused as a lost register. Every row
+/// captured from jq 1.7.1 with `-c`; the message is pinned only as the common prefix.
+#[test]
+fn test_fold_under_an_alt_bind_retries_and_states_the_bare_alternative_4488() -> Result<()> {
+    let rows: Vec<PathRow3289> = vec![
+        // The wrong answers: the fold's UPDATE refuses a navigation of a literal INIT, jq's own path error,
+        // so the chain's next alternative runs on the state `null` (the `try` around the fold never sees it).
+        (
+            "null",
+            r#"path(. as $x | . | (try (foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7) | $x)"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | .a? | (try (foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7) | $x)"#,
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"try path(foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // ...and the same chain read, written and refused as jq does: `null` is the register's kind on
+        // `{"a":null}`, an array is not.
+        (
+            "null",
+            r#"[path(foreach . as [$a] ?// $a ({"a":5}; .a; .))]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"[path(reduce . as [$a] ?// $a ({"a":5}; .a))]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"del(foreach .a as [$a] ?// $a ({"a":5}; .a; .))"#,
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"(foreach .a as [$a] ?// $a ({"a":5}; .a; .)) = 9"#,
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"(foreach .a as [$a] ?// $a ({"a":5}; .a; .)) |= 9"#,
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"del(foreach .a as [$a] ?// $a ({"a":5}; .a; .))"#,
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"[path(foreach .a as [$a] ?// $a ({"a":5}; .a; .))]"#,
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            "[path(foreach .a as [$a] ?// $a (1; .a; .))]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            "[path(foreach .a as [$a] ?// $a (.; .b; .))]",
+            "[[\"a\",\"b\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"[path(foreach .a as {b:$b} ?// $a ({"a":5}; .a; .))]"#,
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        // A chain that is the UPDATE falls back to its bare `$x` with the register where the fold step
+        // left it: EXTRACT's `$k` is checked against it, and a write lands on `.a`.
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as [$a] ?// $a | $a); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as {a:$a} ?// $a | 0); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as [$a] ?// [$a] ?// $a | 0); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":3}"#,
+            "path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":3}"#,
+            "del(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":3}"#,
+            "(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        // The contrasts jq refuses: a body that navigates, an EXTRACT that is not the register.
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as [$a] ?// $a | .a); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        // A `reduce` UPDATE backtracks its source, its pattern's steps and its own UPDATEs, so only its INIT's
+        // navigation survives it, whichever alternative destructured.
+        (
+            "null",
+            "path(foreach .a? as $k (0; reduce . as [$a] ?// $a (0; .); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":3}"#,
+            "path(foreach .a? as $k (0; reduce . as [$a] ?// $a (0; 1); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":3}"#,
+            "(foreach .a? as $k (0; reduce . as [$a] ?// $a (0; 1); $k)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(foreach .a? as $k (0; reduce . as [$a] ?// $a (.a?; 1); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r#"{"a":3}"#,
+            "path(foreach .a? as $k (0; reduce . as [$a] ?// $a (.a?; 1); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+    ];
+    assert_path_rows_both_routes_3749(&rows)
+}

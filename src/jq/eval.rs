@@ -55951,7 +55951,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Escaped(e) => {
-                                        outcome = Some(fold_escape_outcome::<S>(e, is_last, &aborted));
+                                        outcome =
+                                            Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Exhausted => {}
@@ -143491,8 +143492,14 @@ mod neutral_leaves_register_tests_4028 {
         for (src, shape) in [
             (". as [$a] | $a", "none"),
             (". as {a:$a} | $a", "none"),
-            (". as [$a] ?// $a | 1", "none"),
+            (". as [$a] ?// [$b] | 1", "none"),
             (". as {(.a):$a} | $a", "none"),
+            // #4488: but the bare `$x` a `?//` chain falls back to runs no pattern step, so it
+            // states the register at the bind's entry itself, when the body navigates nothing.
+            (". as [$a] ?// $a | 1", "forwarded"),
+            (". as $a ?// [$a] | $a", "forwarded"),
+            (". as {a:$a} ?// [$a] ?// $a | 1", "forwarded"),
+            (". as [$a] ?// $a | .a", "none"),
             // A producer in a computed key or in the source states nothing into the sink.
             (". as {(try .a catch 1):$a} | $a", "none"),
             ("(.. | .) as [$a] | $a", "none"),
