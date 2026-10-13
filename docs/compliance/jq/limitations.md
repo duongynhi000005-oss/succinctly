@@ -3850,13 +3850,21 @@ answers `["b"]` — and classified the two residuals appended below):
     `delpaths([])`, `setpath([]; .)` and `del(f)` over an empty path set (jq mode only, as the witness
     is). The stage is a leaf of the transparent bind-source grammar, judged per value (and per argument)
     by the resolver's own arms: an input that gets a fresh result (`{"b":5}|tostring`) is still refused,
-    as in jq. Still refused where jq answers (never a write): the stage under a `//`, a postfix `?` or
-    a `try` (`path(.b|(tostring // .) as $y|$y)`, `(tostring?)`, `(try tostring catch .)`), because the
-    resolver's refusal for a fresh result would be swallowed there and the register bound in its place;
-    such a bound result gets the `Unproven` marker, so a refusal off it is loud, not catchable. A
-    navigation of the result stays refused too (`(tostring|.[1:2]) as $y`), and so does a generator
-    argument (`ltrimstr("x","s")`). The sweep pins each in its `input-returning-bind-*` rows, and
-    `scripts/jq-bind-origin-fuzz.py --input-returning-source-p` draws the shape.
+    as in jq. The same holds under a `//`, a postfix `?` or a `try` (#4444:
+    `path(.b|(tostring // .) as $y|$y)`, `(tostring?)` and `(try tostring catch .)` are `["b"]`, and
+    `{"n":5}|path(.n|(tostring // .) as $y|$y)` is still refused): the resolver places a fresh result
+    as an untracked value, as it does a literal, so there is no refusal for the construct to swallow
+    and fall to `.` on. A `ltrimstr`/`rtrimstr` whose argument is a comma of literals
+    (`ltrimstr("x","s")`) is placed run by run, one per output, as jq runs it: `["b"]`, then a
+    refusal of the fresh `""`. A navigation of the result stays refused (`(tostring|.[1:2]) as $y`).
+    Still refused where jq answers (never a write): a trim argument that is a generator but not a comma
+    of literals (`ltrimstr("y", (.|tostring))`), which falls to the by-value route, and `walk(.)` under
+    a `//`, `?` or `try` (`path(.s|(walk(.)?) as $y|$y)` is refused for a scalar, where jq prints
+    `["s"]`, and for a container, where jq raises too): the resolver refuses a rebuilt container
+    rather than placing it, so the construct would swallow that refusal and write nothing or bind
+    what runs next; the whole leaf stays off the grammar there rather than judging it per value. The sweep pins each in
+    its `input-returning-bind-*` rows, and `scripts/jq-bind-origin-fuzz.py
+    --input-returning-source-p` draws the shape.
     `del(f)`, `delpaths([])` and `setpath([]; .)` return their input as well when the path set
     is empty (#4295: `5 | path(del(.[]?))` and `[1] | path(del(.b?))` are `[[]]`),
     judged on the resolved path set, never on the shape: `[1] | path(del(.[]?))` and

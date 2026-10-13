@@ -40914,6 +40914,17 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         {
             emit_passthrough(value, trackable, snapshot, sink)
         }
+        // #4444: `ltrimstr("x", "s")` runs once per output of its argument, and each run is its
+        // own judgement of the same input (`path(.b|ltrimstr("x","s"))` answers `["b"]` and
+        // then refuses the fresh `""`). A comma of literals is that sequence of one-literal
+        // trims, which the arms below judge one by one. Any other generator argument keeps
+        // the refusal.
+        Expr::Builtin(Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_))
+            if S::TAG == EvalTag::Jq && trim_generator_literals(expr).is_some() =>
+        {
+            let split = split_trim_generator(expr);
+            resolve_node_sink::<S>(&split, value, trackable, snapshot, frame, keep, sink)
+        }
         // #4016: `ltrimstr`/`rtrimstr` hand their input back as the same `jv`
         // unless a string argument actually matches the string input's edge
         // (an empty argument matches), in which case the result is fresh. Only
@@ -51049,7 +51060,9 @@ fn resolve_bind_source_witness<S: EvalSemantics>(
 /// bound by value), which is what keeps `select(false) // {"a":1}` an exact
 /// source instead of an ambiguous one. #4017 adds the builtins that hand their input
 /// back as the same `jv` for some inputs ([`is_input_returning_stage`]) as a leaf the
-/// resolver judges per value, except under a `try`, `?` or the left of `//`.
+/// resolver judges per value, under a `try`, `?` or the left of `//` as anywhere else
+/// (#4444) -- except `walk(.)`, which the resolver refuses for a container and
+/// [`transparent_outputs`] keeps off the grammar there.
 ///
 /// Measured against `/usr/bin/jq` 1.7.1 with `scripts/jq-bind-origin-fuzz.py`
 /// (25 runs of 3,000 programs over every family) and
@@ -51065,8 +51078,9 @@ fn is_transparent_bind_source(source: &Expr) -> bool {
 /// whether every output it can produce is still tracked -- what a navigating leaf
 /// downstream of it needs (#3795).
 ///
-/// `swallowed` says an enclosing `try`, `?` or `//` would catch a resolver
-/// refusal raised at this position (#4017); see [`is_input_returning_stage`].
+/// `swallowed` says an enclosing `try`, `?` or `//` would catch a resolver refusal
+/// raised at this position. Only `walk(.)` can raise one (#4444): every other leaf
+/// places a fresh result as an untracked value, so nothing is left to swallow.
 fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> Option<bool> {
     let all = |exprs: &mut dyn Iterator<Item = &Expr>| {
         let mut tracked = true;
@@ -51099,13 +51113,19 @@ fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> O
         // #4017: a builtin that hands its input back as the same `jv` for some
         // inputs (`tostring` of a string, `tonumber` of a number, ...), which the
         // resolver's own arms place as a pass-through of the register. Whether this
-        // input is one of them is a per-value fact the resolver judges; for any
-        // other it refuses, and the witness then declines to the by-value route. So
-        // the leaf is exact unless an enclosing `try`/`?`/`//` swallows that refusal
-        // and runs something else (`(5 | tostring // .)` would bind the register
-        // where jq binds `"5"`). Its output is not statically tracked, which keeps a
-        // navigation downstream of it off the grammar (`tostring | .[1:2]`).
-        leaf if is_transparent_leaf(leaf) => (!swallowed).then_some(false),
+        // input is one of them is a per-value fact the resolver judges: for any other
+        // it computes the fresh value and places it as an untracked branch, as it does
+        // a literal, so a `try`, `?` or `//` around the leaf sees a value, never a
+        // refusal to swallow (#4444: `(5 | tostring // .)` binds `"5"`, not the
+        // register). Its output is not statically tracked, which keeps a navigation
+        // downstream of it off the grammar (`tostring | .[1:2]`).
+        //
+        // `walk(.)` is the exception: of an array or object it is rebuilt and the
+        // resolver *refuses* instead of placing the copy, so a construct that
+        // swallows the refusal would bind what runs next, or nothing, where jq
+        // raises (`(.o | (walk(.)?) as $y | $y) = 1` is a silent no-op).
+        leaf if is_walk_identity(leaf) => (!swallowed).then_some(false),
+        leaf if is_transparent_leaf(leaf) => Some(false),
         Expr::Comma(exprs) => all(&mut exprs.iter()),
         // A handler's output is untracked; one that may see the register as its
         // error payload ([`try_body_may_raise_alias`]) is not placed at all, so the
@@ -51165,11 +51185,12 @@ fn is_walk_identity(expr: &Expr) -> bool {
 /// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
 /// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
 /// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
-/// `trim_returns_input` ... guard); the arms judge the value
-/// -- and the argument: a non-literal `ltrimstr` argument keeps the refusal -- and
-/// refuse for an input that gets a fresh result. A new pass-through arm there is owed
-/// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
-/// lists them.
+/// `trim_returns_input` ... guard); the arms judge the value and the argument (only a
+/// literal, or a comma of literals, is judged; any other argument is computed by value),
+/// and place an input that gets a fresh result as an untracked value, which `path()`'s
+/// terminal check refuses and a `try`, `?` or `//` therefore has nothing to swallow
+/// (#4444). A new pass-through arm there is owed a row here;
+/// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795` lists them.
 ///
 /// `del(f)` (empty path set, #4295) and `walk(.)` of a scalar (#4456,
 /// [`is_walk_identity`]) are the pass-through arms *not* here: whether `del(f)` returns
@@ -57850,6 +57871,51 @@ fn del_target_is_effect_free(target: &Expr) -> bool {
     !any_subexpr(target, &mut |e| {
         !(is_pure_navigation_node(e) || matches!(e, Expr::Builtin(Builtin::Empty)))
     })
+}
+
+/// The one-literal trim builtin and the literals of a [`trim_generator_literals`] match.
+type TrimGenerator<'e> = (fn(Box<Expr>) -> Builtin, Vec<&'e Expr>);
+
+/// The literals a `ltrimstr(A, B, ...)` / `rtrimstr(A, B, ...)` argument is a comma of,
+/// in the order jq runs the argument's outputs, with the one-literal builtin to rebuild
+/// them with (#4444). `None` unless the argument is a comma (nested or parenthesised)
+/// of literals and nothing else.
+fn trim_generator_literals(expr: &Expr) -> Option<TrimGenerator<'_>> {
+    fn collect<'e>(arg: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
+        match unwrap_paren(arg) {
+            literal @ Expr::Literal(_) => {
+                out.push(literal);
+                true
+            }
+            Expr::Comma(items) => items.iter().all(|item| collect(item, out)),
+            _ => false,
+        }
+    }
+    let (arg, make): (&Expr, fn(Box<Expr>) -> Builtin) = match expr {
+        Expr::Builtin(Builtin::Ltrimstr(arg)) => (arg, Builtin::Ltrimstr),
+        Expr::Builtin(Builtin::Rtrimstr(arg)) => (arg, Builtin::Rtrimstr),
+        _ => return None,
+    };
+    let mut literals = Vec::new();
+    (matches!(unwrap_paren(arg), Expr::Comma(_)) && collect(arg, &mut literals))
+        .then_some((make, literals))
+}
+
+/// `ltrimstr(A, B)` / `rtrimstr(A, B)` over literals as the comma of its one-literal
+/// trims (#4444); see [`trim_generator_literals`]. Any other `expr` comes back as is,
+/// which the resolver arm never asks for (its guard is the same match).
+fn split_trim_generator(expr: &Expr) -> Expr {
+    trim_generator_literals(expr).map_or_else(
+        || expr.clone(),
+        |(make, literals)| {
+            Expr::Comma(
+                literals
+                    .into_iter()
+                    .map(|literal| Expr::Builtin(make(Box::new(literal.clone()))))
+                    .collect(),
+            )
+        },
+    )
 }
 
 /// Whether `ltrimstr`/`rtrimstr` with the literal `arg` returns `value` itself
@@ -136484,9 +136550,10 @@ mod tests {
             ("(.a // length)", false),
             ("($x // .)", false),
             // #4017: a builtin that returns its input for some inputs is a leaf,
-            // judged per value by the resolver, but never where a `try`, `?` or the
-            // left of `//` could swallow its refusal and run something else; its
-            // output is untracked, so no navigation follows it.
+            // judged per value by the resolver; its output is untracked, so no
+            // navigation follows it. A `try`, `?` or the left of `//` around it
+            // changes nothing (#4444): the resolver places a fresh result as an
+            // untracked value, so there is no refusal for them to swallow.
             ("tostring", true),
             ("(.a | tostring)", true),
             ("@text", true),
@@ -136528,12 +136595,12 @@ mod tests {
             ("(. // tostring)", true),
             ("(tostring | select(.))", true),
             ("(tostring | tostring)", true),
-            ("tostring?", false),
-            ("try tostring", false),
-            ("try tostring catch 1", false),
-            ("(tostring // .)", false),
-            ("((.a | tostring) // .)", false),
-            ("(.a, tostring?)", false),
+            ("tostring?", true),
+            ("try tostring", true),
+            ("try tostring catch 1", true),
+            ("(tostring // .)", true),
+            ("((.a | tostring) // .)", true),
+            ("(.a, tostring?)", true),
             ("(tostring | .a)", false),
             ("(tostring | .[1:2])", false),
             ("(.a | tostring | .[1:2])", false),
@@ -136541,7 +136608,7 @@ mod tests {
             ("setpath([\"a\"]; .)", false),
             ("setpath([]; 1)", false),
             ("ascii_downcase", false),
-            ("(del(.x?) // .)", false),
+            ("(del(.x?) // .)", true),
         ] {
             let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
             assert_eq!(is_transparent_bind_source(&expr), expected, "{filter}");

@@ -246,7 +246,10 @@ fi
 # `setpath([]; .)`) is the register, so `path(.b|tostring as $y|$y)` is `["b"]`. The
 # `fresh` rows are the inputs that get a new value (jq refuses), the `swallowed-fresh`
 # rows pin that a `//`/`?`/`try` around the stage cannot turn that refusal into a bind
-# of the register, and the `swallowed-string` rows are the three refuse-only residuals.
+# of the register, and the `swallowed-string` rows are the string-input twins, which bind
+# the register through the same constructs (#4444 closed them as refuse-only). The
+# `trim-generator-*` rows are #4444's generator argument: `ltrimstr("x","s")` runs once
+# per output of its argument.
 #
 # id <TAB> input <TAB> filter
 # `read -d ''`, not `$(cat <<EOF)`: bash scans a command substitution's body for
@@ -1237,6 +1240,22 @@ input-returning-bind-result-slice-refuses	{"b":"sss"}	path(.b|(tostring|.[1:2]) 
 input-returning-bind-swallowed-string-alt	{"b":"s"}	path(.b|(tostring // .) as $y|$y)
 input-returning-bind-swallowed-string-optional	{"b":"s"}	path(.b|(tostring?) as $y|$y)
 input-returning-bind-swallowed-string-try	{"b":"s"}	path(.b|(try tostring catch .) as $y|$y)
+input-returning-bind-swallowed-string-alt-write	{"b":"s"}	(.b|(tostring // .) as $y|$y) = 9
+input-returning-bind-swallowed-string-try-del	{"b":"s"}	del(.b|(try tostring catch .) as $y|$y)
+input-returning-bind-swallowed-container-walk-optional	{"o":{"x":1}}	path(.o|(walk(.)?) as $y|$y)
+input-returning-bind-swallowed-container-walk-optional-write	{"o":{"x":1}}	(.o|(walk(.)?) as $y|$y) = 1
+input-returning-bind-swallowed-container-walk-optional-del	{"o":{"x":1}}	del(.o|(walk(.)?) as $y|$y)
+input-returning-bind-swallowed-container-walk-try-empty	{"o":{"x":1}}	path(.o|(try walk(.) catch empty) as $y|$y)
+input-returning-bind-swallowed-container-walk-comma	{"o":{"x":1}}	path(.o|(walk(.)?, .) as $y|$y)
+input-returning-bind-swallowed-fresh-try-empty-write	{"n":5}	(.n|(try tostring catch empty) as $y|$y) = 1
+input-returning-bind-swallowed-fresh-comma	{"n":5}	path(.n|(tostring?, .) as $y|$y)
+input-returning-bind-swallowed-del-nonempty-optional-write	{"o":{"x":1}}	(.o|(del(.x)?) as $y|$y) = 1
+input-returning-bind-trim-generator-fresh-last	{"b":"s"}	path(.b|ltrimstr("x","s") as $y|$y)
+input-returning-bind-trim-generator-fresh-first	{"b":"s"}	path(.b|ltrimstr("s","x") as $y|$y)
+input-returning-bind-trim-generator-fresh-write	{"b":"s"}	(.b|ltrimstr("x","s") as $y|$y) = 9
+input-returning-bind-trim-generator-no-match	{"b":"s"}	path(.b|ltrimstr("x","y") as $y|$y)
+input-returning-bind-trim-generator-rtrim-nested	{"b":"s"}	path(.b|rtrimstr(("y","x"),"z") as $y|$y)
+input-returning-bind-trim-generator-non-string-input	{"n":5}	path(.n|ltrimstr("x",1) as $y|$y)
 input-returning-bind-del-empty-path-set	{"b":"s","n":1}	path(.b|del(.x?) as $y|$y)
 input-returning-bind-del-empty-path-set-write	{"b":"s","n":1}	(.n|del(.[]?) as $y|$y) = 4
 input-returning-bind-del-nonempty-path-set	{"b":{"x":1}}	path(.b|del(.x?) as $y|$y)
@@ -1310,9 +1329,6 @@ nested-fold-frozen-init-foreach-after-length:#3984 -- the fold's register is unt
 nested-fold-frozen-foreach-in-foreach-extract-del:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
 nested-fold-frozen-foreach-in-foreach-extract-assign:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
 nested-fold-frozen-foreach-in-foreach-extract-path:#3984 -- the fold's register is untracked, so a refusal of a frozen value the step could have navigated is the resolver's guess and stays loud (#3267); jq finds the step intact and answers
-input-returning-bind-swallowed-string-alt:#4017 -- a `//` over the stage keeps it off the witness grammar (the resolver's refusal for an input that gets a fresh value would be swallowed and `.` bound in its place), so the bound result of a string input is a plain value
-input-returning-bind-swallowed-string-optional:#4017 -- same gate, for a postfix `?` over the stage
-input-returning-bind-swallowed-string-try:#4017 -- same gate, for a `try` over the stage
 REFUSE_EOF
 
 if [[ "${1:-}" == "--list-cases" ]]; then
