@@ -2161,7 +2161,14 @@ is the revert that established what the other one costs.
    the pipe walk and the destructure test cannot drift apart. Still accepted besides the two shapes above (#4320): a `$x`
    bound outside the `foreach` (`. as $x | del(foreach ($x as {a:$a} | .) ...)`; reading every such marker as the
    register refused `reduce .[] as $it (.; reduce ($it as {a:$a} | .) ...)` inside a fold body, which jq answers; it is
-   read by certification since #4320's second part, below), and a bound expression
+   read by certification since #4320's second part, below; inside another fold's body a `foreach` source that destructures
+   a `$x` equal to the accumulator is refused loudly like `. as {a:$a}` is, since
+   [#4505](https://github.com/rust-works/succinctly/issues/4505): jq's tracked `INDEX` step moves the register off the
+   accumulator and the `foreach` emits from inside the loop, so `. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a}
+   | .) as $y (.; .; .); .)` raises, and `del` of it deleted the document. A `reduce` source keeps the by-value answer,
+   which backtracks. Still accepted: the same `$x` behind `select($x) | ...`, a pipe (`$x | . as {a:$a}`), a `try` around
+   the destructure or a `?//` alternative, and an outer `reduce` whose own source navigates (`reduce .[]? as $it (.;
+   foreach ($x | .a) ...)`)), and a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
    too. A bound expression that is a pipe of `.` is read since
