@@ -14933,11 +14933,8 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // sees both occurrences of a mapping key; `each_paths_filter_generic`
         // keeps the demand-forwarding and sends only a live `input`/`inputs`
         // queue to the bridge below, which every jq-mode call still takes.
-        Expr::Builtin(Builtin::PathsFilter(filter)) if !S::COLLAPSE_DUPLICATE_KEYS => {
-            each_paths_filter_generic::<S, V>(filter, value, cursor, optional, sink)
-        }
         Expr::Builtin(Builtin::PathsFilter(_)) => {
-            bridge_to_each_owned_flow::<S, V>(expr, value, cursor, optional, sink)
+            each_paths_filter_dispatch::<S, V>(expr, value, cursor, optional, sink)
         }
 
         // #3448: jq's `=`/`op=`/`//=` run their right side as the outer
@@ -23709,6 +23706,27 @@ fn each_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
         }
     }
     Flow::Exhausted
+}
+
+/// Which producer `paths(f)` takes in `eval_each_generic` (#1342): the walk
+/// where duplicate keys survive, the owned bridge where they collapse anyway.
+/// A function of its own, with the same arguments the single bridge call it
+/// replaced took, so `eval_each_generic`'s native frame -- the one the
+/// recursion floor is read against -- is the size it was.
+#[inline(never)]
+fn each_paths_filter_dispatch<S: EvalSemantics, V: DocumentValue>(
+    expr: &Expr,
+    value: V,
+    cursor: Option<V::Cursor>,
+    optional: bool,
+    sink: &mut dyn Sink<V>,
+) -> Flow {
+    match expr {
+        Expr::Builtin(Builtin::PathsFilter(filter)) if !S::COLLAPSE_DUPLICATE_KEYS => {
+            each_paths_filter_generic::<S, V>(filter, value, cursor, optional, sink)
+        }
+        _ => bridge_to_each_owned_flow::<S, V>(expr, value, cursor, optional, sink),
+    }
 }
 
 /// [`each_paths_filter_generic`] collected, out of line so
