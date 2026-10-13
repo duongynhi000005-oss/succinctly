@@ -61682,18 +61682,99 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             invalid,
             5,
         ),
-        // A `?//` chain stays refused (jq answers `null`/`[[]]`: a failed alternative leaves `null`
-        // in the vetter's model, so it is not read as handing the accumulator through).
-        (
-            doc,
-            r"del(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))",
-            "",
-            invalid,
-            5,
-        ),
+        // A `?//` chain as the nested `reduce`'s SOURCE is read as the single pattern is (#4506):
+        // the fold's state is the accumulator throughout whichever alternative matches, and a
+        // chain whose every alternative fails raises in jq as it does here.
         (
             doc,
             r"[path(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as [$a] ?// {b:$b} | .) as $k (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} ?// {b:$b} | $a) as $k (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as [$a] ?// [$b] | .) as $k (.; .)))]",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        // The nested fold may be a `foreach`, and an alternative may be a bare `$var`.
+        (
+            doc,
+            r"del(reduce 1 as $k (.; foreach (. as {a:$a} ?// {b:$b} | .) as $k (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (. as {a:$a} ?// {b:$b} | .) as $k (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} ?// $x | .) as $k (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce (. as $x ?// [$q] | .) as $k (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(reduce 1 as $k (.; reduce (. as [$q] ?// {a:$a} | .) as $k (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        // Still refused, where jq answers `null`: a chain as the loop pattern over a source that
+        // destructures the register (the emitted element is not the register the pattern steps on).
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))",
             "",
             invalid,
             5,
