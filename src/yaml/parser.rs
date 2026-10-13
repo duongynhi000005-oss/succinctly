@@ -4328,6 +4328,15 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // split below) - defer it rather than capturing it here;
                 // `take_pending_head_comment` claims it wherever the next
                 // primary node opens.
+                //
+                // First claim a comment an *earlier* anchor's deferred value
+                // floated onto this key (`a: &x # c1` / `b: &y # c2`, #1080):
+                // `defer_line_comment` never overwrites a pending comment, so
+                // leaving `c1` unclaimed here silently dropped `c2` and then
+                // `c1` itself as stale. The key's own same-line comment
+                // belongs to the deferred value, so nothing else competes for
+                // the key's slot.
+                self.take_pending_head_comment(self.last_open_bp_pos);
                 self.defer_line_comment();
             } else {
                 // A trailing comment here is this key's own (issue #765) -
@@ -4738,6 +4747,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // no-anchor case) - defer it rather than dropping it;
                 // `take_pending_head_comment` claims it wherever the next
                 // primary node opens.
+                //
+                // A comment an earlier anchor's deferred value floated onto
+                // this key is claimed first, for the same reason as in
+                // `parse_compact_mapping_entry` (#1080).
+                self.take_pending_head_comment(self.last_open_bp_pos);
                 self.defer_line_comment();
 
                 // Need to check if the next line has content for this value,
