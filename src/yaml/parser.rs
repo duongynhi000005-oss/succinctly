@@ -2635,6 +2635,118 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         true // EOF counts as line end
     }
 
+    /// Whether the flow collection at the cursor is an implicit mapping key:
+    /// `[a, b]: v` / `{a: 1}: v` (#1188). The collection must close on the
+    /// same line (YAML limits an implicit key to one) and be followed, after
+    /// optional blanks, by a `:` that is itself followed by whitespace, a
+    /// break or the end of input -- the same disambiguation
+    /// [`Self::looks_like_mapping_entry`] applies to a scalar key, which
+    /// deliberately answers `false` for `[`/`{` and is left that way.
+    ///
+    /// It is a second, line-bounded lexer for the quoting, nesting and comment
+    /// rules `parse_flow_sequence` / `parse_flow_mapping` apply; a change to
+    /// those rules has to be mirrored here, or the entry is routed wrongly.
+    ///
+    /// Answers `false` for anything it cannot place: under `json_strict`
+    /// (`{"a": 1}: x` is two JSON values there, not a mapping), when the
+    /// collection runs onto another line or past a comment, and when a quote
+    /// inside it never closes. `false` is always the safe direction -- it
+    /// keeps the previous behavior for that input.
+    fn looks_like_flow_keyed_mapping_entry(&self) -> bool {
+        if self.json_strict || !matches!(self.peek(), Some(b'[' | b'{')) {
+            return false;
+        }
+        let input = self.input;
+        let mut i = self.pos;
+        let mut depth = 0usize;
+        // The last non-blank byte seen: a quote only opens a string at the
+        // start of a token (`[it's, b]` has no string in it).
+        let mut prev = 0u8;
+        // Whether blanks sit between `prev` and the byte under the cursor: a
+        // `#` only starts a comment after one.
+        let mut blank_before = false;
+        // The first byte of the word before the current one, so that a quote
+        // after a property (`[!!str "a]", b]`, `[&x "a]"]`) still opens a string.
+        let mut word_first = 0u8;
+        let mut prev_word_first = 0u8;
+        while i < input.len() {
+            let b = input[i];
+            if Self::is_inline_whitespace(b) {
+                blank_before = true;
+                i += 1;
+                continue;
+            }
+            if blank_before || prev == 0 || matches!(prev, b'[' | b'{' | b',' | b':' | b'?') {
+                prev_word_first = word_first;
+                word_first = b;
+            }
+            let after_property = blank_before && matches!(prev_word_first, b'&' | b'!');
+            match b {
+                b'"' | b'\''
+                    if after_property || matches!(prev, b'[' | b'{' | b',' | b':' | b'?') =>
+                {
+                    i += 1;
+                    loop {
+                        match input.get(i) {
+                            None => return false,
+                            Some(&c) if Self::is_break(c) => return false,
+                            // An escaped line break would carry the key onto
+                            // another line, which an implicit key cannot do.
+                            Some(b'\\') if b == b'"' => match input.get(i + 1) {
+                                None => return false,
+                                Some(&c) if Self::is_break(c) => return false,
+                                Some(_) => i += 2,
+                            },
+                            Some(&c) if c == b => {
+                                if b == b'\'' && input.get(i + 1) == Some(&b'\'') {
+                                    i += 2;
+                                } else {
+                                    break;
+                                }
+                            }
+                            Some(_) => i += 1,
+                        }
+                    }
+                }
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'#' if blank_before => return false,
+                c if Self::is_break(c) => return false,
+                _ => {}
+            }
+            prev = b;
+            blank_before = false;
+            i += 1;
+        }
+        if depth != 0 {
+            return false;
+        }
+        while input.get(i).is_some_and(|&c| Self::is_inline_whitespace(c)) {
+            i += 1;
+        }
+        input.get(i) == Some(&b':') && Self::is_ws_break_or_eoi(input.get(i + 1).copied())
+    }
+
+    /// Parse the flow collection that is an implicit mapping key (see
+    /// [`Self::looks_like_flow_keyed_mapping_entry`]) inside the key node the
+    /// caller already opened: the same wrapper-around-the-collection shape
+    /// `parse_explicit_key`'s `[`/`{` arms write, which the reader already
+    /// reads as `""` (#1188). The `:` is left for the caller.
+    fn parse_flow_mapping_key(&mut self) -> Result<(), YamlError> {
+        if self.peek() == Some(b'[') {
+            self.parse_flow_sequence()?;
+        } else {
+            self.parse_flow_mapping()?;
+        }
+        self.reject_trailing_flow_content(true)
+    }
+
     /// Check if current position starts a key-value pair (compact mapping).
     /// Returns true if there's a `:` followed by space/tab/newline/EOF on this line.
     /// Also returns true for empty key case (`:` at start).
@@ -2753,7 +2865,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
         // `looks_like_mapping_entry` does not stop at `#`, so a trailing comment
         // containing `: ` would otherwise read as a mapping entry.
-        let result = !self.at_line_end() && self.looks_like_mapping_entry();
+        // A flow collection keying the entry (`&k [a, b]: v`) counts too (#1188).
+        let result = !self.at_line_end()
+            && (self.looks_like_mapping_entry() || self.looks_like_flow_keyed_mapping_entry());
         self.pos = saved_pos;
         result
     }
@@ -4174,8 +4288,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             self.parse_explicit_key(self.current_column())?;
             // Don't close anything - mapping and item are closed by
             // close_deeper_indents when we see content at lower indent.
-        } else if self.looks_like_mapping_entry() {
-            // Check for compact mapping: `- key: value`
+        } else if self.looks_like_mapping_entry() || self.looks_like_flow_keyed_mapping_entry() {
+            // Check for compact mapping: `- key: value` (or `- [a, b]: value`, #1188)
             // This is a mapping entry directly as the sequence item value
             // The sequence item contains a mapping.
             //
@@ -4312,8 +4426,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // record it pointing to this key.
         self.record_key_properties()?;
 
-        // Parse the key
+        // Parse the key. A flow collection keying the entry (`- [a, b]: v`)
+        // is a container inside the key node, with no text range (#1188).
+        let flow_key = self.looks_like_flow_keyed_mapping_entry();
         let key_end = match self.peek() {
+            _ if flow_key => {
+                self.parse_flow_mapping_key()?;
+                self.pos
+            }
             Some(b'"') => {
                 self.parse_double_quoted()?;
                 self.pos
@@ -4326,7 +4446,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             Some(b'*') => self.record_key_alias()?,
             _ => self.parse_unquoted_key()?,
         };
-        self.set_bp_text_end(key_end);
+        if !flow_key {
+            self.set_bp_text_end(key_end);
+        }
 
         // Close key node
         self.write_bp_close();
@@ -4567,8 +4689,15 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // Check for a property on the key - record it pointing to this key BP
         self.record_key_properties()?;
 
+        // A flow collection keying the entry (`[a, b]: v`) is a container
+        // inside the key node, with no text range of its own (#1188).
+        let flow_key = self.looks_like_flow_keyed_mapping_entry();
+
         // Parse the key - check for empty key first (colon at start)
-        let key_end = if self.peek() == Some(b':') {
+        let key_end = if flow_key {
+            self.parse_flow_mapping_key()?;
+            self.pos
+        } else if self.peek() == Some(b':') {
             // Empty key - check that it's followed by proper terminator
             let next = self.peek_at(1);
             if Self::is_ws_break_or_eoi(next) {
@@ -4594,7 +4723,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 _ => self.parse_unquoted_key()?,
             }
         };
-        self.set_bp_text_end(key_end);
+        if !flow_key {
+            self.set_bp_text_end(key_end);
+        }
 
         // Close key node
         self.write_bp_close();
@@ -5096,6 +5227,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 }
                 self.write_bp_close(); // close item
             }
+            // `? [1, 2]: value`: the node after `? ` is a compact mapping keyed by
+            // the flow collection, so the explicit key *is* that mapping and the
+            // entry has no value (yq: `{"":null}`), exactly as `? k: v` below
+            // (#1188). Ahead of the plain `[`/`{` arms, which read a collection
+            // that stands alone.
+            Some(b'[' | b'{') if self.looks_like_flow_keyed_mapping_entry() => {
+                self.parse_compact_mapping_entry(self.current_column())?;
+            }
             Some(b'[') => {
                 // Flow sequence as key. #902: this dispatch is a 5th,
                 // deliberately-unmerged copy of `try_dispatch_flow_or_block_
@@ -5266,6 +5405,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // trailing-content check (#902) permits exactly this `:`-following
         // shape, so it doesn't reject real, non-garbage input before
         // `looks_like_mapping_entry` below gets a chance to run on it.
+        //
+        // Checked first, so the collection is read as the compact mapping's key
+        // rather than consumed as a value (#1188).
+        if self.looks_like_flow_keyed_mapping_entry() {
+            self.parse_compact_mapping_entry(self.current_column())?;
+            return Ok(());
+        }
         if self.try_dispatch_flow_or_block_value(indent, true)? {
             return Ok(());
         }
@@ -7871,6 +8017,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             Some(b'\n' | b'\r') => {
                 // Empty line
                 self.skip_line_break();
+            }
+            // A flow collection keying a mapping entry (`[a, b]: v`) is that
+            // entry, not a value of its own: routed to the same entry parser
+            // a scalar key takes, so a following sibling joins the mapping and
+            // a nested occurrence opens one (#1188).
+            Some(b'{' | b'[') if self.looks_like_flow_keyed_mapping_entry() => {
+                self.parse_mapping_entry(indent)?;
             }
             Some(b'{' | b'[') => {
                 // Flow mapping or sequence at document root
