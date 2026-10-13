@@ -758,6 +758,17 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   caught step or refuse where jq answers; a fold sibling that reads a frozen `$var` is kept out of the
   uniform siblings for the same reason.
 
+  **Since [#4527](https://github.com/rust-works/succinctly/issues/4527) and
+  [#4539](https://github.com/rust-works/succinctly/issues/4539)** a destructuring pattern's computed key that is an
+  array, on an array input, is jq's subarray search in path position (the key is the path component whole), and a
+  fold's `try` over a computed-key `?//` bind retries a step that can never succeed, as a literal key already did.
+  Pinned by `test_pattern_key_that_is_an_array_is_a_subarray_search_in_path_position_4527` and
+  `test_fold_try_over_a_computed_key_alternative_chain_retries_a_step_that_cannot_succeed_4539`.
+  **Still divergent** ([#4550](https://github.com/rust-works/succinctly/issues/4550)): a fold whose UPDATE is
+  `try (. as PATTERN ?// $a | $a)` over a *container* accumulator (`[]`, `[1]`, `{}`) answers where jq raises
+  `Invalid path expression with result <accumulator>` (`path(reduce .a? as $k ([]; try (. as [$a] ?// $a | $a)))`
+  on `null` is `[]` here); the first step could succeed on a container, so the walk's refusal reads as a guess.
+
   **Since [#4497](https://github.com/rust-works/succinctly/issues/4497)** a `foreach` source that is a
   `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative prints once in `path()` (jq's `first` is a
   `label`/`break` the chain's `?//` catches, so by value it emits twice) also behind a `try`, a `?`,

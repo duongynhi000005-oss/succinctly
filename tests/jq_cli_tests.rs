@@ -70143,6 +70143,22 @@ fn test_fold_try_over_a_computed_key_alternative_chain_retries_a_step_that_canno
             "",
             0,
         ),
+        // Controls: a step that could succeed on a container accumulator is the walk's guess, not
+        // retried; both still raise (jq at the emission, here at the step).
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; . as {(.|tostring):$a} ?// $a | $a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k ({}; . as {(.|tostring):$a} ?// $a | $a))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
         (
             "null",
             r"path(foreach .a? as $k (0; try (. as {a:$a} ?// $a | $a); .))",

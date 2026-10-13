@@ -52134,8 +52134,9 @@ struct PathPatternMode<'f> {
     /// for a key with no kind, or before any refusal. A walk ends at its first
     /// refusal (`step(..)?`) and a fold makes the cell afresh for each alternative,
     /// so a value read after a refusal is that refusal's. A fold's
-    /// [`settle_fold_alternative`] reads it to tell a refusal that is the walk's
-    /// guess from one jq raises whatever its register is (#3840, #3998).
+    /// [`settle_fold_alternative`] and a bind's [`resolve_as_pattern`] (its `refusal_is_exact`)
+    /// read it to tell a refusal that is the walk's guess from one jq raises whatever its
+    /// register is (#3840, #3998, #4539): change when a step sets it and both move.
     refused_step_could_succeed: Option<&'f core::cell::Cell<Option<bool>>>,
 }
 
