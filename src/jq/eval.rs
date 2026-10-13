@@ -36663,6 +36663,11 @@ fn is_try_scoped_component(component: &Expr) -> bool {
     matches!(component, Expr::Optional(inner) if !is_postfix_optional_primitive(inner))
 }
 
+/// Whether a fold's UPDATE is a `?//` bind (#4440): `. as [$q] ?// $z | BODY`, parenthesized or not.
+fn update_is_alt_bind(update: &Expr) -> bool {
+    matches!(unwrap_paren(update), Expr::AsPattern { patterns, .. } if patterns.len() > 1)
+}
+
 /// Whether every output of a `reduce` UPDATE is the accumulator's own node, whatever
 /// the UPDATE's register moves along the way (#3953).
 ///
@@ -52373,7 +52378,8 @@ fn each_pattern_walk_probed<S: EvalSemantics>(
 /// then write through. Not retrying costs only the rows where jq's *own*
 /// path error triggers the next alternative -- a refusal, the safe direction.
 /// The rows this arm can prove are an untracked navigation the body raises, in jq mode on a
-/// non-last alternative outside every fold body (the `retries` rule in the walk's sink): the
+/// non-last alternative outside every fold body, or in the one step of a fold body that
+/// [`fold_body::acc_is_register`] marked (#4440; the `retries` rule in the walk's sink): the
 /// destructure moved the register onto a node the ambient is not, so a navigation of the
 /// ambient fails jq's `path_intact`, and `?//` retries on any body error. The first step of a
 /// body is #4115 (`path(. as {a:$q} ?// $z | .a)` retries onto `$z` and answers jq's `["a"]`),
@@ -52794,10 +52800,14 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             // every fold body: inside one the same retry accepted a `del` jq
                             // refuses (the sweep's `reduce-source`/`reduce-update-*` contexts, 21
                             // rows), the accumulator being a state this walk does not track.
+                            // #4440: except in the one step a fold marked as having `.` on the
+                            // register ([`fold_body::acc_is_register_here`]), where the retried
+                            // alternative starts from it as outside a fold.
                             let retries = path_alternative_retries(&escape, is_last)
                                 || (S::TAG == EvalTag::Jq
                                     && !is_last
-                                    && fold_body::depth() == 0
+                                    && (fold_body::depth() == 0
+                                        || fold_body::acc_is_register_here())
                                     && matches!(
                                         &escape,
                                         EvalEscape::Error(e) if e.is_untracked_navigation_error()
@@ -55321,6 +55331,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // the first step, as for a `try` UPDATE above. Marked per step by `update_at_register`.
     let foreach_update_on_register =
         first_step_on_register && matches!(unwrap_paren(update), Expr::Foreach { .. });
+    // #4440: an UPDATE that is a `?//` bind of `.` runs its alternatives with `.` on the accumulator,
+    // which is on the register at the first step as for the UPDATEs above.
+    let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
     // #4484: an outermost `reduce` whose source navigates leaves jq's register on the element.
     let source_moves_register =
         S::TAG == EvalTag::Jq && fold_body::depth() == 0 && !cannot_move_register(input);
@@ -55640,7 +55653,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         }
                         let _acc_is_register = ((keeps_accumulator
                             || try_update_on_register
-                            || foreach_update_on_register)
+                            || foreach_update_on_register
+                            || alt_bind_update_on_register)
                             && update_at_register
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
@@ -55967,6 +55981,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
     let step_cannot_move =
         cannot_move_register(update) && extract.map_or(true, cannot_move_register);
+    // #4440: `resolve_reduce`'s `alt_bind_update_on_register`, for a `foreach`: a `?//` bind UPDATE
+    // runs with `.` on the register at a step whose accumulator is still on it.
+    let first_step_on_register = S::TAG == EvalTag::Jq
+        && fold_body::depth() == 0
+        && patterns_all_bare(patterns)
+        && cannot_move_register(input)
+        && cannot_move_register(init);
+    let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
+    // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
+    let alt_bind_extract_on_register =
+        first_step_on_register && extract.is_some_and(update_is_alt_bind);
     // #4130: everything in the loop body but the pattern walk, judged once: an untracked
     // entry's emission is at the entry register when this holds and the step walked nothing.
     let entry_stays_at_register = states_untracked
@@ -56214,6 +56239,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             .then(|| active_reg.trackable_at_live_null_bool())
                             .flatten()
                             .filter(|live| null_bool_identical(&entry_state, &live.value));
+                        let live_stepped = live_step.is_some();
                         let (active_reg, active_at_register) = match live_step {
                             Some(live) => (live, true),
                             None => (active_reg, active_at_register),
@@ -56333,6 +56359,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // #3507: EXTRACT is driven by demand too, straight into
                                 // the outer sink, so `first(path(foreach 1 as $x (.; .;
                                 // .[("a"|stderr), ("b"|stderr)])))` stops after `a`.
+                                let _acc_is_register = (alt_bind_extract_on_register
+                                    && extract_at_register)
+                                    .then(fold_body::acc_is_register);
                                 match extract_reg.resolve_sink::<S>(
                                     ext_expr,
                                     update_branch.value.clone().into_owned(),
@@ -56365,6 +56394,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             }
                             Demand::Continue
                         };
+                        let _acc_is_register =
+                            (alt_bind_update_on_register && active_at_register && !live_stepped)
+                                .then(fold_body::acc_is_register);
                         let flow = active_reg.resolve_sink::<S>(
                             &bound_update,
                             entry_state,

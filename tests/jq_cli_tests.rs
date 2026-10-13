@@ -128408,21 +128408,166 @@ fn test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115() 
     ])
 }
 
-/// #4115: inside a `foreach` UPDATE jq's state slot is `null`, so no retry is modelled there. jq
-/// prints `["x",0]` after raising `near attempt to access element 0 of true`; this refuses
-/// without printing (recorded in `limitations.md`).
+/// #4440: a `?//` bind that is a fold's UPDATE or EXTRACT retries past a refused leading
+/// navigation on the step whose accumulator is jq's register, as it does outside a fold
+/// (#4115). On the first step of a `foreach` over a source and INIT that move nothing, `.` is the
+/// register: the pattern moves it onto a node the ambient is not, the body's first step fails
+/// `path_intact`, and `?//` runs the next alternative from the register the stage entered
+/// (`["x",0]`). From the second step the state is the previous UPDATE's output, which jq's
+/// register is not on, so the retry fails the same way and raises. A `reduce` UPDATE and a
+/// source that navigates leave the register off the accumulator, and still raise. Every row
+/// captured from jq 1.7.1.
 #[test]
-fn test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115() -> Result<()> {
-    let (stdout, stderr, code) = run_jq_full(
-        &[
-            "-c",
+fn test_destructuring_alt_bind_retries_in_a_fold_step_on_the_register_4440() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"x":[true]}"#,
             r"path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))",
-        ],
-        Some(r#"{"x":[true]}"#),
-    )?;
-    assert_eq!(code, 5, "stdout={stdout} stderr={stderr}");
-    assert!(stdout.is_empty(), "must not print: {stdout}");
-    Ok(())
+            "[\"x\",0]\n",
+            "Invalid path expression near attempt to access element 0 of true",
+            5,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0]); .))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"del(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0]); .))",
+            "{\"x\":[]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0]); .)) |= 9",
+            "{\"x\":[9]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .)) = 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of true",
+            5,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0][0]); .))",
+            "[\"x\",0,0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | (.[0]?, .[0][0])); .))",
+            "[\"x\",0]\n[\"x\",0,0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | (.[0] // 1)); .))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// [$r] ?// $z | .[0]); .))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .); .))",
+            "[\"x\"]\n[\"x\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0]); .[0]))",
+            "[\"x\",0,0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; (. as [$q] ?// $z | .[0]); $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach (1,2) as $k (.; (. as [$q] ?// $z | .[0]); .))",
+            "[0]\n",
+            "Invalid path expression near attempt to access element 0 of [1]",
+            5,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; .; (. as [$q] ?// $z | .[0])))",
+            "[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1,2) as $i (.; .; (. as [$q] ?// $z | .[0])))",
+            "[\"x\",0]\n[\"x\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"path(.x | foreach (1) as $i (.; .[0]; (. as [$q] ?// $z | .[0])))",
+            "[\"x\",0,0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"x":[[true]]}"#,
+            r"del(.x | foreach (1) as $i (.; .; (. as [$q] ?// $z | .[0])))",
+            "{\"x\":[]}\n",
+            "",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[] as $k (.; (. as [$q] ?// $z | .[0]); .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [[1],[2]]",
+            5,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[] as $k (.; .; (. as [$q] ?// $z | .[0])))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [[1],[2]]",
+            5,
+        ),
+        (
+            r#"{"x":[true]}"#,
+            r"path(.x | reduce (1) as $i (.; (. as [$q] ?// $z | .[0])))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"[[]]",
+            r"path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [[]]",
+            5,
+        ),
+    ])
 }
 
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
