@@ -48063,8 +48063,8 @@ fn pipe_without_trailing_forwarders(stages: &[Expr]) -> &[Expr] {
 /// register unevenly -- a syntactic over-approximation, used by
 /// [`FoldRegister::resolve`] to decline carrying the register into such a body
 /// (#3145 review). A comma, a destructuring bind and the shapes this
-/// predicate cannot see inside (a fold, a call) count, since the answer must be
-/// "maybe" for those.
+/// predicate cannot see inside (a call) count, since the answer must be
+/// "maybe" for those. A fold does not (#4492): see the arm in [`fans_out_with`].
 ///
 /// A comma or call *inside* a pipe does not count either (#3770): the walk stops
 /// at an `Expr::Pipe`, which takes the register from the frame and threads it
@@ -48137,6 +48137,17 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         {
             Visit::Descend
         }
+        // #4492: a `foreach`/`reduce` is one flow, not siblings. INIT, the source, UPDATE and
+        // EXTRACT run in sequence against the frame it is entered with, and it reads the
+        // register from that frame once (`FoldRegister::enter`), so nothing in it can see the
+        // register unevenly the way a comma's two sides can. Counting it withheld the register
+        // from an inner fold's frame, whose step on a `null` accumulator was then refused as
+        // jq's own verdict, swallowed by the `try` inside it, and dropped from the stream
+        // (`foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .)`). What the fold nests
+        // (a comma in its source, a call) is its own to judge: the walk skips it, and the
+        // fold's own entry applies the rules that gate it. Inside an `isempty` operand
+        // (`patterns_fan_out` false) a fold still counts.
+        Expr::Reduce { .. } | Expr::Foreach { .. } if patterns_fan_out => Visit::Skip,
         Expr::Comma(_)
         | Expr::AsPattern { .. }
         | Expr::Reduce { .. }
@@ -142481,6 +142492,15 @@ mod touched_edge_cases_2999 {
             ("try (($w | .a), select(.a))", false),
             ("try (($w | .a), select(.a[.b]))", false),
             ("try (($w | .a), f)", true),
+            // #4492: a fold is one flow, not siblings, wherever the walk meets it above a pipe;
+            // what it nests is its own to judge. A comma that has a fold as a sibling still
+            // counts, and so does a fold inside an `isempty` operand.
+            ("foreach (1,2) as $i (1; try .a; .)", false),
+            ("reduce (1,2) as $i (1; try .a)", false),
+            ("-(foreach (1,2) as $i (1; try .a; .))", false),
+            ("try (foreach (1,2) as $i ((1,2); (.a, .b); .))", false),
+            ("(foreach (1,2) as $i (1; try .a; .), 1)", true),
+            ("isempty(foreach (1,2) as $i (1; .a; .))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");
         }

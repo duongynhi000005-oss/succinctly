@@ -708,8 +708,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `test_foreach_update_navigates_accumulator_on_untracked_null_register_4480`. Over the 68 `foreach`
   operands that start from a scalar INIT (60,411 `--stage-only` rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) ACCEPT_WRONG went 10 to 2, REFUSE_WRONG 2,007 to 2,003 and MATCH 58,338 to 58,354, with
-  no regression; the two that remain are a `foreach` nested in another fold's `UPDATE`
-  ([#4492](https://github.com/rust-works/succinctly/issues/4492)). **A recorded
+  no regression; the two that remained, a `foreach` nested in another fold's `UPDATE`, are closed by
+  [#4492](https://github.com/rust-works/succinctly/issues/4492) below. **A recorded
   divergence, in the safe direction**: a register that is
   not `null`/boolean (a pointer identity the model cannot compare), a fold that mentions a frozen
   `$var` (#3984), and an `UPDATE` that nests a `reduce`/`foreach` or a `try ... catch` around the
@@ -719,6 +719,24 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `untracked-*`) is unchanged. Over a seeded sample of 30,027 rows of the 20 `?//` fold operands
   (`--sample 30000 --seed 11`, `/usr/bin/jq` 1.7.1) #3999 moved REFUSE_WRONG 1,883 to 1,793 and
   MATCH 28,138 to 28,228, no ACCEPT_WRONG before or after, none of the 6 DIFF rows moved.
+
+  Since [#4492](https://github.com/rust-works/succinctly/issues/4492) (with
+  [#4491](https://github.com/rust-works/succinctly/issues/4491)) a fold *nested in another fold's
+  `UPDATE`* gets the same live register. `fans_out` counted any `foreach`/`reduce` as a body that may
+  split into siblings and withheld the register from the `UPDATE`'s frame, so the inner fold's caught
+  step on a `null` accumulator was refused, swallowed by the `try` inside it, and dropped:
+  `path(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .))` on `null` is jq's `["a","a"]`,
+  and `path(reduce .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .))))` raises `null (null) cannot
+  be negated`. A fold is one flow, so it no longer counts; a comma, a destructuring bind and a call
+  still do. Pinned by `test_nested_fold_in_update_follows_null_accumulator_on_live_register_4492`.
+  Over the 29 fold operands that start from a scalar INIT or a `try` (25,779 `--stage-only` rows,
+  `/usr/bin/jq` 1.7.1, against a `main` build) ACCEPT_WRONG went 2 to 0, REFUSE_WRONG 787 to 771, DIFF
+  52 to 40 and MATCH 24,938 to 24,968, with no regression; a seeded 40,027-row sample of all 391 fold
+  operands moved 14 rows, all to MATCH. **Still divergent, unchanged by it**
+  ([#4499](https://github.com/rust-works/succinctly/issues/4499)): a fold that is a sibling in a comma
+  (`(foreach (1,2) as $i (1; try .a; .), 1)` in an `UPDATE`), a `reduce` nested under `try` inside a
+  fold's `UPDATE`, a nested fold that reads an outer frozen `$var`, and `isempty(FOLD)` still lose the
+  caught step or refuse where jq answers.
 
 ## A fold over the register itself (#3790)
 
