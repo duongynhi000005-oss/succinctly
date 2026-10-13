@@ -46974,6 +46974,12 @@ fn reduce_leaves_register_in_place(input: &Expr, init: &Expr, update: &Expr) -> 
 /// entry. Kept out of [`register_movement_tracked`] itself: that predicate is also
 /// what an `and`/`or` operand and an `[E]` are judged by ([`array_contents_are_checked`]),
 /// where a `try` *is* a way for the resolver to swallow an error jq raises.
+///
+/// #4486: a `catch H` is seen through as well when `H` cannot move the register (the handler runs
+/// from the register the `try` entered with, and the fold backtracks it too), and an `isempty(g)`
+/// is admitted when `g`'s movement is one the resolver tracks, not only when `g` navigates nothing:
+/// the resolver path-checks `g` live, so what it navigates is checked as jq checks it, and jq
+/// backtracks it.
 fn fold_update_movement_tracked(update: &Expr) -> bool {
     register_movement_tracked(update)
         || match update {
@@ -46990,9 +46996,17 @@ fn fold_update_movement_tracked(update: &Expr) -> bool {
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
                 cannot_move_register(gen) && cannot_move_register(cond)
             }
-            Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen),
+            Expr::Builtin(Builtin::IsEmpty(gen)) => register_movement_tracked(gen),
             Expr::Paren(inner) | Expr::Optional(inner) => fold_update_movement_tracked(inner),
-            Expr::Try { expr, catch: None } => fold_update_movement_tracked(expr),
+            // #4486: a `catch H` whose handler cannot move the register is no different: jq
+            // restores the register to where the `try` entered whether the body raised or not,
+            // so the handler runs on the error payload from there and the fold backtracks it
+            // all the same. (A handler that is a nested `try` or any other shape
+            // `cannot_move_register` does not admit keeps the general route.)
+            Expr::Try { expr, catch } => {
+                fold_update_movement_tracked(expr)
+                    && catch.as_deref().map_or(true, cannot_move_register)
+            }
             _ => false,
         }
 }
@@ -130449,6 +130463,21 @@ mod tests {
         assert!(!fold_update_movement_tracked(
             &parse("try recurse(first(.a))").unwrap()
         ));
+        // #4486: a `catch H` is seen through when `H` moves nothing, and an `isempty` generator
+        // the resolver path-checks is admitted; a handler that navigates, or a generator it cannot
+        // check, is not.
+        assert!(fold_update_movement_tracked(
+            &parse("try isempty(.[]?) catch 1").unwrap()
+        ));
+        assert!(fold_update_movement_tracked(
+            &parse("isempty(.[]?)").unwrap()
+        ));
+        assert!(!fold_update_movement_tracked(
+            &parse("try .a catch .b").unwrap()
+        ));
+        assert!(!fold_update_movement_tracked(
+            &parse("isempty(first(.a))").unwrap()
+        ));
     }
 
     /// The filed repro, read and write: the seed re-establishes the register,
@@ -134299,9 +134328,12 @@ mod tests {
             ("reduce . as {a:$a} ?// $a (0; .)", true),
             ("reduce .a as {b:$b} (.; $b)", true),
             ("reduce (1) as [$i] (.a; .)", false),
-            ("reduce . as {a:$a} (.; try .a catch .)", false),
+            // #4486: a `catch H` UPDATE is seen through when `H` cannot move the register, as the
+            // catch-less `try` is (#3580); one whose handler navigates is not.
+            ("reduce . as {a:$a} (.; try .a catch .)", true),
             ("reduce (. as {a:$a} | .) as $k (.; .)", false),
-            ("reduce (1) as $i (.; try .a catch .)", false),
+            ("reduce (1) as $i (.; try .a catch .)", true),
+            ("reduce (1) as $i (.; try .a catch .b)", false),
         ] {
             assert_eq!(
                 leaves_register_in_place::<JqSemantics>(&parse(src).unwrap()),
