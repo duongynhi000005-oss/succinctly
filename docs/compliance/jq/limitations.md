@@ -2170,8 +2170,9 @@ is the revert that established what the other one costs.
    destructuring patterns are the same destructure and are refused too. Still accepted: the same `$x` behind
    `select($x) | ...` or a `try ... catch` around the destructure (a `.` source is accepted there as well), a navigation
    of it (`foreach ($x | .a)`), and an outer `reduce` whose own source navigates (`reduce .[]? as $it (.;
-   foreach ($x | .a) ...)`)), and a bound expression
-   that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
+   foreach ($x | .a) ...)`). Outside a fold body, a bound expression
+   that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
+   reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
    too. A bound expression that is a pipe of `.` is read since
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s third part: `(.|.) as {a:$a}` (also `(.|.|.)`) is

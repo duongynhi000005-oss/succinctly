@@ -50832,12 +50832,22 @@ fn drive_fold_source_with<S: EvalSemantics>(
             let markers = unplaced_register_markers::<S>(source, ambient);
             !markers.is_empty()
                 && !any_subexpr(source, &mut |e| matches!(e, Expr::Reduce { .. }))
-                && source_destructures_register_with(
-                    &collapse_marker_pipes(source, &markers),
-                    true,
-                    markers.clone(),
-                    false,
-                )
+                && {
+                    // The copy is only built when some pipe is headed by a listed marker.
+                    let headed = any_subexpr(source, &mut |e| {
+                        matches!(e, Expr::Pipe(stages)
+                            if stages.len() > 1
+                                && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
+                                    if markers.contains(&Rc::as_ptr(m))))
+                    });
+                    let collapsed = headed.then(|| collapse_marker_pipes(source, &markers));
+                    source_destructures_register_with(
+                        collapsed.as_ref().unwrap_or(source),
+                        true,
+                        markers,
+                        false,
+                    )
+                }
         };
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
