@@ -696,7 +696,20 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   a boolean (identical to an equal one by kind): `path(.a | 5 | reduce null as {a:$q} (null; .b))` on
   `{"a":null}` is jq's `["a"]` (it refused at `.b`), a boolean accumulator raises jq's own `Cannot index
   boolean with string "b"`, and `del`/`=` land on `.a`. Pinned by
-  `test_reduce_update_navigates_accumulator_on_untracked_null_register_4131`. **A recorded
+  `test_reduce_update_navigates_accumulator_on_untracked_null_register_4131`. Since
+  [#4480](https://github.com/rust-works/succinctly/issues/4480) (with
+  [#4446](https://github.com/rust-works/succinctly/issues/4446)) a `foreach` step is followed the same
+  way, including the `null` a step that delivered nothing leaves behind (jq moves the state out):
+  `path(1 | foreach (1,2) as $i (1; try .a; .))` on `null` is jq's `["a"]`, where step 1's `.a`
+  raised, the `try` swallowed the resolver's refusal as jq's own and step 2's navigation was refused
+  the same way, so the stream was empty -- `-(foreach ...)` never met the `null` jq raises on
+  (`null (null) cannot be negated`) and `del` of it deleted the document. `path(.a | 5 | foreach
+  (1,2) as $q (null; .b; .))` on `{"a":null}` is `["a","b"]` twice, and `del`/`=` land on it. Pinned by
+  `test_foreach_update_navigates_accumulator_on_untracked_null_register_4480`. Over the 68 `foreach`
+  operands that start from a scalar INIT (60,411 `--stage-only` rows, `/usr/bin/jq` 1.7.1, against a
+  `main` build) ACCEPT_WRONG went 10 to 2, REFUSE_WRONG 2,007 to 2,003 and MATCH 58,338 to 58,354, with
+  no regression; the two that remain are a `foreach` nested in another fold's `UPDATE`
+  ([#4492](https://github.com/rust-works/succinctly/issues/4492)). **A recorded
   divergence, in the safe direction**: a register that is
   not `null`/boolean (a pointer identity the model cannot compare), a fold that mentions a frozen
   `$var` (#3984), and an `UPDATE` that nests a `reduce`/`foreach` or a `try ... catch` around the
