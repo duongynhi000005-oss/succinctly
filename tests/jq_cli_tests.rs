@@ -133159,3 +133159,112 @@ fn test_alternative_retry_past_a_wrapped_leading_navigation_4441() -> Result<()>
         ),
     ])
 }
+
+/// #4485 (third shape, the accepted rows): a `$`-style parameter of a `def` called as a `foreach`
+/// source holds the register when the call's argument is the register (`f(.)`, `f((.|.))`), per
+/// call, so a destructure of it in the body is the source's own and raises where jq's register
+/// has moved off the emitted node. The spine walk read every parameter as not the register, so
+/// the by-value drive answered `[]` and `del` deleted the document (exit 0). An argument that is
+/// another node (`f(.a)`), the other parameter and the value-mode source keep their answers.
+/// Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_def_parameter_bound_to_the_register_4485() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(.)) as $k (.; .; .))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "{}",
+            r"(foreach (def f($x): $x as {a:$a} | .; f(.)) as $k (.; .; .)) = 9",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} ?// [$a] | .; f(.)) as $k (.; .; .))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            "{}",
+            r"del(foreach (def f($x): $x as {a:$a} ?// [$a] | .; f(.)) as $k (.; .; .))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): $x as {a:$a} | .; f((.|.))) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x; $y): $y as {a:$a} | .; f(1; .)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): def g: $x as {a:$a} | .; g; f(.)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        // Two calls to one definition: each is read with its own argument, not the first one's
+        // answer (the memo is by body).
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(.), f(1)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(1), f(.)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 1"#,
+            5,
+        ),
+        // A body read inside the definition sees its parameters, so it is read per call too.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): def g: $x as {a:$a} | .; g; f(null), f(.)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of null"#,
+            5,
+        ),
+        // On `null` the pattern's first step succeeds and the register lands on the member.
+        (
+            "null",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(.)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // Controls: an argument that is another node, and the value-mode source.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(.a)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 1"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[foreach (def f($x): $x as {a:$a} | $a; f(.)) as $k (.; .; .)]",
+            "[{\"a\":1}]\n",
+            "",
+            0,
+        ),
+    ])
+}

@@ -49975,7 +49975,7 @@ impl<'e> RegisterSpine<'e> {
     /// first `vars` spine variables and `defs` spine definitions in scope: what was bound where
     /// the definition was written.
     fn read_body(&mut self, body: &'e Expr, vars: usize, defs: usize) -> Reach {
-        self.read_body_with(body, vars, defs, &[])
+        self.read_body_with(body, vars, defs, &[], &[])
     }
 
     /// [`read_body`](Self::read_body) of a definition with `params` (#4424): each is a closure
@@ -49987,10 +49987,26 @@ impl<'e> RegisterSpine<'e> {
         vars: usize,
         defs: usize,
         params: &'e [Param],
+        args: &'e [Expr],
     ) -> Reach {
+        // #4485: a `$`-style parameter holds the register when its argument is the register
+        // (`def f($x): $x as {a:$a} | .; f(.)`). Read in the caller's scope, before the body's.
+        let holds: Vec<bool> = if params.len() == args.len() {
+            params
+                .iter()
+                .zip(args)
+                .map(|(param, arg)| param.is_dollar() && self.binds_register(arg))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let per_call = holds.iter().any(|held| *held);
         let key: *const Expr = body;
-        if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
-            return reach;
+        // The memo is by body, which only fixes the answer when no parameter holds the register.
+        if !per_call {
+            if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
+                return reach;
+            }
         }
         if self.calls == 0 {
             return self.past_budget();
@@ -50001,7 +50017,7 @@ impl<'e> RegisterSpine<'e> {
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
         let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
-        for param in params {
+        for (i, param) in params.iter().enumerate() {
             self.defs.push(SpineDef {
                 name: param.name(),
                 arity: 0,
@@ -50010,7 +50026,8 @@ impl<'e> RegisterSpine<'e> {
                 vars: 0,
             });
             if param.is_dollar() {
-                self.vars.push((param.name(), false));
+                self.vars
+                    .push((param.name(), holds.get(i).copied().unwrap_or(false)));
             }
         }
         let reach = self.reach(body);
@@ -50018,7 +50035,17 @@ impl<'e> RegisterSpine<'e> {
         self.defs.truncate(defs_base);
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
-        self.memo[at].1 = reach;
+        if params.iter().any(Param::is_dollar) {
+            // A body read inside this one (`def f($x): def g: $x as {a:$a} | .; g; ...`) can see
+            // the parameters, so its answer depends on what this call bound them to: nothing this
+            // read memoized is kept. The body itself is, when no parameter held the register.
+            self.memo.truncate(at);
+            if !per_call {
+                self.memo.push((key, reach));
+            }
+        } else {
+            self.memo[at].1 = reach;
+        }
         reach
     }
 
@@ -50257,7 +50284,7 @@ impl<'e> RegisterSpine<'e> {
                             body, vars, params, ..
                         } = self.defs[at];
                         match body {
-                            Some(body) => self.read_body_with(body, vars, at + 1, params),
+                            Some(body) => self.read_body_with(body, vars, at + 1, params, args),
                             None => Reach::Opaque,
                         }
                     }
@@ -50282,7 +50309,7 @@ impl<'e> RegisterSpine<'e> {
                 if !def.params.is_empty() && args.len() == def.params.len() =>
             {
                 let (body, params): (&'e Expr, &'e [Param]) = (&def.body, &def.params);
-                self.read_body_with(body, 0, 0, params)
+                self.read_body_with(body, 0, 0, params, args)
             }
             // A nested `foreach` does not backtrack its source; a nested `reduce` does, so it is
             // read only through a `reduce` ([`source_destructures_register`]).
