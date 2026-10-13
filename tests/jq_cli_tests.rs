@@ -81120,70 +81120,92 @@ fn test_foreach_source_pipe_head_of_a_chain_4424() -> Result<()> {
 /// while the accumulator is the whole document, so the chain's `[$a]` step raises (`del`
 /// deleted the document, `=` replaced it, `|=` wrote). When the `reduce` source cannot move the
 /// register (`(1)`), the accumulator is the register at the first step and jq answers, as it does
-/// on a document the chain never reaches (`[]`, `null`). Every jq side captured from jq 1.7.1 with
-/// `-c`; the message is pinned only as the common prefix.
+/// on a document the chain never reaches (`[]`, `null`), behind `first`/`limit`/`try`, in a nested
+/// `reduce`, over a moved foreach INIT, and over a source that yields two elements. Every jq side
+/// captured from jq 1.7.1 with `-c`; the message is pinned only as the common prefix.
 #[test]
 fn test_foreach_source_pipe_chain_in_a_reduce_update_4484() -> Result<()> {
-    const CHAIN: &str = "foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)";
-    let moved = |wrap: &str| wrap.replace("BODY", &format!("reduce .[]? as $k (.; {CHAIN})"));
-    let kept = |wrap: &str| wrap.replace("BODY", &format!("reduce (1) as $i (.; {CHAIN})"));
-    let mut rows: Vec<(String, String, String, &'static str, i32)> = Vec::new();
+    macro_rules! chain {
+        () => {
+            "foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)"
+        };
+    }
+    macro_rules! moved {
+        ($pre:literal, $post:literal) => {
+            concat!($pre, "reduce .[]? as $k (.; ", chain!(), ")", $post)
+        };
+    }
+    macro_rules! kept {
+        ($pre:literal, $post:literal) => {
+            concat!($pre, "reduce (1) as $i (.; ", chain!(), ")", $post)
+        };
+    }
+    const RAISES: &str = "Invalid path expression";
+    let mut rows: Vec<PathRow3289> = Vec::new();
     for doc in ["[true]", r#"{"a":1}"#, "[[1]]"] {
-        for wrap in ["del(BODY)", "(BODY) = 9", "(BODY) |= 9", "[path(BODY)]"] {
-            rows.push((
-                doc.to_string(),
-                moved(wrap),
-                String::new(),
-                "Invalid path expression",
-                5,
-            ));
-        }
-        // The source leaves the register on the accumulator: jq answers.
-        rows.push((
-            doc.to_string(),
-            kept("[path(BODY)]"),
-            "[[]]\n".to_string(),
-            "",
-            0,
-        ));
-        rows.push((
-            doc.to_string(),
-            kept("(BODY) = 9"),
-            "9\n".to_string(),
-            "",
-            0,
-        ));
+        rows.extend([
+            (doc, moved!("del(", ")"), "", RAISES, 5),
+            (doc, moved!("(", ") = 9"), "", RAISES, 5),
+            (doc, moved!("(", ") |= 9"), "", RAISES, 5),
+            (doc, moved!("[path(", ")]"), "", RAISES, 5),
+            // The source leaves the register on the accumulator: jq answers.
+            (doc, kept!("[path(", ")]"), "[[]]\n", "", 0),
+            (doc, kept!("(", ") = 9"), "9\n", "", 0),
+            (
+                doc,
+                concat!("[path(reduce (1,2) as $i (.; ", chain!(), "))]"),
+                "[[]]\n",
+                "",
+                0,
+            ),
+            (
+                doc,
+                concat!(
+                    "[path(reduce (1) as $i (.; reduce (1) as $j (.; ",
+                    chain!(),
+                    ")))]"
+                ),
+                "[[]]\n",
+                "",
+                0,
+            ),
+            (
+                doc,
+                concat!("[path(reduce (1) as $i (.; try (", chain!(), ")))]"),
+                "[[]]\n",
+                "",
+                0,
+            ),
+        ]);
+    }
+    // Behind `first`/`limit` the chain's first alternative still decides: jq answers where `[$a]`
+    // matches (on `{"a":1}` it raises, as the by-value drive does).
+    for doc in ["[true]", "[[1]]"] {
+        rows.extend([
+            (
+                doc,
+                concat!("[path(reduce (1) as $i (.; first(", chain!(), ")))]"),
+                "[[]]\n",
+                "",
+                0,
+            ),
+            (
+                doc,
+                concat!("[path(reduce (1) as $i (.; limit(1; ", chain!(), ")))]"),
+                "[[]]\n",
+                "",
+                0,
+            ),
+        ]);
     }
     // Nothing for the chain to reach: the `reduce` source is empty, or its element is `null`.
     for doc in ["[]", "null"] {
-        rows.push((
-            doc.to_string(),
-            moved("del(BODY)"),
-            "null\n".to_string(),
-            "",
-            0,
-        ));
-        rows.push((
-            doc.to_string(),
-            moved("(BODY) = 9"),
-            "9\n".to_string(),
-            "",
-            0,
-        ));
+        rows.extend([
+            (doc, moved!("del(", ")"), "null\n", "", 0),
+            (doc, moved!("(", ") = 9"), "9\n", "", 0),
+        ]);
     }
-    let borrowed: Vec<PathRow3289> = rows
-        .iter()
-        .map(|(doc, filter, out, msg, code)| {
-            (
-                &*Box::leak(doc.clone().into_boxed_str()),
-                &*Box::leak(filter.clone().into_boxed_str()),
-                &*Box::leak(out.clone().into_boxed_str()),
-                *msg,
-                *code,
-            )
-        })
-        .collect();
-    assert_path_rows_both_routes_3749(&borrowed)
+    assert_path_rows_both_routes_3749(&rows)
 }
 
 /// #4424 (second part): the register reaches a `foreach` source's `?//` chain through a call to a

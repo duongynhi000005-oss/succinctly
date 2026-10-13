@@ -2343,13 +2343,19 @@ is the revert that established what the other one costs.
    `del(reduce .[]? as $k (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))` on `[true]` deleted the document,
    and `=` replaced it. When the `reduce` source navigates, jq's register sits on the element while the accumulator is the
    whole document, so the chain's `[$a]` step raises; when it cannot move the register (`reduce (1) as $i (.; CHAIN)`) the
-   accumulator is the register at the first step and jq answers (`[[]]` on `[true]`). A `reduce` whose UPDATE is a
-   `foreach` now marks that step as one where `.` is the register (`foreach_update_on_register`, the way a `try` UPDATE
-   does since #4126), so the chain is placed there and answers; elsewhere in a body the walk's unplaced refusal fires.
-   Over the 243 `foreach`/`reduce` pattern operands (`--stage-only`, 206,595 rows) wrong accepts go from 1,066 to 1,045,
-   refusals jq does not make from 4,253 to 4,109, 165 rows become matches, and none is lost. Pinned by
-   `test_foreach_source_pipe_chain_in_a_reduce_update_4484`. Still accepted inside a body: a later bare alternative
-   (`. as $x ?// $y | $y as {a:$a} | .`, 28 rows, #4320's fourth part is gated to outside every fold body).
+   accumulator is the register at the first step and jq answers (`[[]]` on `[true]`). Two marks tell the cases apart, both
+   on the outermost `reduce` only: a `reduce` whose UPDATE is a `foreach` and whose source and INIT cannot move the register
+   marks the step as one where `.` is the register (`foreach_update_on_register`, as a `try` UPDATE does since #4126), so the
+   chain is placed there and answers; a `reduce` whose source navigates marks the body as one where the register is on
+   the element (`fold_body::source_moved`), and the walk's unplaced refusal then raises. A first version refused wherever the
+   walk was unplaced, and lost `reduce (1) as $i (.; reduce (1) as $j (.; CHAIN))`, `first(CHAIN)` and `limit(1; CHAIN)`
+   as the UPDATE, which jq answers. Over the 243 `foreach`/`reduce` pattern operands (`--stage-only`, 206,595 rows) wrong
+   accepts go from 1,066 to 1,045 (the 21 rows of the issue), refusals jq does not make from 4,253 to 4,109, and no match is
+   lost. Pinned by `test_foreach_source_pipe_chain_in_a_reduce_update_4484`. Still accepted inside a body: a later bare
+   alternative (`. as $x ?// $y | $y as {a:$a} | .`, 28 rows; #4320's fourth part is gated to outside every fold body);
+   the chain in a `reduce` nested under a navigating `reduce` (`reduce .[]? as $i (.; reduce (1) as $j (.; CHAIN))`, whose
+   inner body is not the marked depth); and a `foreach` source whose own INIT moves the register is placed by the resolver
+   against the marked register, which the sweep has no operand for.
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
