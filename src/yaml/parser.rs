@@ -504,6 +504,16 @@ struct Parser<'a, const HAS_CR: bool> {
     /// the one below it.
     pending_explicit_key: Option<usize>,
 
+    /// Whether the key named by [`Self::pending_explicit_key`] was a bare `?`
+    /// with no content (`?\n- a\n:\n- c`), as opposed to a key that held a
+    /// node of its own (`? k`). Only the latter rejects a same-indent `-`
+    /// line (#1104): real yq never reads such a sequence as the key's
+    /// implicit value, but the bare-`?` shapes (YAML test suite 6PBE) must
+    /// keep parsing as they do today. Meaningful only while
+    /// `pending_explicit_key` is `Some`; written only together with it, by
+    /// [`Self::set_pending_explicit_key`].
+    pending_explicit_key_empty: bool,
+
     /// Current depth of recursively-parsed constructs, capped at
     /// [`MAX_NESTING_DEPTH`] to bound call-stack growth
     nesting_depth: usize,
@@ -668,6 +678,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             in_document: false,
             document_start_bp_pos: 0,
             pending_explicit_key: None,
+            pending_explicit_key_empty: false,
             nesting_depth: 0,
             json_strict: false,
             #[cfg(debug_assertions)]
@@ -2093,6 +2104,39 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
         // Close is 0, which is default, so just increment position
         self.bp_pos += 1;
+    }
+
+    /// Record that the mapping at `owner_depth` has an explicit key still
+    /// waiting for its value, and whether that key was a bare `?`
+    /// ([`Self::pending_explicit_key_empty`]). The one place that field pair
+    /// is written, so a new site cannot set the depth and inherit a stale
+    /// emptiness (#1104).
+    #[inline]
+    fn set_pending_explicit_key(&mut self, owner_depth: usize, empty: bool) {
+        self.pending_explicit_key = Some(owner_depth);
+        self.pending_explicit_key_empty = empty;
+    }
+
+    /// Whether a `-` line at `indent` would land directly after an explicit
+    /// key that held a node of its own (`? k`, `? a: b`, `? - a`, `? [a]`) in
+    /// the mapping at that indent, with the key's `:` value not yet seen.
+    ///
+    /// Real yq rejects it ("did not find expected key"): an explicit key's
+    /// value must be introduced by `:`, unlike an ordinary `key:` entry,
+    /// which accepts a same-indent sequence as its implicit value (#1104).
+    /// The owner is found by depth rather than as the top of the stack: a key
+    /// that opens a container of its own (a compact mapping, a block
+    /// sequence) leaves that frame above the owner until the `-` line closes
+    /// it. A bare `?` is excluded -- its same-indent sequence is the key's
+    /// own content (YAML test suite 6PBE) and must keep parsing.
+    fn explicit_key_with_content_rejects_sequence_at(&self, indent: usize) -> bool {
+        let Some(owner_depth) = self.pending_explicit_key else {
+            return false;
+        };
+        !self.pending_explicit_key_empty
+            && owner_depth > 0
+            && self.indent_stack.get(owner_depth - 1) == Some(&indent)
+            && self.type_stack.get(owner_depth - 1) == Some(&NodeType::Mapping)
     }
 
     /// Whether the mapping on top of `indent_stack` right now is the owner
@@ -4952,7 +4996,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.set_ib();
                 self.write_bp_open();
                 self.write_bp_close();
-                self.pending_explicit_key = Some(owner_depth);
+                self.set_pending_explicit_key(owner_depth, true);
                 return Ok(());
             }
 
@@ -4981,7 +5025,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.write_bp_close();
                     // Restore position for main loop to process `: value`
                     self.pos = saved_pos;
-                    self.pending_explicit_key = Some(owner_depth);
+                    self.set_pending_explicit_key(owner_depth, true);
                     return Ok(());
                 }
                 // Other content at same/lower indent - empty key (null) with implicit null value
@@ -4992,7 +5036,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_close();
                 // Restore position for main loop to process next content
                 self.pos = saved_pos;
-                self.pending_explicit_key = Some(owner_depth);
+                self.set_pending_explicit_key(owner_depth, true);
                 return Ok(());
             }
 
@@ -5144,7 +5188,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
 
         // Mark that we have an explicit key waiting for a value
-        self.pending_explicit_key = Some(owner_depth);
+        self.set_pending_explicit_key(owner_depth, false);
 
         Ok(())
     }
@@ -7790,6 +7834,16 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // own additional #325/#485 out-dented-continuation
                 // tolerance this check must not flag as ambiguous.
                 self.check_mapping_under_mapping_gap(indent, true)?;
+                // An explicit key's value must be introduced by `:`, so a
+                // same-indent `-` line right after a key that held a node
+                // is an error, not that key's implicit value (#1104) --
+                // see `explicit_key_with_content_rejects_sequence_at`.
+                if self.explicit_key_with_content_rejects_sequence_at(indent) {
+                    return Err(self.err_unexpected_char(
+                        self.pos,
+                        "a sequence cannot be an explicit key's implicit value",
+                    ));
+                }
                 self.parse_sequence_item(indent)?;
             }
             // Tab included in both arms below: the sibling `-` arm just above

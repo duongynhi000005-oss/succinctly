@@ -578,6 +578,34 @@ slice written out in full (`(.[$i:]) | .[0]`) still does. It is an input-validat
 not an evaluator rule, and the same as `.[0]` and `length`; the table and the reasoning are in
 [jq limitations § A fused slice read does not validate the rest of the range](../jq/limitations.md#a-fused-slice-read-does-not-validate-the-rest-of-the-range-4195).
 
+### An explicit `?` key next to a block sequence — rejected when the key has content; three shapes remain (#1104)
+
+Real yq reads a block sequence at a mapping's indent as the implicit value of an ordinary
+`key:` entry, but never as the value of an explicit key: `? k` / `- item` fails with
+`did not find expected key`. succinctly now fails the same way for every key that holds a
+node on the `?` line (`? k`, `? "k"`, `? [a]`, `? a: b`, `? - a`), with its own message
+(`a sequence cannot be an explicit key's implicit value`).
+
+Still different, each live-verified against yq v4.53.3:
+
+```bash
+$ printf -- '---\n?\n- a\n- b\n:\n- c\n- d\n' | yq -o=json -I=0 .
+{"":["c","d"]}                       # succinctly: {"":["a","b","c","d"]}
+$ printf '?\n- item\n' | yq -o=json -I=0 .
+{"":null}                            # succinctly: {"":["item"]}
+$ printf '?\n  k\n- item\n' | yq -o=json -I=0 .
+Error: ... did not find expected key # succinctly: {"k":["item"]}
+```
+
+- **A bare `?` followed by a same-indent sequence** (YAML test suite 6PBE) keeps parsing, with
+  the sequence read as the value. Neither tool matches the spec (`{["a","b"]: ["c","d"]}`), and
+  rejecting it here would stop the conformance suite's 6PBE parsing at all.
+- **A key whose content starts on the next line** (`?` / `  k`) never records a pending key (#4532), so
+  the rejection does not reach it, and `?` / `  k` / `x: 1` loses the `x: 1` entry
+  (`{"k":"x"}` where yq answers `{"k":null,"x":1}`).
+- **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is dropped
+  silently where yq errors (#4530); the next-line key form is #4532.
+
 ## Open divergences (bugs, not decisions)
 
 Representative cases, each live-verified. These are gaps to close, listed here so they are
