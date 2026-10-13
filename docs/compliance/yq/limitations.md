@@ -3794,6 +3794,16 @@ document (`del(.a[].b[0:2].x)` over `a: [[1]]`, where `.b` is applied to an arra
 type-checked, so it no-ops where yq fails on `.b`. A `.[]` *after* the run
 (`del(.a[0:2][].x)`) is also still a no-op: [#4542](https://github.com/rust-works/succinctly/issues/4542).
 
+A comma-grouped `del()` with an `.[]` branch no longer raises on a non-null scalar
+([#4464](https://github.com/rust-works/succinctly/issues/4464)): `5 | del(.a, .[])` and
+`del(.[], .[])` are `5`, as in yq, and `a: 5` with `del(.a[], .b)` is unchanged. The path resolver
+that backs this treats `.[]` over a non-null scalar as yielding nothing in yq mode everywhere,
+so `--jq-extensions` `path(.[])` over `5` is empty rather than jq's raise. A `null` still raises
+(`null | del(.b, .[])` is `[]` in yq, and `del(.a[][], .c)` over `a: [null, [1]]` is `[[], []]`):
+the resolver cannot tell a stored `null` from the `null` placeholder an out-of-range index or
+a missing key reads as, and dropping the branch for the placeholder would be silently wrong
+(`del(.[-1], .[4][])`).
+
 ### `.[]` over a non-container is now a silent no-op — two residual gaps remain (#2346)
 
 Real yq's `.[]` (iterate) produces zero output — not an error — for *any* non-container
