@@ -81603,6 +81603,92 @@ fn test_foreach_source_later_bare_alternative_in_a_reduce_update_4507() -> Resul
     assert_path_rows_both_routes_3749(&rows)
 }
 
+/// #4514: a `$x` bound to the register and held behind a pipe that ends in it (`$x | .`, `. | $x`)
+/// or an `if` whose branches are both it is the register, as a bare `$x` is: the `foreach`
+/// source's destructure steps off a node the pattern's first step then checks, and raises on a
+/// document it cannot index. The by-value drive answered the root (`path` printed `[]`, `del`
+/// returned `null`, `|=` wrote). On `null` the first step succeeds and the register moves onto
+/// `.a`, so the path is `["a"]`. Contrasts: a pipe that ends in a navigation, and an `if` with a
+/// branch that is not the register, raise on the other node. Every jq side captured from jq
+/// 1.7.1 with `-c`; the message is pinned only as the common prefix.
+#[test]
+fn test_foreach_source_held_var_behind_a_pipe_or_if_4514() -> Result<()> {
+    const RAISES: &str = "Invalid path expression";
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{}",
+            r"path(. as $x | foreach (($x|.) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"del(. as $x | foreach (($x|.|.) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"(. as $x | foreach ((.|$x) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(. as $x | foreach ((if $x then $x else . end) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"[path(. as $x | foreach ((if true then $x else .a end) as {a:$a} | .) as $k (.; .; .))]",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"[path(. as $x | foreach (($x|.a) as {a:$a} | .) as $k (.; .; .))]",
+            "",
+            RAISES,
+            5,
+        ),
+        // On `null` the first step succeeds and the register moves onto `.a`.
+        (
+            "null",
+            r"path(. as $x | foreach (($x|.) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(. as $x | foreach ((.|$x) as {a:$a} | .) as $k (.; .; .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach ((if $x then $x else . end) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(. as $x | foreach (($x|.|.) as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4424 (second part): the register reaches a `foreach` source's `?//` chain through a call to a
 /// `def` with parameters, a comma that is the register on only some outputs (`(., 1) | CHAIN`), or
 /// a nested `foreach` over `.` whose accumulator is the register. The spine walk read each as

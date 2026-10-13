@@ -49839,6 +49839,16 @@ impl<'e> RegisterSpine<'e> {
         }
         match peel_value_wrappers(e) {
             Expr::Var(name) => self.holds_register(name),
+            // #4514: a pipe ends in what its last stage that is not `.` yields, so one that ends
+            // in a held variable (`$x | .`, `. | $x`) is that variable, whatever came before.
+            Expr::Pipe(stages) if self.pipe_ends_in_held_var(stages) => true,
+            // #4514: the condition runs as a subexpression, so an `if` is the register when both
+            // branches are.
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.binds_register(then_branch) && self.binds_register(else_branch),
             Expr::Comma(items) if items.iter().any(binds_variable) => {
                 items.iter().all(|item| self.binds_register(item))
             }
@@ -49866,6 +49876,24 @@ impl<'e> RegisterSpine<'e> {
             _ if self.through_reduce => yields_only_the_register(unwrap_bind_source(e)),
             _ => bind_hands_on_the_register(unwrap_bind_source(e)),
         }
+    }
+
+    /// Whether the last stage of a pipe that is not `.` is a variable the spine bound to the
+    /// register (#4514): the value of such a pipe is the variable's, as the stages before it only
+    /// feed an input it ignores.
+    fn pipe_ends_in_held_var(&self, stages: &'e [Expr]) -> bool {
+        stages
+            .iter()
+            .rev()
+            .find(|stage| !is_identity_stage(stage))
+            .is_some_and(|last| match marker_head(last) {
+                // A `$x` bound outside the source that is the register at the fold (#4320).
+                Some(marker) => self.markers.contains(&Rc::as_ptr(marker)),
+                None => matches!(
+                    peel_value_wrappers(last),
+                    Expr::Var(name) if self.holds_register(name)
+                ),
+            })
     }
 
     /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
