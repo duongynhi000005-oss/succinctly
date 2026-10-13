@@ -73979,16 +73979,16 @@ fn test_map_f_in_path_position_raises_where_jq_does_3865() -> Result<()> {
             "",
             0,
         ),
-        // Pinned refuse-only: under a `?//` destructuring alternative the entry is untracked,
-        // so the live `.[]` raises a refusal the retry does not catch, where jq's own
-        // catchable error retries the second alternative and writes nothing (the `.a` twin
-        // refused the same way before #3865).
+        // Under a `?//` destructuring alternative the entry is untracked, so the live `.[]`
+        // raises a refusal; it was pinned refuse-only (the retry did not take it) where jq's own
+        // catchable error retries the second alternative and writes nothing. Since #4487 the
+        // retry takes it and the row answers as jq does.
         (
             r#"[{"a":1}]"#,
             r"del(. as [$q] ?// $q | ([map(.a)] and (.a)?) | .c)",
+            "[{\"a\":1}]\n",
             "",
-            r#"Invalid path expression near attempt to iterate through [{"a":1}]"#,
-            5,
+            0,
         ),
         // Answers: `f` only navigates the elements it is given, or runs on none.
         (r#"[{"a":1}]"#, r"path(map(.a) | empty)", "", "", 0),
@@ -80593,7 +80593,7 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "true",
             r"path(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
             "",
-            "Invalid path expression",
+            "Cannot index boolean with string \"a\"",
             5,
         ),
         (
@@ -80607,7 +80607,7 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "[true]",
             r"(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) = 9",
             "",
-            "Invalid path expression",
+            "Cannot index array with string \"a\"",
             5,
         ),
         (
@@ -80663,14 +80663,14 @@ fn test_foreach_source_later_bare_alternative_destructure_4320() -> Result<()> {
             "Invalid path expression",
             5,
         ),
-        // The recorded divergence, in the safe direction: jq answers `{"a":true}` here (the `try`
-        // catches the retry's error); the routed source refuses.
+        // jq answers `{"a":true}` here (the `try` catches the retry's error). The routed source
+        // refused this until #4487 let the bind's own walk retry the next alternative.
         (
             r#"{"a":true}"#,
             r"del(.a? as $y | try (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)) | try ($y | .b))",
+            "{\"a\":true}\n",
             "",
-            "Invalid path expression",
-            5,
+            0,
         ),
         // Controls: the first bare alternative's destructure, a source that never destructures,
         // a destructure of another node, and the value-mode source.
