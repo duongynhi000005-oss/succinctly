@@ -708,8 +708,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `test_foreach_update_navigates_accumulator_on_untracked_null_register_4480`. Over the 68 `foreach`
   operands that start from a scalar INIT (60,411 `--stage-only` rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) ACCEPT_WRONG went 10 to 2, REFUSE_WRONG 2,007 to 2,003 and MATCH 58,338 to 58,354, with
-  no regression; the two that remain are a `foreach` nested in another fold's `UPDATE`
-  ([#4492](https://github.com/rust-works/succinctly/issues/4492)). **A recorded
+  no regression; the two that remained were a `foreach` nested in another fold's `UPDATE`, closed by
+  [#4492](https://github.com/rust-works/succinctly/issues/4492) (with
+  [#4491](https://github.com/rust-works/succinctly/issues/4491)): `fans_out` counted a fold as a body
+  that splits into siblings and withheld the live register from the inner fold's frame, so the
+  inner fold's caught step vanished (`path(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .);
+  .))` on `null` is jq's `["a","a"]`; `path(reduce .a? as $k (0; -(foreach (1,2) as $i (1; try .a;
+  .))))` raises `null (null) cannot be negated`). Pinned by
+  `test_nested_fold_in_update_follows_null_accumulator_on_live_register_4492`. Over the 29 fold
+  operands that start from a scalar INIT or a `try` (25,779 `--stage-only` rows, `/usr/bin/jq` 1.7.1,
+  against a `main` build) ACCEPT_WRONG went 2 to 0, REFUSE_WRONG 787 to 771, DIFF 52 to 40 and MATCH
+  24,938 to 24,968, with no regression; a seeded 40,027-row sample of all 391 fold operands moved 14
+  rows, all to MATCH. **A recorded
   divergence, in the safe direction**: a register that is
   not `null`/boolean (a pointer identity the model cannot compare), a fold that mentions a frozen
   `$var` (#3984), and an `UPDATE` that nests a `reduce`/`foreach` or a `try ... catch` around the

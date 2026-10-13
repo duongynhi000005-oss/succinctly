@@ -67946,6 +67946,166 @@ fn test_foreach_update_navigates_accumulator_on_untracked_null_register_4480() -
     ])
 }
 
+/// #4492, #4491: a fold nested in another fold's `UPDATE` follows a `null`/boolean accumulator
+/// against the live register too (the #4480 widening). `fans_out` read a `foreach` or `reduce` body as "maybe
+/// splits into siblings" and withheld the register from the UPDATE's frame, so the inner fold's
+/// step on a `null` accumulator was refused, the `try` inside it swallowed the refusal as jq's
+/// own, and the step vanished: `path(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .);
+/// .))` on `null` printed nothing where jq prints `["a","a"]` (#4491), and
+/// `path(reduce .a? as $k (0; -(foreach ...)))` answered `[]` where jq raises `null (null)
+/// cannot be negated`. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_nested_fold_in_update_follows_null_accumulator_on_live_register_4492() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The filed rows (#4491): the inner fold's caught step still emits once per inner element, at the register the outer `.a?` left.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (foreach (1,2) as $i (1; try .a; .)); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        // A negation of the inner fold meets the `null` jq raises on, whatever the outer fold is.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        (
+            "null",
+            r"del(foreach .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .))))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        // An outer source that computes, an outer `reduce`, and an inner `reduce`.
+        (
+            "null",
+            r"path(foreach (1) as $k (0; (foreach (1,2) as $i (1; try .a; .)); .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (1) as $k (0; (foreach (1,2) as $i (null; .a; .)); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (foreach (1,2) as $i (null; .a; .)); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k (0; (foreach (1,2) as $i (null; .a; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k (0; (reduce (1,2) as $i (null; .a))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (reduce (1,2) as $i (1; try .a)); .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // The write side lands on the register the outer source reached.
+        (
+            "null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .)) = 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        // A construction around the inner fold is still refused, as jq does.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; [foreach (1,2) as $i (1; try .a; .)]; .))",
+            "",
+            "Invalid path expression with result [null]",
+            5,
+        ),
+        // Controls. A register that is not `null`/boolean is a pointer identity this model cannot compare, and a boolean one raises or yields nothing as jq does.
+        (
+            r#"{"a":0}"#,
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":0}"#,
+            r"path(foreach .a as $k (0; foreach (1,2) as $i (null; .a; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(foreach .a as $k (0; -(foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(foreach .a as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach (1) as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
 /// emission carries is where the pattern walk and `UPDATE` left it. It is the entry's when the
 /// step took no walk step (a bare `$var`, or the bare alternative a failed destructure's
