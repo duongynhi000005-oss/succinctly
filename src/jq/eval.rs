@@ -57830,11 +57830,14 @@ fn del_target_is_effect_free(target: &Expr) -> bool {
     })
 }
 
+/// The one-literal trim builtin and the literals of a [`trim_generator_literals`] match.
+type TrimGenerator<'e> = (fn(Box<Expr>) -> Builtin, Vec<&'e Expr>);
+
 /// The literals a `ltrimstr(A, B, ...)` / `rtrimstr(A, B, ...)` argument is a comma of,
 /// in the order jq runs the argument's outputs, with the one-literal builtin to rebuild
 /// them with (#4444). `None` unless the argument is a comma (nested or parenthesised)
 /// of literals and nothing else.
-fn trim_generator_literals(expr: &Expr) -> Option<(fn(Box<Expr>) -> Builtin, Vec<&Expr>)> {
+fn trim_generator_literals(expr: &Expr) -> Option<TrimGenerator<'_>> {
     fn collect<'e>(arg: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
         match unwrap_paren(arg) {
             literal @ Expr::Literal(_) => {
