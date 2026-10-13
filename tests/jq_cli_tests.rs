@@ -67685,6 +67685,51 @@ fn test_foreach_update_navigates_accumulator_on_untracked_null_register_4480() -
             "",
             0,
         ),
+        // A destructuring source moves the step's register by its walk, which is not the live
+        // one; a `?//` chain's alternative that binds a plain variable keeps it; a consumer that
+        // stops early reads the same stream.
+        (
+            "null",
+            r"path(1 | foreach (1,2) as [$x] (1; try .a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(1 | foreach ([1],[2]) as [$x] (null; .a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $a ?// [$a] (1; try .a; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | first(foreach (1,2,3) as $i (1; try .a; .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | limit(1; foreach (1,2,3) as $i (null; .a; .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | limit(2; foreach (1,2,3,4) as $i (1; try .a; .)))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
         // The write side lands on the register.
         (
             "null",

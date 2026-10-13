@@ -55313,7 +55313,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // jq's own, a `try` caught it, and the step vanished -- so a
                         // consumer of the stream never saw the output jq raises on
                         // (`-(foreach ...)`, #4480). jq mode only: on the write side the
-                        // widening turns a refusal into a write where yq no-ops.
+                        // widening turns a refusal into a write where yq no-ops. Unlike
+                        // `resolve_reduce`'s, it is not gated on the UPDATE definitely
+                        // navigating: `foreach` emits from inside the loop, so a body that
+                        // computes (`.`, `5`, `.a // 5`) must also state its output against
+                        // the register an equal `null`/boolean accumulator is on, and the
+                        // stage's own emission check judges what UPDATE then yields.
                         let live_step = (S::TAG == EvalTag::Jq && is_null_or_bool(&entry_state))
                             .then(|| active_reg.trackable_at_live_null_bool())
                             .flatten()
