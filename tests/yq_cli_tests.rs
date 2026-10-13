@@ -58038,6 +58038,25 @@ mod yq_text_equality_2785 {
         Ok(())
     }
 
+    /// `min_by`/`max_by` are not yq builtins; the gated extensions follow jq, which reads an absent key as
+    /// `null`, so the key scope of #4054 must not reach them on either route: the document (cursor route)
+    /// and a computed array agree, and the absent key ties with the explicit `null`.
+    #[test]
+    fn min_by_and_max_by_keep_jqs_absent_key_as_null_on_both_routes_4054() -> Result<()> {
+        let doc = "recs:\n  - {k: 3, n: x}\n  - {k: null, n: w}\n  - {n: u}\n";
+        for (filter, want) in [
+            (".recs | min_by(.k) | .n", r#""w""#),
+            (".recs | max_by(.k) | .n", r#""x""#),
+            ("[.recs[] | .] | min_by(.k) | .n", r#""w""#),
+            ("[.recs[] | .] | max_by(.k) | .n", r#""x""#),
+        ] {
+            let (stdout, code) =
+                run_yq_stdin(filter, doc, &["--jq-extensions", "-o=json", "-I=0"])?;
+            assert_eq!((stdout.trim(), code), (want, 0), "{filter}");
+        }
+        Ok(())
+    }
+
     /// #2799 (part 3): real yq's `sort`/`sort_by` use `sortableNodeArray.compare` and Go's
     /// `sort.Stable`: `null` first, bools next, two integers numerically, two numbers as floats,
     /// otherwise the node texts byte-wise (a container's is empty, so containers tie and sort

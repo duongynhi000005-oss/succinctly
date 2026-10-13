@@ -19262,8 +19262,9 @@ fn builtin_flatten_depth<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// `ReadOnlyClone`, as it does an assignment's right side (#2470), so a key read that finds
 /// nothing is no node at all. The element's key list is shorter by that output rather than
 /// holding a `null`: `[{"k":3},{"k":null},{}] | sort_by(.k)` puts `{}` first, with an empty key,
-/// where a `null` key ties with the explicit `null`. `None` outside yq mode.
-fn by_key_scope<S: EvalSemantics>() -> Option<yq_read_only_context::Guard> {
+/// where a `null` key ties with the explicit `null`. `None` outside yq mode. Not for `min_by`/
+/// `max_by`: yq has neither, and the gated extensions follow jq.
+pub(crate) fn by_key_scope<S: EvalSemantics>() -> Option<yq_read_only_context::Guard> {
     S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(yq_read_only_context::enter)
 }
 
