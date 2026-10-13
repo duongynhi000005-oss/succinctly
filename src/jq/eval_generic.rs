@@ -23640,6 +23640,7 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
 /// filter evaluation applies (#1344). An `input`/`inputs` in the filter on a
 /// live queue still goes to `eval.rs`'s producer, the only evaluator with the
 /// native arm for it.
+#[inline(never)]
 fn each_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
     filter: &Expr,
     value: V,
@@ -23708,6 +23709,26 @@ fn each_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
         }
     }
     Flow::Exhausted
+}
+
+/// [`each_paths_filter_generic`] collected, out of line so
+/// [`eval_builtin_in`]'s own native frame -- which ADR-0025's recursion floor
+/// is read against -- does not carry this arm's locals (the `r(12000; 7)` row of
+/// `test_literal_dollar_argument_matches_jq_3260` failed under coverage's fatter
+/// frames when they lived in the match).
+#[inline(never)]
+fn collect_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
+    filter: &Expr,
+    value: V,
+    cursor: Option<V::Cursor>,
+    optional: bool,
+) -> GenericResult<V> {
+    let mut items: Vec<GenericItem<V>> = Vec::new();
+    let flow = each_paths_filter_generic::<S, V>(filter, value, cursor, optional, &mut |item| {
+        items.push(item);
+        Demand::Continue
+    });
+    collected_items_result::<_, S>(items, flow)
 }
 
 /// Native `Builtin::Has` arm for the generic evaluator (#1739): checks
@@ -32392,13 +32413,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
         // so the two routes cannot disagree on a duplicate key. jq mode skips
         // the guard and reaches the wildcard bridge as before.
         Builtin::PathsFilter(filter) if !S::COLLAPSE_DUPLICATE_KEYS => {
-            let mut items: Vec<GenericItem<V>> = Vec::new();
-            let flow =
-                each_paths_filter_generic::<S, V>(filter, value, cursor, optional, &mut |item| {
-                    items.push(item);
-                    Demand::Continue
-                });
-            collected_items_result::<_, S>(items, flow)
+            collect_paths_filter_generic::<S, V>(filter, value, cursor, optional)
         }
 
         // The `is*` family reads through `tagged_type_name` rather than
