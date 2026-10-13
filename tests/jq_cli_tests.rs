@@ -135365,6 +135365,21 @@ fn test_reduce_source_destructuring_a_fresh_value_residual_shapes_4522() -> Resu
             NEAR_A,
             5,
         ),
+        // One closure-taking `def` called twice: each call reads its own argument, in either order.
+        (
+            DOC,
+            r"[path(reduce (def g(x): x as {a:$a} | .; g(.), g({a:1})) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def g(x): x as {a:$a} | .; g({a:1}), g(.)) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
         // INIT is a path expression: the source raises whatever INIT is.
         (
             DOC,
@@ -135414,6 +135429,36 @@ fn test_reduce_source_destructuring_a_fresh_value_residual_shapes_4522() -> Resu
             DOC,
             r"[path(reduce (def f: {a:1}; f as $x | . as {a:$a} | .) as $k (.; .))]",
             "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g(x): x as {a:$a} | .; g(.), g(.)) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // A non-trackable INIT (`tostring`) in value and path position, which jq answers or
+        // raises exactly as for `.`.
+        (
+            DOC,
+            r"[reduce (def f: {a:1}; f as {a:$a} | .) as $k (tostring; .)]",
+            "[\"{\\\"a\\\":false,\\\"b\\\":null}\"]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r#"try path(reduce (def f: {a:1}; f as {a:$a} | .) as $k (tostring; .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .))))",
+            "{\"a\":false,\"b\":null}\n",
             "",
             0,
         ),

@@ -50017,13 +50017,12 @@ struct SpineDef<'e> {
     vars: usize,
     /// For a closure parameter in a `fresh_only` walk, its argument and the scope of the call that
     /// passed it (#4522): a call to the parameter reads the argument there, not in the callee's.
-    closure: Option<Rc<ClosureScope<'e>>>,
+    closure: Option<(&'e Expr, Rc<CallerScope<'e>>)>,
 }
 
-/// A closure argument with the spine variables and definitions in scope where it was passed
-/// ([`SpineDef::closure`]).
-struct ClosureScope<'e> {
-    arg: &'e Expr,
+/// The spine variables and definitions in scope where a call passed its closure arguments, shared
+/// by all of them ([`SpineDef::closure`]).
+struct CallerScope<'e> {
     defs: Vec<SpineDef<'e>>,
     vars: Vec<(&'e str, bool)>,
 }
@@ -50080,12 +50079,12 @@ impl<'e> RegisterSpine<'e> {
     /// `read` of a closure parameter's argument, in the scope of the call that passed it (#4522).
     fn in_closure_scope<R>(
         &mut self,
-        closure: &ClosureScope<'e>,
+        (arg, scope): &(&'e Expr, Rc<CallerScope<'e>>),
         read: impl FnOnce(&mut Self, &'e Expr) -> R,
     ) -> R {
-        let defs = core::mem::replace(&mut self.defs, closure.defs.clone());
-        let vars = core::mem::replace(&mut self.vars, closure.vars.clone());
-        let result = read(self, closure.arg);
+        let defs = core::mem::replace(&mut self.defs, scope.defs.clone());
+        let vars = core::mem::replace(&mut self.vars, scope.vars.clone());
+        let result = read(self, arg);
         self.defs = defs;
         self.vars = vars;
         result
@@ -50513,7 +50512,12 @@ impl<'e> RegisterSpine<'e> {
         // a call that binds one, and every body read inside it (a nested `def g` sees the
         // parameter), is read afresh, with a recursive call taken to hand the register on as the
         // memo's placeholder does. Bodies read outside such a call are memoized as before.
-        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held);
+        // #4522: and a call whose closure arguments the `fresh_only` walk reads, which differ per call
+        // (`g(.)` and `g({a:1})` share one body).
+        let reads_closures = self.fresh_only
+            && params.len() == args.len()
+            && params.iter().any(|param| !param.is_dollar());
+        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held) || reads_closures;
         if held_scope {
             if self.held.contains(&key) {
                 return Reach::HandsOn;
@@ -50531,25 +50535,22 @@ impl<'e> RegisterSpine<'e> {
         } else {
             self.memo.push((key, Reach::HandsOn));
         }
-        let (caller_defs, caller_vars) = if self.fresh_only && !params.is_empty() {
-            (self.defs.clone(), self.vars.clone())
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let caller = reads_closures.then(|| {
+            Rc::new(CallerScope {
+                defs: self.defs.clone(),
+                vars: self.vars.clone(),
+            })
+        });
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
         let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
         for (i, param) in params.iter().enumerate() {
             // #4522: a closure parameter of a `fresh_only` walk reads its argument in the caller's
             // scope, which is this one before the callee's definitions replaced it.
-            let closure = (self.fresh_only && !param.is_dollar() && params.len() == args.len())
-                .then(|| {
-                    Rc::new(ClosureScope {
-                        arg: &args[i],
-                        defs: caller_defs.clone(),
-                        vars: caller_vars.clone(),
-                    })
-                });
+            let closure = caller
+                .as_ref()
+                .filter(|_| !param.is_dollar())
+                .map(|scope| (&args[i], Rc::clone(scope)));
             self.defs.push(SpineDef {
                 name: param.name(),
                 arity: 0,
