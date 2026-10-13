@@ -3338,14 +3338,20 @@ expression form and the array-literal-keys form), not a gap after all. `keys`/
 live-confirmed gap -- `keys[-5]`/`keys_unsorted[-5]` silently answered `null` instead of
 raising, since each already walks (or already knows) the whole container's length to
 resolve a negative index at all, so the check now rides along for free, the same shape
-as every other fix in this section. Three more copies remain genuinely unverified --
-`path()`'s own walker (`navigate_static_component`, `src/jq/eval.rs`; real yq's `path()`
-turns out to reject essentially any bracket-index argument outright, regardless of sign,
-so what "fixed" even means here needs its own grammar investigation first),
-`get_value_at_path` (`src/jq/eval.rs`), and `getpath`'s own path-array walk
-(`resolve_read_index`/`getpath_walk_owned`, `src/jq/eval.rs`; jq-only syntax, so this
-only matters under `--jq-extensions`) -- filed as
-[#2335](https://github.com/rust-works/succinctly/issues/2335).
+as every other fix in this section. Three more copies were left over, and
+[#2335](https://github.com/rust-works/succinctly/issues/2335) settled them: `path()`'s own
+walker (`navigate_static_component`, `src/jq/eval.rs`) is not reached by yq's grammar (real yq
+rejects every `path(<expr>)` form as `bad expression`, so `path(expr)` is gated behind
+`--jq-extensions`, and `.a.b | path` takes no argument); `get_value_at_path` only ever sees
+document-harvested or gated paths and cannot panic; and `getpath`'s own path-array walk
+(`resolve_read_index`/`getpath_walk_owned`) keeps jq's `null` under `--jq-extensions`, the
+flag being the jq-compatible surface (an extension only has to leave filters the reference
+accepts alone -- ADR-0018 rule 5). What #2335 did change is the **write side**: a write through
+a still-negative index (`.a.b[-5] = 9`, `|=`, `+=`, `*=`, a deeper path, a comma target,
+`setpath`, an index reached through an auto-vivified `null`) now says `index [-5] out of range,
+array size is 3` as yq does (it said jq's `Out of bounds negative array index`), and `?` does not
+suppress it. A float key still differs in wording (`.a.b[-5.5] = 1` is
+`cannot index array with '-5.5'` in yq).
 `del()`/`delpaths()` silently no-op on this shape instead of raising at all (more severe than
 a suppression gap -- a missing error, not a differently-worded one) -- filed separately as
 [#2268](https://github.com/rust-works/succinctly/issues/2268). `eval_stage_with_path_context`'s

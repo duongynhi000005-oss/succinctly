@@ -857,7 +857,10 @@ impl EvalError {
     /// (suppressible) navigation failure is `set_path`'s `Expr::Optional`
     /// arm in `eval.rs`.
     pub fn is_write_time_application_error(&self) -> bool {
-        self.message == Self::OUT_OF_BOUNDS_NEGATIVE_INDEX
+        // yq words the same refusal after the index as written (#2335); it is just as
+        // unsuppressible, so it is named here rather than left to the read side raising first.
+        self.is_yq_negative_index_error()
+            || self.message == Self::OUT_OF_BOUNDS_NEGATIVE_INDEX
             || self.message == Self::SLICE_ASSIGN_NON_ARRAY
             || self.message == Self::CANNOT_UPDATE_STRING_SLICES
             || self.message == Self::CANNOT_UPDATE_ARRAY_INDEX_OF_ARRAY

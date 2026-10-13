@@ -12392,7 +12392,7 @@ fn owned_assign_step<S: EvalSemantics>(
             Some(match key {
                 StepKey::Field(name) => set_field(state, name.into_owned(), new_value)
                     .map_err(|_| unreachable_owned_assign_write()),
-                StepKey::Index(idx) => set_index(state, idx, new_value)
+                StepKey::Index(idx) => set_index(state, idx, new_value, S::TAG == EvalTag::Yq)
                     .unwrap_or_else(|| Err(unreachable_owned_assign_write())),
             })
         }
@@ -33404,10 +33404,13 @@ fn set_index(
     root: &mut OwnedValue,
     idx: i64,
     new_value: OwnedValue,
+    yq_mode: bool,
 ) -> Option<Result<(), EvalError>> {
     autovivify_array(root);
     match root {
-        OwnedValue::Array(arr) => Some(write_index(arr, idx).map(|slot| *slot = new_value)),
+        OwnedValue::Array(arr) => {
+            Some(write_index(arr, idx, yq_mode).map(|slot| *slot = new_value))
+        }
         _ => None,
     }
 }
@@ -33431,8 +33434,12 @@ fn autovivify_array(root: &mut OwnedValue) {
 /// `optional`/`here` flag at any call site; only `set_path`'s
 /// `Expr::Optional` arm ever needs to tell it apart from a suppressible
 /// error, via [`EvalError::is_write_time_application_error`] (#498, #1303).
-fn write_index(arr: &mut Vec<OwnedValue>, idx: i64) -> Result<&mut OwnedValue, EvalError> {
-    let actual_idx = resolve_setpath_index(&OwnedValue::Int(idx), arr.len())?;
+fn write_index(
+    arr: &mut Vec<OwnedValue>,
+    idx: i64,
+    yq_mode: bool,
+) -> Result<&mut OwnedValue, EvalError> {
+    let actual_idx = resolve_setpath_index(&OwnedValue::Int(idx), arr.len(), yq_mode)?;
     if actual_idx >= arr.len() {
         pad_with_nulls(arr, actual_idx)?;
     }
@@ -33558,7 +33565,7 @@ fn set_path<S: EvalSemantics>(
                 name,
             )),
         },
-        Expr::Index { idx, .. } => match set_index(root, *idx, new_value) {
+        Expr::Index { idx, .. } => match set_index(root, *idx, new_value, S::TAG == EvalTag::Yq) {
             Some(written) => written,
             None if scalar_noop && is_yq_field_index_noop_scalar(root) => Ok(()),
             None => Err(EvalError::cannot_index_with_type(
@@ -33979,7 +33986,7 @@ fn set_path_steps<S: EvalSemantics>(
                     // is jq's write-time bounds check, which `?` never covers
                     // -- so this propagates rather than folding into the
                     // `optional` branch, exactly as `get_path_mut` had it.
-                    write_index(arr, *idx)?
+                    write_index(arr, *idx, S::TAG == EvalTag::Yq)?
                 } else if optional || noop_here {
                     return Ok(());
                 } else {
@@ -34093,7 +34100,7 @@ fn set_path_steps<S: EvalSemantics>(
                     // covers -- so `write_index`'s error propagates here
                     // rather than being folded into the `optional` branch
                     // below, exactly as `get_path_mut` had it.
-                    let current = write_index(arr, *idx)?;
+                    let current = write_index(arr, *idx, S::TAG == EvalTag::Yq)?;
                     let result = set_path_steps::<S>(
                         current,
                         rest,
@@ -35355,7 +35362,7 @@ fn update_path_with_deletes<S: EvalSemantics>(
                     // call, unconditional on the filter's outcome.
                     let child = index_child_pos(pos, *idx, arr.len());
                     update_path_with_deletes::<S>(
-                        write_index(arr, *idx)?,
+                        write_index(arr, *idx, S::TAG == EvalTag::Yq)?,
                         &Expr::Identity,
                         filter_expr,
                         optional,
@@ -35452,7 +35459,7 @@ fn update_path_with_deletes<S: EvalSemantics>(
                                 deletes.leave();
                             }
                             if wrote {
-                                *write_index(arr, *idx)? = scratch;
+                                *write_index(arr, *idx, S::TAG == EvalTag::Yq)? = scratch;
                             }
                             wrote
                         }
@@ -35931,7 +35938,7 @@ fn update_path_steps<S: EvalSemantics>(
                     }
                     return Ok(wrote);
                 }
-                let value = wrap_fresh(&fresh[1..], scratch)?;
+                let value = wrap_fresh(&fresh[1..], scratch, S::TAG == EvalTag::Yq)?;
                 let OwnedValue::Object(map) = root else {
                     unreachable!("already_exists only set false for an Object root")
                 };
@@ -35961,9 +35968,11 @@ fn update_path_steps<S: EvalSemantics>(
                 // produced a value to land.
                 let actual_idx = match &*root {
                     OwnedValue::Array(arr) if *idx < 0 && arr.len() as i64 + *idx < 0 => None,
-                    OwnedValue::Array(arr) => {
-                        Some(resolve_setpath_index(&OwnedValue::Int(*idx), arr.len())?)
-                    }
+                    OwnedValue::Array(arr) => Some(resolve_setpath_index(
+                        &OwnedValue::Int(*idx),
+                        arr.len(),
+                        S::TAG == EvalTag::Yq,
+                    )?),
                     _ if here || noop_scalar => return Ok(false),
                     _ => {
                         return Err(EvalError::cannot_index_with_type(
@@ -36027,11 +36036,11 @@ fn update_path_steps<S: EvalSemantics>(
                     }
                     return Ok(wrote);
                 }
-                let value = wrap_fresh(&fresh[1..], scratch)?;
+                let value = wrap_fresh(&fresh[1..], scratch, S::TAG == EvalTag::Yq)?;
                 let OwnedValue::Array(arr) = root else {
                     unreachable!("actual_idx was only resolved for an Array root")
                 };
-                *write_index(arr, *idx)? = value;
+                *write_index(arr, *idx, S::TAG == EvalTag::Yq)? = value;
                 return Ok(wrote);
             }
             Expr::Iterate => {
@@ -36255,7 +36264,7 @@ fn fresh_run_len(steps: &[Expr]) -> usize {
 /// shapes defer the same way today -- see
 /// `test_negative_out_of_range_middle_index_defers_like_positive_3388` in
 /// `tests/jq_cli_tests.rs`.
-fn wrap_fresh(steps: &[Expr], value: OwnedValue) -> Result<OwnedValue, EvalError> {
+fn wrap_fresh(steps: &[Expr], value: OwnedValue, yq_mode: bool) -> Result<OwnedValue, EvalError> {
     let mut value = value;
     for step in steps.iter().rev() {
         let (component, _optional) = unwrap_path_component(step);
@@ -36267,7 +36276,7 @@ fn wrap_fresh(steps: &[Expr], value: OwnedValue) -> Result<OwnedValue, EvalError
             }
             Expr::Index { idx, .. } => {
                 let mut arr = Vec::new();
-                *write_index(&mut arr, *idx)? = value;
+                *write_index(&mut arr, *idx, yq_mode)? = value;
                 OwnedValue::array_from(arr)
             }
             // `fresh_run_len` only ever collects `Field`/`Index` components.
@@ -69633,7 +69642,7 @@ fn builtin_leaf_paths<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// that is out of bounds rather than clamped to zero, which is also what keeps
 /// the caller's null padding bounded: `(len + idx) as usize` for
 /// `[1,2] | setpath([-5]; 9)` wraps to ~1.8e19 and pads until memory runs out.
-fn resolve_setpath_index(key: &OwnedValue, len: usize) -> Result<usize, EvalError> {
+fn resolve_setpath_index(key: &OwnedValue, len: usize, yq_mode: bool) -> Result<usize, EvalError> {
     let index = match key {
         OwnedValue::Int(i) => *i,
         OwnedValue::Float(f) if f.is_nan() => {
@@ -69657,7 +69666,10 @@ fn resolve_setpath_index(key: &OwnedValue, len: usize) -> Result<usize, EvalErro
 
     let resolved = if index < 0 { len as i64 + index } else { index };
     if resolved < 0 {
-        return Err(EvalError::out_of_bounds_negative_index());
+        // #2335: yq words the same refusal after the index as written (`yq_negative_index_check`
+        // is the read side's one definition of the rule and the text).
+        return Err(yq_negative_index_check_core(yq_mode, index, resolved, len)
+            .unwrap_or_else(EvalError::out_of_bounds_negative_index));
     }
     // Still fallible on a 32-bit target, where a large positive index does not
     // fit a `usize`. That is the same refusal as `pad_with_nulls`', not a
@@ -69835,7 +69847,7 @@ fn set_value_at_path_impl<S: EvalSemantics, const YQ_SETPATH: bool>(
                     }
                 }
             }
-            let index = resolve_setpath_index(key, arr.len())?;
+            let index = resolve_setpath_index(key, arr.len(), S::TAG == EvalTag::Yq)?;
             if index >= arr.len() {
                 pad_with_nulls(&mut arr, index)?;
             }

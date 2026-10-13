@@ -131221,3 +131221,23 @@ fn test_comma_head_and_guarded_body_residuals_match_jq_4294() -> Result<()> {
     }
     Ok(())
 }
+
+/// #2335: jq mode keeps jq's own text for a write through a still-negative index (yq mode words
+/// it after the index as written). Captured from jq 1.7.1: `Out of bounds negative array index`.
+#[test]
+fn test_negative_index_write_error_keeps_jq_wording_2335() -> Result<()> {
+    for filter in [
+        ".a[-5] = 9",
+        ".a[-5] |= 9",
+        ".a[-5]? = 9",
+        "setpath([\"a\",-5]; 1)",
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("{\"a\":[1,2,3]}\n"))?;
+        assert_eq!(code, 5, "{filter}: stdout: {stdout:?}");
+        assert!(
+            stderr.contains("Out of bounds negative array index"),
+            "{filter}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
