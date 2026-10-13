@@ -745,7 +745,29 @@ OPERANDS = [
     "(reduce (.[] as $a | .) as $k (.; .))",
     "(reduce (try (. as {a:$a} | .)) as $k (.; .))",
     "(reduce ((.|.) as {a:$a} | .) as $k (.; .))",
-    "(reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// $q (.; .))",
+    # (#4506) a `?//` chain as the nested fold's own LOOP pattern, bound to `$q` and not `$x` (the grid
+    # skips an operand with a free `$x` outside a context that binds it, which left the row above out
+    # of most contexts). A chain whose last alternative is a bare variable over a no-op UPDATE cannot
+    # raise whichever alternative binds, so the first alternative's pattern step is retried even where
+    # the walk can only guess at jq's `path_intact`. The contrasts are a last alternative that can
+    # fail, an UPDATE that navigates or reads `$q`, an INIT that is not the register, a chain of
+    # three, a source that navigates or fans out, and a `foreach` (whose EXTRACT is emitted with the
+    # register the pattern moved).
+    "(reduce . as {a:$q} ?// $y (.; .))",
+    "(reduce (. as {a:$a} | .) as [$q] ?// {b:$y} ?// $z (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// [$q] (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// {b:$q} (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// $q (.; .a))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// $q (.; $q))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// $q (1; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q} ?// $q (.a; .))",
+    "(reduce (.a, .) as {a:$q} ?// $q (.; .))",
+    "(reduce (. as {a:$a} | .a) as {a:$q} ?// $q (.; .))",
+    "(reduce (. as {a:$a} | .) as {a:$q, b:$y} ?// $z (.; . | .))",
+    "(reduce (. as {a:$a} | .) as [$q] ?// $q (.; .) | .a)",
+    "(foreach (. as {a:$a} | .) as {a:$q} ?// $q (.; .; .))",
+    "(foreach (. as {a:$a} | .) as {a:$q} ?// $q (.; .; $q))",
     "(reduce (. as {a:$a} ?// {b:$b} | .) as $k (.; .))",
     "(. as {a:$q} | reduce (. as {b:$b} | .) as $k (.; .))",
     "(. as {a:$q} | reduce (def f: .; f as {b:$b} | .) as $k (.; .))",

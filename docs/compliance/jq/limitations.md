@@ -2234,7 +2234,12 @@ is the revert that established what the other one costs.
    a source `foreach_source_is_path_checked` accepts). A `?//` chain as the nested `reduce`'s *source* answers since
    [#4506](https://github.com/rust-works/succinctly/issues/4506) (`foreach_source_is_path_checked` no longer excludes a
    chain: the resolver retries the alternatives as jq does, and a chain whose every alternative fails raises in both); a
-   chain as its *loop pattern* (`reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)`, jq `null`) is still refused. Over the
+   chain as its *loop pattern* answers too (`reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)`, jq `null`) when its
+   last alternative is a bare `$var` and the UPDATE is a no-op (`reduce_alternative_is_immaterial`): the chain cannot
+   raise whichever alternative binds, and jq restores the register on exit, so an earlier alternative's pattern step
+   that the walk can only guess at (the source moved the register off the node the step reads) is retried instead of
+   refused. A chain whose last alternative can fail (`... as {a:$q} ?// {b:$y} (.; .)`) keeps the guess and refuses
+   where jq may answer. Over the
    158 `reduce` operands (137,259 `--stage-only` rows) 156 refusals become matches and none is lost. The vetter inherits
    the router's reading of a call, so a `def` whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is
    accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the

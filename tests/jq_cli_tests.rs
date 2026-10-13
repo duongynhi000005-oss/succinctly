@@ -61770,11 +61770,107 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             "",
             0,
         ),
-        // Still refused, where jq answers `null`: a chain as the loop pattern over a source that
-        // destructures the register (the emitted element is not the register the pattern steps on).
+        // A `?//` chain as the nested fold's own LOOP pattern whose last alternative is a bare
+        // `$var`, over a no-op UPDATE, cannot raise whichever alternative binds: jq answers `null`
+        // (#4506). The first alternative's step on a source that destructured the register is the
+        // walk's guess at `path_intact`, and the retry is harmless.
         (
             doc,
             r"del(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce . as {a:$x} ?// $y (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce . as {a:$x} ?// [$y] ?// $z (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce (. as {a:$a} | .) as {a:$x} ?// $y (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (.a, .) as {a:$x} ?// $x (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)) | .a)]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        // The contrasts keep raising as jq does: a last alternative that can fail, an UPDATE that
+        // navigates, an INIT that is not the register, and a `.a` after the nested `reduce` in
+        // the outer UPDATE.
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// {b:$y} (.; .)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .a)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (1; .)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .) | .a))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach (. as {a:$a} | .) as {a:$x} ?// $x (.; .; .))]",
             "",
             invalid,
             5,

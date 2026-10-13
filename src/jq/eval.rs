@@ -36678,9 +36678,9 @@ fn is_try_scoped_component(component: &Expr) -> bool {
 /// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
-/// A `?//` chain as the nested fold's own loop pattern is out (a failed alternative leaves `null`; one
-/// in its source is in since #4506), and so is any pattern whose `$var` could be returned: the body must
-/// itself hand its input on.
+/// A `?//` chain is in as the nested fold's source or its own loop pattern (#4506), since the
+/// UPDATE it vets is a no-op that cannot fail and so leaves no `null` behind for a retry; a pattern
+/// whose `$var` could be returned is out: the body must itself hand its input on.
 fn update_returns_its_input(e: &Expr) -> bool {
     match e {
         Expr::Identity => true,
@@ -36719,13 +36719,13 @@ fn update_returns_its_input(e: &Expr) -> bool {
     }
 }
 
-/// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one
-/// loop pattern (a `?//` chain there leaves `null` when an alternative fails, which nothing models
-/// here; a chain in the SOURCE is fine, #4506), an INIT and UPDATE that move
+/// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): a loop
+/// pattern (a `?//` chain too, #4506: a failed alternative leaves `null` only when UPDATE raises, and
+/// the UPDATE here is a no-op), an INIT and UPDATE that move
 /// nothing, so the fold's state is the accumulator throughout, and a SOURCE the resolver checks
 /// as jq does ([`foreach_source_is_path_checked`]). A `foreach` also needs a no-op EXTRACT.
 fn nested_fold_keeps_state(input: &Expr, patterns: &[Pattern], init: &Expr, update: &Expr) -> bool {
-    patterns.len() == 1
+    !patterns.is_empty()
         && body_performs_no_step(init)
         && body_performs_no_step(update)
         && foreach_source_is_path_checked(input)
@@ -36778,7 +36778,7 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
     // fresh value is not, and is accepted here where jq raises. A `?//` chain in the source is read as
     // a single pattern is (#4506): the resolver retries the alternatives as jq does, and the fold's
     // state is the accumulator whichever one matches (a chain whose every alternative fails raises
-    // in jq and here). The loop pattern of the nested fold stays a single one (`nested_fold_keeps_state`).
+    // in jq and here). The loop pattern of the nested fold may be a chain too (`nested_fold_keeps_state`).
     cannot_move_register(e)
         || navigation(e, None)
         || foreach_source_destructures_register(e, Vec::new(), false)
@@ -54547,6 +54547,7 @@ fn settle_fold_alternative<S: EvalSemantics>(
     elem: &FoldSourceValue,
     reg: &FoldRegister,
     refused_step_could_succeed: Option<bool>,
+    alternative_is_immaterial: bool,
     aborted: &StashedEscape,
 ) -> FoldStepOutcome {
     if let Some(outcome) = outcome {
@@ -54567,6 +54568,7 @@ fn settle_fold_alternative<S: EvalSemantics>(
             // computed (which [`pattern_walk_fails_by_value`] does not judge, as
             // running it again would repeat its effects).
             let guessed = !is_last
+                && !alternative_is_immaterial
                 && matches!(&control, Control::Error(e) if is_resolver_refusal(e))
                 && refused_step_could_succeed != Some(false)
                 && fold_walk_refusal_is_guess::<S>(pattern, elem, reg);
@@ -54590,6 +54592,26 @@ fn settle_fold_alternative<S: EvalSemantics>(
             }
         }
     }
+}
+
+/// Whether it does not matter to a `reduce` which `?//` alternative binds its source element
+/// (#4506): a chain whose last alternative is a bare variable and whose UPDATE is a no-op.
+///
+/// The last alternative cannot fail, so the chain never raises whichever alternative runs, and a
+/// no-op UPDATE reads no bound variable and leaves the accumulator as it found it. jq backtracks a
+/// `reduce`'s source and UPDATE, so the register the pattern's steps moved is restored on exit and
+/// the final state is the same too. A refusal of an earlier alternative's pattern step is then
+/// retried even where it is only the walk's guess at `path_intact`
+/// ([`fold_walk_refusal_is_guess`]): if jq found that step intact it carried on with the
+/// alternative, and the result is the one the retry gives. `reduce (. as {a:$a} | .) as {a:$x} ?// $x
+/// (.; .)` is `.` in jq whatever the register is; without this the walk refused it (the first
+/// alternative's step, on a source that moved the register), and an enclosing `reduce` UPDATE
+/// that nests it was refused with it. Not a `foreach`, whose EXTRACT is emitted with the register
+/// the pattern moved.
+fn reduce_alternative_is_immaterial(patterns: &[Pattern], update: &Expr) -> bool {
+    patterns.len() > 1
+        && matches!(patterns.last(), Some(Pattern::Var(_)))
+        && body_performs_no_step(update)
 }
 
 /// Whether two paths reach the same node, reading a component through a postfix
@@ -55372,6 +55394,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // single pattern, which has nothing to fill.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
+    // #4506: see [`reduce_alternative_is_immaterial`].
+    let alternative_is_immaterial =
+        S::TAG == EvalTag::Jq && reduce_alternative_is_immaterial(patterns, update);
     let mut drive_fork = |init_branch: PathBranch<'a>| -> Demand {
         let init_branch = &init_branch;
         fork_outcome.begin(); // #3293
@@ -55721,6 +55746,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                     &elem,
                     &reg,
                     refused_step_could_succeed.get(),
+                    alternative_is_immaterial,
                     &aborted,
                 ) {
                     FoldStepOutcome::Retry => continue,
@@ -56431,6 +56457,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     &elem,
                     &reg,
                     refused_step_could_succeed.get(),
+                    false,
                     &aborted,
                 ) {
                     FoldStepOutcome::Retry => continue,
