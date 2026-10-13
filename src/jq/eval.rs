@@ -37034,6 +37034,15 @@ fn eval_owned_multi_keep_partial<S: EvalSemantics>(
     (out, escape)
 }
 
+/// Whether an array key indexes `container` as jq's subarray search in path position (#3506): the key
+/// is the path component whole -- `path(.[[9]])` is `[[9]]` even where nothing matches -- and only an
+/// array target has one (`null | path(.[[1]])` keeps raising). yq has no such key. One rule for
+/// `.[k]` ([`key_to_path_component`]) and a destructuring pattern's computed key
+/// ([`PatternKey::component`], #4527), which disagreed once.
+fn subarray_search_applies<S: EvalSemantics>(container: &OwnedValue) -> bool {
+    S::TAG != EvalTag::Yq && matches!(container, OwnedValue::Array(_))
+}
+
 /// Turn a resolved key value into the static path component it denotes.
 ///
 /// NaN is the one numeric key with no component: reading `.[nan]` is null, but
@@ -37095,13 +37104,8 @@ fn key_to_path_component<S: EvalSemantics>(
         OwnedValue::Object(desc) if S::TAG != EvalTag::Yq => {
             descriptor_path_component::<S>(desc, container)
         }
-        // #3506: jq's subarray search, in path position. The key is the
-        // component whole -- `path(.[[9]])` is `[[9]]` even where nothing
-        // matches -- and only an array target has one (`null | path(.[[1]])`
-        // keeps raising). yq has no such key.
-        OwnedValue::Array(_)
-            if S::TAG != EvalTag::Yq && matches!(container, OwnedValue::Array(_)) =>
-        {
+        // #3506: jq's subarray search, in path position.
+        OwnedValue::Array(_) if subarray_search_applies::<S>(container) => {
             Ok(Expr::ArrayKey(Box::new(key.clone())))
         }
         // Truncation toward zero, as in the value path.
@@ -80860,9 +80864,7 @@ impl PatternKey<'_> {
                 // array target has one. [`Self::child`] already reads it, so refusing it here
                 // made the step fail where jq's succeeds and moves the register -- a `try`
                 // around the bind swallowed that as jq's own and read its handler's register.
-                OwnedValue::Array(_)
-                    if S::TAG != EvalTag::Yq && matches!(input, OwnedValue::Array(_)) =>
-                {
+                OwnedValue::Array(_) if subarray_search_applies::<S>(input) => {
                     Ok(Expr::ArrayKey(Box::new((*key).clone())))
                 }
                 other => Err(EvalError::cannot_index_with_type(
@@ -143879,6 +143881,23 @@ mod neutral_leaves_register_tests_4028 {
         assert!(!reduce_states_register_on_untracked_entry::<YqSemantics>(
             &yq
         ));
+    }
+
+    // #4527: an array key on an array input is jq's subarray search in a pattern step too, and only
+    // in jq mode: yq has no such key, and an array key on anything else is `child`'s own error.
+    #[test]
+    fn a_pattern_array_key_is_a_subarray_search_in_jq_mode_only_4527() {
+        let key = OwnedValue::Array(vec![OwnedValue::Bool(true)].into());
+        let input = OwnedValue::Array(vec![OwnedValue::Bool(true)].into());
+        let step = PatternKey::Computed(&key);
+        assert!(matches!(
+            step.component::<JqSemantics>(&input),
+            Ok(Expr::ArrayKey(_))
+        ));
+        assert!(step.component::<YqSemantics>(&input).is_err());
+        assert!(step.component::<JqSemantics>(&OwnedValue::Null).is_err());
+        let object = OwnedValue::Object(IndexMap::new().into());
+        assert!(step.component::<JqSemantics>(&object).is_err());
     }
 
     /// [`entry_marker_shape`] of a program once its leading `def` is bound, as the resolver sees

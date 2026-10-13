@@ -492,8 +492,8 @@ OPERANDS = [
     "(. as [$a] | ..)",
     "(. as [$a] | (., 1))",
     "(.a | . as [$a] | $a)",
-    # (#4527) a computed key forks the walk: a producer in the body stays opaque, and the same
-    # shapes inside a fold UPDATE are where a statement read once for every branch writes.
+    # (#4527) a computed key forks the walk, and the same shapes inside a fold UPDATE are where a
+    # key that is an array wrote through a `try` handler's register.
     "try (. as {(.):$a} | .) catch 7",
     "try (. as {(try . catch 1):$a} | .) catch 7",
     "try ((.,1) | . as {(.):$a} | ..) catch 7",

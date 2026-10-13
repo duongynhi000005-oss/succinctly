@@ -70029,6 +70029,28 @@ fn test_pattern_key_that_is_an_array_is_a_subarray_search_in_path_position_4527(
             "Invalid path expression with result [[true]]",
             5,
         ),
+        // An empty key, a nested element, and the ambient value after the walk moved the register.
+        (
+            "[[1],[2]]",
+            r"path(. as {(.[0:0]):$a} | $a)",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            "[[true]]",
+            r"path(. as [{(.):$a}] | $a)",
+            "[0,[true]]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1],[2]]",
+            r"path(. as {(.[0:1]):$a} | .)",
+            "",
+            "Invalid path expression with result [[1],[2]]",
+            5,
+        ),
         // Controls: the step is a subarray search only on an array input, and a stage the bind took
         // the register past is the stage's own (the `1 |` ahead leaves the register where it was).
         (
