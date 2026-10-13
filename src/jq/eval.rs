@@ -18239,8 +18239,15 @@ fn builtin_split<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             // #4263 (yq): the separator is its node's text whatever its tag -- `null` is
             // `null`, a number its spelling, a boolean `true`/`false` -- and a container,
             // which has no text, splits the input into characters. jq requires a string.
+            //
+            // #4374: except the `{}` *literal*, whose node carries the text `{}` (`"a{}b" |
+            // split({})` is `["a","b"]`) where a `{}` read from a document has none and splits
+            // into characters. The two are the same `OwnedValue`, so the AST tells them apart.
             let sep: Cow<'_, str> = match (&sep_owned, S::TAG == EvalTag::Yq) {
                 (OwnedValue::String(sep), _) => Cow::Borrowed(sep),
+                (OwnedValue::Object(_), true) if is_empty_object_literal(sep_expr) => {
+                    Cow::Borrowed("{}")
+                }
                 (_, true) => yq_scalar_text::<S>(&sep_owned).unwrap_or(Cow::Borrowed("")),
                 _ => {
                     return QueryResult::Error(EvalError::new(
@@ -18261,12 +18268,23 @@ fn builtin_split<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     QueryResult::Owned(OwnedValue::array_from(split_string(&cow, &sep)))
                 }
                 _ if optional => QueryResult::None,
+                // #4374 (yq): the input's tagged type, as the other yq errors name it.
+                _ if S::TAG == EvalTag::Yq => QueryResult::Error(EvalError::new(format!(
+                    "cannot split {}, can only split strings",
+                    yaml_type_tag(&value)
+                ))),
                 _ => {
                     QueryResult::Error(EvalError::new("split input and separator must be strings"))
                 }
             }
         },
     )
+}
+
+/// Whether `expr` (through any parentheses) is the empty object constructor `{}` -- the one
+/// literal whose text yq's `split` uses as the separator (#4374).
+fn is_empty_object_literal(expr: &Expr) -> bool {
+    matches!(unwrap_paren(expr), Expr::Object(entries) if entries.is_empty())
 }
 
 /// Stringifies one `join` element for yq mode (#1041, live-verified against

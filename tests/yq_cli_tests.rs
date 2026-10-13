@@ -64870,6 +64870,38 @@ fn test_yq_split_by_a_non_string_separator_4263() -> Result<()> {
     Ok(())
 }
 
+/// #4374: `split`'s separator text for the `{}` *literal* is `{}` (the `split_empty_object_*_4374`
+/// goldens pin yq's output), and a non-string input is `cannot split !!int, can only split
+/// strings` with the input's tag (`split_*_input_error_4374`); `succinctly jq` keeps its wording.
+/// The same `{}` through a variable bound from a document stays characters (golden), and a `{}`
+/// reached through a pipe (`split({} | .)`) is still read as the document kind -- a recorded gap.
+#[test]
+fn test_yq_split_empty_object_literal_and_input_error_4374() -> Result<()> {
+    let args = ["-n", "-o=json", "-I=0"];
+    for (filter, want) in [
+        (r#""a{}b" | split({})"#, "[\"a\",\"b\"]\n"),
+        (r#""ab" | split({})"#, "[\"ab\"]\n"),
+        (r#""a{}b" | split(({}))"#, "[\"a\",\"b\"]\n"),
+        (r#""a[]b" | split([])"#, "[\"a\",\"[\",\"]\",\"b\"]\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "", &args)?;
+        assert_eq!((stdout.as_str(), code), (want, 0), "{filter}: {stderr}");
+    }
+    let (_, stderr, code) = run_yq_stdin_with_stderr(r#"5 | split(",")"#, "", &args)?;
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("cannot split !!int, can only split strings"),
+        "{stderr}"
+    );
+    let (_, stderr, code) = run_jq_stdin_with_stderr(r#"5 | split(",")"#, "null", &[])?;
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("split input and separator must be strings"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// #2064: yq's `sort` and `sort_by(f)` on a mapping reorder its entries by the values (or by
 /// `[f]` of each value), stably, and answer a mapping; jq raises its pairing error. Rows captured
 /// from yq v4.53.3 (`-p=json -o=json -I=0`).
