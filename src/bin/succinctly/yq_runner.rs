@@ -3825,11 +3825,17 @@ fn writes_head_foot_or_comments(expr: &Expr) -> bool {
 /// evaluation errors -- the real evaluation reports that, so the pass just
 /// stops resolving there.
 ///
-/// A metadata write anywhere *other* than a top-level pipe stage (inside a
-/// `reduce`/`foreach` body, an `as` binding's body, a `def`, ...) is refused
-/// explicitly: this pass can't see the document such a write would run
-/// against, and a silent no-op is the one outcome #798's own triage ruled
-/// out.
+/// A write under a variable binding (`.b as $x | .a line_comment = $x`, #2705) is a pipe stage
+/// of the binding's body, which the real evaluation reaches with `$x` already spliced in as a
+/// literal: this pass does the same, evaluating the binding's source against the stage's
+/// document and resolving the body once per output with `$x` substituted. Every fork's writes
+/// are kept, in order, and applied to every result -- real yq's forks share the node, so the
+/// last write wins in each result (`.[] as $x | .a line_comment = $x` prints the last `$x` in
+/// both documents, live-verified).
+///
+/// A metadata write anywhere *else* (inside a `reduce`/`foreach` body, a destructuring `as`
+/// pattern, a `def`, ...) is refused explicitly: this pass can't see the document such a write
+/// would run against, and a silent no-op is the one outcome #798's own triage ruled out.
 fn resolve_meta_assign_writes(
     expr: &Expr,
     root_value: &OwnedValue,
@@ -3867,40 +3873,79 @@ fn resolve_meta_assign_writes(
         );
         return None;
     }
-    let top_level = stages
-        .iter()
-        .filter(|s| matches!(s, Expr::MetaAssign { .. }))
-        .count();
-    if top_level != total {
+    if reachable_meta_assigns(&stages) != total {
         sink.report(
             DiagStyle::Yq,
             &EvalError::new(
                 "metadata assignment (line_comment/head_comment/foot_comment/comments/style/anchor \
-                 = ...) is only supported as a top-level pipe stage",
+                 = ...) is only supported as a pipe stage, or under a plain `as $var` binding",
             ),
             &no_location(),
         );
         return None;
     }
+    let mut out = Vec::new();
+    resolve_pipeline_writes(&stages, root_value, sink, &mut out).then_some(out)
+}
+
+/// How many `Expr::MetaAssign` nodes [`resolve_pipeline_writes`] reaches in `stages`: the
+/// stages that are one, plus those under a plain `as $var` binding's body, however deep.
+fn reachable_meta_assigns(stages: &[&Expr]) -> usize {
+    stages
+        .iter()
+        .map(|stage| match stage {
+            Expr::MetaAssign { .. } => 1,
+            Expr::As { body, .. } => {
+                let mut inner = Vec::new();
+                flatten_pipe_stages(body, &mut inner);
+                reachable_meta_assigns(&inner)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Resolve the metadata writes of one flattened pipeline into `out`, `current` being the
+/// document its first stage sees. Returns `false` (already reported via `sink`) only on a
+/// genuine validation failure; see [`resolve_meta_assign_writes`] for what is not one.
+fn resolve_pipeline_writes(
+    stages: &[&Expr],
+    current: &OwnedValue,
+    sink: &mut ErrorSink,
+    out: &mut Vec<ResolvedMetaWrite>,
+) -> bool {
     let last_meta = stages
         .iter()
-        .rposition(|s| matches!(s, Expr::MetaAssign { .. }))
+        .rposition(|s| reachable_meta_assigns(&[*s]) > 0)
         .unwrap_or(0);
-
-    let mut out = Vec::new();
-    let mut current = std::borrow::Cow::Borrowed(root_value);
+    let mut current = std::borrow::Cow::Borrowed(current);
     for (i, stage) in stages.iter().enumerate() {
-        if let Expr::MetaAssign {
-            target,
-            slot,
-            value,
-            is_update,
-        } = stage
-        {
-            if !resolve_one_meta_assign(target, *slot, value, *is_update, &current, sink, &mut out)
-            {
-                return None;
+        match stage {
+            Expr::MetaAssign {
+                target,
+                slot,
+                value,
+                is_update,
+            } => {
+                if !resolve_one_meta_assign(target, *slot, value, *is_update, &current, sink, out) {
+                    return false;
+                }
             }
+            Expr::As { expr, var, body } if reachable_meta_assigns(&[*stage]) > 0 => {
+                // A source whose evaluation fails is the real evaluation's to report.
+                let Some(bound) = evaluate_input_quiet(&current, expr) else {
+                    return true;
+                };
+                for value in &bound {
+                    let body = jq::substitute_vars(body, [(var.as_str(), value)]);
+                    let mut inner = Vec::new();
+                    flatten_pipe_stages(&body, &mut inner);
+                    if !resolve_pipeline_writes(&inner, &current, sink, out) {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
         }
         if i >= last_meta {
             break;
@@ -3912,7 +3957,7 @@ fn resolve_meta_assign_writes(
             }
         }
     }
-    Some(out)
+    true
 }
 
 /// Resolve one `Expr::MetaAssign` stage against `current`, the document it

@@ -1,0 +1,1 @@
+.k as $k | .[$k] line_comment = "y"

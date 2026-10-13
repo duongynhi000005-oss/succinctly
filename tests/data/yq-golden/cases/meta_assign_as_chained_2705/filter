@@ -1,0 +1,1 @@
+.b as $x | .c as $y | .a line_comment = ($x + $y)
