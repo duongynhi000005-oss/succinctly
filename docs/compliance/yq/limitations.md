@@ -5684,8 +5684,11 @@ that is `--- 42` also loses the marker and the blanks after it from its columns 
 `[1,1]`). `yq-locate`, `at_offset` and the library's `YamlCursor::line` keep the editor line; only the
 `line`/`column` builtins renumber (`yq_position_preamble`).
 
-Still different: `--- # c` / `&b [1]` is `[0,0]` in yq (the comment on the marker line), `[2,1]` here; and a
-second `---` straight after the first (`---` / `--- 5`) is `[1,1]` in yq and `[1,5]` here.
+Still different (#4548): `--- # c` / `&b [1]` is `[0,0]` in yq (the comment on the marker line), `[2,1]` here; a
+second `---` straight after the first (`---` / `--- 5`) is `[1,1]` in yq and `[1,5]` here; and a document with
+lone-CR line breaks is `[0,0]` in yq. Only a `%YA..` directive is slurped, as in the printed header: `%TAG` is content.
+The renumbering lives in the `DocumentCursor` impl that only the `line`/`column` builtins call; `succinctly jq` never holds
+a `YamlCursor`.
 
 `column` counts characters, as yq does ([#4364](https://github.com/rust-works/succinctly/issues/4364)):
 `é: [1]` is `[1,4]`, where it used to read `[1,5]` (the byte column). A character is a Unicode scalar

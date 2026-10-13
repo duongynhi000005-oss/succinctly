@@ -9197,8 +9197,9 @@ fn write_foot_comment_lines<Out: core::fmt::Write>(
 /// content line that is itself `--- 42` loses the marker and the blanks after it too: `columns`
 /// is how many columns that is, applied to that one line only (`--- [1, 2]` has `[` at column 1).
 ///
-/// Unlike the header yq *prints*, a whitespace-only line counts as leading here, and only the first
-/// `---` is one: a second marker is content. A `--- # c` line is left as content: yq's answer
+/// Unlike the header yq *prints* ([`yq_header_len`]), a whitespace-only line counts as leading
+/// here (live-checked: `# c` / `  ` / `k: 1` numbers `k` from line 2), and only the first `---` is
+/// one: a second marker is content. As there, only a `%YA..` directive is slurped: `%TAG` is content. A `--- # c` line is left as content: yq's answer
 /// there is `[0,0]`, which nothing here reproduces.
 fn yq_position_preamble(text: &[u8]) -> (usize, usize) {
     let mut pos = 0;
@@ -9217,7 +9218,7 @@ fn yq_position_preamble(text: &[u8]) -> (usize, usize) {
             && !seen_marker;
         let leading = match first {
             None => true,
-            Some(i) => line[i] == b'#' || (i == 0 && line[0] == b'%') || bare_marker,
+            Some(i) => line[i] == b'#' || (i == 0 && line.starts_with(b"%YA")) || bare_marker,
         };
         if !leading {
             let columns = if !seen_marker
@@ -17355,6 +17356,12 @@ plain: hello
             assert_eq!(yq_position_preamble(b"---\nk: 1\n"), (1, 0));
             assert_eq!(yq_position_preamble(b"--- \nk: 1\n"), (1, 0));
             assert_eq!(yq_position_preamble(b"%YAML 1.2\n---\nk: 1\n"), (2, 0));
+            // Only `%YA..` is slurped; any other directive is content.
+            assert_eq!(
+                yq_position_preamble(b"%TAG ! tag:e.com,2000:\n---\nk: 1\n"),
+                (0, 0)
+            );
+            assert_eq!(yq_position_preamble(b"# c\n  \nk: 1\n"), (2, 0));
             assert_eq!(yq_position_preamble(b"# c\r\n---\r\nk: 1\r\n"), (2, 0));
             // Content on the marker line loses the marker and the blanks after it.
             assert_eq!(yq_position_preamble(b"--- 5\n"), (0, 4));

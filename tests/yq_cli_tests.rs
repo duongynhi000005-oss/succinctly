@@ -13768,6 +13768,18 @@ fn test_line_and_column_count_from_the_first_content_line_4363() -> Result<()> {
         ("\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
         ("  \nk: 1\n", ".k | [line,column]", "[1,4]"),
         ("\t\nk: 1\n", ".k | [line,column]", "[1,4]"),
+        ("# c\n  \nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        (
+            "# c\r\n---\r\nk: 1\r\nm: 2\r\n",
+            ".m | [line,column]",
+            "[2,4]",
+        ),
+        // Only `%YA..` is slurped; a `%TAG` line is content, so nothing is dropped.
+        (
+            "%TAG ! tag:example.com,2000:\n---\nk: 1\nm: 2\n",
+            ".m | [line,column]",
+            "[4,4]",
+        ),
         ("# c\n  k: 1\n", "[line,column]", "[1,3]"),
         ("# c\n- 1\n", "[line,column]", "[1,1]"),
         ("# c\n5\n", "[line,column]", "[1,1]"),
