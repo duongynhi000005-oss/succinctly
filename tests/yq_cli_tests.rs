@@ -41917,7 +41917,7 @@ fn test_2347_del_comma_iterate_suffix_with_optional_components_2380() -> Result<
         (r#"{"y":1}"#, "del(.missing?[], .y)", "{}\n"),
         (r#"{"y":1}"#, "del(.missing?[].x, .y)", "{}\n"),
         (
-            r#"[1,2]"#,
+            "[1,2]",
             "del(.[5][].x, .[3][].y)",
             "[1,2,null,[],null,[]]\n",
         ),
