@@ -5503,7 +5503,42 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 end
             }
         };
+        self.reject_content_after_inline_value()?;
         Ok(end)
+    }
+
+    /// A mapping value's scalar must be the last thing on its line: whatever
+    /// follows it other than blanks and a comment is an error, not text to
+    /// drop (#4463). `a: 1 b: 2` is yq's "mapping values are not allowed in
+    /// this context" -- the plain scalar stops at the `: ` and the rest of
+    /// the line used to be skipped, so `{"a":"1 b"}` came back with `2` gone
+    /// and a write rewrote the line without it. Quoted values follow the same
+    /// rule (`a: "x" y: z`), as do the second line of a multi-line plain
+    /// scalar and a trailing `:` (`a: b:`).
+    fn reject_content_after_inline_value(&self) -> Result<(), YamlError> {
+        let mut i = self.pos;
+        while self
+            .input
+            .get(i)
+            .is_some_and(|&b| Self::is_inline_whitespace(b))
+        {
+            i += 1;
+        }
+        match self.input.get(i) {
+            None => Ok(()),
+            Some(&b) if Self::is_break(b) => Ok(()),
+            // A comment, which only counts after a blank.
+            Some(b'#')
+                if i > self.pos
+                    || self.pos == 0
+                    || Self::is_inline_whitespace(self.input[self.pos - 1]) =>
+            {
+                Ok(())
+            }
+            Some(_) => {
+                Err(self.err_unexpected_char(i, "mapping values are not allowed in this context"))
+            }
+        }
     }
 
     /// Parse a value (could be scalar or nested structure).

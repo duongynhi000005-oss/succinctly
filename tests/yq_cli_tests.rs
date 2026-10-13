@@ -13830,6 +13830,75 @@ fn test_yq_locate_still_resolves_against_the_editor_line_4363() -> Result<()> {
     Ok(())
 }
 
+/// #4463: a mapping value's scalar must be the last thing on its line. The plain scalar stops at a `: `
+/// and the rest of the line used to be skipped, so `a: 1 b: 2` read as `{"a":"1 b"}` with `2` gone,
+/// and a write rewrote the line without it. yq: `mapping values are not allowed in this context`. Every
+/// row is a yq v4.53.3 error (the first column of its message is ours to differ on).
+#[test]
+fn test_content_after_a_mapping_value_is_an_error_4463() -> Result<()> {
+    for input in [
+        "a: 1 b: 2\n",
+        "a: 1 b:\n",
+        "a: b:\n",
+        "a: b: c\n",
+        "a: x:y: z\n",
+        "k: v: w: u\n",
+        "- a: 1 b: 2\n",
+        "a:\n  b: 1 c: 2\n",
+        "a: x\n  y: z\n",
+        "a: \"x\" y: z\n",
+        "a: 1\tb: 2\n",
+        "? a: 1 b: 2\n",
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.as_str()), (1, ""), "{input:?}");
+        assert!(
+            err.contains("mapping values are not allowed in this context"),
+            "{input:?}: {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The shapes next to #4463's rows that must keep parsing, each also read the same by yq v4.53.3: a colon
+/// not followed by a blank, a comment, quotes holding `: `, a flow value with a pair, and a block scalar.
+#[test]
+fn test_mapping_value_shapes_next_to_4463_still_parse() -> Result<()> {
+    for (input, expected) in [
+        ("a: b:c\n", r#"{"a":"b:c"}"#),
+        ("a: 1 #b: 2\n", r#"{"a":1}"#),
+        ("a: http://x.y/z\n", r#"{"a":"http://x.y/z"}"#),
+        ("a: 'x: y'\n", r#"{"a":"x: y"}"#),
+        ("a: \"x: y\"\n", r#"{"a":"x: y"}"#),
+        ("a: 12:30\n", r#"{"a":"12:30"}"#),
+        ("a: 1 :b\n", r#"{"a":"1 :b"}"#),
+        ("a: [1, b: 2]\n", r#"{"a":[1,{"b":2}]}"#),
+        ("a: >\n  x: y\n", r#"{"a":"x: y\n"}"#),
+        ("- 1 b: 2\n", r#"[{"1 b":2}]"#),
+        ("a: \"x\"  # c\nb: 'y' # d\n", r#"{"a":"x","b":"y"}"#),
+    ] {
+        let (out, code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((out.trim(), code), (expected, 0), "{input:?}");
+    }
+    Ok(())
+}
+
+/// The data-loss half of #4463: a write over `a: 1 b: 2` rewrote the line as `a: 9` and lost `b: 2`'s
+/// `2`. The document is now refused, and `--inplace` leaves the file byte-identical.
+#[test]
+fn test_inplace_refuses_content_after_a_mapping_value_4463() -> Result<()> {
+    let mut file = NamedTempFile::new()?;
+    write!(file, "a: 1 b: 2\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq", "-i", ".a = 9"])
+        .arg(file.path())
+        .stdin(Stdio::null())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(std::fs::read_to_string(file.path())?, "a: 1 b: 2\n");
+    Ok(())
+}
+
 #[test]
 fn test_line_column_object_construction_is_a_known_limitation() -> Result<()> {
     // Object construction used to round-trip through OwnedValue, which has

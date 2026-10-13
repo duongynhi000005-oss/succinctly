@@ -46,13 +46,11 @@
 98YD      structure         same shape and reason as 8G76 — #2795 review
 9C9N      lax:indentation   indentation not validated — #223
 9HCY      lax:documents     mid-stream `%TAG` directive (no `...` footer before it) absorbed as scalar text rather than rejected — #223 (surfaced by #224: previously masked by tags erroring at column 0 before the directive was ever reached)
-9KBC      lax:mapping       mapping/key rules not validated — #223
 AVM7      scalars           scalar content/folding differs from spec
 BF9H      lax:comments      comment placement not validated — #223
 C2SP      lax:flow          flow syntax not validated — #223
 CXX2      lax:anchors       anchor/alias rules not validated — #223
 DK3J      scalars           scalar content/folding differs from spec
-EW3V      lax:mapping       mapping/key rules not validated — #223
 FP8R      scalars           scalar content/folding differs from spec
 G9HC      lax:indentation   indentation not validated — #223
 GT5M      lax:anchors       anchor/alias rules not validated — #223

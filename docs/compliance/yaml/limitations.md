@@ -83,18 +83,18 @@ the 78** documents below with zero false positives on the valid corpus (a guardr
 must-fail case as handled if the loader *or* the validator rejects it, which is why the
 Reject figure above is 69/94 rather than 16/94.
 
-The 25 documents the validator does not yet reject (marked `lax:*` in the manifest) need
+The 23 documents the validator does not yet reject (marked `lax:*` in the manifest) need
 deeper structural analysis — cross-line anchor binding, block-scalar content indentation,
 flow multi-line implicit keys, malformed tag syntax — and are tracked in
 [#223](https://github.com/rust-works/succinctly/issues/223) (`lax:tags` under #224, see
 below).
 
-The 25 documents still lax today (neither the loader nor the validator rejects them) break
+The 23 documents still lax today (neither the loader nor the validator rejects them) break
 down as:
 
 | Category           | Cases | What is not checked                                     |
 |---------------------|------|-----------------------------------------------------------|
-| `lax:mapping`      | 4     | Mapping and implicit-key rules                          |
+| `lax:mapping`      | 2     | Mapping and implicit-key rules                          |
 | `lax:indentation`  | 5     | Indentation consistency                                 |
 | `lax:flow`         | 3     | Flow collection syntax                                  |
 | `lax:anchors`      | 4     | Anchor and alias rules, incl. an unindented tag target (#224) |
@@ -104,6 +104,10 @@ down as:
 | `lax:block-scalar` | 2     | Block scalar header validity (`\|--` parses)             |
 | `lax:tabs`         | 1     | Tabs where indentation is expected                       |
 
+Two `lax:mapping` cases (`9KBC`, `EW3V`) left the manifest with #4463: the loader now rejects content after a
+mapping value's scalar (`--- key1: value1`, a mis-indented `k2: v2`) as yq does (`mapping values are not allowed in
+this context`) instead of dropping it, so the validator is no longer the only thing that catches them.
+
 This table is the current *remainder* — cases the validator has not yet caught up to — not
 a fixed accounting of the original 78; earlier revisions of this page also carried
 `lax:other` and `lax:quoting` rows that the validator has since closed out entirely.
@@ -112,8 +116,8 @@ The opt-in validation mode now exists ([#223](https://github.com/rust-works/succ
 mirroring the JSON side's `succinctly json validate` / `sjq --validate`. Validation is a
 separate pass run before indexing, so the default path pays nothing for it — see
 [`src/yaml/validate.rs`](../../../src/yaml/validate.rs). The 78 cases above were its
-acceptance criteria; it rejects 53 of them today (each `lax:*` line removed from the
-manifest is a case now rejected), with the 25 harder cases still tracked in #223 (`lax:tags`
+acceptance criteria; it rejects 55 of them today (each `lax:*` line removed from the
+manifest is a case now rejected), with the 23 harder cases still tracked in #223 (`lax:tags`
 under #224).
 
 ### What "accepted" means: the text is kept, not dropped
