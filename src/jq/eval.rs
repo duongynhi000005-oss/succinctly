@@ -28305,9 +28305,9 @@ fn eval_index_expr<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// no key means no result.
 ///
 /// The children of a scalar or `null` are none, not an error (`.b[]` on `b: 3`
-/// is silent in yq), hence the `?`: path-position iteration over a scalar
-/// raises (see `resolve_iterate_sink`), which would turn a no-op write into a
-/// failure.
+/// is silent in yq), hence the `?`: path-position iteration over `null`
+/// raises (see `resolve_iterate_sink`; a non-null scalar yields nothing since
+/// #4464), which would turn a no-op write into a failure.
 pub(crate) fn yq_empty_index_children(target: &Expr) -> Expr {
     Expr::Pipe(vec![target.clone(), Expr::Optional(Box::new(Expr::Iterate))].into())
 }
@@ -40100,27 +40100,24 @@ fn resolve_iterate_sink<'a, S: EvalSemantics>(
             }
             ResolveFlow::Exhausted
         }
-        // #2346 considered, deliberately NOT fixed here: real yq's `.[]`
-        // over a genuinely-resolved non-container is a silent no-op
-        // (confirmed live: `first(.a[])` on `{"a":5}` is `[]`, not an
-        // error, against yq v4.53.3), but this function is also reached by
-        // `resolve_del_path_branches`'s comma-fanout fallback (any sibling
-        // with a negative index declines the vivify pre-pass and falls
-        // through to this read-only path-computation machinery, which has
-        // no way to extend/vivify an array the way `delete_at_path`'s own
-        // `real_slot`-gated rule does) -- an out-of-range index read
-        // reaching this arm there is not a genuinely-resolved scalar, it's
-        // a placeholder for a write real yq's own vivify would perform, and
-        // this function has no way to tell the two apart (no `real_slot`
-        // equivalent, unlike `delete_at_path`/`delete_path_steps`).
-        // Silently returning zero branches for that shape regresses an
-        // honest "Cannot iterate" (a documented, tracked coverage gap) into
-        // a silently wrong answer instead -- confirmed live: `del(.[-1],
-        // .[4][])` on `[1,2]` reached this arm and produced `[1]`
-        // (`.[4][]`'s branch silently vanished) where real yq gives `[1,
-        // null, null, []]`. Left as a follow-up (only `first`, real yq
-        // surface, is currently affected) rather than folded into this
-        // fix. Tracked as #2376.
+        // yq's `.[]` over a genuinely resolved non-container is a silent no-op (`first(.a[])` on
+        // `{"a":5}` is `[]`, #2346/#2376), so yq mode yields no branches for a non-null scalar
+        // (#4464: `5 | del(.a, .[])` is `5`). It does so for every path-position `.[]` in yq
+        // mode, `--jq-extensions` builtins included (`path(.[])` over `5` is empty), the same
+        // as the value-position `.[]`.
+        //
+        // `null` keeps the raise, and that is *wider* than it needs to be: this function is also
+        // reached by `resolve_del_path_branches`'s comma-fanout fallback (any sibling with a
+        // negative index declines the vivify pre-pass), where an out-of-range index or a missing
+        // key reads as a `null` placeholder for a write real yq's own vivify would perform, and
+        // there is no `real_slot` here to tell it from a stored `null` (`delete_at_path` has
+        // one). Dropping the branch for the placeholder is silently wrong -- `del(.[-1],
+        // .[4][])` on `[1,2]` gave `[1]` where yq gives `[1, null, null, []]` -- so a stored
+        // `null` (`del(.a[][], .c)` over `a: [null, [1]]`, yq `[[], []]`) raises as well, a
+        // recorded gap (`docs/compliance/yq/limitations.md`).
+        other if S::TAG == EvalTag::Yq && !matches!(other, OwnedValue::Null) => {
+            ResolveFlow::Exhausted
+        }
         other => ResolveFlow::Escaped(EvalError::cannot_iterate_with(S::TAG, other).into()),
     }
 }

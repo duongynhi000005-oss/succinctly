@@ -36372,13 +36372,13 @@ fn test_yq_error_value_preview_matches_tostring_number_literal_spelling_1055() -
 /// yq rule (`null` -> `[]`, any other scalar -> unchanged passthrough) the
 /// value-only `builtin_map` already had since #1907.
 ///
-/// The trigger is now an assignment whose *path* expression iterates:
-/// `.a | (.[] | key) = 1`, which reaches `cannot_iterate_with` through the
-/// path-computation walk rather than through any `map`/`.[]` evaluation
-/// arm. Like every other yq-mode use of jq's "Cannot iterate over ..."
-/// template, that is itself a divergence from real yq (which no-ops and
-/// prints the document unchanged, confirmed live against v4.53.3) -- a
-/// pre-existing one, unrelated to and deliberately out of scope for #2375.
+/// The trigger is now `.a | sort_by(.)`, which iterates its input through
+/// `cannot_iterate_with` rather than through any `map`/`.[]` evaluation arm
+/// (#4464 removed the earlier trigger, an assignment whose *path* expression
+/// iterates -- `.a | (.[] | key) = 1` -- by making yq's no-op there match yq).
+/// Like every other yq-mode use of jq's "Cannot iterate over ..."
+/// template, that is itself a divergence from real yq, a pre-existing one,
+/// unrelated to and deliberately out of scope for #2375.
 /// It is what this test needs, though: the invariant under test is that
 /// *whenever* yq mode does build that preview, the number keeps its source
 /// spelling, and there is no shape where real yq emits the template at all
@@ -36391,7 +36391,7 @@ fn test_yq_cannot_iterate_preview_matches_tostring_number_literal_spelling_1055(
         let (tostring_out, code) = run_yq_stdin(".a | tostring", &input, &[])?;
         assert_eq!(code, 0, "literal={literal} tostring out: {tostring_out:?}");
         let expected = tostring_out.trim();
-        let (_out, stderr, code) = run_yq_stdin_with_stderr(".a | (.[] | key) = 1", &input, &[])?;
+        let (_out, stderr, code) = run_yq_stdin_with_stderr(".a | sort_by(.)", &input, &[])?;
         assert_ne!(code, 0, "literal={literal} unexpectedly iterated a scalar");
         assert!(
             stderr.contains(expected),
@@ -42342,6 +42342,33 @@ fn test_2347_del_comma_iterate_suffix_with_length_dependent_sibling_still_declin
 ) -> Result<()> {
     let (_out, code) = run_yq_stdin("del(.[5][].x, .[-1])", "[1,2]", &["-o=json", "-I=0"])?;
     assert_eq!(code, 1);
+    Ok(())
+}
+
+/// #4464: `.[]` over a non-null scalar is yq's silent no-op inside a comma-grouped `del()` too
+/// (the `del_comma_iterate_*_4464` goldens pin the matching output), while `succinctly jq` keeps
+/// raising, and a `null` iterate -- which can be the placeholder for an out-of-range index
+/// (`del(.[-1], .[4][])`) -- keeps raising rather than silently dropping the branch.
+#[test]
+fn test_4464_del_comma_iterate_scalar_root_is_a_noop_in_yq_and_raises_in_jq() -> Result<()> {
+    for (input, filter) in [
+        ("5", "del(.a, .[])"),
+        ("5", "del(.[], .[])"),
+        ("\"s\"", "del(.[], .a)"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (0, format!("{input}\n").as_str()),
+            "[{filter}]"
+        );
+    }
+    let (_out, stderr, code) = run_jq_stdin_with_stderr("del(.[], .[])", "5", &["-c"])?;
+    assert_ne!(code, 0, "stderr: {stderr:?}");
+    assert!(stderr.contains("Cannot iterate"), "stderr: {stderr:?}");
+    let (out, stderr, code) =
+        run_yq_stdin_with_stderr("del(.[-1], .[4][])", "[1,2]", &["-o=json", "-I=0"])?;
+    assert_eq!((code, out.as_str()), (1, ""), "stderr: {stderr:?}");
     Ok(())
 }
 
