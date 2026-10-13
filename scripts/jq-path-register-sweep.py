@@ -1849,6 +1849,41 @@ OPERANDS = [
     "(foreach .[]? as $i (.; isempty(.[]?); .))",
     "(foreach .[]? as $i (.; try .a catch 1; .))",
     "(foreach 1 as $i (.; isempty(empty); .))",
+    # (#4488) a `?//` chain under a fold. The fold's own UPDATE refuses a navigation of a value
+    # that is not the register (a literal INIT, jq's own path error), which sends the chain to its
+    # next alternative with the state `null`; and a chain that *is* the UPDATE falls back to its
+    # bare `$x` with the register where the fold step left it (the failed alternatives were
+    # backtracked). The contrasts: a body or INIT that navigates, a source that navigates, and a
+    # `reduce`/`foreach` UPDATE whose chain destructures.
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .a; .))",
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .a; .a))",
+    "(foreach .a as [$a] ?// $a ({\"a\":5}; .a; .))",
+    "(foreach . as [$a] ?// $a (1; .a; .))",
+    "(foreach . as [$a] ?// $a (.; .b; .))",
+    "(foreach . as {b:$b} ?// $a ({\"a\":5}; .a; .))",
+    "(foreach . as [$a] ?// [$a] ?// $a ({\"a\":5}; .a; .))",
+    "(reduce . as [$a] ?// $a ({\"a\":5}; .a))",
+    "(reduce . as [$a] ?// $a (1; .a))",
+    "(reduce .a as [$a] ?// $a ({\"a\":5}; .a))",
+    "try (foreach . as [$a] ?// $a ({\"a\":5}; .a; .)) catch 7",
+    "try (foreach . as [$a] ?// $a ({\"a\":5}; .a; .a)) catch 7",
+    "try (reduce . as [$a] ?// $a ({\"a\":5}; .a)) catch 7",
+    "(. as [$a] ?// $a | 0)",
+    "(. as [$a] ?// $a | $a)",
+    "(. as {a:$a} ?// $a | 0)",
+    "(. as [$a] ?// [$a] ?// $a | 0)",
+    "(. as $a ?// [$a] | 0)",
+    "(. as [$a] ?// $a | .a)",
+    "(. as [$a] ?// $a | (0, .a))",
+    "(.a as [$a] ?// $a | 0)",
+    "(try (. as [$a] ?// $a | 0) catch 5)",
+    "(reduce . as [$a] ?// $a (0; .))",
+    "(reduce . as [$a] ?// $a (0; 1))",
+    "(reduce (1, 2) as [$a] ?// $a (0; 1))",
+    "(reduce .a? as [$a] ?// $a (0; 1))",
+    "(reduce . as [$a] ?// $a (.a?; 1))",
+    "(reduce . as [$a] ?// $a (0; .a?))",
+    "(foreach . as [$a] ?// $a (0; 1; 2))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
@@ -1951,6 +1986,11 @@ CONTEXTS = [
     ("foreach-extract-try-path", "path(foreach .a? as $k (0; .; try ({X})))"),
     ("foreach-extract-try-del", "del(foreach .a? as $k (0; .; try ({X})))"),
     ("foreach-extract-try-assign", "(foreach .a? as $k (0; .; try ({X}))) = 9"),
+    # (#4488) the same body as UPDATE with the loop variable as EXTRACT, read back by `path`
+    # (the register EXTRACT's `$k` is checked against) and written through.
+    ("foreach-update-var-path", "path(foreach .a? as $k (0; {X}; $k))"),
+    ("foreach-update-var-del", "del(foreach .a? as $k (0; {X}; $k))"),
+    ("foreach-update-var-assign", "(foreach .a? as $k (0; {X}; $k)) = 9"),
     ("reduce-update-try-path", "path(reduce .a? as $k (0; try ({X})))"),
     ("reduce-update-try-del", "del(reduce .a? as $k (0; try ({X})))"),
 ]

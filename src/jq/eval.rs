@@ -48033,6 +48033,19 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // register the pattern's walk already moved, which is why it stays opaque). A body
         // with none has nothing to misread, so a `try` around the bind is read for its
         // handler's outputs alone (`try (. as [$a] | $a) catch 7`).
+        //
+        // #4488: but the bare `$x` a `?//` chain falls back to is a producer of its own
+        // ([`resolve_as_pattern`]'s `entry_sink`): no step ran for it, the fork that backtracked
+        // out of the failed alternatives restored the register, and a body that navigates nothing
+        // leaves it there. It states that for the outputs it hands on, so a fold's UPDATE reads it.
+        Expr::AsPattern { patterns, body, .. }
+            if !any_subexpr(body, &mut is_entry_marker_producer)
+                && patterns.len() > 1
+                && patterns.iter().any(|p| matches!(p, Pattern::Var(_)))
+                && neutral_leaves_register(body) =>
+        {
+            EntryMarkers::Forwarded
+        }
         Expr::AsPattern { body, .. } if !any_subexpr(body, &mut is_entry_marker_producer) => {
             EntryMarkers::None
         }
@@ -49235,6 +49248,17 @@ impl FoldRegister {
                 live_register_known: false,
             }
         } else if neutral_leaves_register(update_expr)
+            // #4488: a `reduce` UPDATE backtracks its source, its pattern's steps and every one of
+            // its own UPDATEs, so only its INIT's navigation survives it
+            // ([`reduce_leaves_register_in_place`]) -- whichever alternative of a `?//` chain
+            // destructured, which [`cannot_move_register`] cannot say. Jq mode only, like every
+            // register admission here (ADR-0018).
+            || (S::TAG == EvalTag::Jq
+                && matches!(
+                    unwrap_paren(update_expr),
+                    Expr::Reduce { input, init, update, .. }
+                        if reduce_leaves_register_in_place(input, init, update)
+                ))
             // #3580: UPDATE could navigate, but this output is one it emitted
             // before it did (a recursion's seed, a caught body's handler): the
             // register is where UPDATE entered, which is `self`.
@@ -52303,6 +52327,27 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         &all_names,
                     );
                     clear_nonretryable_stop();
+                    // #4488: an alternative that ran no step (the bare `$x` a `?//` chain falls
+                    // back to) leaves jq's register where the bind entered: the fork that
+                    // backtracked out of the failed alternatives restored it, and a body that
+                    // navigates nothing moves it nowhere. An output that states nothing says so,
+                    // for a fold's UPDATE to read ([`FoldRegister::advance`]) -- otherwise the
+                    // register reads as lost and EXTRACT's `$k` refuses where jq answers.
+                    let states_entry = S::TAG == EvalTag::Jq
+                        && reg.path.depth() == 0
+                        && neutral_leaves_register(&substituted);
+                    let mut entry_sink = |branch: PathBranch<'a>| -> Demand {
+                        if states_entry
+                            && !branch.trackable
+                            && branch.path.depth() == 0
+                            && matches!(branch.register, BranchRegister::None)
+                        {
+                            sink(branch.with_register(BranchRegister::AtEntry))
+                        } else {
+                            sink(branch)
+                        }
+                    };
+                    let sink: &mut dyn FnMut(PathBranch<'a>) -> Demand = &mut entry_sink;
                     let flow = if reg.path.depth() == 0 {
                         match register {
                             // No step ran (a bare `$x` alternative, or an
@@ -54796,8 +54841,17 @@ fn foreach_emitted_branch<'a>(update_branch: &PathBranch<'a>) -> PathBranch<'a> 
 /// and answer the source drive with its stop. Shared by the two path-mode folds,
 /// [`resolve_reduce`] and [`resolve_foreach`], so their `FoldStepOutcome` retry
 /// rule cannot drift between them (#2979).
-fn fold_escape_outcome(e: EvalEscape, is_last: bool, aborted: &StashedEscape) -> FoldStepOutcome {
-    if path_alternative_retries(&e, is_last) {
+fn fold_escape_outcome<S: EvalSemantics>(
+    e: EvalEscape,
+    is_last: bool,
+    aborted: &StashedEscape,
+) -> FoldStepOutcome {
+    if path_alternative_retries(&e, is_last)
+        || (S::TAG == EvalTag::Jq
+            && !is_last
+            && fold_body::depth() == 0
+            && matches!(&e, EvalEscape::Error(err) if err.is_untracked_navigation_error()))
+    {
         FoldStepOutcome::Retry
     } else {
         FoldStepOutcome::Return(aborted.stop(e.into()))
@@ -55273,7 +55327,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 (acc_at_register, acc_snapshot) =
                                     reg.fold_branch_provenance::<S>(last.as_ref(), frame, slice_ok);
                                 acc = last.map(|b| b.value.into_owned());
-                                outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                                outcome = Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                                 Demand::Stop
                             }
                         }
@@ -55919,7 +55973,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Escaped(e) => {
-                                        outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                                        outcome =
+                                            Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Exhausted => {}
@@ -55982,7 +56037,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 reg.branch_provenance::<S>(None, frame);
                         }
                         if let ResolveFlow::Escaped(e) = flow {
-                            outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                            outcome = Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                             return Demand::Stop;
                         }
                         Demand::Continue
@@ -143459,8 +143514,14 @@ mod neutral_leaves_register_tests_4028 {
         for (src, shape) in [
             (". as [$a] | $a", "none"),
             (". as {a:$a} | $a", "none"),
-            (". as [$a] ?// $a | 1", "none"),
+            (". as [$a] ?// [$b] | 1", "none"),
             (". as {(.a):$a} | $a", "none"),
+            // #4488: but the bare `$x` a `?//` chain falls back to runs no pattern step, so it
+            // states the register at the bind's entry itself, when the body navigates nothing.
+            (". as [$a] ?// $a | 1", "forwarded"),
+            (". as $a ?// [$a] | $a", "forwarded"),
+            (". as {a:$a} ?// [$a] ?// $a | 1", "forwarded"),
+            (". as [$a] ?// $a | .a", "none"),
             // A producer in a computed key or in the source states nothing into the sink.
             (". as {(try .a catch 1):$a} | $a", "none"),
             ("(.. | .) as [$a] | $a", "none"),
