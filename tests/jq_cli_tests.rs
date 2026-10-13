@@ -132541,3 +132541,107 @@ fn test_negative_index_write_error_keeps_jq_wording_2335() -> Result<()> {
     }
     Ok(())
 }
+
+/// #4487: a `?//` bind whose earlier alternative's body raises a path error jq does not catch -- a
+/// bare postfix `?` on a navigation, here behind an `and`/`or` operand, which runs on the input
+/// while jq's register sits where the pattern's walk left it -- retries the next alternative, as
+/// jq's `?//` does for any body error. The resolver declined to retry every untracked-navigation
+/// refusal and refused rows jq answers. The last alternative's error, a destructuring that fails
+/// in every alternative and an error jq does not turn into a retry (the terminal `with result`)
+/// still propagate. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_alternative_retries_on_an_uncaught_body_path_error_4487() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        ("[]", r"path(. as [$q] ?// $q | .a?)", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (1 and (.a?)))", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (.a? and 1))", "", "", 0),
+        ("[]", r"path(. as [$q] ?// $q | (1 and (.[]?)))", "", "", 0),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (0 and (.a?)), .)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"[path(. as [$q] ?// $q | (1 and (.a?)))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"del(. as [$q] ?// $q | (1 and (.a?)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"(. as [$q] ?// $q | (1 and (.a?))) |= 9",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q ?// $z | (1 and (.a?)))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(. as [[$q]] ?// $q | (1 and (.a?)))",
+            "",
+            "",
+            0,
+        ),
+        // Inside a fold body the retry is not read (it accepted a `del` jq refuses).
+        (
+            "[true]",
+            r"del(reduce .[]? as $k (.; (. as [$q] ?// $z | (.a?, $z))))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        // Controls: no `?//` (nothing retries), the last alternative's own error, an ordinary
+        // type error in the retried alternative, and the terminal refusal.
+        (
+            "[]",
+            r"path(. as [$q] | .a?)",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// [$z] | (1 and (.a?)))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (1 and (.a)))",
+            "",
+            "Cannot index array with string \"a\"",
+            5,
+        ),
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (1 or (.a?)))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            "null",
+            r"path(. as [$q] ?// $q | (1 and (.a?)))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+    ])
+}

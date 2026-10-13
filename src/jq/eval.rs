@@ -52212,6 +52212,23 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                     && matches!(
                                         &escape,
                                         EvalEscape::Error(e) if e.is_untracked_navigation_error()
+                                    ))
+                                // #4487: an untracked navigation the body raised is jq's own path
+                                // error, not a guess ([`guess_refusal`] already made every guess
+                                // an uncatchable `GuessedPathRefusal`, which is not matched here):
+                                // the register the pattern's walk left is known and the navigated
+                                // value is not it, as for `(1 and (.a?))` whose right operand runs
+                                // on the input. jq's `?//` retries on any body error, so the next
+                                // alternative runs. Not the last alternative (its error is final)
+                                // and not the terminal `with result` refusal. Only outside every fold body: inside one
+                                // the same retry accepted a `del` jq refuses (the sweep's `reduce-source`/`reduce-update-*`
+                                // contexts, 21 rows), the accumulator being a state this walk does not track.
+                                || (S::TAG == EvalTag::Jq
+                                    && !is_last
+                                    && fold_body::depth() == 0
+                                    && matches!(
+                                        &escape,
+                                        EvalEscape::Error(e) if e.is_untracked_navigation_error()
                                     ));
                             // Before the generation is read: the by-value run below may hold a
                             // `?//` of its own, which bumps it (#4150 review).
