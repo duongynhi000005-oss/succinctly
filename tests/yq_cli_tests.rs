@@ -13888,7 +13888,7 @@ fn test_mapping_value_shapes_next_to_4463_still_parse() -> Result<()> {
 #[test]
 fn test_inplace_refuses_content_after_a_mapping_value_4463() -> Result<()> {
     let mut file = NamedTempFile::new()?;
-    write!(file, "a: 1 b: 2\n")?;
+    writeln!(file, "a: 1 b: 2")?;
     let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
         .args(["yq", "-i", ".a = 9"])
         .arg(file.path())
