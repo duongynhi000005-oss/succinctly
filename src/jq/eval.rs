@@ -36574,8 +36574,9 @@ fn is_try_scoped_component(component: &Expr) -> bool {
 /// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
-/// A `?//` chain is out (a failed alternative leaves `null`), and so is any pattern whose
-/// `$var` could be returned: the body must itself hand its input on.
+/// A `?//` chain as the nested fold's own loop pattern is out (a failed alternative leaves `null`; one
+/// in its source is in since #4506), and so is any pattern whose `$var` could be returned: the body must
+/// itself hand its input on.
 fn update_returns_its_input(e: &Expr) -> bool {
     match e {
         Expr::Identity => true,
@@ -36644,11 +36645,7 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
             Expr::Identity | Expr::Field(_) | Expr::Index { .. } | Expr::Iterate => true,
             Expr::Paren(inner) | Expr::Optional(inner) => navigation(inner, pass),
             Expr::Pipe(stages) => stages.iter().all(|stage| navigation(stage, pass)),
-            Expr::AsPattern {
-                expr,
-                patterns,
-                body,
-            } => patterns.len() == 1 && is_register(expr) && body_performs_no_step(body),
+            Expr::AsPattern { expr, body, .. } => is_register(expr) && body_performs_no_step(body),
             Expr::FuncDef {
                 name,
                 params,
@@ -36668,15 +36665,13 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
     // only with either stays refused (the safe direction). It inherits the router's own reading
     // of a call. A `def` whose body builds its result is routed too since #4452 (the resolver
     // then refuses the pattern's step as jq does); one that hands the register on next to a
-    // fresh value is not, and is accepted here where jq raises. Not a `?//` chain, whose failed
-    // alternative leaves `null` (the same exclusion as above).
-    let no_chain = !any_subexpr(
-        e,
-        &mut |s| matches!(s, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
-    );
+    // fresh value is not, and is accepted here where jq raises. A `?//` chain in the source is read as
+    // a single pattern is (#4506): the resolver retries the alternatives as jq does, and the fold's
+    // state is the accumulator whichever one matches (a chain whose every alternative fails raises
+    // in jq and here). The loop pattern of the nested fold stays a single one (`nested_fold_keeps_state`).
     cannot_move_register(e)
         || navigation(e, None)
-        || (no_chain && foreach_source_destructures_register(e, Vec::new(), false))
+        || foreach_source_destructures_register(e, Vec::new(), false)
 }
 
 /// Whether `e` is a no-op in path position: `.`, or a pipe or parenthesised group of

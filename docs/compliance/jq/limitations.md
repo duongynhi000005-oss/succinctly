@@ -2205,7 +2205,7 @@ is the revert that established what the other one costs.
    refusal where jq answers and not a wrong accept, because a nested `reduce` had no `update_returns_its_input` arm; it
    answers since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s eighth part, whose `reduce` arm vets
    the nested `reduce` as the `foreach` arm does (`nested_fold_keeps_state`: a single pattern, a no-op INIT and UPDATE,
-   a source `foreach_source_is_path_checked` accepts). A `?//` chain on the nested `reduce` is still refused. Over the
+   a source `foreach_source_is_path_checked` accepts). A `?//` chain as the nested `reduce`'s *source* answers since [#4506](https://github.com/rust-works/succinctly/issues/4506) (`foreach_source_is_path_checked` no longer excludes a chain: the resolver retries the alternatives as jq does, and a chain whose every alternative fails raises in both); a chain as its *loop pattern* (`reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)`, jq `null`) is still refused. Over the
    158 `reduce` operands (137,259 `--stage-only` rows) 156 refusals become matches and none is lost. The vetter inherits
    the router's reading of a call, so a `def` whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is
    accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
