@@ -20453,6 +20453,30 @@ mod meta_assign_798 {
         Ok(())
     }
 
+    /// #2705 (review): a write under an `as` binding that asks which document it is on is refused
+    /// like the same write at the top level (#2796), not resolved against the first document --
+    /// `select(di == 1) | .b as $x | .a line_comment = $x` printed the second document with no
+    /// comment before the guard saw through the binding.
+    #[test]
+    fn as_binding_write_that_asks_which_document_is_refused_2705() -> Result<()> {
+        for filter in [
+            "select(di == 1) | .b as $x | .a line_comment = $x",
+            ".b as $x | .a line_comment = (di | tostring)",
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(
+                filter,
+                "a: 1\nb: 2\n---\na: 2\nb: 3\n",
+                &["--jq-extensions"],
+            )?;
+            assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+            assert!(
+                err.contains("cannot depend on document_index/file_index/filename"),
+                "[{filter}] stderr: {err}"
+            );
+        }
+        Ok(())
+    }
+
     /// #2705: a binding whose source yields nothing resolves no write, and the document passes
     /// through unchanged -- what pinned yq v4.53.3 prints for it too (a quirk: jq prints nothing).
     #[test]
