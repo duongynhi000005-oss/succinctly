@@ -50679,16 +50679,42 @@ impl<'e> RegisterSpine<'e> {
 }
 
 /// The bound expression of a `?//` chain with a bare `$var` alternative that is the whole
-/// operand of a `first(..)` or `limit(n; ..)` with a literal `n` (#4483). Not behind a `try`/`?`
-/// around the wrapper: those rows are answered by the by-value drive, and routing them accepted
-/// a `del` that jq refuses. Not a `limit` whose `n` is a generator (`limit(1,2; ..)` runs the
-/// chain once per `n`): the resolver answers the chain once.
+/// operand of a `first(..)`, `limit(n; ..)` or `nth(n; ..)` with a literal `n` (#4483), read
+/// through the wrappers that hand the chain on unchanged (#4497): a `try` without a handler, a
+/// `?`, a wrapper under a wrapper (`first(first(CHAIN))`, `try nth(0; CHAIN)`) and a `$x` bind in
+/// front of the chain (its source is a subexp in jq and moves nothing). Not a `limit` whose `n`
+/// is a generator (`limit(1,2; ..)` runs the chain once per `n`): the resolver answers the chain
+/// once. Routing the `try`/`?` rows was tried in #4496 and produced wrong accepts, which was the
+/// by-value drive's `with result` guess answering for a refusal; #4497 reads them and pins the
+/// row that failed (`test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497`).
 fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
+    wrapped_bare_chain(e, WRAPPED_CHAIN_DEPTH)
+}
+
+/// How many wrappers [`take_wrapped_bare_chain`] reads through; past it the operand is read as
+/// not a chain, the previous answer (a native-stack bound for a pathological nesting).
+const WRAPPED_CHAIN_DEPTH: u8 = 16;
+
+fn wrapped_bare_chain(e: &Expr, budget: u8) -> Option<&Expr> {
+    let budget = budget.checked_sub(1)?;
+    if let Expr::Try { expr, catch: None } | Expr::Optional(expr) = unwrap_paren(e) {
+        return wrapped_bare_chain(expr, budget);
+    }
+    let literal = |n: &Expr| matches!(unwrap_paren(n), Expr::Literal(_));
     let operand = match unwrap_paren(e) {
-        Expr::Limit { n, expr } if matches!(unwrap_paren(n), Expr::Literal(_)) => expr,
+        Expr::Limit { n, expr } if literal(n) => expr,
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) if literal(n) => {
+            expr
+        }
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => inner,
         _ => return None,
     };
+    bare_chain_source(operand, budget)
+}
+
+/// The bound expression of the `?//` chain `operand` is, or holds behind the wrappers
+/// [`take_wrapped_bare_chain`] reads.
+fn bare_chain_source(operand: &Expr, budget: u8) -> Option<&Expr> {
     match unwrap_paren(operand) {
         Expr::AsPattern { expr, patterns, .. }
             if routes_destructuring_chain(patterns)
@@ -50696,7 +50722,8 @@ fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
         {
             Some(expr)
         }
-        _ => None,
+        Expr::As { body, .. } => bare_chain_source(body, budget.checked_sub(1)?),
+        wrapped => wrapped_bare_chain(wrapped, budget),
     }
 }
 
