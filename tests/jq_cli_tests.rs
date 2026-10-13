@@ -69749,6 +69749,169 @@ fn test_try_handler_over_destructuring_bind_or_fold_states_the_entry_register_41
     ])
 }
 
+/// #4490: a `try` with a handler over a destructuring bind whose *body* holds a `.` (or a recursion,
+/// a `try`, a comma, an `if`), or a bind behind a navigating stage inside the `try`. The body's
+/// producer was read as a statement against a register the pattern's walk already moved, so the whole
+/// `try` read as opaque and the stage after it was refused
+/// (`path(. as $x | 1 | (try (. as [$a] | .) catch 7) | $x)` on `[true]` is `[]`, was exit 5). A bind that
+/// took a step hands its body a seed carrying the register it moved, so an output states that one and
+/// never the entry register; only a bind that took no step reads as the stage's entry. Every jq side
+/// captured from jq 1.7.1.
+#[test]
+fn test_try_handler_over_a_destructure_with_a_producer_body_states_the_entry_register_4490(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The two rows from the issue, as a path, a delete and an assignment.
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | .) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"del(. as $x | 1 | (try (. as [$a] | .) catch 7) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"(. as $x | 1 | (try (. as [$a] | .) catch 7) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (.a | . as [$a] | $a) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"del(. as $x | 1 | (try (.a | . as [$a] | $a) catch 7) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"(. as $x | 1 | (try (.a | . as [$a] | $a) catch 7) | $x) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        // The walk succeeds, so the body's own output is a result: `$x` is still the root, and a
+        // navigation after it is the root's.
+        (
+            "[[1]]",
+            r"path(. as $x | [1] | (try (. as [$a] | .) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(. as $x | [1] | (try (. as [$a] | .) catch 7) | $x | .[0]?)",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // A producer of every kind in the body: a comma, an `if`, a `?//` chain, a recursion, `first`,
+        // a nested pattern, and a bind behind an identity, a literal or a `?` stage.
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | (., 1)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | if $a then . else 1 end) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] ?// $a | .) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | ..) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | first(.)) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [[$a]] | .) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (1 | . as [$a] | .) catch 7) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        // The bind outside a `try`, as a comma sibling: the sibling that fails is the second output.
+        (
+            "[true]",
+            r"path(. as $x | 1 | (1, (. as [$a] | .)) | $x)",
+            "[]\n",
+            "Invalid path expression near attempt to access element 0 of 1",
+            5,
+        ),
+        // Controls, jq's own refusals: the register moved before the `try`, a handler that navigates
+        // the caught payload, and the same bind as a comma sibling ahead of a failing one.
+        (
+            "[[true]]",
+            r"path(. as $x | .[0] | (try (. as [$a] | .) catch 7) | $x)",
+            "",
+            "Invalid path expression with result [[true]]",
+            5,
+        ),
+        (
+            "[[true]]",
+            r"path(. as $x | .[0] | (try (.a | . as [$a] | $a) catch 7) | $x)",
+            "",
+            "Invalid path expression with result [[true]]",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | (try (. as [$a] | .) catch .a) | $x)",
+            "",
+            r#"Invalid path expression near attempt to access element "a""#,
+            5,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | 1 | ((. as [$a] | .), 1) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of 1",
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
