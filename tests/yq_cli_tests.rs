@@ -13751,6 +13751,73 @@ fn test_yaml_only_file_after_a_json_first_file_is_a_parse_error_4394() -> Result
     Ok(())
 }
 
+/// #4363: yq slurps the leading blank, whitespace-only, comment, `%` directive and first `---` lines
+/// off the input before parsing, so its `line` counts from the first content line in every document,
+/// and a `--- 42` first line loses the marker from its columns. Each row is a live yq v4.53.3 capture
+/// (`yq -o json -I0 '<filter>'` over the input).
+#[test]
+fn test_line_and_column_count_from_the_first_content_line_4363() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        ("# c\nk: 1\nm: 2\n", "[line,column]", "[1,1]"),
+        ("# c\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("# c\n# d\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("---\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("---\n# c\n\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("# c\n---\n# d\nk: 1\n", ".k | [line,column]", "[1,4]"),
+        ("%YAML 1.2\n---\nk: 1\n", ".k | [line,column]", "[1,4]"),
+        ("\nk: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("  \nk: 1\n", ".k | [line,column]", "[1,4]"),
+        ("\t\nk: 1\n", ".k | [line,column]", "[1,4]"),
+        ("# c\n  k: 1\n", "[line,column]", "[1,3]"),
+        ("# c\n- 1\n", "[line,column]", "[1,1]"),
+        ("# c\n5\n", "[line,column]", "[1,1]"),
+        // The content of a `--- 42` line starts at column 1.
+        ("--- 5\n", "[line,column]", "[1,1]"),
+        ("--- [1, 2]\n", ".[1] | [line,column]", "[1,5]"),
+        ("---  [1, 2]\n", ".[0] | [line,column]", "[1,2]"),
+        ("--- a: 1\n", ".a | [line,column]", "[1,4]"),
+        ("--- &x [1]\n", ".[0] | [line,column]", "[1,5]"),
+        // No preamble: unchanged.
+        ("k: 1\nm: 2\n", ".m | [line,column]", "[2,4]"),
+        ("k: 1\n\n\nm: 2\n", ".m | [line,column]", "[4,4]"),
+        // A later document counts from the same origin.
+        ("a: 1\n---\nb: 2\nc: 3\n", ".c | [line,column]", "[4,4]"),
+        (
+            "---\nk: 1\n---\nb: 2\nc: 3\n",
+            ".c | [line,column]",
+            "[4,4]",
+        ),
+        (
+            "# c\n---\nk: 1\n---\nb: 2\nc: 3\n",
+            ".c | [line,column]",
+            "[4,4]",
+        ),
+    ];
+    for (input, filter, expected) in rows {
+        let (stdout, code) = run_yq_stdin(filter, input, &["-o", "json", "-I", "0"])?;
+        let last = stdout.lines().last().unwrap_or_default();
+        assert_eq!((last, code), (*expected, 0), "{filter} on {input:?}");
+    }
+    Ok(())
+}
+
+/// `yq-locate` resolves an editor line, not yq's: the renumbering is the `line` and `column`
+/// builtins' alone (#4363). Line 3 of `# c` / `k: 1` / `m: 2` is `m`, though yq calls it line 2.
+#[test]
+fn test_yq_locate_still_resolves_against_the_editor_line_4363() -> Result<()> {
+    let mut file = NamedTempFile::new()?;
+    write!(file, "# c\nk: 1\nm: 2\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .args(["yq-locate"])
+        .arg(file.path())
+        .args(["--line", "3", "--column", "1"])
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), ".[0].m");
+    Ok(())
+}
+
 #[test]
 fn test_line_column_object_construction_is_a_known_limitation() -> Result<()> {
     // Object construction used to round-trip through OwnedValue, which has

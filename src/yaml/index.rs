@@ -124,6 +124,10 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// that counts characters ([`Self::to_line_char_column`]) is the byte column in that
     /// case, so an ASCII document pays one scan for the whole run and no per-call prefix walk.
     text_is_ascii: OnceCell<bool>,
+    /// The leading lines (and the same-line columns of the first content line) real yq does not
+    /// count when it numbers `line`/`column`, measured once on first use (#4363; see
+    /// `light.rs`'s `yq_position_preamble`).
+    yq_preamble: OnceCell<(usize, usize)>,
 }
 
 /// Build cumulative popcount index for IB.
@@ -219,6 +223,7 @@ impl YamlIndex<Vec<u64>> {
             header_doc_markers: true,
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
+            yq_preamble: OnceCell::new(),
         };
         index.validate_alias_acyclicity()?;
         Ok(index)
@@ -289,6 +294,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             header_doc_markers: true,
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
+            yq_preamble: OnceCell::new(),
         }
     }
 
@@ -977,6 +983,13 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             .filter(|byte| (**byte & 0xC0) != 0x80)
             .count();
         (line, characters + overshoot + 1)
+    }
+
+    /// The `(lines, columns)` yq leaves out of its `line`/`column` numbering, from the
+    /// leading preamble of the text (#4363). Computed by `measure` on first use, then cached.
+    #[inline]
+    pub(crate) fn yq_preamble(&self, measure: impl FnOnce() -> (usize, usize)) -> (usize, usize) {
+        *self.yq_preamble.get_or_init(measure)
     }
 
     /// Convert (line, column) to a byte offset using the line index.

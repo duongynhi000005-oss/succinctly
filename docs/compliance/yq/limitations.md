@@ -5675,11 +5675,17 @@ stop, listing `m.<<` where this lists the merged `m.p`/`m.q`), and `recurse(f; c
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in
 yq ([#2712](https://github.com/rust-works/succinctly/issues/2712)): `b: &anc [1,2]` is column 4.
-One pre-existing difference remains, not specific to properties:
+yq numbers `line` from the first *content* line (#4363): its header preprocessing slurps the leading
+blank, whitespace-only, comment, `%` directive and first `---` lines off the input and parses the rest,
+in every document of the stream. `# c` / `k: 1` / `m: 2` has `.m` on line 2 and the root on `[1,1]`, as
+does the same text opened by `---`, `%YAML 1.2` / `---`, or a blank line; a later document counts from the
+same origin (`---` / `k: 1` / `---` / `b: 2` / `c: 3` has `.c` on line 4, not 5). A first content line
+that is `--- 42` also loses the marker and the blanks after it from its columns (`--- [1, 2]` has `[` on
+`[1,1]`). `yq-locate`, `at_offset` and the library's `YamlCursor::line` keep the editor line; only the
+`line`/`column` builtins renumber (`yq_position_preamble`).
 
-- yq reports `1:1` for the root of a *first* document that opens with an explicit `---` or a leading
-  comment (`--- 5`, `# c` / `k: 1`); here the root reports its own position (`[1,5]`, `[2,1]`). A later
-  document's root agrees (#4363).
+Still different: `--- # c` / `&b [1]` is `[0,0]` in yq (the comment on the marker line), `[2,1]` here; and a
+second `---` straight after the first (`---` / `--- 5`) is `[1,1]` in yq and `[1,5]` here.
 
 `column` counts characters, as yq does ([#4364](https://github.com/rust-works/succinctly/issues/4364)):
 `é: [1]` is `[1,4]`, where it used to read `[1,5]` (the byte column). A character is a Unicode scalar
