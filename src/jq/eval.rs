@@ -49914,24 +49914,24 @@ fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
     }
 }
 
-/// Whether a `limit` count is a literal that takes exactly the first output (#4514): positive
-/// and at most one (`limit(0.5; f)` takes `ceil(0.5)`), as [`update_navigates_within`] reads it.
-fn limit_takes_one(n: &Expr) -> bool {
+/// A `limit` count that is a literal number (#4514), as [`update_navigates_within`] reads one.
+fn limit_literal_count(n: &Expr) -> Option<f64> {
     match unwrap_paren(n) {
-        Expr::Literal(lit) => literal_to_owned(lit)
-            .as_f64()
-            .is_some_and(|n| n > 0.0 && n <= 1.0),
-        _ => false,
+        Expr::Literal(lit) => literal_to_owned(lit).as_f64(),
+        _ => None,
     }
+}
+
+/// Whether a `limit` count is a literal that takes exactly the first output (#4514): positive
+/// and at most one (`limit(0.5; f)` takes `ceil(0.5)`).
+fn limit_takes_one(n: &Expr) -> bool {
+    limit_literal_count(n).is_some_and(|n| n > 0.0 && n <= 1.0)
 }
 
 /// Whether a `limit` count is a literal that takes at least the first output (#4514): any
 /// positive literal, `limit(2; ..)` as well as the `limit(1; ..)` [`limit_takes_one`] reads.
 fn limit_takes_some(n: &Expr) -> bool {
-    match unwrap_paren(n) {
-        Expr::Literal(lit) => literal_to_owned(lit).as_f64().is_some_and(|n| n > 0.0),
-        _ => false,
-    }
+    limit_literal_count(n).is_some_and(|n| n > 0.0)
 }
 
 /// Whether `e` is a comma whose first output is `.`: its first leaf, through nested commas
@@ -50173,25 +50173,49 @@ impl<'e> RegisterSpine<'e> {
     /// note on `def f: ., {a:1}` (a register leaf beside a fresh one) pins that a routed call
     /// refuses a negated operand jq answers.
     fn first_output_is_register(&mut self, e: &'e Expr) -> bool {
-        let e = unwrap_bind_source(e);
-        // A `$x` bound outside the source that is the register at the fold, as the first leaf.
-        let marker = match e {
-            Expr::Comma(_) => first_leaf_marker(e),
-            Expr::Limit { n, expr: inner } if limit_takes_some(n) => first_leaf_marker(inner),
-            _ => None,
-        };
-        if marker.is_some_and(|marker| self.markers.contains(&Rc::as_ptr(marker))) {
-            return true;
+        // The wrappers whose first output is their operand's first: `try`, `?`, `first`, a
+        // `limit` with a positive literal count, `nth(0; ..)`, a `label`, and a pipe of one stage
+        // that is not `.` (`(., 1) | .`, `. | (., 1)`).
+        let mut e = unwrap_bind_source(e);
+        loop {
+            let inner = match e {
+                Expr::Optional(inner)
+                | Expr::Try {
+                    expr: inner,
+                    catch: None,
+                }
+                | Expr::FirstExpr(inner)
+                | Expr::Builtin(Builtin::FirstStream(inner))
+                | Expr::Label { body: inner, .. } => inner,
+                Expr::Limit { n, expr: inner } if limit_takes_some(n) => inner,
+                Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner))
+                    if limit_literal_count(n) == Some(0.0) =>
+                {
+                    inner
+                }
+                Expr::Pipe(stages) => {
+                    let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+                    match (rest.next(), rest.next()) {
+                        (Some(only), None) => only,
+                        _ => break,
+                    }
+                }
+                _ => break,
+            };
+            e = unwrap_bind_source(inner);
         }
         match e {
-            Expr::Comma(items) => items.first().is_some_and(|first| {
-                self.binds_register(first) || self.first_output_is_register(first)
-            }),
-            Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
-                self.binds_register(inner) || self.first_output_is_register(inner)
-            }
+            Expr::Comma(items) => items
+                .first()
+                .is_some_and(|first| self.binds_register_first(first)),
             _ => false,
         }
+    }
+
+    /// [`binds_register`](Self::binds_register), or [`first_output_is_register`]
+    /// (Self::first_output_is_register): the question the routing decisions ask (#4514).
+    fn binds_register_first(&mut self, e: &'e Expr) -> bool {
+        self.binds_register(e) || self.first_output_is_register(e)
     }
 
     /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
@@ -50384,10 +50408,7 @@ impl<'e> RegisterSpine<'e> {
             params
                 .iter()
                 .zip(args)
-                .map(|(param, arg)| {
-                    param.is_dollar()
-                        && (self.binds_register(arg) || self.first_output_is_register(arg))
-                })
+                .map(|(param, arg)| param.is_dollar() && self.binds_register_first(arg))
                 .collect()
         } else {
             Vec::new()
@@ -50518,7 +50539,7 @@ impl<'e> RegisterSpine<'e> {
             Expr::As { expr, var, body } => {
                 // #4514: a variable bound to a source that is the register on its first output
                 // holds it for the walk, which only decides what the resolver is asked.
-                let register = self.binds_register(expr) || self.first_output_is_register(expr);
+                let register = self.binds_register_first(expr);
                 self.with_vars(&[(var.as_str(), register)], body)
             }
             Expr::AsPattern {
@@ -50595,7 +50616,8 @@ impl<'e> RegisterSpine<'e> {
                     && (routes_destructuring(patterns)
                         || patterns_all_destructuring_chain(patterns)
                         || (self.null_register && routes_destructuring_chain(patterns)))
-                    && (self.binds_register(expr) || self.first_output_is_register(expr))
+                    && (self.binds_register(expr)
+                        || (patterns.len() == 1 && self.first_output_is_register(expr)))
                     && (patterns.len() == 1
                         || self.null_register
                         || (patterns_all_destructuring_chain(patterns)

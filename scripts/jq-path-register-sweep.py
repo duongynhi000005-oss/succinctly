@@ -2008,6 +2008,16 @@ OPERANDS = [
     "(. as $x | foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
     "(reduce (limit(2; ., 1) as {a:$a} | .) as $k (.; .))",
     "(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+    # The wrappers that hand the first output on: `nth(0; ..)`, a pipe with `.`, `try`, and the contrasts
+    # that do not (`nth(1; ..)`, `limit(0; ..)`).
+    "(foreach (nth(0; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (((., 1) | .) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach ((. | (., 1)) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(2; (., 1) | .) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach ((try (., 1)) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (nth(1; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(0; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | $a; f(limit(2; ., 1) | .)) as $k (.; .; .))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
