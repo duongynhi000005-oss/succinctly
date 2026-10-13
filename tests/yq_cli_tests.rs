@@ -31926,6 +31926,91 @@ fn test_2344_del_slice_field_tail_errors_for_every_non_string_target() -> Result
     Ok(())
 }
 
+/// #4542: an `.[]` *after* the slice-run fans out over the sliced sequence and the tail is applied
+/// to each element: an array element fails a following field (even an empty one), a mapping, a
+/// scalar or a string does not, and an index tail never fails. The walk is the same one the
+/// no-iterate shape uses, so a mapping target slices to its key/value children (#1102), a second
+/// `.[]` fans out over each element's children, a prefix step that mismatches the document fails
+/// on its own, and `.x?` suppresses.
+#[test]
+fn test_4542_del_slice_then_iterate_field_tail_errors_per_element() -> Result<()> {
+    let failing = [
+        ("del(.a[0:2][].x)", r#"{"a":[[1,2,3],{"y":1}]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":[[],[]]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":[5,[1]]}"#),
+        ("del(.a[1:2][].x)", r#"{"a":["s",[1]]}"#),
+        ("del(.a[0:2][0:1][].x)", r#"{"a":[[1],5]}"#),
+        ("del(.a[0:2][].x[0])", r#"{"a":[[1]]}"#),
+        ("del(.a[0:2][][0].x)", r#"{"a":[[[1]]]}"#),
+        ("del(.a[0:2][][].x)", r#"{"a":[[[1]]]}"#),
+        ("del(.a[0:2][][].x)", r#"{"a":[{"y":[1]}]}"#),
+        // A mapping slices to its alternating keys and values: `y` then `[1]`.
+        ("del(.a[0:2][].x)", r#"{"a":{"y":[1]}}"#),
+        ("del(.a[1:2][].x)", r#"{"a":{"y":[1]}}"#),
+        ("del(.a[0:2][1].x)", r#"{"a":{"y":[1]}}"#),
+        // `.[]` before and after the run: the outer one classifies per element.
+        ("del(.a[][0:2][].x)", r#"{"a":[[[1]]]}"#),
+        // The prefix before the run is a field step on an array.
+        ("del(.a[0:2][].x)", r"[1,2]"),
+        ("del(.a[0:2][0])", r"[1,2]"),
+        ("del(.a[].b[0:2].x)", r#"{"a":[[1]]}"#),
+        // A comma sibling does not rescue the call.
+        ("del(.a[0:2][].x, .c)", r#"{"a":[[1]],"c":1}"#),
+    ];
+    for (filter, input) in failing {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (1, ""),
+            "[{filter}] [{input}] stderr: {stderr:?}"
+        );
+    }
+    let (_, stderr, _) = run_yq_stdin_with_stderr(
+        "del(.a[0:2][].x)",
+        r#"{"a":[[1,2,3],{"y":1}]}"#,
+        &["-o=json", "-I=0"],
+    )?;
+    assert!(
+        stderr.contains("array") && stderr.contains('x'),
+        "stderr: {stderr:?}"
+    );
+
+    let inert = [
+        ("del(.a[0:2][].x)", r#"{"a":["s","t"]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":[{"x":1},{"x":2}]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":[5,true,null]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":[]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":{"y":1}}"#),
+        ("del(.a[0:2][].x)", r#"{"a":"s"}"#),
+        ("del(.a[0:2][].x)", r#"{"a":5}"#),
+        ("del(.a[0:2][].x)", r#"{"a":null}"#),
+        ("del(.a[0:2][].x)", r#"{"b":1}"#),
+        ("del(.a[5:9][].x)", r#"{"a":[[1]]}"#),
+        ("del(.a[1:2][].x)", r#"{"a":[[1],5]}"#),
+        ("del(.a[0:1][].x)", r#"{"a":{"y":[1]}}"#),
+        ("del(.a[0:2][][0].x)", r#"{"a":[5,[1]]}"#),
+        ("del(.a[0:2][][].x)", r#"{"a":[[1,2,3],{"y":1}]}"#),
+        ("del(.a[0:2][][0])", r#"{"a":[[1],[2]]}"#),
+        ("del(.a[0:2][])", r#"{"a":[[1],[2]]}"#),
+        ("del(.a[0:2][].x?)", r#"{"a":[[1],{"y":1}]}"#),
+        ("del(.a[0:2][].x?, .b)", r#"{"a":[[1]],"b":2}"#),
+    ];
+    for (filter, input) in inert {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        let expected = if filter.ends_with(", .b)") {
+            "{\"a\":[[1]]}\n".to_string()
+        } else {
+            format!("{input}\n")
+        };
+        assert_eq!(
+            (code, out.as_str()),
+            (0, expected.as_str()),
+            "[{filter}] [{input}]"
+        );
+    }
+    Ok(())
+}
+
 /// #2333: the error propagates even when the array-targeting field access
 /// isn't the step immediately after the slice — `.a[0:2][0].x` slices,
 /// indexes into the (real) sliced array, and *that* element turns out to
