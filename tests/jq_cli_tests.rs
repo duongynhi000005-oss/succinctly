@@ -61722,6 +61722,11 @@ fn test_reduce_update_caught_or_isempty_leaves_the_register_4486() -> Result<()>
     // (filter, stdout, exit code)
     const ROWS: &[(&str, &str, i32)] = &[
         (
+            r"path(. as $x | reduce 1 as $i (.; isempty(.[]?)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
             r"del(((reduce .[]? as $i (.; try isempty(.[]?) catch 1)) and .b?) // .a)",
             "{}\n",
             0,
@@ -72174,14 +72179,9 @@ fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
             "[]",
             r#"Invalid path expression with result {"a":false}"#,
         ),
-        // #3826: a `reduce` whose `UPDATE` is a verdict over a generator that navigates is not
-        // admitted (only the bare `any`/`all`, and a generator that moves nothing, are).
-        (
-            r"[false]",
-            r"path(. as $x | reduce 1 as $i (.; isempty(.[]?)) | $x)",
-            "[]",
-            r"Invalid path expression with result [false]",
-        ),
+        // (A `reduce` whose `UPDATE` is `isempty` over a generator that navigates was refused here
+        // until #4486: the resolver path-checks the generator live, so the fold leaves the register
+        // where `INIT` put it. See `test_reduce_update_caught_or_isempty_leaves_the_register_4486`.)
         // #3826: on an untracked entry a generator the allowlist cannot prove leaves the
         // register in place states a loss, which the stage does not override.
         (
