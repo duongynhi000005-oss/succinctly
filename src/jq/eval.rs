@@ -49537,6 +49537,7 @@ fn source_destructures_register_with(
         calls: SPINE_CALL_BUDGET,
         depth: 0,
         binding: Vec::new(),
+        held: Vec::new(),
         markers,
     };
     walk.reach(source) == Reach::Destructures
@@ -49772,6 +49773,9 @@ struct RegisterSpine<'e> {
     /// The `def` bodies [`binds_register`](Self::binds_register) is reading the result of
     /// right now, so a recursive definition is read once (#4320).
     binding: Vec<*const Expr>,
+    /// The bodies being read inside a call that bound a `$` parameter to the register (#4485):
+    /// not memoized, since their answer depends on the call.
+    held: Vec<*const Expr>,
     /// The `$x` markers (bound outside the source) that are jq's register at the fold, by
     /// `Rc` identity: the caller certified each one against the register it holds
     /// ([`fold_source_register_markers`], #4320). Empty for a walk with no such caller.
@@ -50004,7 +50008,7 @@ impl<'e> RegisterSpine<'e> {
     /// first `vars` spine variables and `defs` spine definitions in scope: what was bound where
     /// the definition was written.
     fn read_body(&mut self, body: &'e Expr, vars: usize, defs: usize) -> Reach {
-        self.read_body_with(body, vars, defs, &[])
+        self.read_body_with(body, vars, defs, &[], &[])
     }
 
     /// [`read_body`](Self::read_body) of a definition with `params` (#4424): each is a closure
@@ -50016,9 +50020,31 @@ impl<'e> RegisterSpine<'e> {
         vars: usize,
         defs: usize,
         params: &'e [Param],
+        args: &'e [Expr],
     ) -> Reach {
+        // #4485: a `$`-style parameter holds the register when its argument is the register
+        // (`def f($x): $x as {a:$a} | .; f(.)`). Read in the caller's scope, before the body's.
+        let holds: Vec<bool> = if params.len() == args.len() && params.iter().any(Param::is_dollar)
+        {
+            params
+                .iter()
+                .zip(args)
+                .map(|(param, arg)| param.is_dollar() && self.binds_register(arg))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let key: *const Expr = body;
-        if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
+        // The memo is by body, which fixes the answer only where no parameter holds the register:
+        // a call that binds one, and every body read inside it (a nested `def g` sees the
+        // parameter), is read afresh, with a recursive call taken to hand the register on as the
+        // memo's placeholder does. Bodies read outside such a call are memoized as before.
+        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held);
+        if held_scope {
+            if self.held.contains(&key) {
+                return Reach::HandsOn;
+            }
+        } else if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
             return reach;
         }
         if self.calls == 0 {
@@ -50026,11 +50052,15 @@ impl<'e> RegisterSpine<'e> {
         }
         self.calls -= 1;
         let at = self.memo.len();
-        self.memo.push((key, Reach::HandsOn));
+        if held_scope {
+            self.held.push(key);
+        } else {
+            self.memo.push((key, Reach::HandsOn));
+        }
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
         let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
-        for param in params {
+        for (i, param) in params.iter().enumerate() {
             self.defs.push(SpineDef {
                 name: param.name(),
                 arity: 0,
@@ -50039,7 +50069,8 @@ impl<'e> RegisterSpine<'e> {
                 vars: 0,
             });
             if param.is_dollar() {
-                self.vars.push((param.name(), false));
+                self.vars
+                    .push((param.name(), holds.get(i).copied().unwrap_or(false)));
             }
         }
         let reach = self.reach(body);
@@ -50047,7 +50078,11 @@ impl<'e> RegisterSpine<'e> {
         self.defs.truncate(defs_base);
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
-        self.memo[at].1 = reach;
+        if held_scope {
+            self.held.pop();
+        } else {
+            self.memo[at].1 = reach;
+        }
         reach
     }
 
@@ -50286,7 +50321,7 @@ impl<'e> RegisterSpine<'e> {
                             body, vars, params, ..
                         } = self.defs[at];
                         match body {
-                            Some(body) => self.read_body_with(body, vars, at + 1, params),
+                            Some(body) => self.read_body_with(body, vars, at + 1, params, args),
                             None => Reach::Opaque,
                         }
                     }
@@ -50311,7 +50346,7 @@ impl<'e> RegisterSpine<'e> {
                 if !def.params.is_empty() && args.len() == def.params.len() =>
             {
                 let (body, params): (&'e Expr, &'e [Param]) = (&def.body, &def.params);
-                self.read_body_with(body, 0, 0, params)
+                self.read_body_with(body, 0, 0, params, args)
             }
             // A nested `foreach` does not backtrack its source; a nested `reduce` does, so it is
             // read only through a `reduce` ([`source_destructures_register`]).
