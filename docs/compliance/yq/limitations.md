@@ -568,30 +568,34 @@ would cover only the last two spellings, leaving `1_000` → `1000` and `0X2A` �
 perfectly consumable output that succinctly simply declines to match — with no justification
 at all. The justification is the spec target, which is why the case belongs here.
 
-### Invalid UTF-8 in a `-p json` document is judged by the whole input, not by what is printed (#1616)
+### Invalid UTF-8 in a `-p json` document — substituted for JSON output; YAML output still differs on a key and on the prefix (#1616)
 
-`-p json` with `-o json` substitutes one U+FFFD per invalid byte and succeeds, as real yq does;
-with any other output it refuses the document before reading it
-(`Error: yaml: cannot marshal invalid UTF-8 data as !!str`, exit 1, nothing on stdout). Three
-things differ from yq, each live-verified against v4.53.3 (`printf '{"a":"x\xe4y","b":1}'`):
+Real yq turns each invalid byte of a JSON document into U+FFFD and lets the *output* encoder
+decide. succinctly does the first half on the bytes, before indexing, when the output is JSON
+(one U+FFFD per invalid byte, Go's count, not jq's or WHATWG's), so `-p json -o json` succeeds
+on every route (stream, `--slurp`, `--eval-all`, `-i`) as yq does. With YAML output the string
+is left as it is and the decode error it already raised fires when it is printed, which is yq's
+`yaml: cannot marshal invalid UTF-8 data as !!str` refusal, including that a filter that never
+prints it succeeds (`{"a":"x\xe4y","b":1}` with `.b` is `1` in both). Live-verified against
+yq v4.53.3:
 
-| input / filter                        | yq                                | succinctly                      |
-|---------------------------------------|-----------------------------------|---------------------------------|
-| `-p json -o json .`                   | `"a": "x\ufffdy"` (escaped)       | `"a": "x�y"` (raw U+FFFD)       |
-| `-p json .b` (YAML output)            | `1`                               | the error above                 |
-| `-p json .` on `{"x\xe4y":1}`         | `x�y: 1` (substituted key)        | the error above                 |
+| input / filter                       | yq                           | succinctly                     |
+|--------------------------------------|------------------------------|--------------------------------|
+| `-p json -o json .` on a bad value   | `"a": "x\ufffdy"` (escaped)  | `"a": "x�y"` (raw U+FFFD)      |
+| `-p json .` on `{"x\xe4y":1}`        | `x�y: 1` (substituted key)   | `"": 1` (the key is emptied)   |
+| `-p json .` on a bad value           | the refusal, nothing printed | an error after the prefix, e.g. `a: ` |
+| `-p json .a` on a bad value          | the raw bytes `x\xe4y`       | an error                       |
 
 - **A substituted value prints as the raw character, not `\ufffd`.** It is the same JSON value;
   telling a substituted U+FFFD from a literal one through the index is not worth tracking.
-- **The refusal covers the whole document**, where yq refuses only when the offending string is
-  marshalled: a filter that never prints it (`.b`) succeeds in yq. The check is on the bytes, before
-  indexing, so it cannot see which values a filter will print.
-- **yq substitutes a bad key even on the YAML encoder**, and prints an unwrapped scalar's raw bytes
-  (`-p json .a` writes `x\xe4y`), output yq itself cannot read back; succinctly refuses both under
-  the one YAML-output rule.
-
-Also unchanged: invalid bytes *outside* a string become `�` plain scalars the YAML scanner accepts
-where yq reports a syntax error, and `--validate -p json` has no grammar check.
+- **A bad key with YAML output is silently emptied** (`"": 1`), the `""` fallback for a key that will
+  not decode ([#222](https://github.com/rust-works/succinctly/issues/222)), where yq substitutes it.
+  This is data loss rather than a refusal; tracked as #4536.
+- **The refusal can follow output already written** (`a: ` before the error), where yq refuses
+  before printing; the streaming writers have no error channel to check first (the "Stage 6" gap in
+  [decode-failure-routing.md](../../plan/decode-failure-routing.md)).
+- **Offsets count the substituted buffer**: with `-o json`, `at_offset(n)` counts each replacement
+  as three bytes, not the one invalid byte of the file.
 
 ### A fused slice read does not validate the rest of the range (#4195)
 

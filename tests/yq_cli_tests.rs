@@ -38142,16 +38142,18 @@ fn test_yq_accepts_multibyte_utf8_1242() -> Result<()> {
 }
 
 // =============================================================================
-// `-p json` and invalid UTF-8 (#1616). Real yq answers by *output* format: `-o json`
-// substitutes one U+FFFD per invalid byte and succeeds, the YAML encoder refuses
-// the string. Settled on the bytes before indexing (`json_utf8_gate`), so every
-// route -- the M2 stream, `--slurp`, `--eval-all`, `--inplace` -- agrees.
+// `-p json` and invalid UTF-8 (#1616). Real yq turns each invalid byte into U+FFFD
+// and then lets the *output* encoder decide: `-o json` prints it, the YAML encoder
+// refuses to marshal the string. Only the first half rewrites bytes
+// (`substitute_json_utf8`, before indexing, so the stream, `--slurp`, `--eval-all`
+// and `--inplace` all agree); the refusal is the decode error the string already
+// raises when it is printed.
 // =============================================================================
 
 /// `-p json -o json` substitutes, in a value and in a key, and (unlike a
 /// YAML-sourced document, #1242) exits 0. The counts are Go's: one per invalid
 /// byte, so a truncated 3-byte sequence is two and a truncated 4-byte one is
-/// three.
+/// three. Each row was captured from yq v4.53.3.
 #[test]
 fn test_pjson_invalid_utf8_is_substituted_for_json_output_1616() -> Result<()> {
     for (input, expected) in [
@@ -38175,29 +38177,27 @@ fn test_pjson_invalid_utf8_is_substituted_for_json_output_1616() -> Result<()> {
     Ok(())
 }
 
-/// The YAML encoder refuses an invalid string, and nothing reaches stdout
-/// first: the stream used to write `"a": ` before failing.
+/// The YAML encoder refuses a printed invalid string, as yq's does -- but only
+/// when the string is printed: a filter that never reaches it still succeeds,
+/// which a whole-input refusal would have broken.
 #[test]
-fn test_pjson_invalid_utf8_is_refused_for_yaml_output_1616() -> Result<()> {
-    for input in [&b"{\"a\":\"x\xe4y\"}"[..], &b"{\"x\xe4y\":1}"[..]] {
-        for extra in [&["-p", "json"][..], &["-p", "json", "-o", "yaml"][..]] {
-            let (out, err, code) = run_yq_stdin_bytes_with_stderr(".", input, extra)?;
-            assert_eq!(code, 1, "{input:?} {extra:?}");
-            assert_eq!(out, "", "{input:?} {extra:?} wrote before failing");
-            assert_eq!(
-                err.trim(),
-                "Error: yaml: cannot marshal invalid UTF-8 data as !!str",
-                "{input:?} {extra:?}"
-            );
-        }
+fn test_pjson_invalid_utf8_is_refused_only_when_printed_for_yaml_output_1616() -> Result<()> {
+    let input = b"{\"a\":\"x\xe4y\",\"b\":1}";
+    for extra in [&["-p", "json"][..], &["-p", "json", "-o", "yaml"][..]] {
+        let (_, err, code) = run_yq_stdin_bytes_with_stderr(".", input, extra)?;
+        assert_eq!(code, 1, "{extra:?}");
+        assert!(err.contains("invalid UTF-8"), "{extra:?}: {err:?}");
+
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(".b", input, extra)?;
+        assert_eq!((code, out.trim(), err.as_str()), (0, "1", ""), "{extra:?}");
     }
     Ok(())
 }
 
 /// Genuine YAML keeps #1242's unconditional rejection whatever the output, and
-/// valid JSON is untouched by the gate.
+/// valid JSON is untouched.
 #[test]
-fn test_pjson_utf8_gate_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
+fn test_pjson_utf8_substitution_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
     let (out, _, code) =
         run_yq_stdin_bytes_with_stderr(".", b"a: \"x\xe4y\"\n", &["-o", "json", "-I", "0"])?;
     assert_eq!((code, out.as_str()), (1, ""));
@@ -38205,10 +38205,10 @@ fn test_pjson_utf8_gate_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
     let (out, err, code) = run_yq_stdin_bytes_with_stderr(
         ".",
         "{\"a\":\"caf\u{e9} \u{1f600}\"}".as_bytes(),
-        &["-p", "json", "-I", "0"],
+        &["-p", "json", "-o", "json", "-I", "0"],
     )?;
     assert_eq!((code, err.as_str()), (0, ""), "stdout: {out:?}");
-    assert!(out.contains("caf\u{e9}"), "stdout: {out:?}");
+    assert_eq!(out.trim(), "{\"a\":\"caf\u{e9} \u{1f600}\"}");
     Ok(())
 }
 
@@ -38216,34 +38216,29 @@ fn test_pjson_utf8_gate_leaves_yaml_and_valid_json_alone_1616() -> Result<()> {
 /// YAML scanner the stream uses; both get the same bytes.
 #[test]
 fn test_pjson_invalid_utf8_on_slurp_and_eval_all_1616() -> Result<()> {
-    for flag in ["--slurp", "--eval-all"] {
+    for (flag, expected) in [
+        ("--slurp", "[{\"a\":\"x\u{fffd}y\"}]"),
+        ("--eval-all", "{\"a\":\"x\u{fffd}y\"}"),
+    ] {
         let (out, err, code) = run_yq_stdin_bytes_with_stderr(
             ".",
             b"{\"a\":\"x\xe4y\"}",
             &["-p", "json", "-o", "json", "-I", "0", flag],
         )?;
         assert_eq!((code, err.as_str()), (0, ""), "{flag}");
-        let expected = if flag == "--slurp" {
-            "[{\"a\":\"x\u{fffd}y\"}]"
-        } else {
-            "{\"a\":\"x\u{fffd}y\"}"
-        };
         assert_eq!(out.trim(), expected, "{flag}");
 
-        let (out, err, code) =
+        let (_, err, code) =
             run_yq_stdin_bytes_with_stderr(".", b"{\"a\":\"x\xe4y\"}", &["-p", "json", flag])?;
         assert_eq!(code, 1, "{flag}");
-        assert_eq!(out, "", "{flag}");
-        assert!(
-            err.contains("cannot marshal invalid UTF-8"),
-            "{flag}: {err:?}"
-        );
+        assert!(err.contains("invalid UTF-8"), "{flag}: {err:?}");
     }
     Ok(())
 }
 
-/// A file argument takes the same gate as stdin, and `--inplace` refuses to
-/// touch the file when the output would be YAML.
+/// A file argument takes the same path as stdin, and `--inplace` rewrites the
+/// file with the substitution only when its output is JSON; for YAML output
+/// the decode error leaves it byte-identical.
 #[test]
 fn test_pjson_invalid_utf8_from_files_and_inplace_1616() -> Result<()> {
     let dir = TempDir::new()?;
@@ -38255,9 +38250,8 @@ fn test_pjson_invalid_utf8_from_files_and_inplace_1616() -> Result<()> {
     let (out, code) = run_yq_file(".", path, &["-o", "json", "-I", "0"])?;
     assert_eq!((code, out.trim()), (0, "{\"a\":\"x\u{fffd}y\"}"));
     let (out, code) = run_yq_file(".", path, &[])?;
-    assert_eq!((code, out.as_str()), (1, ""));
+    assert_eq!(code, 1, "stdout: {out:?}");
 
-    // `-i` with YAML output is refused and the file is byte-identical.
     let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
         .args(["yq", "-i", "-p", "json", ".b = 1", path])
         .stdin(Stdio::null())
@@ -38265,7 +38259,6 @@ fn test_pjson_invalid_utf8_from_files_and_inplace_1616() -> Result<()> {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(std::fs::read(path)?, original);
 
-    // ...and with JSON output it is rewritten with the substitution.
     let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
         .args([
             "yq", "-i", "-p", "json", "-o", "json", "-I", "0", ".b = 1", path,

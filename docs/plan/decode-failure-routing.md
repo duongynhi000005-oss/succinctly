@@ -513,14 +513,17 @@ otherwise already correct, and it can be reverted independently if the perf gate
   succinctly has never matched for any other parse error. The check is unconditional, not
   gated on `--validate`: YAML 1.2 requires a UTF-8/16/32 stream, so this is a parse error,
   not an opt-in strictness preference.
-- **`-p json` is keyed on the output format, not the input** (#1616). Real yq substitutes
-  one U+FFFD per invalid *byte* for `-o json` and refuses the string on the YAML encoder
-  (`yaml: cannot marshal invalid UTF-8 data as !!str`). That is decided on the bytes at the
-  same input boundary as the YAML check (`json_utf8_gate` in
-  [yq_runner.rs](../../src/bin/succinctly/yq_runner.rs)) -- the output format is already known
-  at every call site -- so the scalar decoder in `yaml/light.rs`, shared with genuine YAML
-  documents and unconditionally strict, never learns about output formats. The per-byte count
-  is `substitute_invalid_utf8_per_byte`, not `substitute_invalid_utf8_jq_style` (jq's rule) or
+- **`-p json` is keyed on the output format, not the input** (#1616). Real yq turns each
+  invalid byte into U+FFFD, then the encoder decides: `-o json` prints it, the YAML encoder
+  refuses the string (`yaml: cannot marshal invalid UTF-8 data as !!str`). Only the first half
+  rewrites bytes, at the same input boundary as the YAML check (`substitute_json_utf8` in
+  [yq_runner.rs](../../src/bin/succinctly/yq_runner.rs)) and only for JSON output -- the output
+  format is already known at every call site, so the scalar decoder in `yaml/light.rs`, shared
+  with genuine YAML documents and unconditionally strict, never learns about output formats. The
+  YAML-output refusal stays the decode error the string already raises when printed; a first
+  version refused the whole document up front instead, which broke `-p json '.b'` on a document
+  whose `.a` was bad (yq prints `1`) and was dropped. The per-byte count is
+  `substitute_invalid_utf8_per_byte`, not `substitute_invalid_utf8_jq_style` (jq's rule) or
   `String::from_utf8_lossy` (WHATWG's): the three disagree on a truncated multi-byte sequence.
 - **`yaml validate`** grew the check too, reusing the `InvalidUtf8` variant that had been
   declared but never constructed — the scanner reads bytes and never decodes them, so
