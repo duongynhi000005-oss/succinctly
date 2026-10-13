@@ -1564,6 +1564,20 @@ OPERANDS = [
     "(foreach (1,2) as $i (.a; try ..; .))",
     "(foreach .[]? as $i (1; try ..; .))",
     "(foreach (1,2) as $i (1; try ..; .) | .a?)",
+    # (#4445, #4480, #4492) a fold over a `null` accumulator on an untracked entry, and a fold
+    # nested in another fold's UPDATE: the live `null`/boolean register is the accumulator by kind,
+    # whatever shape UPDATE has, and the inner fold's caught step still emits.
+    "(reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b)))",
+    "(reduce (1,2) as $q (null; foreach (3,4) as $r (.; .b)))",
+    "(reduce (1,2) as $q (null; foreach (3,4) as $r (.; .b; .)))",
+    "(reduce (1,2) as $q (null; reduce (3,4) as $r (1; .b)))",
+    "(reduce (1,2) as $q (null; null))",
+    "(reduce (1,2) as $q (null; if $q == 1 then . else null end))",
+    "(foreach (1,2) as $q (null; foreach (3,4) as $r (.; .b); .))",
+    "(foreach (1,2) as $i (null; .a; .))",
+    "(foreach (1,2) as $i (null; .; .))",
+    "(foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .))",
+    "(foreach .a? as $k (0; -(foreach (1,2) as $i (1; try .a; .)); .))",
     # (#4071) a `try` in UPDATE whose handler navigates a frozen `$k` may or may not have moved
     # jq's register (it runs only if the body raised), so a stage after it leaves the register
     # somewhere the resolver cannot name, and EXTRACT's refusal of `$k` is its guess.

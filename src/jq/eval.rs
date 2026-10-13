@@ -54888,7 +54888,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // accumulator equal to that register is on it by kind, so a navigating
                         // UPDATE passes `path_intact` in jq. Only the step's input is widened:
                         // `acc_at_register`, which the final emission reads, is untouched.
-                        let live_step_reg = (update_navigates && is_null_or_bool(acc_effective))
+                        //
+                        // #4445: taken for any such accumulator, not only when UPDATE definitely
+                        // navigates ([`update_definitely_navigates`]). That read does not see a
+                        // fold nested in UPDATE (`reduce (3,4) as $r (.; .b)`) as navigating, so
+                        // the nested INIT `.` met an untracked accumulator and its navigation was
+                        // refused where jq answers. The identity is by kind, so it holds whatever
+                        // UPDATE does; a body that never reads the accumulator is unaffected.
+                        let live_step_reg = is_null_or_bool(acc_effective)
                             .then(|| reg.trackable_at_live_null_bool())
                             .flatten()
                             .filter(|live| null_bool_identical(acc_effective, &live.value));
