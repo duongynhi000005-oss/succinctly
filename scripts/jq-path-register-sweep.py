@@ -1884,6 +1884,26 @@ OPERANDS = [
     "(reduce . as [$a] ?// $a (.a?; 1))",
     "(reduce . as [$a] ?// $a (0; .a?))",
     "(foreach . as [$a] ?// $a (0; 1; 2))",
+    # (#4514) `limit(1; ., ..)` is its comma's first leaf, as `first(., ..)` is: the register, so a
+    # destructure of it is the register's own. The contrasts: a first leaf that is not the register,
+    # a count past one (the second leaf is not), and a count of zero.
+    "(foreach (limit(1; ., 1) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(1; ., 1) as [$a] | .) as $k (.; .; .))",
+    "(foreach (limit(1; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(1; ., 1) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (limit(1; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(1; 1, .) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(0; ., 1) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(0.5; ., 1) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(1; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (limit(1; ., 1) as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(1; ., 1) as {a:$a} | $a) as $k (.; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f(limit(1; ., 1))) as $k (.; .; .))",
+    "(foreach (def f: limit(1; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))",
+    "(reduce (label $o | .) as $z (.; . as {a:$a} | .))",
+    "(foreach (label $o | .) as $z (.; . as {a:$a} | .; .))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
