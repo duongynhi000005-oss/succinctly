@@ -29683,7 +29683,7 @@ enum YqDelSliceOutcome {
     NotApplicable,
     /// #2333: what used to be classified `Noop` uniformly is, for this
     /// specific resolved path, actually a hard type error in real yq -- see
-    /// [`yq_del_slice_field_error`]'s own doc comment.
+    /// [`yq_del_walk_error`]'s own doc comment.
     Error(EvalError),
 }
 
@@ -29776,7 +29776,7 @@ fn yq_del_slice_outcome(
         // along the way (#2333): a `Field` step landing on whatever the
         // trailing slice(s) produced (or, for `null`'s own direct-target
         // quirk, on `null` itself) isn't inert there, it raises. See
-        // `yq_del_slice_field_error`'s own doc comment.
+        // `yq_del_walk_error`'s own doc comment.
         //
         // An `Iterate` ahead of the slice-run (`del(.a[][0:2].x)`, #2344) means there is no
         // single value to classify here: each element of the fanned-out container is its own
@@ -29791,7 +29791,7 @@ fn yq_del_slice_outcome(
         }) {
             return YqDelSliceOutcome::NotApplicable;
         }
-        if let Some(e) = yq_del_slice_field_error(&steps, root) {
+        if let Some(e) = yq_del_walk_error(root, &steps) {
             return YqDelSliceOutcome::Error(e);
         }
         return YqDelSliceOutcome::Noop;
@@ -29800,8 +29800,12 @@ fn yq_del_slice_outcome(
     if prefix.iter().any(|s| s.component.is_slice()) {
         // An interior slice separated from the trailing run by something
         // else (`del(.a[0:2][1][3:5])`) still no-ops the whole call, even
-        // though the path's last component is itself a slice.
-        return YqDelSliceOutcome::Noop;
+        // though the path's last component is itself a slice -- unless yq's navigation
+        // raises on the way there (`del(.a[0:2][].x[0:1])` over `a: [[1]]` fails on `.x`, #4542).
+        return match yq_del_walk_error(root, &steps) {
+            Some(e) => YqDelSliceOutcome::Error(e),
+            None => YqDelSliceOutcome::Noop,
+        };
     }
     if prefix.is_empty() {
         // A bare trailing slice-run with *nothing* before it at all
@@ -29884,13 +29888,9 @@ fn yq_del_slice_outcome(
 /// case). An `Array` target keeps the error live through arbitrarily deeper `Index` navigation,
 /// since real document data really is there to walk (`del(.a[0:2][0].x)` errors when index 0
 /// holds another array and stays a no-op when it holds a scalar or object).
-fn yq_del_slice_field_error(steps: &[DeleteStep], root: &OwnedValue) -> Option<EvalError> {
-    yq_del_walk_error(root, steps)
-}
-
-/// [`yq_del_slice_field_error`]'s walker: replays `steps` against `current` the way yq's generic
-/// navigation would, and returns the first type error it raises, or `None` when every branch
-/// gives up quietly (a missing key, an out-of-range index, a string or other scalar).
+/// The walk itself ([`yq_del_walk_error`]'s job) replays the path against `current` the way yq's
+/// generic navigation would, and returns the first type error it raises, or `None` when every
+/// branch gives up quietly (a missing key, an out-of-range index, a string or other scalar).
 ///
 /// A slice step applies yq's read-path slice rule ([`slice_owned_value_read`]: an array slices to
 /// a shorter array, a mapping to its alternating key/value children, #1102, any scalar but a string
@@ -29898,7 +29898,8 @@ fn yq_del_slice_field_error(steps: &[DeleteStep], root: &OwnedValue) -> Option<E
 /// comes out of the slice and nothing after it can fail. `Iterate` fans out over an array's
 /// elements or a mapping's values and each branch is walked on its own (#4542): yq applies
 /// the tail to every element, so one array element is enough to fail the call, and an empty array
-/// or a scalar yields nothing to fail on.
+/// or a scalar yields nothing to fail on. A component it does not model (a computed index, a
+/// recursive descent) ends that branch as a no-op.
 fn yq_del_walk_error(current: &OwnedValue, steps: &[DeleteStep]) -> Option<EvalError> {
     let (step, rest) = steps.split_first()?;
     match &step.component {
@@ -29975,9 +29976,7 @@ fn navigate_read_only(root: &OwnedValue, steps: &[Expr]) -> bool {
 /// "give up" shape (`Field`/`Index` on an incompatible container, an
 /// out-of-range `Index`, or any step this function can't interpret at all,
 /// `Iterate` included per #1298), but hands back the resolved value instead
-/// of collapsing it to a bare `bool`. Used by [`yq_del_slice_field_error`],
-/// which needs to inspect the value the trailing slice-run actually applies
-/// to, not just confirm it exists.
+/// of collapsing it to a bare `bool`.
 fn navigate_owned_value<'a>(root: &'a OwnedValue, steps: &[Expr]) -> Option<&'a OwnedValue> {
     let mut current = root;
     for step in steps {

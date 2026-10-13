@@ -3783,17 +3783,19 @@ shape raised `Cannot iterate over number (5)` before.
 
 ### `del()` through a slice-run and a field tail: per element, one gap ([#2344](https://github.com/rust-works/succinctly/issues/2344), [#4542](https://github.com/rust-works/succinctly/issues/4542))
 
-`del(.a[0:2].x)` fails in yq for every target but a string: yq slices a mapping, int, bool,
-`null` or array to an empty sequence (a mapping to its alternating key/value children), and `.x`
-is then parsed as an index. A `.[]` ahead of the run (`del(.a[][0:2].x)`) is classified per
-element, and one failing element fails the call. A `.[]` *after* the run (`del(.a[0:2][].x)`) is
-applied to each sliced element: an array element (even an empty one) fails a following field, a
-mapping, scalar or string element does not, and an index tail never does. The steps before the run
-are type-checked too (`del(.a[0:2][].x)` over a root array fails on `.a`, `del(.a[].b[0:2].x)` over
-`a: [[1]]` fails on `.b`). `.x?` suppresses and a `[0]` tail stays a no-op. One shape still
-differs, because the information is not in the value tree: an unquoted YAML timestamp
-(`a: 2024-01-01`) or a `!!binary` scalar is a string to succinctly but not to yq, so
-`del(.a[0:2].x)` no-ops here where yq fails (a *quoted* `"2024-01-01"` matches).
+`del(.a[0:2].x)` fails in yq for every target but a string: yq slices a mapping, int, bool, `null`
+or array to an empty sequence (a mapping to its alternating key/value children), and `.x` is then
+parsed as an index. A `.[]` ahead of the run (`del(.a[][0:2].x)`) is classified per element, and
+one failing element fails the call. A `.[]` *after* the run (`del(.a[0:2][].x)`) is applied to
+each sliced element: an array element (even an empty one) fails a following field, a mapping,
+scalar or string element does not, and an index tail never does. The steps before the run are
+type-checked too (`del(.a[0:2][].x)` over a root array fails on `.a`, `del(.a[].b[0:2].x)` over
+`a: [[1]]` fails on `.b`), including when the path ends in a further slice behind the field
+(`del(.a[0:2][].x[0:1])`). Only `.field`, `[n]`, `.[]` and slice steps are walked; a computed
+index or recursive descent in the tail ends that walk as a no-op. `.x?` suppresses and a `[0]`
+tail stays a no-op. One shape still differs, because the information is not in the value tree: an
+unquoted YAML timestamp (`a: 2024-01-01`) or a `!!binary` scalar is a string to succinctly but not
+to yq, so `del(.a[0:2].x)` no-ops here where yq fails (a *quoted* `"2024-01-01"` matches).
 
 ### `.[]` over a non-container is now a silent no-op — two residual gaps remain (#2346)
 

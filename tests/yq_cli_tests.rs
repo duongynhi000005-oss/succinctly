@@ -31956,6 +31956,9 @@ fn test_4542_del_slice_then_iterate_field_tail_errors_per_element() -> Result<()
         ("del(.a[].b[0:2].x)", r#"{"a":[[1]]}"#),
         // A comma sibling does not rescue the call.
         ("del(.a[0:2][].x, .c)", r#"{"a":[[1]],"c":1}"#),
+        // The same walk runs when the path ends in a further slice behind the field tail.
+        ("del(.a[0:2][].x[0:1])", r#"{"a":[[1]]}"#),
+        ("del(.a[0:2].x[0:1])", r#"{"a":[[1]]}"#),
     ];
     for (filter, input) in failing {
         let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["-o=json", "-I=0"])?;
@@ -31976,35 +31979,67 @@ fn test_4542_del_slice_then_iterate_field_tail_errors_per_element() -> Result<()
     );
 
     let inert = [
-        ("del(.a[0:2][].x)", r#"{"a":["s","t"]}"#),
-        ("del(.a[0:2][].x)", r#"{"a":[{"x":1},{"x":2}]}"#),
-        ("del(.a[0:2][].x)", r#"{"a":[5,true,null]}"#),
-        ("del(.a[0:2][].x)", r#"{"a":[]}"#),
-        ("del(.a[0:2][].x)", r#"{"a":{"y":1}}"#),
-        ("del(.a[0:2][].x)", r#"{"a":"s"}"#),
-        ("del(.a[0:2][].x)", r#"{"a":5}"#),
-        ("del(.a[0:2][].x)", r#"{"a":null}"#),
-        ("del(.a[0:2][].x)", r#"{"b":1}"#),
-        ("del(.a[5:9][].x)", r#"{"a":[[1]]}"#),
-        ("del(.a[1:2][].x)", r#"{"a":[[1],5]}"#),
-        ("del(.a[0:1][].x)", r#"{"a":{"y":[1]}}"#),
-        ("del(.a[0:2][][0].x)", r#"{"a":[5,[1]]}"#),
-        ("del(.a[0:2][][].x)", r#"{"a":[[1,2,3],{"y":1}]}"#),
-        ("del(.a[0:2][][0])", r#"{"a":[[1],[2]]}"#),
-        ("del(.a[0:2][])", r#"{"a":[[1],[2]]}"#),
-        ("del(.a[0:2][].x?)", r#"{"a":[[1],{"y":1}]}"#),
-        ("del(.a[0:2][].x?, .b)", r#"{"a":[[1]],"b":2}"#),
+        (
+            "del(.a[0:2][].x)",
+            r#"{"a":["s","t"]}"#,
+            r#"{"a":["s","t"]}"#,
+        ),
+        (
+            "del(.a[0:2][].x)",
+            r#"{"a":[{"x":1},{"x":2}]}"#,
+            r#"{"a":[{"x":1},{"x":2}]}"#,
+        ),
+        (
+            "del(.a[0:2][].x)",
+            r#"{"a":[5,true,null]}"#,
+            r#"{"a":[5,true,null]}"#,
+        ),
+        ("del(.a[0:2][].x)", r#"{"a":[]}"#, r#"{"a":[]}"#),
+        ("del(.a[0:2][].x)", r#"{"a":{"y":1}}"#, r#"{"a":{"y":1}}"#),
+        ("del(.a[0:2][].x)", r#"{"a":"s"}"#, r#"{"a":"s"}"#),
+        ("del(.a[0:2][].x)", r#"{"a":5}"#, r#"{"a":5}"#),
+        ("del(.a[0:2][].x)", r#"{"a":null}"#, r#"{"a":null}"#),
+        ("del(.a[0:2][].x)", r#"{"b":1}"#, r#"{"b":1}"#),
+        ("del(.a[5:9][].x)", r#"{"a":[[1]]}"#, r#"{"a":[[1]]}"#),
+        ("del(.a[1:2][].x)", r#"{"a":[[1],5]}"#, r#"{"a":[[1],5]}"#),
+        (
+            "del(.a[0:1][].x)",
+            r#"{"a":{"y":[1]}}"#,
+            r#"{"a":{"y":[1]}}"#,
+        ),
+        (
+            "del(.a[0:2][][0].x)",
+            r#"{"a":[5,[1]]}"#,
+            r#"{"a":[5,[1]]}"#,
+        ),
+        (
+            "del(.a[0:2][][].x)",
+            r#"{"a":[[1,2,3],{"y":1}]}"#,
+            r#"{"a":[[1,2,3],{"y":1}]}"#,
+        ),
+        (
+            "del(.a[0:2][][0])",
+            r#"{"a":[[1],[2]]}"#,
+            r#"{"a":[[1],[2]]}"#,
+        ),
+        ("del(.a[0:2][])", r#"{"a":[[1],[2]]}"#, r#"{"a":[[1],[2]]}"#),
+        (
+            "del(.a[0:2][].x?)",
+            r#"{"a":[[1],{"y":1}]}"#,
+            r#"{"a":[[1],{"y":1}]}"#,
+        ),
+        (
+            "del(.a[0:2][].x?, .b)",
+            r#"{"a":[[1]],"b":2}"#,
+            r#"{"a":[[1]]}"#,
+        ),
+        ("del(.a[0:2][].x[0:1])", r#"{"a":[5]}"#, r#"{"a":[5]}"#),
     ];
-    for (filter, input) in inert {
+    for (filter, input, expected) in inert {
         let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
-        let expected = if filter.ends_with(", .b)") {
-            "{\"a\":[[1]]}\n".to_string()
-        } else {
-            format!("{input}\n")
-        };
         assert_eq!(
             (code, out.as_str()),
-            (0, expected.as_str()),
+            (0, format!("{expected}\n").as_str()),
             "[{filter}] [{input}]"
         );
     }
