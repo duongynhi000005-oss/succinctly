@@ -67953,6 +67953,78 @@ fn test_reduce_live_null_register_step_covers_a_nested_fold_update_4445() -> Res
             "Invalid path expression with result false",
             5,
         ),
+        // The accumulator is read by a bind or a destructure, and a source that moved the register
+        // (`.b`, `.[]?`) does not change that a `null`/boolean accumulator is the register by kind.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .)) = 3",
+            "{\"a\":3}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; . as $z | $z))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":null}}"#,
+            r"path(.a | 5 | reduce .b as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":5}}"#,
+            r"path(.a | 5 | reduce .b as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"path(.a | 5 | reduce .[]? as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"path(.a | 5 | reduce .[]? as $q (null; .x))",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"(.a | 5 | reduce .[]? as $q (null; null)) = 9",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; . as {x:$z} | .))",
+            "",
+            "Cannot index boolean with string \"x\"",
+            5,
+        ),
         // Controls. A boolean register raises or yields as jq does, and a register that is not `null`/boolean is a pointer identity this model cannot compare.
         (
             r#"{"a":false}"#,

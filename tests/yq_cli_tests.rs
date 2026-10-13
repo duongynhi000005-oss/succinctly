@@ -64975,3 +64975,24 @@ fn test_negative_index_write_error_uses_yq_wording_2335() -> Result<()> {
     );
     Ok(())
 }
+
+/// #4445: the live `null`/boolean register step of a `reduce` is jq mode only. In yq mode a
+/// refused navigation of a `null` accumulator on an untracked entry stays a refusal, because the
+/// widening would turn it into a write where real yq no-ops (`(null | .a) = 5` on `null`).
+/// Exit 1 and no output, as before.
+#[test]
+fn test_reduce_live_null_register_step_stays_jq_only_4445() -> Result<()> {
+    for filter in [
+        "(.a | 5 | reduce (1,2) as $q (null; .b)) = 9",
+        "(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b))) = 9",
+    ] {
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, "a: null\n", &["--jq-extensions", "-o=json", "-I=0"])?;
+        assert_eq!((code, stdout.as_str()), (1, ""), "{filter}: {stderr:?}");
+        assert!(
+            stderr.contains("Invalid path expression"),
+            "{filter}: {stderr:?}"
+        );
+    }
+    Ok(())
+}

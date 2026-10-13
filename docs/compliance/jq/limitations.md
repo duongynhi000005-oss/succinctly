@@ -716,7 +716,9 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   where jq answers. Since [#4445](https://github.com/rust-works/succinctly/issues/4445) the step
   is taken for any `null`/boolean accumulator that is the register by kind, not only when `UPDATE`
   definitely navigates, so a `reduce`/`foreach` nested in `UPDATE` (`reduce (1,2) as $q (null;
-  reduce (3,4) as $r (.; .b))`) answers jq's `["a"]` as well; pinned by
+  reduce (3,4) as $r (.; .b))`) answers jq's `["a"]` as well, and so does a destructure of the
+  accumulator (`. as {x:$z} | .`). A `try ... catch` around the navigation, listed here until then,
+  answered once #4459 and #4480 landed. Pinned by
   `test_reduce_live_null_register_step_covers_a_nested_fold_update_4445`. Over the 11 operands added
   to `scripts/jq-path-register-sweep.py` for it (9,795 `--stage-only` rows) DIFF went 15 to 0,
   REFUSE_WRONG 69 to 48 and MATCH 9,711 to 9,747, with no ACCEPT_WRONG and no regression; the 141
