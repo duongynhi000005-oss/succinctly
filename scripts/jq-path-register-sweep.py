@@ -1985,6 +1985,27 @@ OPERANDS = [
     "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))",
     "(reduce (label $o | .) as $z (.; . as {a:$a} | .))",
     "(foreach (label $o | .) as $z (.; . as {a:$a} | .; .))",
+    # (#4514) a source whose FIRST output is the register and whose later outputs need not be: jq
+    # runs the first output first, and its destructure moves the register before the second exists.
+    # A comma as a call argument bound to a `$` parameter, a `limit` with a count past one, and
+    # the contrasts: the register on the second output only, a first output that is not the
+    # register, and a body that does not navigate.
+    "(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f((1, .))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f(((., 1), 2))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f(limit(2; ., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | $a; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as [$a] | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as [$a] | .) as $k (.; .; .))",
+    "(foreach (limit(2; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; 1, .) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (limit(2; ., 1) as {a:$a} | .) as $k (.; .))",
+    "(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs

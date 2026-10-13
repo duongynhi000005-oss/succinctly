@@ -134588,6 +134588,189 @@ fn test_foreach_source_destructuring_limit_one_comma_first_leaf_4514() -> Result
     ])
 }
 
+/// #4514: a source whose *first* output is the register and whose later outputs need not be.
+/// jq runs the first output first, and the destructure moves the register onto the matched member
+/// before the second output exists, so the source's own step raises ("Invalid path expression
+/// with result ..") at the first output; the by-value drive ran every output and answered the
+/// later one's error, which a `try` swallowed, so `del(try ..)` deleted the document. Covers a
+/// comma as the argument of a `$` parameter (`f((., 1))`), `limit(2; ., 1)` (a count past one),
+/// each behind a variable (`as $b`), a call with no arguments, and a frozen `$x`; on `null` the
+/// destructure succeeds and jq answers. Every row captured from jq 1.7.1 with `-c`; the message is
+/// pinned only as the common prefix.
+#[test]
+fn test_foreach_source_destructuring_register_on_first_output_only_4514() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{}",
+            "path(foreach (limit(2; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "path(foreach (limit(2; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach (limit(2; ., 1) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "{}",
+            "del(try foreach (limit(2; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "del(try foreach (limit(2; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(try foreach (limit(2; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "path(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "path(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "path(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "{}",
+            "del(try foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "del(try foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(try foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "del(try foreach (limit(2; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "del(try foreach (limit(2; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(try foreach (limit(2; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            ". as $x | del(try foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            ". as $x | del(try foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            ". as $x | del(try foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "{}",
+            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4497: a `foreach` over `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative,
 /// behind a `try`, a `?`, a wrapper under a wrapper, or a plain `$x` bind in front of the chain.
 /// jq's `first` is a `label`/`break` the chain's `?//` catches as a body error, so by value the

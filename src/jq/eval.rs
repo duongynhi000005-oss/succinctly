@@ -49925,6 +49925,15 @@ fn limit_takes_one(n: &Expr) -> bool {
     }
 }
 
+/// Whether a `limit` count is a literal that takes at least the first output (#4514): any
+/// positive literal, `limit(2; ..)` as well as the `limit(1; ..)` [`limit_takes_one`] reads.
+fn limit_takes_some(n: &Expr) -> bool {
+    match unwrap_paren(n) {
+        Expr::Literal(lit) => literal_to_owned(lit).as_f64().is_some_and(|n| n > 0.0),
+        _ => false,
+    }
+}
+
 /// Whether `e` is a comma whose first output is `.`: its first leaf, through nested commas
 /// (`(., 1), 2`).
 fn comma_first_leaf_is_identity(e: &Expr) -> bool {
@@ -50106,14 +50115,14 @@ impl<'e> RegisterSpine<'e> {
                 {
                     Some(at) => {
                         let SpineDef { body, vars, .. } = self.defs[at];
-                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1))
+                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1, false))
                     }
                     None => false,
                 }
             }
             Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
                 let body: &'e Expr = &def.body;
-                self.body_binds_register(body, 0, 0)
+                self.body_binds_register(body, 0, 0, false)
             }
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
@@ -50151,9 +50160,65 @@ impl<'e> RegisterSpine<'e> {
             })
     }
 
+    /// Whether the *first* output of `e` is the register although later ones need not be
+    /// (#4514): a comma whose first leaf is, through nested commas (`(., 1)`, `((., 1), 2)`), also
+    /// behind a `limit` with a literal positive count (`limit(2; ., 1)`, whose second output is
+    /// the comma's second leaf). jq runs the first output first, and its destructure moves the
+    /// register onto the matched member, so the source's own step is checked against a register it
+    /// is no longer at before any later output exists; the by-value drive ran every output and
+    /// answered the later one's error (`del(try ..)` then deleted the document). Only the
+    /// routing decision asks this: a variable bound to such a source does not hold the register
+    /// on its later outputs, so [`binds_register`](Self::binds_register) stays the all-outputs
+    /// question.
+    fn first_output_is_register(&mut self, e: &'e Expr) -> bool {
+        let e = unwrap_bind_source(e);
+        // A `$x` bound outside the source that is the register at the fold, as the first leaf.
+        let marker = match e {
+            Expr::Comma(_) => first_leaf_marker(e),
+            Expr::Limit { n, expr: inner } if limit_takes_some(n) => first_leaf_marker(inner),
+            _ => None,
+        };
+        if marker.is_some_and(|marker| self.markers.contains(&Rc::as_ptr(marker))) {
+            return true;
+        }
+        match e {
+            Expr::Comma(items) => items.first().is_some_and(|first| {
+                self.binds_register(first) || self.first_output_is_register(first)
+            }),
+            Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
+                self.binds_register(inner) || self.first_output_is_register(inner)
+            }
+            // A call with no arguments returns what its body does.
+            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+                match self
+                    .defs
+                    .iter()
+                    .rposition(|def| def.name == name && def.arity == 0)
+                {
+                    Some(at) => {
+                        let SpineDef { body, vars, .. } = self.defs[at];
+                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1, true))
+                    }
+                    None => false,
+                }
+            }
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let body: &'e Expr = &def.body;
+                self.body_binds_register(body, 0, 0, true)
+            }
+            _ => false,
+        }
+    }
+
     /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
     /// variables and `defs` definitions in scope ([`read_body`](Self::read_body)'s scoping).
-    fn body_binds_register(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
+    fn body_binds_register(
+        &mut self,
+        body: &'e Expr,
+        vars: usize,
+        defs: usize,
+        first_only: bool,
+    ) -> bool {
         let key: *const Expr = body;
         if self.binding.contains(&key) {
             return false;
@@ -50168,7 +50233,8 @@ impl<'e> RegisterSpine<'e> {
         self.binding.push(key);
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
-        let register = self.binds_register(body);
+        let register =
+            self.binds_register(body) || (first_only && self.first_output_is_register(body));
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
         self.binding.pop();
@@ -50269,8 +50335,10 @@ impl<'e> RegisterSpine<'e> {
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
         // A wrapped marker is the register for a single pattern only (#4320): a `?//` chain keeps
         // the retry rules of #3279/#3781, which a placed head would change.
-        let register =
-            self.binds_register(expr) && (patterns.len() == 1 || wrapped_marker(expr).is_none());
+        let register = (self.binds_register(expr)
+            && (patterns.len() == 1 || wrapped_marker(expr).is_none()))
+            // #4514: for a single pattern, the register on the source's first output is enough.
+            || (patterns.len() == 1 && self.first_output_is_register(expr));
         // #4320: a later bare alternative binds the register only after the body raised on
         // the earlier one. At the top level the walk is then the register's (`. as $x ?//
         // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
@@ -50339,7 +50407,10 @@ impl<'e> RegisterSpine<'e> {
             params
                 .iter()
                 .zip(args)
-                .map(|(param, arg)| param.is_dollar() && self.binds_register(arg))
+                .map(|(param, arg)| {
+                    param.is_dollar()
+                        && (self.binds_register(arg) || self.first_output_is_register(arg))
+                })
                 .collect()
         } else {
             Vec::new()
@@ -50468,7 +50539,9 @@ impl<'e> RegisterSpine<'e> {
             // swallows (`. as $x ?// $y | $y as {a:$a}` under `try`, in a `reduce` UPDATE,
             // raised in jq and answered here).
             Expr::As { expr, var, body } => {
-                let register = self.binds_register(expr);
+                // #4514: a variable bound to a source that is the register on its first output
+                // holds it for the walk, which only decides what the resolver is asked.
+                let register = self.binds_register(expr) || self.first_output_is_register(expr);
                 self.with_vars(&[(var.as_str(), register)], body)
             }
             Expr::AsPattern {
@@ -50545,7 +50618,7 @@ impl<'e> RegisterSpine<'e> {
                     && (routes_destructuring(patterns)
                         || patterns_all_destructuring_chain(patterns)
                         || (self.null_register && routes_destructuring_chain(patterns)))
-                    && self.binds_register(expr)
+                    && (self.binds_register(expr) || self.first_output_is_register(expr))
                     && (patterns.len() == 1
                         || self.null_register
                         || (patterns_all_destructuring_chain(patterns)
