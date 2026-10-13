@@ -11867,11 +11867,8 @@ fn test_yaml_bare_explicit_key_with_same_indent_sequence_still_parses_1104() -> 
     // the rejection above must not reach it. Neither tool is spec-correct on
     // the value (yq drops the key's content, succinctly merges both
     // sequences into the value); the pin is that the document still parses.
-    let (_, exit_code) = run_yq_stdin(
-        ".",
-        "---\n?\n- a\n- b\n:\n- c\n- d\n",
-        &["-o=json", "-I=0"],
-    )?;
+    let (_, exit_code) =
+        run_yq_stdin(".", "---\n?\n- a\n- b\n:\n- c\n- d\n", &["-o=json", "-I=0"])?;
     assert_eq!(exit_code, 0);
     Ok(())
 }
