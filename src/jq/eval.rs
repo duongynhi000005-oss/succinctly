@@ -50115,14 +50115,14 @@ impl<'e> RegisterSpine<'e> {
                 {
                     Some(at) => {
                         let SpineDef { body, vars, .. } = self.defs[at];
-                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1, false))
+                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1))
                     }
                     None => false,
                 }
             }
             Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
                 let body: &'e Expr = &def.body;
-                self.body_binds_register(body, 0, 0, false)
+                self.body_binds_register(body, 0, 0)
             }
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
@@ -50169,7 +50169,9 @@ impl<'e> RegisterSpine<'e> {
     /// answered the later one's error (`del(try ..)` then deleted the document). Only the
     /// routing decision asks this: a variable bound to such a source does not hold the register
     /// on its later outputs, so [`binds_register`](Self::binds_register) stays the all-outputs
-    /// question.
+    /// question. A call with no arguments is not read here: [`binds_fresh`](Self::binds_fresh)'s
+    /// note on `def f: ., {a:1}` (a register leaf beside a fresh one) pins that a routed call
+    /// refuses a negated operand jq answers.
     fn first_output_is_register(&mut self, e: &'e Expr) -> bool {
         let e = unwrap_bind_source(e);
         // A `$x` bound outside the source that is the register at the fold, as the first leaf.
@@ -50188,37 +50190,13 @@ impl<'e> RegisterSpine<'e> {
             Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
                 self.binds_register(inner) || self.first_output_is_register(inner)
             }
-            // A call with no arguments returns what its body does.
-            Expr::FuncCall { name, args, .. } if args.is_empty() => {
-                match self
-                    .defs
-                    .iter()
-                    .rposition(|def| def.name == name && def.arity == 0)
-                {
-                    Some(at) => {
-                        let SpineDef { body, vars, .. } = self.defs[at];
-                        body.is_some_and(|body| self.body_binds_register(body, vars, at + 1, true))
-                    }
-                    None => false,
-                }
-            }
-            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
-                let body: &'e Expr = &def.body;
-                self.body_binds_register(body, 0, 0, true)
-            }
             _ => false,
         }
     }
 
     /// [`binds_register`](Self::binds_register) of a `def` body, with the first `vars` spine
     /// variables and `defs` definitions in scope ([`read_body`](Self::read_body)'s scoping).
-    fn body_binds_register(
-        &mut self,
-        body: &'e Expr,
-        vars: usize,
-        defs: usize,
-        first_only: bool,
-    ) -> bool {
+    fn body_binds_register(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
         let key: *const Expr = body;
         if self.binding.contains(&key) {
             return false;
@@ -50233,8 +50211,7 @@ impl<'e> RegisterSpine<'e> {
         self.binding.push(key);
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
-        let register =
-            self.binds_register(body) || (first_only && self.first_output_is_register(body));
+        let register = self.binds_register(body);
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
         self.binding.pop();

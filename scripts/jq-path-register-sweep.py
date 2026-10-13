@@ -1989,7 +1989,9 @@ OPERANDS = [
     # runs the first output first, and its destructure moves the register before the second exists.
     # A comma as a call argument bound to a `$` parameter, a `limit` with a count past one, and
     # the contrasts: the register on the second output only, a first output that is not the
-    # register, and a body that does not navigate.
+    # register, and a body that does not navigate. The last operand (a call with no arguments
+    # returning such a source) is the open contrast: a routed `def f: ., {a:1}` refuses a negated
+    # operand jq answers (#4452), so the walk does not read a call's body for its first output.
     "(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
     "(foreach (def f($x): $x as {a:$a} | .; f((1, .))) as $k (.; .; .))",
     "(foreach (def f($x): $x as {a:$a} | .; f(((., 1), 2))) as $k (.; .; .))",

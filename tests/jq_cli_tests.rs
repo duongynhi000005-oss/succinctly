@@ -134594,7 +134594,7 @@ fn test_foreach_source_destructuring_limit_one_comma_first_leaf_4514() -> Result
 /// with result ..") at the first output; the by-value drive ran every output and answered the
 /// later one's error, which a `try` swallowed, so `del(try ..)` deleted the document. Covers a
 /// comma as the argument of a `$` parameter (`f((., 1))`), `limit(2; ., 1)` (a count past one),
-/// each behind a variable (`as $b`), a call with no arguments, and a frozen `$x`; on `null` the
+/// behind a variable (`as $b`) and a frozen `$x`; on `null` the
 /// destructure succeeds and jq answers. Every row captured from jq 1.7.1 with `-c`; the message is
 /// pinned only as the common prefix.
 #[test]
@@ -134707,27 +134707,6 @@ fn test_foreach_source_destructuring_register_on_first_output_only_4514() -> Res
         ),
         (
             "{}",
-            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
-            "",
-            "Invalid path expression",
-            5,
-        ),
-        (
-            r#"{"a":true}"#,
-            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
-            "",
-            "Invalid path expression",
-            5,
-        ),
-        (
-            "null",
-            "del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
-            "null\n",
-            "",
-            0,
-        ),
-        (
-            "{}",
             ". as $x | del(try foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
             "",
             "Invalid path expression",
@@ -134743,27 +134722,6 @@ fn test_foreach_source_destructuring_register_on_first_output_only_4514() -> Res
         (
             "null",
             ". as $x | del(try foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
-            "null\n",
-            "",
-            0,
-        ),
-        (
-            "{}",
-            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
-            "",
-            "Invalid path expression",
-            5,
-        ),
-        (
-            r#"{"a":true}"#,
-            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
-            "",
-            "Invalid path expression",
-            5,
-        ),
-        (
-            "null",
-            "del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
             "null\n",
             "",
             0,
