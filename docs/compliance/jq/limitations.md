@@ -3858,7 +3858,9 @@ answers `["b"]` — and classified the two residuals appended below):
     (`ltrimstr("x","s")`) is placed run by run, one per output, as jq runs it: `["b"]`, then a
     refusal of the fresh `""`. A navigation of the result stays refused (`(tostring|.[1:2]) as $y`).
     Still refused where jq answers (never a write): a trim argument that is a generator but not a comma
-    of literals (`ltrimstr("y", (.|tostring))`), which falls to the by-value route. The sweep pins each in
+    of literals (`ltrimstr("y", (.|tostring))`), which falls to the by-value route, and `walk(.)` under
+    a `//`, `?` or `try` (`path(.s|(walk(.)?) as $y|$y)`): the resolver refuses a rebuilt container
+    rather than placing it, so the construct would swallow that refusal where jq raises. The sweep pins each in
     its `input-returning-bind-*` rows, and `scripts/jq-bind-origin-fuzz.py
     --input-returning-source-p` draws the shape.
     `del(f)`, `delpaths([])` and `setpath([]; .)` return their input as well when the path set

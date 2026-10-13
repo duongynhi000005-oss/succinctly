@@ -61798,7 +61798,6 @@ fn test_bound_result_under_swallowing_construct_is_judged_per_value_4444() -> Re
         ),
         // `del(f)` over an empty path set, and `walk(.)` of a scalar, are the same leaves.
         (r"path(.b|(del(.x?) // .) as $y|$y)", "[\"b\"]\n", 0),
-        (r"path(.b|(walk(.)?) as $y|$y)", "[\"b\"]\n", 0),
         // An input that gets a fresh result is still refused, and so is a container.
         (r"path(.n|(tostring // .) as $y|$y)", "", 5),
         (r"(.n|(tostring // .) as $y|$y) = 9", "", 5),
@@ -61807,6 +61806,36 @@ fn test_bound_result_under_swallowing_construct_is_judged_per_value_4444() -> Re
         (r"path(.a|(del(.[0]) // .) as $y|$y)", "", 5),
         (r"path(.a|(walk(.) // .) as $y|$y)", "", 5),
         (r"path(.a|(try walk(.) catch .) as $y|$y)", "", 5),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4444 review: `walk(.)` of an array or object is rebuilt, and the resolver refuses the
+/// copy instead of placing it, so a `?`, `try` or `//` around it must stay off the witness
+/// grammar: the refusal it would swallow turned `(.o|(walk(.)?) as $y|$y) = 1` into a
+/// silent no-op and `(walk(.)?, .)` into a bind of the register, where jq raises.
+/// Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_walk_identity_of_a_container_is_not_swallowed_4444() -> Result<()> {
+    const DOC: &str = r#"{"o":{"x":1},"a":[1],"s":"s"}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (r"path(.o|(walk(.)?) as $y|$y)", "", 5),
+        (r"(.o|(walk(.)?) as $y|$y) = 1", "", 5),
+        (r"del(.o|(walk(.)?) as $y|$y)", "", 5),
+        (r"path(.o|(try walk(.) catch empty) as $y|$y)", "", 5),
+        (r"path(.o|(walk(.)?, .) as $y|$y)", "", 5),
+        (r"path(.o|(walk(.) // 3) as $y|$y)", "", 5),
+        (r"path(.a|(walk(.)?) as $y|$y)", "", 5),
+        // A bare `walk(.)` of a scalar is the register (#4456); under a construct it stays
+        // off the grammar with the containers, a refusal where jq answers.
+        (r"path(.s|walk(.) as $y|$y)", "[\"s\"]\n", 0),
+        (r"path(.s|(walk(.)?) as $y|$y)", "", 5),
     ];
     for (filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;

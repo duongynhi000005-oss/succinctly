@@ -1242,6 +1242,14 @@ input-returning-bind-swallowed-string-optional	{"b":"s"}	path(.b|(tostring?) as 
 input-returning-bind-swallowed-string-try	{"b":"s"}	path(.b|(try tostring catch .) as $y|$y)
 input-returning-bind-swallowed-string-alt-write	{"b":"s"}	(.b|(tostring // .) as $y|$y) = 9
 input-returning-bind-swallowed-string-try-del	{"b":"s"}	del(.b|(try tostring catch .) as $y|$y)
+input-returning-bind-swallowed-container-walk-optional	{"o":{"x":1}}	path(.o|(walk(.)?) as $y|$y)
+input-returning-bind-swallowed-container-walk-optional-write	{"o":{"x":1}}	(.o|(walk(.)?) as $y|$y) = 1
+input-returning-bind-swallowed-container-walk-optional-del	{"o":{"x":1}}	del(.o|(walk(.)?) as $y|$y)
+input-returning-bind-swallowed-container-walk-try-empty	{"o":{"x":1}}	path(.o|(try walk(.) catch empty) as $y|$y)
+input-returning-bind-swallowed-container-walk-comma	{"o":{"x":1}}	path(.o|(walk(.)?, .) as $y|$y)
+input-returning-bind-swallowed-fresh-try-empty-write	{"n":5}	(.n|(try tostring catch empty) as $y|$y) = 1
+input-returning-bind-swallowed-fresh-comma	{"n":5}	path(.n|(tostring?, .) as $y|$y)
+input-returning-bind-swallowed-del-nonempty-optional-write	{"o":{"x":1}}	(.o|(del(.x)?) as $y|$y) = 1
 input-returning-bind-trim-generator-fresh-last	{"b":"s"}	path(.b|ltrimstr("x","s") as $y|$y)
 input-returning-bind-trim-generator-fresh-first	{"b":"s"}	path(.b|ltrimstr("s","x") as $y|$y)
 input-returning-bind-trim-generator-fresh-write	{"b":"s"}	(.b|ltrimstr("x","s") as $y|$y) = 9

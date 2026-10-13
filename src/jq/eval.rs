@@ -40922,12 +40922,8 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         Expr::Builtin(Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_))
             if S::TAG == EvalTag::Jq && trim_generator_literals(expr).is_some() =>
         {
-            match split_trim_generator(expr) {
-                Some(split) => {
-                    resolve_node_sink::<S>(&split, value, trackable, snapshot, frame, keep, sink)
-                }
-                None => ResolveFlow::Exhausted, // patchcov: coverage tolerate-line reason="unreachable: the arm's guard is trim_generator_literals(expr).is_some()"
-            }
+            let split = split_trim_generator(expr);
+            resolve_node_sink::<S>(&split, value, trackable, snapshot, frame, keep, sink)
         }
         // #4016: `ltrimstr`/`rtrimstr` hand their input back as the same `jv`
         // unless a string argument actually matches the string input's edge
@@ -51031,7 +51027,8 @@ fn resolve_bind_source_witness<S: EvalSemantics>(
 /// source instead of an ambiguous one. #4017 adds the builtins that hand their input
 /// back as the same `jv` for some inputs ([`is_input_returning_stage`]) as a leaf the
 /// resolver judges per value, under a `try`, `?` or the left of `//` as anywhere else
-/// (#4444).
+/// (#4444) -- except `walk(.)`, which the resolver refuses for a container and
+/// [`transparent_outputs`] keeps off the grammar there.
 ///
 /// Measured against `/usr/bin/jq` 1.7.1 with `scripts/jq-bind-origin-fuzz.py`
 /// (25 runs of 3,000 programs over every family) and
@@ -51039,7 +51036,7 @@ fn resolve_bind_source_witness<S: EvalSemantics>(
 /// Widening it to any source wrote where jq refuses
 /// (`(.a | tostring | .[0:1])? as $v`), which is why it is a grammar.
 fn is_transparent_bind_source(source: &Expr) -> bool {
-    transparent_outputs(source, true).is_some()
+    transparent_outputs(source, true, false).is_some()
 }
 
 /// [`is_transparent_bind_source`]'s grammar walk, for a source whose input is
@@ -51047,11 +51044,14 @@ fn is_transparent_bind_source(source: &Expr) -> bool {
 /// whether every output it can produce is still tracked -- what a navigating leaf
 /// downstream of it needs (#3795).
 ///
-fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
+/// `swallowed` says an enclosing `try`, `?` or `//` would catch a resolver refusal
+/// raised at this position. Only `walk(.)` can raise one (#4444): every other leaf
+/// places a fresh result as an untracked value, so nothing is left to swallow.
+fn transparent_outputs(source: &Expr, input_tracked: bool, swallowed: bool) -> Option<bool> {
     let all = |exprs: &mut dyn Iterator<Item = &Expr>| {
         let mut tracked = true;
         for e in exprs {
-            tracked &= transparent_outputs(e, input_tracked)?;
+            tracked &= transparent_outputs(e, input_tracked, swallowed)?;
         }
         Some(tracked)
     };
@@ -51085,6 +51085,12 @@ fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
         // refusal to swallow (#4444: `(5 | tostring // .)` binds `"5"`, not the
         // register). Its output is not statically tracked, which keeps a navigation
         // downstream of it off the grammar (`tostring | .[1:2]`).
+        //
+        // `walk(.)` is the exception: of an array or object it is rebuilt and the
+        // resolver *refuses* instead of placing the copy, so a construct that
+        // swallows the refusal would bind what runs next, or nothing, where jq
+        // raises (`(.o | (walk(.)?) as $y | $y) = 1` is a silent no-op).
+        leaf if is_walk_identity(leaf) => (!swallowed).then_some(false),
         leaf if is_transparent_leaf(leaf) => Some(false),
         Expr::Comma(exprs) => all(&mut exprs.iter()),
         // A handler's output is untracked; one that may see the register as its
@@ -51094,13 +51100,15 @@ fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
             expr,
             catch: Some(_),
         } => (!try_body_may_raise_alias(expr))
-            .then(|| transparent_outputs(expr, input_tracked))
+            .then(|| transparent_outputs(expr, input_tracked, true))
             .flatten()
             .map(|_| false),
-        Expr::Optional(inner)
-        | Expr::Try { expr: inner, .. }
-        | Expr::FirstExpr(inner)
-        | Expr::Limit { expr: inner, .. } => transparent_outputs(inner, input_tracked),
+        Expr::Optional(inner) | Expr::Try { expr: inner, .. } => {
+            transparent_outputs(inner, input_tracked, true)
+        }
+        Expr::FirstExpr(inner) | Expr::Limit { expr: inner, .. } => {
+            transparent_outputs(inner, input_tracked, swallowed)
+        }
         Expr::If {
             then_branch,
             else_branch,
@@ -51108,12 +51116,12 @@ fn transparent_outputs(source: &Expr, input_tracked: bool) -> Option<bool> {
         } => all(&mut [&**then_branch, &**else_branch].into_iter()),
         // The left of `//` is run with its errors suppressed.
         Expr::Alternative(left, right) => {
-            let left = transparent_outputs(left, input_tracked)?;
-            Some(left & transparent_outputs(right, input_tracked)?)
+            let left = transparent_outputs(left, input_tracked, true)?;
+            Some(left & transparent_outputs(right, input_tracked, swallowed)?)
         }
         Expr::Pipe(stages) if !stages.is_empty() => {
             stages.iter().try_fold(input_tracked, |tracked, stage| {
-                transparent_outputs(stage, tracked)
+                transparent_outputs(stage, tracked, swallowed)
             })
         }
         _ => None,
@@ -51145,7 +51153,9 @@ fn is_walk_identity(expr: &Expr) -> bool {
 /// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
 /// `trim_returns_input` ... guard); the arms judge the value
 /// -- and the argument: a non-literal `ltrimstr` argument keeps the refusal -- and
-/// refuse for an input that gets a fresh result. A new pass-through arm there is owed
+/// place an input that gets a fresh result as an untracked value, which `path()`'s
+/// terminal check refuses and a `try`, `?` or `//` therefore has nothing to swallow
+/// (#4444). A new pass-through arm there is owed
 /// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
 /// lists them.
 ///
@@ -57859,15 +57869,20 @@ fn trim_generator_literals(expr: &Expr) -> Option<TrimGenerator<'_>> {
 }
 
 /// `ltrimstr(A, B)` / `rtrimstr(A, B)` over literals as the comma of its one-literal
-/// trims (#4444); see [`trim_generator_literals`].
-fn split_trim_generator(expr: &Expr) -> Option<Expr> {
-    let (make, literals) = trim_generator_literals(expr)?;
-    Some(Expr::Comma(
-        literals
-            .into_iter()
-            .map(|literal| Expr::Builtin(make(Box::new(literal.clone()))))
-            .collect(),
-    ))
+/// trims (#4444); see [`trim_generator_literals`]. Any other `expr` comes back as is,
+/// which the resolver arm never asks for (its guard is the same match).
+fn split_trim_generator(expr: &Expr) -> Expr {
+    trim_generator_literals(expr).map_or_else(
+        || expr.clone(),
+        |(make, literals)| {
+            Expr::Comma(
+                literals
+                    .into_iter()
+                    .map(|literal| Expr::Builtin(make(Box::new(literal.clone()))))
+                    .collect(),
+            )
+        },
+    )
 }
 
 /// Whether `ltrimstr`/`rtrimstr` with the literal `arg` returns `value` itself
@@ -136525,8 +136540,8 @@ mod tests {
             ("(strings | length)", false),
             ("walk(.)", true),
             ("(.a | walk(.))", true),
-            ("(walk(.) // .)", true),
-            ("try walk(.)", true),
+            ("(walk(.) // .)", false),
+            ("try walk(.)", false),
             ("walk(.a)", false),
             ("walk(tostring)", false),
             ("ltrimstr(\"x\")", true),

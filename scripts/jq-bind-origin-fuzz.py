@@ -746,6 +746,11 @@ INPUT_RETURNING_SOURCES = [
     ("ltrimstr(\"z\", \"s\")", False), ("rtrimstr(\"s\", \"z\")", False),
     ("ltrimstr(\"z\", \"y\")", False), ("(ltrimstr(\"z\", \"s\") // .)", False),
     ("first(ltrimstr(\"s\", \"z\"))", False),
+    # #4444 review: `walk(.)` of a container is refused, not placed, so each of these
+    # must keep raising where jq raises (a silent write no-op, a bind of what runs next).
+    ("(walk(.)?)", False), ("(try walk(.) catch empty)", False), ("(walk(.)?, .)", False),
+    ("(walk(.) // 3)", False), ("(tostring?, .)", False), ("(try tostring catch empty)", False),
+    ("(tonumber?)", False), ("(del(.x)?)", False), ("(del(.x?)?, .)", False),
 ]
 
 def input_returning_source_program(rng):
