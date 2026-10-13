@@ -81822,6 +81822,105 @@ fn test_foreach_source_held_var_behind_a_pipe_or_if_4514() -> Result<()> {
     ])
 }
 
+/// #4514 (the wrappers): `first(.)`, `last(.)`, `limit(1; .)`, `.?` and `try .` hand the register on, so
+/// a `foreach` source that destructures one, or a held `$` parameter whose argument is one
+/// (`def f($x): $x as {a:$a} | .; f(first(.))`), is the register's own destructure and raises on a
+/// document it cannot index. `binds_register` peeled the wrappers and then tested the unpeeled
+/// expression, so the by-value drive answered the root (`path` printed `[]`, `del` returned
+/// `null`). On `null` the first step succeeds and the register moves onto `.a`. Every jq side
+/// captured from jq 1.7.1 with `-c`; the message is pinned only as the common prefix.
+#[test]
+fn test_foreach_source_register_behind_first_last_limit_and_as_an_argument_4514() -> Result<()> {
+    const RAISES: &str = "Invalid path expression";
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{}",
+            r"path(foreach (first(.) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (last(.) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (limit(1; .) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"del(foreach (first(.) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(first(.))) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(.?)) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(try .)) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"del(foreach (def f($x): $x as {a:$a} | .; f(last(.))) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(limit(1; .))) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"(foreach (def f($x): $x as {a:$a} | .; f(first(.))) as $k (.; .; .)) |= 5",
+            "",
+            RAISES,
+            5,
+        ),
+        // On `null` the first step succeeds and the register moves onto `.a`.
+        (
+            "null",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(first(.))) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach (first(.) as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4424 (second part): the register reaches a `foreach` source's `?//` chain through a call to a
 /// `def` with parameters, a comma that is the register on only some outputs (`(., 1) | CHAIN`), or
 /// a nested `foreach` over `.` whose accumulator is the register. The spine walk read each as

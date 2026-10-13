@@ -49858,7 +49858,8 @@ impl<'e> RegisterSpine<'e> {
         if let Some(marker) = marker_head(e) {
             return self.markers.contains(&Rc::as_ptr(marker));
         }
-        match peel_value_wrappers(e) {
+        let peeled = peel_value_wrappers(e);
+        match peeled {
             Expr::Var(name) => self.holds_register(name),
             // #4514: a pipe ends in what its last stage that is not `.` yields, so one that ends
             // in a held variable (`$x | .`, `. | $x`) is that variable, whatever came before.
@@ -49895,7 +49896,10 @@ impl<'e> RegisterSpine<'e> {
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
             _ if self.through_reduce => yields_only_the_register(unwrap_bind_source(e)),
-            _ => bind_hands_on_the_register(unwrap_bind_source(e)),
+            // #4514: the wrappers peeled above hand their operand's value on, so the operand is
+            // what is tested (`first(.)`, `last(.)`, `limit(1; .)`, as a bound expression or as the
+            // argument a held `$` parameter is bound to).
+            _ => bind_hands_on_the_register(peeled),
         }
     }
 
