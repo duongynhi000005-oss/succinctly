@@ -61734,6 +61734,42 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             "Cannot index object with number",
             5,
         ),
+        // The nested fold may be a `foreach`, and an alternative may be a bare `$var`.
+        (
+            doc,
+            r"del(reduce 1 as $k (.; foreach (. as {a:$a} ?// {b:$b} | .) as $k (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; foreach (. as {a:$a} ?// {b:$b} | .) as $k (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} ?// $x | .) as $k (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce (. as $x ?// [$q] | .) as $k (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(reduce 1 as $k (.; reduce (. as [$q] ?// {a:$a} | .) as $k (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
         // Still refused, where jq answers `null`: a chain as the loop pattern over a source that
         // destructures the register (the emitted element is not the register the pattern steps on).
         (

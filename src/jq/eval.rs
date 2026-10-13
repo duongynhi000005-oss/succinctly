@@ -36616,7 +36616,8 @@ fn update_returns_its_input(e: &Expr) -> bool {
 }
 
 /// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one
-/// pattern (a `?//` chain's failed alternative leaves `null`), an INIT and UPDATE that move
+/// loop pattern (a `?//` chain there leaves `null` when an alternative fails, which nothing models
+/// here; a chain in the SOURCE is fine, #4506), an INIT and UPDATE that move
 /// nothing, so the fold's state is the accumulator throughout, and a SOURCE the resolver checks
 /// as jq does ([`foreach_source_is_path_checked`]). A `foreach` also needs a no-op EXTRACT.
 fn nested_fold_keeps_state(input: &Expr, patterns: &[Pattern], init: &Expr, update: &Expr) -> bool {
@@ -36645,6 +36646,11 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
             Expr::Identity | Expr::Field(_) | Expr::Index { .. } | Expr::Iterate => true,
             Expr::Paren(inner) | Expr::Optional(inner) => navigation(inner, pass),
             Expr::Pipe(stages) => stages.iter().all(|stage| navigation(stage, pass)),
+            // Any chain, not only a single pattern (#4506): the bound expression is the register
+            // and the body moves nothing, so whichever alternative matches the state is the
+            // accumulator, and an alternative that raises raises in jq too (the resolver's retry
+            // is what the 171k-row sweep behind #4506 measures, pinned by
+            // `test_reduce_update_nested_reduce_destructuring_source_4320`).
             Expr::AsPattern { expr, body, .. } => is_register(expr) && body_performs_no_step(body),
             Expr::FuncDef {
                 name,
