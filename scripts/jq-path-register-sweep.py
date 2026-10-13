@@ -697,6 +697,17 @@ OPERANDS = [
     # are an outer `$x` bound to a member, a `reduce` (which backtracks its source), an outer
     # `$x` rebound by a pattern, and one the source only reads.
     "(. as $x | foreach ($x as [$q] | .) as $k (.; .; .))",
+    # (#4514) a held `$x` behind a pipe or an `if`: the register as a bare `$x` is. The contrasts
+    # are a pipe that ends in a navigation, a held variable that is a member, and an `if` with
+    # a branch that is not the register.
+    "(. as $x | foreach (($x|.) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ((.|$x) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x|.|.) as [$q] | .) as $k (.; .; .))",
+    "(. as $x | foreach ((if $x then $x else . end) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ((if true then $x else .a end) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x|.a) as {a:$a} | .) as $k (.; .; .))",
+    "(.a as $x | foreach (($x|.) as {a:$a} | .) as $k (.; .; .))",
+    "(. as $x | foreach ((.a|$x) as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach (($x, $x) as {a:$a} | .) as $k (.; .; .))",
     "(. as $x | foreach (first($x) as {a:$a} | .) as $k (.; .; .))",
     # (#4320, sixth part) a `$x` behind a nested wrapper, `first` over a comma whose first leaf it
