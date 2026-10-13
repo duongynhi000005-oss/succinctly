@@ -81903,6 +81903,37 @@ fn test_foreach_source_register_behind_first_last_limit_and_as_an_argument_4514(
             RAISES,
             5,
         ),
+        // A pipe of such operands is the register, and `first` of a comma is its first leaf.
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(first(.)|.)) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(first(., 1))) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (first(., 1) as {a:$a} | .) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
+        // The operand of the wrapper is not the register: jq raises on the other node too, and the
+        // verdict must not change.
+        (
+            "{}",
+            r"path(foreach (def f($x): $x as {a:$a} | .; f(first(.a))) as $k (.; .; .))",
+            "",
+            RAISES,
+            5,
+        ),
         // On `null` the first step succeeds and the register moves onto `.a`.
         (
             "null",

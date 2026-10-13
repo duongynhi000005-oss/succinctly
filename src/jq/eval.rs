@@ -49858,6 +49858,16 @@ impl<'e> RegisterSpine<'e> {
         if let Some(marker) = marker_head(e) {
             return self.markers.contains(&Rc::as_ptr(marker));
         }
+        // #4514: `first(., 1)` is its comma's first leaf, the only output `first` emits, so it is
+        // the register when that leaf is `.` (peeling `first` would leave the whole comma, whose
+        // other leaves are not).
+        if let Expr::FirstExpr(inner) = unwrap_bind_source(e) {
+            if let Expr::Comma(items) = unwrap_bind_source(inner) {
+                if items.first().is_some_and(is_identity_stage) {
+                    return true;
+                }
+            }
+        }
         let peeled = peel_value_wrappers(e);
         match peeled {
             Expr::Var(name) => self.holds_register(name),
@@ -49895,10 +49905,18 @@ impl<'e> RegisterSpine<'e> {
             }
             // A closure argument (`def h(q): ... q as {a:$a}` called as `h(.)`) is its own
             // expression.
-            _ if self.through_reduce => yields_only_the_register(unwrap_bind_source(e)),
             // #4514: the wrappers peeled above hand their operand's value on, so the operand is
-            // what is tested (`first(.)`, `last(.)`, `limit(1; .)`, as a bound expression or as the
-            // argument a held `$` parameter is bound to).
+            // what is tested (`first(.)`, `last(.)`, `limit(1; .)`, `label $l | .`, as a bound
+            // expression or as the argument a held `$` parameter is bound to), and a pipe of
+            // such operands is the register as a pipe of `.` is.
+            _ if self.through_reduce => yields_only_the_register(peeled),
+            Expr::Pipe(stages)
+                if stages
+                    .iter()
+                    .all(|stage| matches!(peel_value_wrappers(stage), Expr::Identity)) =>
+            {
+                true
+            }
             _ => bind_hands_on_the_register(peeled),
         }
     }
