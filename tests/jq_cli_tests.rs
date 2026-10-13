@@ -80201,6 +80201,13 @@ fn test_foreach_source_bare_alternative_chain_under_first_limit_4483() -> Result
             0,
         ),
         (
+            r#"{"a":true}"#,
+            r"path(foreach (limit(2; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
             "[1]",
             r"path(foreach (first(. as [$a] ?// $a | .)) as $k (.; .; .))",
             "[]\n",

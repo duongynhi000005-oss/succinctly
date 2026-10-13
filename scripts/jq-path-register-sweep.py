@@ -501,10 +501,13 @@ OPERANDS = [
     "(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
     # (#4483) the chain directly under `first`/`limit` (jq's `first` is a `label`/`break`, which the
     # chain's `?//` catches as a body error, so value mode emits twice and path mode once). The
-    # contrasts nest the wrapper (`try`, `nth`, `limit(2; ..)`, `last`), put a stage that is not the
+    # contrasts nest the wrapper (`try`, `nth`, `limit(2; ..)`, `last`), count with a generator (`limit(1,2; ..)`), put a stage that is not the
     # register in front of the chain, or put it under a `reduce`, which backtracks its source.
     "(foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (limit(2; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (limit(0; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (limit(1,2; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (limit(2,1; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (first(. as [$a] ?// $a | .)) as $k (.; .; .))",
     "(foreach (first(. as {a:$a} ?// [$a] ?// $a | .)) as $k (.; .; .))",
     "(foreach (first(. as {a:$a} ?// $a | $a)) as $k (.; .; .))",

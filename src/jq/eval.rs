@@ -50255,7 +50255,6 @@ impl<'e> RegisterSpine<'e> {
             // the same scope, so the destructure behind it is the source's own.
             Expr::Label { body, .. } => self.reach(body),
             other => {
-                let peeled = peel_register_transparent(other);
                 // #4483: the chain directly under `first`/`limit(..)` (jq's `first` is a
                 // `label`/`break`, which the chain's `?//` catches as a body error, so by value
                 // the source emits twice) is the register's own destructure outside every fold
@@ -50268,6 +50267,7 @@ impl<'e> RegisterSpine<'e> {
                         }
                     }
                 }
+                let peeled = peel_register_transparent(other);
                 if !core::ptr::eq(peeled, other) {
                     self.reach(peeled)
                 } else if yields_only_the_register(other) {
@@ -50282,22 +50282,23 @@ impl<'e> RegisterSpine<'e> {
 }
 
 /// The bound expression of a `?//` chain with a bare `$var` alternative that is the whole
-/// operand of a `first(..)` or `limit(..; ..)` (#4483). Not behind a `try`/`?` around the
-/// wrapper: those rows are answered by the by-value drive, and routing them accepted a `del`
-/// that jq refuses.
+/// operand of a `first(..)` or `limit(n; ..)` with a literal `n` (#4483). Not behind a `try`/`?`
+/// around the wrapper: those rows are answered by the by-value drive, and routing them accepted
+/// a `del` that jq refuses. Not a `limit` whose `n` is a generator (`limit(1,2; ..)` runs the
+/// chain once per `n`): the resolver answers the chain once.
 fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
-    match unwrap_paren(e) {
-        Expr::FirstExpr(inner)
-        | Expr::Limit { expr: inner, .. }
-        | Expr::Builtin(Builtin::FirstStream(inner)) => match unwrap_paren(inner) {
-            Expr::AsPattern { expr, patterns, .. }
-                if routes_destructuring_chain(patterns)
-                    && !patterns_all_destructuring_chain(patterns) =>
-            {
-                Some(expr)
-            }
-            _ => None,
-        },
+    let operand = match unwrap_paren(e) {
+        Expr::Limit { n, expr } if matches!(unwrap_paren(n), Expr::Literal(_)) => expr,
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => inner,
+        _ => return None,
+    };
+    match unwrap_paren(operand) {
+        Expr::AsPattern { expr, patterns, .. }
+            if routes_destructuring_chain(patterns)
+                && !patterns_all_destructuring_chain(patterns) =>
+        {
+            Some(expr)
+        }
         _ => None,
     }
 }
