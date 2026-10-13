@@ -3191,6 +3191,33 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         column
     }
 
+    /// `line` as yq numbers it (#4363): yq's header preprocessing slurps the leading blank,
+    /// comment, directive and `---` lines off the input and parses the rest, so every node's line
+    /// is counted from the first content line, in every document of the stream. The inherent
+    /// [`Self::line`] stays the editor line, which `yq-locate`, `at_offset` and the library API use.
+    fn yq_line(&self) -> usize {
+        let line = self.line();
+        if line == 0 {
+            return 0;
+        }
+        let (lines, _) = self.index.yq_preamble(|| yq_position_preamble(self.text));
+        line.saturating_sub(lines).max(1)
+    }
+
+    /// `column` as yq numbers it (#4363): the content of a `--- 42` line starts at column 1, the
+    /// `---` and the blanks after it being part of the slurped header.
+    fn yq_column(&self) -> usize {
+        let column = self.column();
+        if column == 0 {
+            return 0;
+        }
+        let (lines, columns) = self.index.yq_preamble(|| yq_position_preamble(self.text));
+        if columns == 0 || self.line() != lines + 1 {
+            return column;
+        }
+        column.saturating_sub(columns).max(1)
+    }
+
     /// Get the 0-indexed document position in a multi-document stream.
     ///
     /// Returns the document index (0 for first document, 1 for second, etc.)
@@ -7616,12 +7643,12 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
 
     #[inline]
     fn line(&self) -> usize {
-        YamlCursor::line(self)
+        self.yq_line()
     }
 
     #[inline]
     fn column(&self) -> usize {
-        YamlCursor::column(self)
+        self.yq_column()
     }
 
     #[inline]
@@ -9158,6 +9185,70 @@ fn write_foot_comment_lines<Out: core::fmt::Write>(
         wrote = true;
     }
     Ok(wrote)
+}
+
+/// How much of the front of `text` real yq leaves out when it numbers a node's `line` and
+/// `column` (#4363): `(lines, columns)`.
+///
+/// yq slurps the leading header (see [`yq_header_len`]) off the input and parses the rest, so
+/// its lines count from the first content line, in every document of the stream: `# c\nk: 1\nm: 2`
+/// has `.m` on line 2, and so does the same text with a leading `---`, a `%YAML` directive, or a
+/// blank or whitespace-only line. `lines` is how many of those leading lines there are. A first
+/// content line that is itself `--- 42` loses the marker and the blanks after it too: `columns`
+/// is how many columns that is, applied to that one line only (`--- [1, 2]` has `[` at column 1).
+///
+/// Unlike the header yq *prints* ([`yq_header_len`]), a whitespace-only line counts as leading
+/// here (live-checked: `# c` / `  ` / `k: 1` numbers `k` from line 2), and only the first `---` is
+/// one: a second marker is content. As there, only a `%YA..` directive is slurped: `%TAG` is content. A `--- # c` line is left as content: yq's answer
+/// there is `[0,0]`, which nothing here reproduces.
+fn yq_position_preamble(text: &[u8]) -> (usize, usize) {
+    let mut pos = 0;
+    let mut lines = 0;
+    let mut seen_marker = false;
+    while pos < text.len() {
+        let rest = &text[pos..];
+        let line_end = rest
+            .iter()
+            .position(|&b| is_line_break(b))
+            .unwrap_or(rest.len());
+        let line = &rest[..line_end];
+        let first = line.iter().position(|&b| b != b' ' && b != b'\t');
+        let bare_marker = line.starts_with(b"---")
+            && line[3..].iter().all(|&b| b == b' ' || b == b'\t')
+            && !seen_marker;
+        let leading = match first {
+            None => true,
+            Some(i) => line[i] == b'#' || (i == 0 && line.starts_with(b"%YA")) || bare_marker,
+        };
+        if !leading {
+            let columns = if !seen_marker
+                && line.starts_with(b"---")
+                && matches!(line.get(3), Some(b' ' | b'\t'))
+            {
+                let content = line[3..]
+                    .iter()
+                    .position(|&b| b != b' ' && b != b'\t')
+                    .map_or(line.len(), |i| 3 + i);
+                if line.get(content) == Some(&b'#') {
+                    0
+                } else {
+                    content
+                }
+            } else {
+                0
+            };
+            return (lines, columns);
+        }
+        seen_marker |= bare_marker;
+        pos += line_end
+            + if line_end < rest.len() {
+                line_break_len(rest, line_end)
+            } else {
+                0
+            };
+        lines += 1;
+    }
+    (0, 0)
 }
 
 /// The byte length of the leading *header* real yq's default
@@ -17253,6 +17344,38 @@ plain: hello
             assert_eq!(yq_header_len(b"# only\n"), (7, false));
             assert_eq!(yq_header_len(b"# only"), (6, false));
             assert_eq!(yq_header_len(b"# c\r\na: 1\r\n"), (5, false));
+        }
+
+        #[test]
+        fn yq_position_preamble_counts_the_lines_yq_slurps_4363() {
+            assert_eq!(yq_position_preamble(b"k: 1\n"), (0, 0));
+            assert_eq!(yq_position_preamble(b"# c\nk: 1\n"), (1, 0));
+            assert_eq!(yq_position_preamble(b"\n\nk: 1\n"), (2, 0));
+            assert_eq!(yq_position_preamble(b"  \n\t\nk: 1\n"), (2, 0));
+            assert_eq!(yq_position_preamble(b"  # indented\nk: 1\n"), (1, 0));
+            assert_eq!(yq_position_preamble(b"---\nk: 1\n"), (1, 0));
+            assert_eq!(yq_position_preamble(b"--- \nk: 1\n"), (1, 0));
+            assert_eq!(yq_position_preamble(b"%YAML 1.2\n---\nk: 1\n"), (2, 0));
+            // Only `%YA..` is slurped; any other directive is content.
+            assert_eq!(
+                yq_position_preamble(b"%TAG ! tag:e.com,2000:\n---\nk: 1\n"),
+                (0, 0)
+            );
+            assert_eq!(yq_position_preamble(b"# c\n  \nk: 1\n"), (2, 0));
+            assert_eq!(yq_position_preamble(b"# c\r\n---\r\nk: 1\r\n"), (2, 0));
+            // Content on the marker line loses the marker and the blanks after it.
+            assert_eq!(yq_position_preamble(b"--- 5\n"), (0, 4));
+            assert_eq!(yq_position_preamble(b"---  [1]\n"), (0, 5));
+            assert_eq!(yq_position_preamble(b"# c\n--- a: 1\n"), (1, 4));
+            // Only the first marker is part of the preamble; a second is content.
+            assert_eq!(yq_position_preamble(b"---\n---\nk: 1\n"), (1, 0));
+            // `--- # c` keeps the marker as content (yq answers [0,0] there).
+            assert_eq!(yq_position_preamble(b"--- # c\nk: 1\n"), (0, 0));
+            // `---x` is a plain scalar, not a marker.
+            assert_eq!(yq_position_preamble(b"---x\n"), (0, 0));
+            // Nothing but preamble: nothing to renumber.
+            assert_eq!(yq_position_preamble(b"# only\n"), (0, 0));
+            assert_eq!(yq_position_preamble(b""), (0, 0));
         }
 
         #[test]
