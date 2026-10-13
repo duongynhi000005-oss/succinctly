@@ -61993,6 +61993,91 @@ fn test_outer_var_destructured_by_a_fold_source_in_a_fold_body_4505() -> Result<
     Ok(())
 }
 
+/// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
+/// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
+/// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an
+/// accumulator the navigation succeeds on, its value is the step's last output and jq refuses
+/// (`{"a":{"b":1}}`), so the verdict is per value, not per shape. Where the source moved the
+/// register onto an element the navigation's success by value is not what jq checks, and the
+/// stage keeps refusing (not pinned). Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_reduce_update_caught_navigation_last_in_a_comma_is_judged_per_value_4486() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; (., (.a)?)))",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; (., try .a)))",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; first((.a)?, .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"del(reduce .[]? as $i (.; (., (.a)?)))",
+            "null\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"(reduce .[]? as $i (.; (., (.a)?))) = 5",
+            "5\n",
+            0,
+        ),
+        ("[true]", r"path(reduce 1 as $i (.; (., (.a)?)))", "[]\n", 0),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce .[]? as $i (.; (., (.a.b)?)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce 1 as $i (.; (., (.a)?)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(reduce 1 as $i (.; (., (.a)?)))",
+            "",
+            5,
+        ),
+        // Two caught items in one comma, before or after the `.`.
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; ((.a)?, (.b)?, .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; (., (.a)?, (.b)?)))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4017: a variable bound to the result of a stage that returns its input as the same
 /// `jv` (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
 /// `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`) is the register itself, so

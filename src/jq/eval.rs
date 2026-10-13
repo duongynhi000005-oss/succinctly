@@ -54714,6 +54714,73 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
     }
 }
 
+/// A comma item that is a caught navigation along a chain of fields and indexes (`(.k)?`,
+/// `try .k`, `(.a.b[0])?`): it emits its navigation's value, or nothing when the navigation
+/// raises (#4486). A bare postfix `.k?` is not: on a register that is not the accumulator it raises
+/// a path error `?` does not suppress. Only a chain of single steps: the probe reads it by value
+/// on every step, which for an iteration or a slice would materialize the accumulator each time.
+fn is_caught_pure_navigation(item: &Expr) -> bool {
+    fn chain(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Identity | Expr::Field(_) | Expr::Index { .. } => true,
+            Expr::Pipe(stages) => stages.iter().all(chain),
+            _ => false,
+        }
+    }
+    match unwrap_paren(item) {
+        Expr::Optional(inner) => !is_postfix_optional_primitive(inner) && chain(inner),
+        Expr::Try { expr, catch: None } => chain(expr),
+        _ => false,
+    }
+}
+
+/// Whether `update` is, through parens and `first`, a comma with a caught navigation item: the
+/// shapes [`silence_failing_caught_navs`] reads.
+fn comma_with_caught_navigation(update: &Expr) -> bool {
+    match update {
+        Expr::Paren(inner) | Expr::FirstExpr(inner) => comma_with_caught_navigation(inner),
+        Expr::Comma(items) => items.iter().any(is_caught_pure_navigation),
+        _ => false,
+    }
+}
+
+/// `update` with each caught pure navigation that raises on `acc` replaced by `empty` (#4486), or
+/// `None` when no item changed. Such an item emits nothing, so `(., (.a)?)` on an accumulator
+/// `.a` raises on is the `.` alone, which a `reduce` keeps as the register. The probe is a pure
+/// navigation read by value, which has no effect to repeat. Reads a comma through parens and
+/// `first`, the places [`update_navigates_within`] reads its items.
+fn silence_failing_caught_navs<S: EvalSemantics>(update: &Expr, acc: &OwnedValue) -> Option<Expr> {
+    match update {
+        Expr::Paren(inner) => silence_failing_caught_navs::<S>(inner, acc)
+            .map(|silenced| Expr::Paren(Box::new(silenced))),
+        Expr::FirstExpr(inner) => silence_failing_caught_navs::<S>(inner, acc)
+            .map(|silenced| Expr::FirstExpr(Box::new(silenced))),
+        Expr::Comma(items) => {
+            let mut changed = false;
+            let silenced: Vec<Expr> = items
+                .iter()
+                .map(|item| {
+                    if is_caught_pure_navigation(item)
+                        && matches!(eval_owned_multi::<S>(item, acc), Ok(outputs) if outputs.is_empty())
+                    {
+                        changed = true;
+                        return Expr::Builtin(Builtin::Empty);
+                    }
+                    match silence_failing_caught_navs::<S>(item, acc) {
+                        Some(inner) => {
+                            changed = true;
+                            inner
+                        }
+                        None => item.clone(),
+                    }
+                })
+                .collect();
+            changed.then(|| Expr::Comma(silenced))
+        }
+        _ => None,
+    }
+}
+
 /// [`update_navigates_within`] for one item of a comma in a `reduce` `UPDATE`, given the items
 /// `later` after it (#4459). A caught navigation (a `try`, or a `(...)?` that is not a bare postfix
 /// step) emits nothing, or its handler's output, when it raises. `reduce` keeps the *last* output
@@ -54918,6 +54985,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // syntactic, so decided once, not per source element
     // ([`reduce_update_at_register`]).
     let update_navigates = S::TAG == EvalTag::Jq && update_definitely_navigates(update);
+    // #4486: whether some comma item of UPDATE is a caught pure navigation, which emits nothing on
+    // an accumulator it raises on ([`silence_failing_caught_navs`]).
+    let update_has_caught_nav = update_navigates && comma_with_caught_navigation(update);
     // #3953: see [`update_returns_its_input`]. Jq mode only: yq has no `reduce` in path position.
     // An outermost `reduce` whose source, INIT and loop pattern cannot move jq's register runs
     // UPDATE with `.` on it for as long as the accumulator is its node, and an UPDATE that hands
@@ -55241,8 +55311,16 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             .as_ref()
                             .filter(|live| null_bool_identical(acc_effective, &live.value));
                         // #3780: see [`reduce_update_at_register`].
+                        // #4486: a caught navigation that raises on this accumulator emits nothing,
+                        // so UPDATE navigates it only on the steps it succeeds on.
+                        let update_navigates_here = update_navigates
+                            && !(update_has_caught_nav
+                                && silence_failing_caught_navs::<S>(update, acc_effective)
+                                    .is_some_and(|silenced| {
+                                        !update_definitely_navigates(&silenced)
+                                    }));
                         let update_at_register = reduce_update_at_register::<S>(
-                            update_navigates,
+                            update_navigates_here,
                             walked.as_ref(),
                             &elem,
                             &reg,
