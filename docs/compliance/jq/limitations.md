@@ -2337,6 +2337,20 @@ is the revert that established what the other one costs.
    spine's call budget (`SPINE_CALL_BUDGET`), where the walk stops reading bodies. Pinned by
    `test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452`.
 
+   A destructuring-only `?//` chain behind a pipe of `.` (`(.|.) as {a:$a} ?// [$a] | .`) as a `foreach` source inside a
+   `reduce` UPDATE raises as jq does since [#4484](https://github.com/rust-works/succinctly/issues/4484), where
+   [#4424](https://github.com/rust-works/succinctly/issues/4424)'s first part left it to the by-value drive:
+   `del(reduce .[]? as $k (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))` on `[true]` deleted the document,
+   and `=` replaced it. When the `reduce` source navigates, jq's register sits on the element while the accumulator is the
+   whole document, so the chain's `[$a]` step raises; when it cannot move the register (`reduce (1) as $i (.; CHAIN)`) the
+   accumulator is the register at the first step and jq answers (`[[]]` on `[true]`). A `reduce` whose UPDATE is a
+   `foreach` now marks that step as one where `.` is the register (`foreach_update_on_register`, the way a `try` UPDATE
+   does since #4126), so the chain is placed there and answers; elsewhere in a body the walk's unplaced refusal fires.
+   Over the 243 `foreach`/`reduce` pattern operands (`--stage-only`, 206,595 rows) wrong accepts go from 1,066 to 1,045,
+   refusals jq does not make from 4,253 to 4,109, 165 rows become matches, and none is lost. Pinned by
+   `test_foreach_source_pipe_chain_in_a_reduce_update_4484`. Still accepted inside a body: a later bare alternative
+   (`. as $x ?// $y | $y as {a:$a} | .`, 28 rows, #4320's fourth part is gated to outside every fold body).
+
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
    | `.a as $y \| path(.a \| $y)`                             | `["a"]`                     | value-mode binding — `eval_as` never resolves its source in path position; the *positional* half of #3037 (its root-of-invocation half is closed)                                                                                                          |

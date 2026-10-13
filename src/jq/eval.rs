@@ -50116,9 +50116,14 @@ impl<'e> RegisterSpine<'e> {
                 // identical: on a `null` register the pattern's first step succeeds whatever the
                 // head is (`resolve_as_pattern`'s per-bound `null_bool_identical`), and a chain of
                 // destructuring patterns only has no bare alternative to retry onto. The second
-                // only outside every fold body, where `.` may be an accumulator the enclosing
-                // source moved: a `reduce` UPDATE that jq answers (`path(reduce (1) as $i (.;
-                // CHAIN))` on `[]`) would refuse.
+                // outside every fold body, and (#4484) inside one where `.` is the register
+                // ([`fold_body::acc_is_register_here`]: a `reduce` UPDATE that is a `foreach`,
+                // whose source and INIT cannot move the register, marks its first step) or where
+                // the walk asks for the unplaced refusal (`through_reduce`). Placed only where `.`
+                // is not known to be the register, it refused a `reduce` UPDATE that jq answers
+                // (`path(reduce (1) as $i (.; CHAIN))` on `[]`, #4429); the mark is what keeps
+                // that row, and the unplaced refusal is what raises on `reduce .[]? as $k (.;
+                // CHAIN)`, where the source leaves jq's register on the element.
                 // #4452: a single pattern over a bound expression with a fresh leaf (a call whose
                 // `def` builds its result, a fresh value beside the register in a comma): the step
                 // raises on the leaf whatever the register is, which only the resolver models. Not
@@ -50138,7 +50143,10 @@ impl<'e> RegisterSpine<'e> {
                     && self.binds_register(expr)
                     && (patterns.len() == 1
                         || self.null_register
-                        || (patterns_all_destructuring_chain(patterns) && fold_body::depth() == 0)
+                        || (patterns_all_destructuring_chain(patterns)
+                            && (fold_body::depth() == 0
+                                || fold_body::acc_is_register_here()
+                                || self.through_reduce))
                         || (!matches!(unwrap_bind_source(expr), Expr::Pipe(_))
                             && wrapped_marker(expr).is_none()))
                 {
@@ -54642,6 +54650,15 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && patterns_all_bare(patterns)
         && cannot_move_register(input)
         && cannot_move_register(init);
+    // #4484: an UPDATE that is itself a `foreach` runs its INIT and SOURCE with `.` on the
+    // accumulator, which a source and INIT that cannot move jq's register leave on the register at
+    // the first step, as for a `try` UPDATE above. Marked per step by `update_at_register`.
+    let foreach_update_on_register = S::TAG == EvalTag::Jq
+        && matches!(unwrap_paren(update), Expr::Foreach { .. })
+        && fold_body::depth() == 0
+        && patterns_all_bare(patterns)
+        && cannot_move_register(input)
+        && cannot_move_register(init);
     // INIT resolved first, before SOURCE (#2031, reordered from the
     // original #1467/#1872 shape): confirmed live against jq 1.7.1 (via
     // `debug`-instrumented INIT/SOURCE/UPDATE clauses) that real jq
@@ -54945,7 +54962,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             outcome = Some(FoldStepOutcome::Return(aborted.stop(control)));
                             return Demand::Stop;
                         }
-                        let _acc_is_register = ((keeps_accumulator || try_update_on_register)
+                        let _acc_is_register = ((keeps_accumulator
+                            || try_update_on_register
+                            || foreach_update_on_register)
                             && update_at_register
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
