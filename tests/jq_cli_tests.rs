@@ -134453,3 +134453,67 @@ fn test_foreach_source_destructuring_limit_one_comma_first_leaf_4514() -> Result
         ),
     ])
 }
+
+/// #4497: a `foreach` over `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative,
+/// behind a `try`, a `?`, a wrapper under a wrapper, or a plain `$x` bind in front of the chain.
+/// jq's `first` is a `label`/`break` the chain's `?//` catches as a body error, so by value the
+/// source emits twice; in `path()` it emits once, which #4483 read for the chain directly under the
+/// wrapper and these read through the wrappers that hand the chain on unchanged. Every jq side
+/// captured from jq 1.7.1; the `-(...)` row is the #4496 audit's wrong-accept shape (jq raises, the
+/// document must not be echoed).
+#[test]
+fn test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497() -> Result<()> {
+    let doc: &'static str = r#"{"a":true}"#;
+    for source in [
+        "try first(CHAIN)",
+        "first(CHAIN)?",
+        "nth(0; CHAIN)",
+        "try nth(0; CHAIN)",
+        "try limit(1; CHAIN)",
+        "first(first(CHAIN))",
+        "first(. as $x | CHAIN)",
+    ] {
+        // The rows hold `&'static str`, so the formatted program is leaked (a test, a few bytes).
+        let program: &'static str = Box::leak(
+            format!(
+                "path(foreach ({}) as $k (.; .; .))",
+                source.replace("CHAIN", ". as {a:$a} ?// $a | .")
+            )
+            .into_boxed_str(),
+        );
+        assert_path_rows_both_routes_3749(&[(doc, program, "[]\n", "", 0)])?;
+    }
+    assert_path_rows_both_routes_3749(&[
+        // The writes through the same source.
+        (
+            doc,
+            r"del(foreach (try first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(foreach (try first(. as {a:$a} ?// $a | .)) as $k (.; .; .)) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        // On `null` the first alternative's walk moves the register: two outputs, as jq.
+        (
+            "null",
+            r"path(foreach (try first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        // The audit's wrong accept: jq raises at the negation, the document must not be echoed.
+        (
+            doc,
+            r"del(foreach .[]? as $k (.; -(foreach (try first(. as {a:$a} ?// $a | .)) as $k (.; .; .)); .b?))",
+            "",
+            "cannot be negated",
+            5,
+        ),
+    ])
+}

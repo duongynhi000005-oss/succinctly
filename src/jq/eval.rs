@@ -50614,11 +50614,26 @@ impl<'e> RegisterSpine<'e> {
 /// a `del` that jq refuses. Not a `limit` whose `n` is a generator (`limit(1,2; ..)` runs the
 /// chain once per `n`): the resolver answers the chain once.
 fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
+    if let Expr::Try { expr, catch: None } | Expr::Optional(expr) = unwrap_paren(e) {
+        return take_wrapped_bare_chain(expr);
+    }
+    let literal = |n: &Expr| matches!(unwrap_paren(n), Expr::Literal(_));
     let operand = match unwrap_paren(e) {
-        Expr::Limit { n, expr } if matches!(unwrap_paren(n), Expr::Literal(_)) => expr,
+        Expr::Limit { n, expr } if literal(n) => expr,
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) if literal(n) => {
+            expr
+        }
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => inner,
         _ => return None,
     };
+    bare_chain_source(operand)
+}
+
+/// The bound expression of the `?//` chain `operand` is, or holds behind the wrappers
+/// [`take_wrapped_bare_chain`] reads (#4497): a wrapper under a wrapper (`first(first(CHAIN))`,
+/// `limit(1; nth(0; CHAIN))`), and a plain `$x` bind in front of the chain (`first(. as $x |
+/// CHAIN)`, whose source is a subexp and moves nothing).
+fn bare_chain_source(operand: &Expr) -> Option<&Expr> {
     match unwrap_paren(operand) {
         Expr::AsPattern { expr, patterns, .. }
             if routes_destructuring_chain(patterns)
@@ -50626,7 +50641,8 @@ fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
         {
             Some(expr)
         }
-        _ => None,
+        Expr::As { body, .. } => bare_chain_source(body),
+        wrapped => take_wrapped_bare_chain(wrapped),
     }
 }
 

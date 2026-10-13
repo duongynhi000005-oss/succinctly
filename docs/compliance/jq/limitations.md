@@ -758,6 +758,17 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   caught step or refuse where jq answers; a fold sibling that reads a frozen `$var` is kept out of the
   uniform siblings for the same reason.
 
+  **Since [#4497](https://github.com/rust-works/succinctly/issues/4497)** a `foreach` source that is a
+  `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative prints once in `path()` (jq's `first` is a
+  `label`/`break` the chain's `?//` catches, so by value it emits twice) also behind a `try`, a `?`,
+  `nth(n; ..)` with a literal `n`, a wrapper under a wrapper and a plain `$x` bind in front of the chain
+  (`take_wrapped_bare_chain`), outside every fold body. Pinned by
+  `test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497`. **Still divergent**: a `limit` whose
+  count is a generator (`limit(1,2; CHAIN)` runs the chain once per count, ours answers three outputs where jq
+  prints two), a comma inside `first` (`first((CHAIN), 1)`), a chain passed as a `def` argument, the same
+  source inside another fold's UPDATE, and `reduce (1,2) as $i (.; first(CHAIN))`, which is refused where jq
+  answers.
+
 ## A fold over the register itself (#3790)
 
 `path(foreach . as $k (0; $k; .))` is `[]` in jq for any document, and succinctly answers it: a fold
