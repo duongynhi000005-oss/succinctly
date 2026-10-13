@@ -28270,6 +28270,64 @@ fn test_slice_sub_and_mul_number_scalar_still_errors_1101() -> Result<()> {
     Ok(())
 }
 
+/// #1390: `*=` on an absent slice target is not a blanket no-op: yq seeds the discarded
+/// write with a `null`-tagged empty sequence, so `null * 5` raises its arithmetic error while
+/// `null * [1]` (and `-=` for any right side) is identity. Pinned here, with goldens covering
+/// the passing half (`slice_null_*_1390`), because yq's error wording is not reproduced.
+#[test]
+fn test_slice_mul_scalar_on_absent_target_still_errors_1390() -> Result<()> {
+    for rhs in ["5", "\"s\""] {
+        let filter = format!(".b[0:1] *= {rhs}");
+        let (out, err, code) = run_yq_stdin_with_stderr(&filter, "c: 0\n", &[])?;
+        assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+        assert!(
+            err.contains("cannot be multiplied"),
+            "[{filter}] stderr: {err}"
+        );
+    }
+    Ok(())
+}
+
+/// #1390: the throwaway the filter runs against is what yq's is -- an empty sequence on a
+/// plain terminal write (`length` is 0, `tojson` is `[]`), and `null` once a step follows the
+/// slice (`.c` autovivifies on it). The write is discarded either way, so the filter's own
+/// error is the only way to see which it was; the filter still runs for the error to surface.
+#[test]
+fn test_slice_noop_throwaway_seed_by_position_1390() -> Result<()> {
+    for (filter, want) in [
+        (".b[0:1] |= error(tojson)", "[]"),
+        (".b[0:1] |= error(length | tostring)", "0"),
+        (".b[0:1].c |= error(tojson)", "null"),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, "c: 0\n", &[])?;
+        assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+        assert_eq!(err.trim(), format!("Error: {want}"), "[{filter}]");
+    }
+    Ok(())
+}
+
+/// #1390: plain `=` is not an update operator: yq raises for a step after the slice
+/// (`cannot index array with 'c'`) where `|=`/`+=`/`-=`/`*=` no-op, so `=` keeps its empty
+/// sequence throwaway there.
+#[test]
+fn test_slice_plain_assign_with_a_step_after_it_still_errors_1390() -> Result<()> {
+    let filter = ".b[0:1].c = 9";
+    let (out, err, code) = run_yq_stdin_with_stderr(filter, "c: 0\n", &[])?;
+    assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+    Ok(())
+}
+
+/// #1390: `-=`/`*=` on a scalar (non-null) slice target keep erroring for a scalar right side,
+/// as yq does; a container right side no-ops there (`slice_scalar_*_1390` goldens).
+#[test]
+fn test_sub_mul_on_scalar_slice_targets_unchanged_by_1390() -> Result<()> {
+    for filter in [".b[0:1] -= 5", ".b[0:1] *= 5", ".c[0:1] -= 5"] {
+        let (_out, _err, code) = run_yq_stdin_with_stderr(filter, "b: 5\nc: true\n", &[])?;
+        assert_eq!(code, 1, "[{filter}]");
+    }
+    Ok(())
+}
+
 /// #1101 deliberately scoped its no-op to scalar targets only, preserving
 /// succinctly's own array/string slice-assignment rather than replicating
 /// what looked like a real-yq gap at the time -- succinctly's array

@@ -12408,7 +12408,13 @@ fn owned_assign_step<S: EvalSemantics>(
             }
             let new_value = owned_assign_new_value::<S>(expr, rhs, old, false)?;
             let path = Expr::Pipe(steps.into_iter().map(StepKey::into_component).collect());
-            Some(set_path::<S>(state, &path, new_value, false, false))
+            Some(set_path::<S>(
+                state,
+                &path,
+                new_value,
+                ScalarNoop::Off,
+                false,
+            ))
         }
     }
 }
@@ -30838,7 +30844,7 @@ fn yq_assign_noop_check<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // through it would be a wasted navigate-and-no-op.
         for (path, outcome) in paths.iter().zip(&outcomes) {
             if matches!(outcome, PathAssignOutcome::RhsUnusedButChanges) {
-                set_path::<S>(&mut result, path, OwnedValue::Null, true, true)?;
+                set_path::<S>(&mut result, path, OwnedValue::Null, ScalarNoop::On, true)?;
             }
         }
         return Ok(YqAssignNoopCheck::Skip(result));
@@ -30886,7 +30892,12 @@ fn eval_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         YqAssignNoopCheck::NotChecked => None,
     };
     let yq_targets = match yq_prepare_assign_targets::<W, S>(
-        path_expr, value_expr, &input, resolved, optional, true,
+        path_expr,
+        value_expr,
+        &input,
+        resolved,
+        optional,
+        ScalarNoop::On,
     ) {
         Ok(targets) => targets,
         Err(early_return) => return early_return,
@@ -30992,7 +31003,8 @@ fn eval_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             } else {
                 value.clone()
             };
-            set_path::<S>(result, path, value, yq_noop, yq_noop).map_err(EvalEscape::from)
+            set_path::<S>(result, path, value, ScalarNoop::from(yq_noop), yq_noop)
+                .map_err(EvalEscape::from)
         },
     )
 }
@@ -31001,14 +31013,10 @@ fn eval_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// Applies filter to the value at path and updates it.
 ///
 /// `scalar_slice_noop` gates #1101's yq no-op check (see
-/// `is_yq_scalar_slice_assign_path`'s doc comment): `true` for a genuine
-/// `|=` and for `+=` (`AssignOp::Add`), `false` for `-=`/`*=` — real yq's
-/// own no-op for these two doesn't run through this arm's "filter against
-/// a throwaway `[]`" mechanism at all (#1340 code review: `-=` genuinely
-/// does no-op live, just not via anything this codebase implements yet;
-/// `*=` genuinely errors), so both stay excluded here rather than one of
-/// them silently reaching this arm and erroring in a way this codebase
-/// happens to produce instead of the no-op real yq actually performs.
+/// `is_yq_scalar_slice_assign_path`'s doc comment) -- the whole mechanism
+/// ([`ScalarNoop::On`]): `true` for a genuine `|=` and for `+=`
+/// (`AssignOp::Add`). `-=`/`*=` reach the slice half of it through
+/// `eval_update_multi` instead ([`ScalarNoop::SliceOnly`], #1390).
 fn eval_update<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     path_expr: &Expr,
     filter_expr: &Expr,
@@ -31292,7 +31300,7 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     path,
                     filter_expr,
                     false,
-                    false,
+                    ScalarNoop::Off,
                     pos.as_ref(),
                     Some(&mut deletes),
                 )
@@ -31438,7 +31446,7 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // expression it wraps, so an outer `(.a |= f)?` still swallows the
     // discarded filter's error correctly via its own catch, not through
     // this flag.
-    let scalar_noop = scalar_slice_noop && S::TAG == EvalTag::Yq;
+    let scalar_noop = ScalarNoop::from(scalar_slice_noop).for_mode::<S>();
 
     // #2522: the position every target of this update stands at, assembled
     // from the ambient prefix the routes above named (`eval_generic::
@@ -31784,7 +31792,7 @@ fn yq_prepare_assign_targets<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     input: &StandardJson<'a, W>,
     resolved: Option<(OwnedValue, Vec<Expr>)>,
     optional: bool,
-    scalar_slice_noop: bool,
+    scalar_slice_noop: ScalarNoop,
 ) -> Result<Option<YqAssignTargets>, QueryResult<'a, W>> {
     if S::TAG != EvalTag::Yq {
         return Ok(None);
@@ -31823,7 +31831,7 @@ fn yq_assign_targets_from<S: EvalSemantics>(
     pristine: OwnedValue,
     mut paths: Vec<Expr>,
     value_expr: &Expr,
-    scalar_slice_noop: bool,
+    scalar_slice_noop: ScalarNoop,
 ) -> Result<YqAssignTargets, EvalEscape> {
     // #2530: redirect through aliases *before* the targets are created, so a
     // new key under `b: *x` is created on the anchor's node, not on the
@@ -31887,7 +31895,12 @@ pub(crate) fn yq_assign_rhs_document<S: EvalSemantics>(
         Ok(paths) => paths,
         Err((_, escape)) => return Err(escape),
     };
-    let targets = yq_assign_targets_from::<S>(input.clone(), paths, value_expr, scalar_slice_noop)?;
+    let targets = yq_assign_targets_from::<S>(
+        input.clone(),
+        paths,
+        value_expr,
+        ScalarNoop::from(scalar_slice_noop),
+    )?;
     Ok(targets.rhs_document().cloned())
 }
 
@@ -32674,7 +32687,7 @@ fn fork_rhs_over_paths<'a, W: Clone + AsRef<[u64]>, State>(
 /// yq mode only (#3448): jq's `op=`/`//=` is [`each_assign`].
 fn eval_update_multi<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     optional: bool,
-    scalar_slice_noop: bool,
+    scalar_slice_noop: ScalarNoop,
     rhs_values: Vec<OwnedValue>,
     terminal: Option<Control>,
     yq_targets: Option<YqAssignTargets>,
@@ -32698,7 +32711,7 @@ fn eval_update_multi<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // jq mode never reaches here (#3448): see `eval_assign`.
         None => unreachable!("jq mode's `op=`/`//=` is `each_assign` (#3448)"), // patchcov: coverage tolerate-line reason="unreachable: eval_compound_assign/eval_alternative_assign return collect_assign for JqSemantics before this point, and yq_prepare_assign_targets is Some for every YqSemantics call (#3448)"
     };
-    let scalar_noop = scalar_slice_noop && S::TAG == EvalTag::Yq;
+    let scalar_noop = scalar_slice_noop.for_mode::<S>();
     // #1351: a compound/alternative assign whose path *ends* at an alias
     // rebinds that position (real yq discards the write outright there -- a
     // data-loss bug succinctly does not reproduce, rule 4(b)); one whose path
@@ -32742,9 +32755,9 @@ fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // #1233: same RHS-discarding no-op as `eval_assign` (see
     // `yq_assign_skip_rhs`'s own doc comment) -- applies uniformly across
     // every compound operator, not just `Add`, unlike the write-level
-    // `scalar_noop` gate further down (`matches!(op, AssignOp::Add)`),
-    // which answers a narrower, operator-specific question about what
-    // happens once the RHS *has* run. Live-verified against yq v4.53.3 for
+    // `scalar_noop` gate further down (`compound_scalar_noop`), which
+    // answers a narrower, operator-specific question about what happens
+    // once the RHS *has* run. Live-verified against yq v4.53.3 for
     // `+=`/`-=`/`*=`; `/=`/`%=` aren't real yq syntax at all (`'/' expects 2
     // args but there is 1`), so their yq-mode answer is judged the same way
     // `//=`'s own comment below judges it -- internal consistency with the
@@ -32781,7 +32794,7 @@ fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         &input,
         None,
         optional,
-        matches!(op, AssignOp::Add),
+        compound_scalar_noop(op),
     ) {
         Ok(targets) => targets,
         Err(early_return) => return early_return,
@@ -32797,28 +32810,14 @@ fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         Err(early_return) => return early_return,
     };
 
-    // #1101's no-op applies to `Add` only (verified live that `-=`/`*=`
-    // error instead for this same shape) — `update_path` runs the filter
-    // normally either way, only skipping the final write when this is
-    // `true` and the resolved target qualifies.
-    //
-    // `-=` looked like it should join `Add` here too (real yq no-ops
-    // `.b[0:1] -= [1]` on an absent `.b` exactly like `+=`) until wider
-    // probing during #1340 code review found it doesn't generalize: real
-    // yq ALSO no-ops `.b[0:1] -= 5` (a *scalar* RHS) with no error at all,
-    // but this arm's own "run the filter against a throwaway `[]`, discard
-    // on success" mechanism (below, `is_yq_slice_empty_container_scalar`)
-    // does not replicate that — `[] - 5` is a genuine, undefined
-    // array-minus-number operation that errors for real, unlike `[] + 5`
-    // which happens to succeed and is what makes `+=`'s reuse of this same
-    // mechanism accidentally correct. Real yq's actual no-op for `-=`
-    // is not "run the filter and discard," it's something this codebase
-    // doesn't implement yet — left as `Add`-only, matching the original
-    // scope, with the corrected understanding recorded on
-    // `through_slice`'s own `Null` arm instead of folded in here.
+    // #1101's whole no-op (slice, field and index step on a scalar) applies to `Add` only; every
+    // other operator gets the slice half on an absent (`null`) target (#1390), where real yq's
+    // `-=` no-ops for any right side and `*=` for a container one (a scalar `*=` raises the
+    // arithmetic's own error) -- see `compound_scalar_noop` and `through_slice`'s seed. Either
+    // way `update_path` runs the filter normally and only skips the final write.
     eval_update_multi::<W, S>(
         optional,
-        matches!(op, AssignOp::Add),
+        compound_scalar_noop(op),
         rhs_values,
         terminal,
         yq_targets,
@@ -32869,7 +32868,12 @@ fn eval_alternative_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // discards it, so the pair is re-derived here exactly as it was before
     // (#1414).
     let yq_targets = match yq_prepare_assign_targets::<W, S>(
-        path_expr, value_expr, &input, None, optional, true,
+        path_expr,
+        value_expr,
+        &input,
+        None,
+        optional,
+        ScalarNoop::On,
     ) {
         Ok(targets) => targets,
         Err(early_return) => return early_return,
@@ -32899,7 +32903,7 @@ fn eval_alternative_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // `|=`'s own already-correct multi-output-filter behavior instead.
     eval_update_multi::<W, S>(
         optional,
-        true,
+        ScalarNoop::On,
         rhs_values,
         terminal,
         yq_targets,
@@ -33135,12 +33139,10 @@ fn assign_one<S: EvalSemantics>(
         let mut write_one = |result: &mut OwnedValue, path: &Expr| match &filter {
             // Cloned for *every* path, including the last: a streaming
             // producer cannot know which is last without resolving the next.
-            None => {
-                set_path::<S>(result, path, value.clone(), false, false).map_err(EvalEscape::from)
-            }
-            Some(filter) => {
-                update_path::<S>(result, path, filter, false, false, None).map(|_wrote| ())
-            }
+            None => set_path::<S>(result, path, value.clone(), ScalarNoop::Off, false)
+                .map_err(EvalEscape::from),
+            Some(filter) => update_path::<S>(result, path, filter, false, ScalarNoop::Off, None)
+                .map(|_wrote| ()),
         };
         // `=` resumes after a `?//` retry; `|=` and `op=` do not (see
         // [`RetryResumes`]).
@@ -33178,10 +33180,10 @@ fn assign_one<S: EvalSemantics>(
                 } else {
                     value.clone() // patchcov: coverage tolerate-line reason="unreachable: the eager route runs only when the path resolves to at most one path -- `needs_path_prepass` false is one verbatim path, and true with `resolves_to_at_most_one_path` is at most one resolved path (#2976) -- so no path is ever followed by another; kept as the loop's own contract (#3448)"
                 };
-                set_path::<S>(&mut result, path, value, false, false)?;
+                set_path::<S>(&mut result, path, value, ScalarNoop::Off, false)?;
             }
             Some(filter) => {
-                update_path::<S>(&mut result, path, filter, false, false, None)?;
+                update_path::<S>(&mut result, path, filter, false, ScalarNoop::Off, None)?;
             }
         }
     }
@@ -33545,7 +33547,7 @@ fn set_path<S: EvalSemantics>(
     root: &mut OwnedValue,
     path_expr: &Expr,
     new_value: OwnedValue,
-    scalar_noop: bool,
+    scalar_noop: ScalarNoop,
     container_noop: bool,
 ) -> Result<(), EvalError> {
     // #4079: an `Index` step on a mapping is the `Field` of its text in yq.
@@ -33559,7 +33561,7 @@ fn set_path<S: EvalSemantics>(
         }
         Expr::Field(name) => match set_field(root, name.clone(), new_value) {
             Ok(()) => Ok(()),
-            Err(_) if scalar_noop && is_yq_field_index_noop_scalar(root) => Ok(()),
+            Err(_) if scalar_noop.field() && is_yq_field_index_noop_scalar(root) => Ok(()),
             Err(_) => Err(EvalError::cannot_index_with_field(
                 owned_type_name(root),
                 name,
@@ -33567,7 +33569,7 @@ fn set_path<S: EvalSemantics>(
         },
         Expr::Index { idx, .. } => match set_index(root, *idx, new_value, S::TAG == EvalTag::Yq) {
             Some(written) => written,
-            None if scalar_noop && is_yq_field_index_noop_scalar(root) => Ok(()),
+            None if scalar_noop.field() && is_yq_field_index_noop_scalar(root) => Ok(()),
             None => Err(EvalError::cannot_index_with_type(
                 owned_type_name(root),
                 "number",
@@ -33653,7 +33655,7 @@ fn set_path<S: EvalSemantics>(
             // one is yq-only, so it's gated on `scalar_noop` rather than run
             // up front like `autovivify_object`/`autovivify_array` are in
             // the arms above.
-            if scalar_noop {
+            if scalar_noop.field() {
                 autovivify_array(root);
             }
             let fanned = for_each_container_slot(root, |slot| {
@@ -33662,7 +33664,7 @@ fn set_path<S: EvalSemantics>(
             });
             match fanned {
                 Some(result) => result,
-                None if scalar_noop && is_yq_field_index_noop_scalar(root) => Ok(()),
+                None if scalar_noop.field() && is_yq_field_index_noop_scalar(root) => Ok(()),
                 None => Err(EvalError::cannot_iterate_with(S::TAG, root)),
             }
         }
@@ -33681,7 +33683,7 @@ fn set_path<S: EvalSemantics>(
             *end,
             SliceEditFlags {
                 optional: false,
-                scalar_noop,
+                scalar_noop: scalar_noop.for_set_path(),
                 container_noop,
                 terminal_write: true,
                 defer_delete: false,
@@ -33866,7 +33868,7 @@ fn set_path_steps<S: EvalSemantics>(
     root: &mut OwnedValue,
     steps: &[Expr],
     new_value: OwnedValue,
-    scalar_noop: bool,
+    scalar_noop: ScalarNoop,
     container_noop: bool,
     iterate_suffix: usize,
 ) -> Result<(), EvalError> {
@@ -33931,7 +33933,7 @@ fn set_path_steps<S: EvalSemantics>(
                         *end,
                         SliceEditFlags {
                             optional,
-                            scalar_noop,
+                            scalar_noop: scalar_noop.for_set_path(),
                             container_noop,
                             // The slice genuinely is the last path component, so
                             // this call's own `edit` is the write (#1321).
@@ -33963,7 +33965,7 @@ fn set_path_steps<S: EvalSemantics>(
             break (first, rest);
         }
         let (component, optional) = unwrap_path_component(first);
-        let noop_here = scalar_noop && is_yq_field_index_noop_scalar(root);
+        let noop_here = scalar_noop.field() && is_yq_field_index_noop_scalar(root);
         root = match component {
             Expr::Identity => root,
             Expr::Field(name) => {
@@ -34012,7 +34014,7 @@ fn set_path_steps<S: EvalSemantics>(
     // `else if`: `autovivify_object`/`autovivify_array` only ever convert
     // `Null` into a container, and `is_yq_field_index_noop_scalar` already
     // excludes `Null`, so the answer is identical before or after they run.
-    let noop_here = scalar_noop && is_yq_field_index_noop_scalar(root);
+    let noop_here = scalar_noop.field() && is_yq_field_index_noop_scalar(root);
     // #1428's undo, jq mode only -- the same gate `update_path` calls
     // `undo_stranded`. Real yq *wants* the chain a suppressed write leaves
     // behind (`null | .a[] = 99` is `{"a": []}` there, #1181), and the probe
@@ -34148,7 +34150,7 @@ fn set_path_steps<S: EvalSemantics>(
             // `null`-to-`[]` autovivify, which unlike `Field`/`Index`'s
             // unconditional autovivify is gated on `scalar_noop` rather than
             // run up front.
-            if scalar_noop {
+            if scalar_noop.field() {
                 autovivify_array(root);
             }
             let fanned = for_each_container_slot(root, |slot| {
@@ -34183,7 +34185,7 @@ fn set_path_steps<S: EvalSemantics>(
             *end,
             SliceEditFlags {
                 optional,
-                scalar_noop,
+                scalar_noop: scalar_noop.for_set_path(),
                 container_noop,
                 terminal_write: false,
                 defer_delete: false,
@@ -34343,6 +34345,70 @@ fn slice_has_non_integer_bound(
     fails(start_key) || fails(end_key)
 }
 
+/// How far yq's scalar-target no-op reaches for one write (#1101, #1390).
+///
+/// `On` is the whole mechanism: a slice step on a scalar root, and a field/index step on one
+/// (#1181), discard the write and run the update filter against a throwaway. `SliceOnly` is
+/// the slice half alone, for the operators `On` excludes (`-=`, `*=`): their field/index
+/// write on a scalar is decided before the right side runs (`yq_assign_skip_rhs`), so only
+/// the slice step needs it. Real yq no-ops (or raises the arithmetic's own error) there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScalarNoop {
+    Off,
+    On,
+    /// `On` for `set_path` (`=`), whose slice step keeps the empty-sequence throwaway even with a
+    /// step after the slice: yq raises there (`.b[0:1].c = 9` is `cannot index array with 'c'`),
+    /// where an update operator's autovivifies (#1390).
+    OnEmptySeq,
+    SliceOnly,
+}
+
+impl ScalarNoop {
+    /// The field/index half (#1181): only the full mechanism has it.
+    fn field(self) -> bool {
+        matches!(self, Self::On | Self::OnEmptySeq)
+    }
+
+    /// The no-op `mode` allows: jq has none of it.
+    fn for_mode<S: EvalSemantics>(self) -> Self {
+        if S::TAG == EvalTag::Yq {
+            self
+        } else {
+            Self::Off
+        }
+    }
+
+    /// What `set_path` hands its slice step.
+    fn for_set_path(self) -> Self {
+        if self == Self::On {
+            Self::OnEmptySeq
+        } else {
+            self
+        }
+    }
+}
+
+impl From<bool> for ScalarNoop {
+    fn from(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+}
+
+/// The scalar no-op a compound assignment's operator earns: `+=` takes the whole mechanism,
+/// every other operator the slice half on a `null` target only (#1390) -- its field/index write
+/// on a scalar still raises.
+fn compound_scalar_noop(op: AssignOp) -> ScalarNoop {
+    if matches!(op, AssignOp::Add) {
+        ScalarNoop::On
+    } else {
+        ScalarNoop::SliceOnly
+    }
+}
+
 struct SliceEditFlags {
     /// Whether the slice itself carried a `?` (`.a[0:1]?[0] = 9`) — threaded
     /// into `slice_owned_value`'s own bounds check so a genuinely
@@ -34352,11 +34418,9 @@ struct SliceEditFlags {
     /// unaffected either way — never gated on this, matching real jq never
     /// suppressing them via an inline `?`.
     optional: bool,
-    /// yq's slice-assignment no-op (#1101/#1116) for a *scalar* target —
-    /// gated by the caller to exclude `-=`/`*=` (real yq's own behavior
-    /// for both diverges from this mechanism, #1340 — see
-    /// `eval_compound_assign`'s doc comment for the detail).
-    scalar_noop: bool,
+    /// yq's slice-assignment no-op (#1101/#1116) for a *scalar* target — see
+    /// [`ScalarNoop`] for which operators get which half (#1390).
+    scalar_noop: ScalarNoop,
     /// yq's slice-assignment no-op (#1101/#1116/#1142/#1157) for a *container*
     /// (array/string/mapping) target — unconditional on the operator, unlike
     /// `scalar_noop` above.
@@ -34639,17 +34703,23 @@ fn through_slice<E: From<EvalError>>(
         // still runs, against a throwaway `[]` (matching real yq's actual
         // internal model, #1119's `eval_update` follow-up) so its own
         // errors/halt/break still propagate; only the write to `root` is
-        // skipped. Callers gate `scalar_noop` to `false` for `-=`/`*=`,
-        // which real yq errors on instead (confirmed live for `*=`;
-        // #1340 code review found real yq actually no-ops `-=` with no
-        // error at all, but this arm's own "run the filter against `[]`"
-        // mechanism can't replicate that -- `[] - 5` is a real,
-        // undefined array-minus-number operation that errors here, unlike
-        // `[] + 5` which happens to succeed and is what makes `+=`'s
-        // identical mechanism accidentally correct. Left as a known,
-        // unfixed gap -- see #1340's own follow-up).
-        _ if scalar_noop && is_yq_slice_empty_container_scalar(root) => {
-            let mut throwaway = OwnedValue::array();
+        // skipped. `-=`/`*=` reach it too (#1390, `ScalarNoop::SliceOnly`): yq raises for
+        // `5 - 5` and `null * 5` alike, and no-ops for a container right side.
+        _ if scalar_noop != ScalarNoop::Off && is_yq_slice_empty_container_scalar(root) => {
+            // The throwaway is what yq's own is: an empty sequence carrying the target's tag
+            // (#1390), so arithmetic dispatches on the target's kind. A `null` target is
+            // `null` to `-=`/`*=` (identity for any right side, an error for a scalar `*=`),
+            // and a trailing field/index/iterate step on it autovivifies and lands on the
+            // detached node. Only a plain terminal write observes the `[]` itself (`length`
+            // is 0, `tojson` is `[]`), and a non-null scalar keeps it as before.
+            let mut throwaway = if matches!(root, OwnedValue::Null)
+                && scalar_noop != ScalarNoop::OnEmptySeq
+                && !(terminal_write && scalar_noop == ScalarNoop::On)
+            {
+                OwnedValue::Null
+            } else {
+                OwnedValue::array()
+            };
             edit(&mut throwaway)?;
             // Always `true`: this is yq's own unconditional slice no-op
             // (unrelated to #1877/#1894's jq-only `|= empty` mechanism --
@@ -34682,14 +34752,14 @@ fn through_slice<E: From<EvalError>>(
         // `S::TAG == EvalTag::Yq` unconditionally, per every call site
         // below) rather than firing unconditionally: an earlier version of
         // this arm ran for yq mode too whenever the arm above didn't claim
-        // it (i.e. for `-=`/`*=`, both `scalar_noop == false`), which
+        // it (i.e. for `-=`/`*=`, which were `scalar_noop == false` then), which
         // #1340 code review caught -- yq never auto-vivifies a null slice
         // target the way jq does, so a yq-mode `Null` that isn't the
         // arm-above's no-op has to fall through to the same catch-all
         // every other unhandled yq shape here already does, leaving
         // `-=`/`*=` on a null slice target exactly as unaffected by this
         // fix as `#1340`'s own issue text was ever scoped to be (jq mode
-        // only) — not newly right, but not newly wrong either.
+        // only); #1390 later gave them the arm above instead.
         //
         // `!terminal_write` no-op (#1873): the doc comment above described
         // `edit`'s result as always having to become an array once it's
@@ -35072,7 +35142,7 @@ mod deferred_update_delete_path_tests {
                 &parse(path).unwrap(),
                 &parse("empty").unwrap(),
                 false,
-                false,
+                ScalarNoop::Off,
                 None,
                 Some(&mut deletes),
             )
@@ -35097,7 +35167,7 @@ mod deferred_update_delete_path_tests {
                 &steps,
                 &parse("empty").unwrap(),
                 false,
-                false,
+                ScalarNoop::Off,
                 None,
                 Some(&mut deletes),
             )
@@ -35115,7 +35185,7 @@ mod deferred_update_delete_path_tests {
             &steps,
             &parse("empty").unwrap(),
             false,
-            false,
+            ScalarNoop::Off,
             None,
             Some(&mut deletes),
         )
@@ -35164,7 +35234,7 @@ fn update_path<S: EvalSemantics>(
     path_expr: &Expr,
     filter_expr: &Expr,
     optional: bool,
-    scalar_noop: bool,
+    scalar_noop: ScalarNoop,
     pos: Option<&UpdatePos<'_>>,
 ) -> Result<bool, EvalEscape> {
     update_path_with_deletes::<S>(
@@ -35183,7 +35253,7 @@ fn update_path_with_deletes<S: EvalSemantics>(
     path_expr: &Expr,
     filter_expr: &Expr,
     optional: bool,
-    scalar_noop: bool,
+    scalar_noop: ScalarNoop,
     pos: Option<&UpdatePos<'_>>,
     mut deletes: Option<&mut DeferredUpdateDeletes>,
 ) -> Result<bool, EvalEscape> {
@@ -35200,8 +35270,8 @@ fn update_path_with_deletes<S: EvalSemantics>(
         );
     }
     // yq's slice-write container no-op (#1142) is unconditional on the
-    // operator, unlike `scalar_noop` (a caller-gated parameter, `false` for
-    // `-=`/`*=`) -- so it only needs `S::TAG`, not threading through every
+    // operator, unlike `scalar_noop` (a caller-gated parameter: `On` for `|=`/`+=`,
+    // `SliceOnly` for `-=`/`*=`) -- so it only needs `S::TAG`, not threading through every
     // recursive call. Bound once here rather than recomputed inline at each
     // `Expr::Slice` arm below, so the two can't drift out of sync.
     //
@@ -35773,7 +35843,7 @@ fn update_path_steps<S: EvalSemantics>(
     steps: &[Expr],
     filter_expr: &Expr,
     optional: bool,
-    scalar_noop: bool,
+    scalar_noop: ScalarNoop,
     pos: Option<&UpdatePos<'_>>,
     mut deletes: Option<&mut DeferredUpdateDeletes>,
 ) -> Result<bool, EvalEscape> {
@@ -74215,7 +74285,7 @@ fn delete_path_steps(
                     *end,
                     SliceEditFlags {
                         optional: here,
-                        scalar_noop: false,
+                        scalar_noop: ScalarNoop::Off,
                         container_noop: false,
                         terminal_write: yq_mode,
                         defer_delete: false,
@@ -118893,7 +118963,7 @@ mod tests {
             &mut root,
             &Expr::Field("a".to_string()),
             OwnedValue::Int(1),
-            false,
+            ScalarNoop::Off,
             false,
         )
         .unwrap();
@@ -118903,13 +118973,25 @@ mod tests {
         );
 
         let mut root = OwnedValue::Null;
-        set_path::<JqSemantics>(&mut root, &Expr::index(0), OwnedValue::Int(1), false, false)
-            .unwrap();
+        set_path::<JqSemantics>(
+            &mut root,
+            &Expr::index(0),
+            OwnedValue::Int(1),
+            ScalarNoop::Off,
+            false,
+        )
+        .unwrap();
         assert_eq!(root, OwnedValue::array_from(vec![OwnedValue::Int(1)]));
 
         let mut root = OwnedValue::array_from(vec![OwnedValue::Int(1), OwnedValue::Int(2)]);
-        set_path::<JqSemantics>(&mut root, &Expr::index(4), OwnedValue::Int(9), false, false)
-            .unwrap();
+        set_path::<JqSemantics>(
+            &mut root,
+            &Expr::index(4),
+            OwnedValue::Int(9),
+            ScalarNoop::Off,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             root,
             OwnedValue::Array(
@@ -118937,7 +119019,7 @@ mod tests {
             &mut root,
             &steps,
             OwnedValue::Int(7),
-            false,
+            ScalarNoop::Off,
             false,
             iterate_suffix_len(&steps),
         )
@@ -118982,15 +119064,25 @@ mod tests {
     #[test]
     fn test_set_path_cannot_iterate_uses_the_real_mode_tag_1494() {
         let mut root = OwnedValue::Float(3.0);
-        let err =
-            set_path::<YqSemantics>(&mut root, &Expr::Iterate, OwnedValue::Int(9), false, false)
-                .unwrap_err();
+        let err = set_path::<YqSemantics>(
+            &mut root,
+            &Expr::Iterate,
+            OwnedValue::Int(9),
+            ScalarNoop::Off,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.message, "Cannot iterate over number (3.0)");
 
         let mut root = OwnedValue::Float(3.0);
-        let err =
-            set_path::<JqSemantics>(&mut root, &Expr::Iterate, OwnedValue::Int(9), false, false)
-                .unwrap_err();
+        let err = set_path::<JqSemantics>(
+            &mut root,
+            &Expr::Iterate,
+            OwnedValue::Int(9),
+            ScalarNoop::Off,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.message, "Cannot iterate over number (3)");
 
         // The mid-chain fan-out arm, which #1429 folded out of
@@ -119003,7 +119095,7 @@ mod tests {
             &mut target,
             &steps,
             OwnedValue::Int(9),
-            false,
+            ScalarNoop::Off,
             false,
             iterate_suffix_len(&steps),
         )
@@ -119015,7 +119107,7 @@ mod tests {
             &mut target,
             &steps,
             OwnedValue::Int(9),
-            false,
+            ScalarNoop::Off,
             false,
             iterate_suffix_len(&steps),
         )
@@ -120337,26 +120429,31 @@ mod tests {
         );
     }
 
-    /// #1340 code review: an initial version of this fix's new `Null`
-    /// arm fired unconditionally, so yq's `-=`/`*=` (both `scalar_noop ==
-    /// false`, unclaimed by the arm above) fell into it too and started
-    /// attempting jq-style auto-vivification instead of their own,
-    /// different (already broken, pre-existing) yq behavior -- the arm is
-    /// now gated on `!container_noop` (jq mode only) specifically so this
-    /// can't happen. Pins that `-=`/`*=` on a null slice target, terminal
-    /// or mid-chain, are byte-for-byte identical to the pre-#1340-fix
-    /// baseline (verified against a build of `main` before this PR).
+    /// #1340 code review: an initial version of this fix's new `Null` arm fired
+    /// unconditionally, so yq's `-=`/`*=` fell into it and started attempting jq-style
+    /// auto-vivification. The arm is gated on `!container_noop` (jq mode only) so that
+    /// cannot happen. #1390 then gave `-=`/`*=` yq's own answer on a null slice target: the
+    /// discarded write is a no-op (`null - X` is identity, `null * [1]` is too) and a scalar
+    /// `*=` raises the arithmetic's error, terminal or mid-chain.
     #[test]
-    fn test_assign_slice_mid_chain_null_target_yq_mode_sub_mul_unaffected_1340() {
-        for op in ["-=", "*="] {
-            yq_query!(br#"{"c":0}"#, &format!(".b[0:1] {op} 5"),
-                QueryResult::Error(e) => {
-                    assert_eq!(e.message, "Cannot index null with object");
+    fn test_assign_slice_mid_chain_null_target_yq_mode_sub_mul_follow_yq_1390() {
+        for (filter, doc) in [
+            (".b[0:1] -= 5", r#"{"c":0,"b":null}"#),
+            (".b[0:1].c -= 9", r#"{"c":0,"b":null}"#),
+            (".b[0:1] -= [1]", r#"{"c":0,"b":null}"#),
+            (".b[0:1] *= [1]", r#"{"c":0,"b":null}"#),
+            (".b[0:1].c *= [1]", r#"{"c":0,"b":null}"#),
+        ] {
+            yq_query!(br#"{"c":0}"#, filter,
+                QueryResult::Owned(v) => {
+                    assert_eq!(v.to_json(), doc, "[{filter}]");
                 }
             );
-            yq_query!(br#"{"c":0}"#, &format!(".b[0:1].c {op} 9"),
+        }
+        for filter in [".b[0:1] *= 5", ".b[0:1].c *= 9"] {
+            yq_query!(br#"{"c":0}"#, filter,
                 QueryResult::Error(e) => {
-                    assert_eq!(e.message, "Cannot index null with object");
+                    assert!(e.message.contains("cannot be multiplied"), "[{filter}] {}", e.message);
                 }
             );
         }
@@ -123928,9 +124025,14 @@ mod tests {
         #[test]
         fn test_set_path_refuses_an_unresolved_key() {
             let mut root = OwnedValue::Null;
-            let err =
-                set_path::<JqSemantics>(&mut root, &unresolved(), OwnedValue::Int(1), false, false)
-                    .unwrap_err();
+            let err = set_path::<JqSemantics>(
+                &mut root,
+                &unresolved(),
+                OwnedValue::Int(1),
+                ScalarNoop::Off,
+                false,
+            )
+            .unwrap_err();
             assert_eq!(
                 err.message,
                 "internal error: unresolved computed index in assignment path"
@@ -123954,7 +124056,7 @@ mod tests {
                 &mut root,
                 &[Expr::Var("k".to_string()), Expr::Field("a".to_string())],
                 OwnedValue::Int(1),
-                false,
+                ScalarNoop::Off,
                 false,
                 iterate_suffix_len(&[Expr::Var("k".to_string()), Expr::Field("a".to_string())]),
             )
@@ -123974,7 +124076,7 @@ mod tests {
                 &mut root,
                 &[unresolved(), Expr::Field("a".to_string())],
                 OwnedValue::Int(1),
-                false,
+                ScalarNoop::Off,
                 false,
                 iterate_suffix_len(&[unresolved(), Expr::Field("a".to_string())]),
             )
@@ -123993,7 +124095,7 @@ mod tests {
                 &unresolved(),
                 &Expr::Identity,
                 false,
-                false,
+                ScalarNoop::Off,
                 None,
             )
             .unwrap_err();
@@ -124076,9 +124178,14 @@ mod tests {
         #[test]
         fn test_set_path_refuses_an_unresolved_slice() {
             let mut root = OwnedValue::Null;
-            let err =
-                set_path::<JqSemantics>(&mut root, &unresolved(), OwnedValue::Int(1), false, false)
-                    .unwrap_err();
+            let err = set_path::<JqSemantics>(
+                &mut root,
+                &unresolved(),
+                OwnedValue::Int(1),
+                ScalarNoop::Off,
+                false,
+            )
+            .unwrap_err();
             assert_eq!(
                 err.message,
                 "internal error: unresolved computed slice in assignment path"
@@ -124097,7 +124204,7 @@ mod tests {
                 &mut root,
                 &[unresolved(), Expr::Field("a".to_string())],
                 OwnedValue::Int(1),
-                false,
+                ScalarNoop::Off,
                 false,
                 iterate_suffix_len(&[unresolved(), Expr::Field("a".to_string())]),
             )
@@ -124116,7 +124223,7 @@ mod tests {
                 &unresolved(),
                 &Expr::Identity,
                 false,
-                false,
+                ScalarNoop::Off,
                 None,
             )
             .unwrap_err();
@@ -126841,7 +126948,7 @@ mod tests {
             &Expr::RecursiveDescent,
             &Expr::Identity,
             false,
-            false,
+            ScalarNoop::Off,
             None,
         );
         assert!(matches!(result, Err(EvalEscape::Error(_))));
