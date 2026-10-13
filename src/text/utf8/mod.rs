@@ -850,15 +850,42 @@ pub fn substitute_invalid_utf8_jq_style(input: &[u8]) -> String {
 ///     substitute_invalid_utf8_per_byte(b"\xE4\xBDy"),
 ///     "\u{FFFD}\u{FFFD}y".as_bytes()
 /// );
+/// // So is a sequence cut off by the end of the input: each remaining byte is bad.
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"ab\xF0\x9F\x98"),
+///     "ab\u{FFFD}\u{FFFD}\u{FFFD}".as_bytes()
+/// );
+/// // A surrogate's three bytes are three bad bytes (`ED` rejects `A0`).
+/// assert_eq!(
+///     substitute_invalid_utf8_per_byte(b"\xED\xA0\x80"),
+///     "\u{FFFD}\u{FFFD}\u{FFFD}".as_bytes()
+/// );
 /// // Valid input, multi-byte included, is untouched.
 /// assert_eq!(substitute_invalid_utf8_per_byte("h\u{e9}llo".as_bytes()), "h\u{e9}llo".as_bytes());
 /// ```
 pub fn substitute_invalid_utf8_per_byte(input: &[u8]) -> alloc::vec::Vec<u8> {
+    // Not `<[u8]>::utf8_chunks`, which is 1.79 and the crate's floor is 1.73;
+    // `Utf8Error` carries the same two facts.
+    const REPLACEMENT: &[u8] = "\u{FFFD}".as_bytes();
     let mut out = alloc::vec::Vec::with_capacity(input.len());
-    for chunk in input.utf8_chunks() {
-        out.extend_from_slice(chunk.valid().as_bytes());
-        for _ in 0..chunk.invalid().len() {
-            out.extend_from_slice("\u{FFFD}".as_bytes());
+    let mut rest = input;
+    while !rest.is_empty() {
+        match core::str::from_utf8(rest) {
+            Ok(_) => {
+                out.extend_from_slice(rest);
+                break;
+            }
+            Err(err) => {
+                let (valid, after) = rest.split_at(err.valid_up_to());
+                out.extend_from_slice(valid);
+                // `None` means the input ends inside a multi-byte sequence:
+                // every remaining byte is part of it, so each is replaced.
+                let bad = err.error_len().unwrap_or(after.len());
+                for _ in 0..bad {
+                    out.extend_from_slice(REPLACEMENT);
+                }
+                rest = &after[bad..];
+            }
         }
     }
     out
