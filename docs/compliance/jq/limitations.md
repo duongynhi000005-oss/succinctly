@@ -12000,10 +12000,15 @@ refusal when the body *leads with* a navigation step (a bare `.k`/`.[n]`/`.[]`/s
 of a pipe, the first branch of a comma, the left operand of a `//`) and the ambient is not equal to the moved register's value
 (`test_destructuring_alt_bind_retries_past_a_leading_navigation_refusal_4115`). A body that reaches its navigation behind
 anything else (`if`, `first(.a)`, `$q | .a`, a `try`-scoped `(.a)?`) keeps the old rule that a resolver refusal never retries, so it can
-still be refused where jq retries. Inside a `reduce`/`foreach` UPDATE or EXTRACT no retry is modelled either: jq hands the fold's state slot back as `null` there,
-so the retried alternative does not start at the register the stage entered (`path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))` on
-`[[]]` raises in jq, and `path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))` on `{"x":[true]}` prints `["x",0]` after raising, where
-this refuses without printing it, `test_destructuring_alt_bind_navigation_in_a_foreach_update_still_refuses_4115`). That is the bind
+still be refused where jq retries. Inside a `reduce`/`foreach` UPDATE or EXTRACT the retry is modelled on the step whose accumulator is jq's register, when the
+body is itself the `?//` bind (#4440): a fold over a source and INIT that move nothing (`cannot_move_register`) runs its first
+step with `.` on the register, so `path(.x | foreach (1,2) as $i (.; (. as [$q] ?// $z | .[0]); .))` on `{"x":[true]}` prints
+`["x",0]` and then raises `near attempt to access element 0 of true`, as jq does; the second step starts from the state the first
+stored, which jq's register is not on, so it raises without a retry. A `reduce` UPDATE is read the same way (its result then
+fails the end-of-path check, `with result true`), and a source that navigates leaves the register off the accumulator, so
+that step still raises (`path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))` on `[[]]`). A `?//` bind
+nested deeper in the body (under a pipe, `if`, `first`, a comma) is not marked and still refuses where jq retries
+(`test_destructuring_alt_bind_retries_in_a_fold_step_on_the_register_4440`). That is the bind
 *inside* the fold's body; a `?//` chain that is the fold's own loop pattern retries on its UPDATE's untracked navigation refusal (the
 navigated state is not the register, which is jq's own path error, and the next alternative runs on the state `null`), at the top
 level only, not inside another fold's body (`path(foreach . as [$a] ?// $a ({"a":5}; .a; .))` on `null` is `["a"]`, #4488). The bare

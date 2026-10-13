@@ -2154,6 +2154,15 @@ CONTEXTS = [
     ("foreach-update-var-assign", "(foreach .a? as $k (0; {X}; $k)) = 9"),
     ("reduce-update-try-path", "path(reduce .a? as $k (0; try ({X})))"),
     ("reduce-update-try-del", "del(reduce .a? as $k (0; try ({X})))"),
+    # (#4440) a `foreach` whose SOURCE and INIT cannot move jq's register, so the first step runs
+    # UPDATE (or, below, EXTRACT) with `.` on it, and a second step that does not. Every `foreach`
+    # context above navigates in its source or starts from `0`, so none of them reached it.
+    ("foreach-update-literal-path", "path(foreach (1,2) as $k (.; {X}; .))"),
+    ("foreach-update-literal-del", "del(foreach (1,2) as $k (.; {X}; .))"),
+    ("foreach-update-literal-assign", "(foreach (1,2) as $k (.; {X}; .)) = 9"),
+    ("foreach-extract-literal-path", "path(foreach (1,2) as $k (.; .; {X}))"),
+    ("foreach-extract-literal-del", "del(foreach (1,2) as $k (.; .; {X}))"),
+    ("foreach-extract-literal-assign", "(foreach (1,2) as $k (.; .; {X})) = 9"),
 ]
 
 # Long chains are the O(N^3) row: a timing axis, not a correctness one.
