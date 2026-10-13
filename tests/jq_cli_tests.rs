@@ -61770,11 +61770,107 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
             "",
             0,
         ),
-        // Still refused, where jq answers `null`: a chain as the loop pattern over a source that
-        // destructures the register (the emitted element is not the register the pattern steps on).
+        // A `?//` chain as the nested fold's own LOOP pattern whose last alternative is a bare
+        // `$var`, over a no-op UPDATE, cannot raise whichever alternative binds: jq answers `null`
+        // (#4506). The first alternative's step on a source that destructured the register is the
+        // walk's guess at `path_intact`, and the retry is harmless.
         (
             doc,
             r"del(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce . as {a:$x} ?// $y (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(reduce 1 as $k (.; reduce . as {a:$x} ?// [$y] ?// $z (.; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce (. as {a:$a} | .) as {a:$x} ?// $y (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (.a, .) as {a:$x} ?// $x (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .)) | .a)]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        // The contrasts keep raising as jq does: a last alternative that can fail, an UPDATE that
+        // navigates, an INIT that is not the register, and a `.a` after the nested `reduce` in
+        // the outer UPDATE.
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// {b:$y} (.; .)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .a)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (1; .)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(reduce 1 as $k (.; reduce (. as {a:$a} | .) as {a:$x} ?// $x (.; .) | .a))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            doc,
+            r"[path(foreach (. as {a:$a} | .) as {a:$x} ?// $x (.; .; .))]",
             "",
             invalid,
             5,
@@ -67808,8 +67904,10 @@ fn test_fold_pattern_step_that_never_succeeds_retries_3998() -> Result<()> {
 /// and `or`. The un-wrapped fold now reaches the second alternative's own refusal, the one jq
 /// raises ("element 0"). Contrast: an element that *is* equal to the register by value (a
 /// `map(.)` copy of the array the register sits on) may be its node, so the walk's refusal is
-/// still the loud guess of #3840; jq retries and fails at the result ("with result 0"), this
-/// refuses at the step, both exit 5. Every jq side captured from jq 1.7.1.
+/// still the loud guess of #3840 -- except for a `reduce` chain whose last alternative is a bare
+/// `$var` over a no-op UPDATE (#4506): that cannot raise whichever alternative binds, so it takes
+/// the retry path like jq and fails at the result ("with result 0"). That row's expected message
+/// moved from "element 0" to "with result 0" because it now matches jq, not because it regressed. Every jq side captured from jq 1.7.1.
 #[test]
 fn test_fold_pattern_against_known_untracked_register_retries_3999() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -67886,7 +67984,7 @@ fn test_fold_pattern_against_known_untracked_register_retries_3999() -> Result<(
             r#"{"a":[1]}"#,
             r"del(try (.a | map(.) | reduce . as [$x] ?// $x (0; .)))",
             "",
-            r"Invalid path expression near attempt to access element 0 of [1]",
+            r"Invalid path expression with result 0",
             5,
         ),
     ])
