@@ -3805,6 +3805,17 @@ the resolver cannot tell a stored `null` from the `null` placeholder an out-of-r
 a missing key reads as, and dropping the branch for the placeholder would be silently wrong
 (`del(.[-1], .[4][])`).
 
+### A slice keeps an explicit `!!str`/`!!int` tag, but not `!!binary` or an alias ([#4328](https://github.com/rust-works/succinctly/issues/4328))
+
+A computed-bound slice (`1 as $i | .[$i:]`) converts each element through its cursor, so
+`- !!str 2` stays the string `"2"` and `- !!str true` stays a string, as in yq. The scalar kinds
+`OwnedValue` cannot carry still come out of *any* slice, literal bounds included: `!!binary aGk=`
+reads as a plain `!!str`, and an alias element (`*x`) as the value it names (`map(tag)` over
+`[!!float 1, !!binary aGk=, &x !!str 5, *x]` is `["!!float","!!binary","!!str",""]` in yq,
+`["!!float","!!str","!!str","!!str"]` after a slice here; without the slice both agree). How a
+sliced value's tag is *rendered* in YAML output (`- !!str 2` vs `- "2"`) is the missing explicit-tag
+slot, [#1416](https://github.com/rust-works/succinctly/issues/1416).
+
 ### `.[]` over a non-container is now a silent no-op — two residual gaps remain (#2346)
 
 Real yq's `.[]` (iterate) produces zero output — not an error — for *any* non-container

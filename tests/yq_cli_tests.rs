@@ -65469,6 +65469,9 @@ fn test_computed_slice_keeps_an_elements_explicit_tag_4328() -> Result<()> {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &args)?;
         assert_eq!((stdout.trim(), code), (want, 0), "{filter}: {stderr}");
     }
+    // jq mode has no tags: a computed slice of JSON is unchanged.
+    let (stdout, code) = run_jq_stdin(r#"0 as $i | .[$i:]"#, r#"[1,"2",true]"#, &["-c"])?;
+    assert_eq!((stdout.as_str(), code), ("[1,\"2\",true]\n", 0));
     // A wide sequence sliced 150 times, so the later slices come from the index: every element
     // keeps its tag, and equals the per-position read.
     let mut wide = String::new();
