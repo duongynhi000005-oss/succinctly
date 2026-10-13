@@ -4676,6 +4676,10 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
   underscored integer compares by its resolved decimal text (`1 == 01` is `true` here,
   `false` in yq). Every one of these already shows in `tostring`. So does `split` by such
   a separator (#4263): `sep: 0x10` splits on `16`, yq on `0x10`.
+  `split`'s other open rows ([#4374](https://github.com/rust-works/succinctly/issues/4374)): the
+  `{}` literal splits on the text `{}` as in yq, but `{} | .` (a pipe around it) is read as a
+  document-kind empty mapping and splits into characters, and `.nan`/`.inf` as separator
+  literals are parsed as field accesses (`"a1b" | split(.nan)` prints nothing, yq `["a","1","b"]`).
 
 A third entry used to sit here -- the reindex bridge re-spelling a computed float, so that
 `[(0.5+0.5)] | .[0] == 1` was `false` (yq `true`) and `[(0.5+0.5)] | .[0] | tostring`
