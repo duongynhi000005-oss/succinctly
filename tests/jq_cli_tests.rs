@@ -61836,6 +61836,17 @@ fn test_outer_var_destructured_by_a_fold_source_in_a_fold_body_4505() -> Result<
             "",
             5,
         ),
+        // A `reduce` nested in the `foreach` source backtracks it: jq answers.
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach (reduce ($x as {a:$a} | .) as $z (.; .)) as $y (.; .; .); .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"del(. as $x | foreach (1) as $i (.; foreach (reduce ($x as {a:$a} | .) as $z (.; .)) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
         (
             r"path(. as $x | reduce (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .)))",
             "[]\n",

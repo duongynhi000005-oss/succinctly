@@ -2166,8 +2166,9 @@ is the revert that established what the other one costs.
    [#4505](https://github.com/rust-works/succinctly/issues/4505): jq's tracked `INDEX` step moves the register off the
    accumulator and the `foreach` emits from inside the loop, so `. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a}
    | .) as $y (.; .; .); .)` raises, and `del` of it deleted the document. A `reduce` source keeps the by-value answer,
-   which backtracks. Still accepted: the same `$x` behind `select($x) | ...`, and an outer `reduce` whose own source
-   navigates (`reduce .[]? as $it (.; foreach ($x | .a) ...)`)), and a bound expression
+   which backtracks. Still accepted: the same `$x` behind `select($x) | ...`, a pipe (`$x | . as {a:$a}`), a `try` around
+   the destructure or a `?//` alternative, and an outer `reduce` whose own source navigates (`reduce .[]? as $it (.;
+   foreach ($x | .a) ...)`)), and a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`), which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
    too. A bound expression that is a pipe of `.` is read since
