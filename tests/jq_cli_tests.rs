@@ -133235,6 +133235,37 @@ fn test_foreach_source_def_parameter_bound_to_the_register_4485() -> Result<()> 
             r#"Invalid path expression near attempt to access element "a" of 1"#,
             5,
         ),
+        // The first call is caught, so the second is what raises: the memo (by body) must not
+        // serve it the first call's answer, nor a nested body the answer read under that call.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): $x as {a:$a} | .; (try f(1)), f(.)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): def g: $x as {a:$a} | .; g; (f(1))?, f(.)) as $k (.; .; .))",
+            "",
+            r#"Invalid path expression with result {"a":1}"#,
+            5,
+        ),
+        // A recursive call inside a held call, and a recursive definition that never destructures.
+        (
+            "{}",
+            r"path(foreach (def f($x): def r($n): if $n==0 then $x as {a:$a} | . else r($n-1) end; r(2); f(.)) as $k (.; .; .))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "{}",
+            r"path(foreach (def f($x; $n): if $n==0 then . else f(.; $n-1) end; f(.; 3)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
         // A body read inside the definition sees its parameters, so it is read per call too.
         (
             r#"{"a":1}"#,

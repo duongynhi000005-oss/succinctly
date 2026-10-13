@@ -49517,6 +49517,7 @@ fn source_destructures_register_with(
         calls: SPINE_CALL_BUDGET,
         depth: 0,
         binding: Vec::new(),
+        held: Vec::new(),
         markers,
     };
     walk.reach(source) == Reach::Destructures
@@ -49752,6 +49753,9 @@ struct RegisterSpine<'e> {
     /// The `def` bodies [`binds_register`](Self::binds_register) is reading the result of
     /// right now, so a recursive definition is read once (#4320).
     binding: Vec<*const Expr>,
+    /// The bodies being read inside a call that bound a `$` parameter to the register (#4485):
+    /// not memoized, since their answer depends on the call.
+    held: Vec<*const Expr>,
     /// The `$x` markers (bound outside the source) that are jq's register at the fold, by
     /// `Rc` identity: the caller certified each one against the register it holds
     /// ([`fold_source_register_markers`], #4320). Empty for a walk with no such caller.
@@ -49991,7 +49995,8 @@ impl<'e> RegisterSpine<'e> {
     ) -> Reach {
         // #4485: a `$`-style parameter holds the register when its argument is the register
         // (`def f($x): $x as {a:$a} | .; f(.)`). Read in the caller's scope, before the body's.
-        let holds: Vec<bool> = if params.len() == args.len() {
+        let holds: Vec<bool> = if params.len() == args.len() && params.iter().any(Param::is_dollar)
+        {
             params
                 .iter()
                 .zip(args)
@@ -50000,20 +50005,29 @@ impl<'e> RegisterSpine<'e> {
         } else {
             Vec::new()
         };
-        let per_call = holds.iter().any(|held| *held);
         let key: *const Expr = body;
-        // The memo is by body, which only fixes the answer when no parameter holds the register.
-        if !per_call {
-            if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
-                return reach;
+        // The memo is by body, which fixes the answer only where no parameter holds the register:
+        // a call that binds one, and every body read inside it (a nested `def g` sees the
+        // parameter), is read afresh, with a recursive call taken to hand the register on as the
+        // memo's placeholder does. Bodies read outside such a call are memoized as before.
+        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held);
+        if held_scope {
+            if self.held.contains(&key) {
+                return Reach::HandsOn;
             }
+        } else if let Some(&(_, reach)) = self.memo.iter().find(|(seen, _)| *seen == key) {
+            return reach;
         }
         if self.calls == 0 {
             return self.past_budget();
         }
         self.calls -= 1;
         let at = self.memo.len();
-        self.memo.push((key, Reach::HandsOn));
+        if held_scope {
+            self.held.push(key);
+        } else {
+            self.memo.push((key, Reach::HandsOn));
+        }
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
         let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
@@ -50035,14 +50049,8 @@ impl<'e> RegisterSpine<'e> {
         self.defs.truncate(defs_base);
         self.vars.extend(vars_tail);
         self.defs.extend(defs_tail);
-        if params.iter().any(Param::is_dollar) {
-            // A body read inside this one (`def f($x): def g: $x as {a:$a} | .; g; ...`) can see
-            // the parameters, so its answer depends on what this call bound them to: nothing this
-            // read memoized is kept. The body itself is, when no parameter held the register.
-            self.memo.truncate(at);
-            if !per_call {
-                self.memo.push((key, reach));
-            }
+        if held_scope {
+            self.held.pop();
         } else {
             self.memo[at].1 = reach;
         }
