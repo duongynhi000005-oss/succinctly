@@ -11833,6 +11833,13 @@ fn test_yaml_explicit_key_same_indent_sequence_is_rejected_1104() -> Result<()> 
         "? &a k\n- item\n",
         "? [a]\n- item\n",
         "? |\n  blk\n- item\n",
+        // A key that opens a container of its own leaves that frame above
+        // the owning mapping until the `-` line closes it.
+        "? a: b\n- item\n",
+        "? - a\n- b\n",
+        "? {a: 1}\n- item\n",
+        "? a: b\n- item\n: v\n",
+        "- ? k\n  - x\n",
     ] {
         assert_explicit_key_sequence_rejected_1104(input)?;
     }
@@ -11865,11 +11872,13 @@ fn test_yaml_explicit_key_forms_next_to_a_sequence_still_parse_1104() -> Result<
 fn test_yaml_bare_explicit_key_with_same_indent_sequence_still_parses_1104() -> Result<()> {
     // YAML test suite 6PBE. The sequence is the bare `?`'s own content, so
     // the rejection above must not reach it. Neither tool is spec-correct on
-    // the value (yq drops the key's content, succinctly merges both
-    // sequences into the value); the pin is that the document still parses.
-    let (_, exit_code) =
+    // the value (yq drops the key's content, answering `{"":["c","d"]}`;
+    // succinctly merges both sequences into the value). The exact output is
+    // pinned so that narrowing or widening the exemption is noticed.
+    let (output, exit_code) =
         run_yq_stdin(".", "---\n?\n- a\n- b\n:\n- c\n- d\n", &["-o=json", "-I=0"])?;
     assert_eq!(exit_code, 0);
+    assert_eq!(output.trim(), r#"{"":["a","b","c","d"]}"#);
     Ok(())
 }
 
