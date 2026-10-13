@@ -49654,6 +49654,7 @@ fn source_destructures_register_with(
 ) -> bool {
     let mut walk = RegisterSpine {
         through_reduce,
+        fresh_only: false,
         null_register,
         vars: Vec::new(),
         defs: Vec::new(),
@@ -49663,6 +49664,30 @@ fn source_destructures_register_with(
         binding: Vec::new(),
         held: Vec::new(),
         markers,
+    };
+    walk.reach(source) == Reach::Destructures
+}
+
+/// Whether a `reduce` source destructures a value the resolver proves is not jq's register -- a
+/// call whose `def` builds its result, a fresh value beside the register in a comma (#4494):
+/// the pattern's tracked `INDEX` step raises on it whatever the register is, which only the resolver
+/// models, so the source is routed there instead of being driven by value (`reduce (def f:
+/// {a:1}; f as {a:$a} | .) as $k (.; .)` is an error in jq and printed the root here). A destructure
+/// of the register itself is not asked about: a `reduce` backtracks its source, jq answers, and
+/// the resolver refuses it.
+fn source_destructures_fresh(source: &Expr) -> bool {
+    let mut walk = RegisterSpine {
+        through_reduce: true,
+        fresh_only: true,
+        null_register: false,
+        vars: Vec::new(),
+        defs: Vec::new(),
+        memo: Vec::new(),
+        calls: SPINE_CALL_BUDGET,
+        depth: 0,
+        binding: Vec::new(),
+        held: Vec::new(),
+        markers: Vec::new(),
     };
     walk.reach(source) == Reach::Destructures
 }
@@ -49944,6 +49969,9 @@ struct SpineDef<'e> {
 struct RegisterSpine<'e> {
     /// See [`source_destructures_register`].
     through_reduce: bool,
+    /// Whether the walk asks only for a destructure of a *fresh* value ([`source_destructures_fresh`],
+    /// #4494): the register clauses of the bind arm are skipped.
+    fresh_only: bool,
     /// Whether jq's register is `null` where the walk starts (#4417, #4420). A `?//` chain with a
     /// bare `$var` alternative then destructures it too, which it does not on any other register
     /// (it is left to the by-value drive, see [`routes_destructuring_chain`]): the first
@@ -50478,6 +50506,16 @@ impl<'e> RegisterSpine<'e> {
                 // register: a `reduce` source inside another fold's body that is a value-mode
                 // subexpression (`del(try (-(reduce 1 as $k (.; reduce (def f: {"a":1}; f as {a:$a}
                 // | .) as $j (.; .)))))`) is answered by jq, and the loud refusal of that route is not.
+                if self.fresh_only {
+                    if routes_destructuring(patterns) && self.binds_fresh(expr, false) {
+                        return Reach::Destructures;
+                    }
+                    let names = self.chain_names(expr, patterns);
+                    return match self.with_vars(&names, body) {
+                        Reach::Destructures => Reach::Destructures,
+                        _ => Reach::Opaque,
+                    };
+                }
                 if !self.through_reduce
                     && routes_destructuring(patterns)
                     && self.binds_fresh(expr, false)
@@ -50611,8 +50649,8 @@ impl<'e> RegisterSpine<'e> {
             | Expr::Reduce {
                 input, patterns, ..
             }) if self.through_reduce || matches!(fold, Expr::Foreach { .. }) => {
-                let destructures = ((routes_destructuring(patterns)
-                    || routes_destructuring_chain(patterns))
+                let destructures = (!self.fresh_only
+                    && (routes_destructuring(patterns) || routes_destructuring_chain(patterns))
                     && yields_only_the_register(input))
                     // #4031: the nested fold does not backtrack its source either, so what
                     // that source destructures reaches the outer EXTRACT whatever the
@@ -51111,6 +51149,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
             ambient.trackable && matches!(ambient.value, OwnedValue::Null),
         ))
         || destructures_unplaced_register
+        // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
+        // result, a fresh value beside the register in a comma) at the top level, where `.` is the
+        // register: the pattern's step raises on it whatever the register is. Inside another
+        // fold's body it is a value-mode subexpression in some contexts jq answers (see
+        // [`RegisterSpine::reach_node`]'s #4452 comment), so the top level only.
+        || (S::TAG == EvalTag::Jq
+            && !foreach_source
+            && ambient.trackable
+            && fold_body::depth() == 0
+            && source_destructures_fresh(source))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
         // output that *is* the register binds as the register-derived element

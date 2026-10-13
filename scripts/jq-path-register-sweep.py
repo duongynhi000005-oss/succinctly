@@ -706,6 +706,18 @@ OPERANDS = [
     "(reduce (. as {a:$a} | .) as $k (.; .) | reduce (. as {b:$b} | .) as $j (.; .))",
     "(reduce (first(. as {a:$a} | .)) as $k (.; .))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))",
+    # (#4494) a top-level `reduce` source that destructures a call whose `def` builds its result
+    # raises at the pattern's step whatever the register is. The contrasts are a bare alternative to
+    # retry onto (`?//  $a`), the register itself (`def f: .`), the value-mode spelling, and the shapes
+    # the route does not yet reach: a bound expression that holds the `def`, a comma of calls, an `if`.
+    "(reduce (def f: {a:1}; f as {a:$a} ?// $a | .) as $k (.; .))",
+    "(reduce ((def f: {a:1}; f) as {a:$a} | .) as $k (.; .))",
+    "(reduce (def g: {a:1}; def f: g; f as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; f | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; (f, f) as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: [1]; f as [$q] | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; f as {a:$a} | $a) as $k (.; .))",
+    "(reduce (def f: {a:1}; if . then f as {a:$a} | . else . end) as $k (.; .))",
     "(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: .|tostring; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))",

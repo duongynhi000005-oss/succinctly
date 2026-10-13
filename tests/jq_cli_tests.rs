@@ -134528,3 +134528,102 @@ fn test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497() -> Resul
         ),
     ])
 }
+
+/// #4494 (the top-level `reduce` source): a `reduce` source that destructures a call whose `def`
+/// builds its result (`def f: {a:1}; f as {a:$a} | .`) raises at the pattern's tracked `INDEX` step
+/// in jq whatever the register is, as the `foreach` source does since #4452. The by-value drive
+/// answered, and `del` deleted the document. Routed through the resolver now, at the top level; a
+/// destructure of the register itself (`def f: .`) is still answered (a `reduce` backtracks its
+/// source), as are the value-mode spelling and a negated `try` operand. Every row captured from
+/// jq 1.7.1 with `-c`.
+#[test]
+// The filters hold `{a:1}`, which clippy reads as a format argument.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_destructuring_a_fresh_bodied_call_4494() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"b":null}"#;
+    const NEAR_A: &str = r#"Invalid path expression near attempt to access element "a" of {"a":1}"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)) = 9",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g: {a:1}; def f: g; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: [1]; f as [$q] | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1]",
+            5,
+        ),
+        // Controls: a bare alternative to retry onto, the register itself, the value-mode
+        // spelling, and a negated operand under a `try`, which jq answers.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as {a:$a} ?// $a | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: .; f as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)]",
+            "[{\"a\":false,\"b\":null}]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+        // A control, not a pin of the top-level gate (dropping the gate leaves this row as it is):
+        // inside another fold's body the source is a value-mode subexpression under the negation
+        // and `try`, which jq answers, and the route must never make it refuse.
+        (
+            DOC,
+            r"del(try (-(reduce 1 as $k (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+    ])
+}
