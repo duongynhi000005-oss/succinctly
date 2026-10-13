@@ -825,10 +825,11 @@ pub fn substitute_invalid_utf8_jq_style(input: &[u8]) -> String {
     out
 }
 
-/// Replace every invalid byte of `input` with U+FFFD, one replacement per
-/// invalid *byte* (#1616), the way Go's `bytes.ToValidUTF8`-style decoding and
-/// `encoding/json` do, which is what real yq's JSON reader applies to a
-/// string holding a stray byte.
+/// Replace every invalid byte of `input` with one U+FFFD (#1616).
+///
+/// That is Go's count -- a `utf8.DecodeRune` loop consumes one byte per
+/// `RuneError` -- which is what real yq's JSON reader applies to a string
+/// holding a stray byte.
 ///
 /// Neither [`substitute_invalid_utf8_jq_style`] nor
 /// `String::from_utf8_lossy` gives this count: both collapse a truncated
