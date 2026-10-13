@@ -504,6 +504,16 @@ struct Parser<'a, const HAS_CR: bool> {
     /// the one below it.
     pending_explicit_key: Option<usize>,
 
+    /// Whether the key named by [`Self::pending_explicit_key`] was a bare `?`
+    /// with no content (`?\n- a\n:\n- c`), as opposed to a key that held a
+    /// node of its own (`? k`). Only the latter rejects a same-indent `-`
+    /// line (#1104): real yq never reads such a sequence as the key's
+    /// implicit value, but the bare-`?` shapes (YAML test suite 6PBE) must
+    /// keep parsing as they do today. Meaningful only while
+    /// `pending_explicit_key` is `Some`; every assignment of that field in
+    /// [`Self::parse_explicit_key`] sets this alongside it.
+    pending_explicit_key_empty: bool,
+
     /// Current depth of recursively-parsed constructs, capped at
     /// [`MAX_NESTING_DEPTH`] to bound call-stack growth
     nesting_depth: usize,
@@ -668,6 +678,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             in_document: false,
             document_start_bp_pos: 0,
             pending_explicit_key: None,
+            pending_explicit_key_empty: false,
             nesting_depth: 0,
             json_strict: false,
             #[cfg(debug_assertions)]
@@ -4953,6 +4964,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_open();
                 self.write_bp_close();
                 self.pending_explicit_key = Some(owner_depth);
+                self.pending_explicit_key_empty = true;
                 return Ok(());
             }
 
@@ -4982,6 +4994,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Restore position for main loop to process `: value`
                     self.pos = saved_pos;
                     self.pending_explicit_key = Some(owner_depth);
+                    self.pending_explicit_key_empty = true;
                     return Ok(());
                 }
                 // Other content at same/lower indent - empty key (null) with implicit null value
@@ -4993,6 +5006,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Restore position for main loop to process next content
                 self.pos = saved_pos;
                 self.pending_explicit_key = Some(owner_depth);
+                self.pending_explicit_key_empty = true;
                 return Ok(());
             }
 
@@ -5145,6 +5159,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
         // Mark that we have an explicit key waiting for a value
         self.pending_explicit_key = Some(owner_depth);
+        self.pending_explicit_key_empty = false;
 
         Ok(())
     }
@@ -7790,6 +7805,25 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // own additional #325/#485 out-dented-continuation
                 // tolerance this check must not flag as ambiguous.
                 self.check_mapping_under_mapping_gap(indent, true)?;
+                // An explicit key's value must be introduced by `:`, so a
+                // same-indent `-` line right after a key that held a node
+                // (`? k\n- item`) is not its implicit value the way
+                // `k:\n- item` is for an ordinary entry -- real yq errors
+                // "did not find expected key" (#1104). A bare `?` is exempt:
+                // its same-indent sequence is the key's own content (YAML
+                // test suite 6PBE), which this parser still reads as the
+                // value, and rejecting it there would stop that document
+                // parsing at all.
+                if self.pending_explicit_key_owns_current_frame()
+                    && !self.pending_explicit_key_empty
+                    && self.type_stack.last() == Some(&NodeType::Mapping)
+                    && self.indent_stack.last() == Some(&indent)
+                {
+                    return Err(self.err_unexpected_char(
+                        self.pos,
+                        "a sequence cannot be an explicit key's implicit value",
+                    ));
+                }
                 self.parse_sequence_item(indent)?;
             }
             // Tab included in both arms below: the sibling `-` arm just above

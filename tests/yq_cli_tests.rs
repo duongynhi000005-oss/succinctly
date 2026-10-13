@@ -11755,48 +11755,46 @@ fn test_yaml_explicit_key_colon_without_space_stays_key_text() -> Result<()> {
 }
 
 // =============================================================================
-// Explicit key followed by a same-indent sequence (#1040) --
+// Explicit key followed by a same-indent sequence (#1040, #1104) --
 // `close_same_indent_sequence_before_mapping_entry` popped the sequence
 // without clearing `pending_explicit_key`, so a later mapping entry at the
 // same indent was silently misattributed to the already-closed key instead
-// of starting fresh.
+// of starting fresh (#1040).
 //
-// Note: real yq v4.53.3 actually *rejects* `? k\n- item\n...` outright
-// ("did not find expected key") -- an explicit key's value must always be
-// introduced by `:`, unlike an ordinary `key:` entry, which does accept a
-// same-indent sequence as an implicit value. succinctly doesn't reproduce
-// that rejection (a deeper, separate gap -- see the issue's follow-up); the
-// fix here is scoped to what #1040 actually named: eliminating the silent
-// data loss and phantom key once the parser has (incorrectly, but
-// harmlessly by this point) accepted the sequence as the key's value.
+// Real yq v4.53.3 *rejects* `? k\n- item\n...` outright ("did not find
+// expected key"): an explicit key's value must always be introduced by `:`,
+// unlike an ordinary `key:` entry, which does accept a same-indent sequence
+// as an implicit value. #1040 only removed the silent data loss and phantom
+// key from the shape succinctly then still accepted; #1104 rejects it, so
+// the rows below pin that the input is an error and that neither the key
+// nor the entries after it are quietly kept.
 // =============================================================================
 
-#[test]
-fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
-    // The issue's second (worse) repro: a field after the sequence used to
-    // vanish entirely, replaced by a phantom "" key stealing the next
-    // field's value.
-    let input = "? k\n- item\nnewkey: v\nthirdkey: w\n";
-    let (output, exit_code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
-    assert_eq!(exit_code, 0);
-    assert_eq!(
-        output.trim(),
-        r#"{"k":["item"],"newkey":"v","thirdkey":"w"}"#
+/// `input` must be a parse error naming the `-` line, with nothing on stdout.
+fn assert_explicit_key_sequence_rejected_1104(input: &str) -> Result<()> {
+    let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+    assert_eq!(code, 1, "{input:?} must be rejected, got stdout {out:?}");
+    assert_eq!(out, "", "{input:?} printed output before failing");
+    assert!(
+        err.contains("a sequence cannot be an explicit key's implicit value"),
+        "{input:?}: unexpected stderr {err:?}"
     );
     Ok(())
 }
 
 #[test]
+fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
+    // #1040's second (worse) repro: a field after the sequence used to
+    // vanish entirely, replaced by a phantom "" key stealing the next
+    // field's value. Rejecting the sequence (#1104) preserves that intent:
+    // no document is produced, so nothing is dropped or misattributed.
+    assert_explicit_key_sequence_rejected_1104("? k\n- item\nnewkey: v\nthirdkey: w\n")
+}
+
+#[test]
 fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_agrees_across_positions_1040(
 ) -> Result<()> {
-    // Two new entries after the sequence, and a third to confirm the
-    // mapping keeps accepting ordinary entries afterward rather than only
-    // recovering for one.
-    let input = "? k\n- item\na: 1\nb: 2\nc: 3\n";
-    let (output, exit_code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
-    assert_eq!(exit_code, 0);
-    assert_eq!(output.trim(), r#"{"k":["item"],"a":1,"b":2,"c":3}"#);
-    Ok(())
+    assert_explicit_key_sequence_rejected_1104("? k\n- item\na: 1\nb: 2\nc: 3\n")
 }
 
 #[test]
@@ -11813,24 +11811,68 @@ fn test_yaml_ordinary_key_same_indent_sequence_unaffected_by_1040_fix() -> Resul
 
 #[test]
 fn test_yaml_chained_explicit_keys_with_same_indent_sequences_1040() -> Result<()> {
-    // Code review's own follow-up finding: the first fix only wired
-    // `close_same_indent_sequence_before_mapping_entry` into
-    // `parse_mapping_entry`, so a same-indent sequence value followed by
-    // *another* explicit key (rather than an ordinary `key:` entry) hit
-    // the identical staleness bug through `parse_explicit_key` instead --
-    // `k2`'s whole entry silently nested as a second element of `k`'s
-    // array rather than becoming a sibling key.
-    let input = "? k\n- item\n? k2\n: v2\n";
-    let (output, exit_code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
-    assert_eq!(exit_code, 0);
-    assert_eq!(output.trim(), r#"{"k":["item"],"k2":"v2"}"#);
+    // The first #1040 fix only covered a following `key:` entry; a following
+    // explicit key hit the same staleness through `parse_explicit_key`. Both
+    // chains now fail at the first `-` line, before either can recur.
+    assert_explicit_key_sequence_rejected_1104("? k\n- item\n? k2\n: v2\n")?;
+    assert_explicit_key_sequence_rejected_1104("? k1\n- a\n? k2\n- b\n? k3\n: v3\n")
+}
 
-    // Chained across three explicit keys, each with its own same-indent
-    // sequence value, confirms the fix isn't a one-shot recovery.
-    let input = "? k1\n- a\n? k2\n- b\n? k3\n: v3\n";
-    let (output, exit_code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
+#[test]
+fn test_yaml_explicit_key_same_indent_sequence_is_rejected_1104() -> Result<()> {
+    // The issue's repro, and the spellings that reach the same `-` dispatch:
+    // a comment or blank line between, the sequence before a `:` value, a
+    // nested mapping, and every key form that holds a node of its own.
+    for input in [
+        "? k\n- item\n",
+        "? k # c\n- item\n",
+        "? k\n\n- item\n",
+        "? k\n- item\n: v\n",
+        "m:\n  ? k\n  - item\n",
+        "? \"k\"\n- item\n",
+        "? &a k\n- item\n",
+        "? [a]\n- item\n",
+        "? |\n  blk\n- item\n",
+    ] {
+        assert_explicit_key_sequence_rejected_1104(input)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn test_yaml_explicit_key_forms_next_to_a_sequence_still_parse_1104() -> Result<()> {
+    // The controls the rejection must leave alone, each captured from yq
+    // v4.53.3: the legitimate `:` value, a following entry, an indented `-`
+    // (key text, not a sequence), an ordinary `key:` entry's same-indent
+    // sequence, and an explicit key that is itself the last entry of an
+    // outer sequence's item.
+    for (input, expected) in [
+        ("? k\n: v\n", r#"{"k":"v"}"#),
+        ("? k\nx: 1\n", r#"{"k":null,"x":1}"#),
+        ("? k\n  - item\n", r#"{"k - item":null}"#),
+        ("k:\n- item\n", r#"{"k":["item"]}"#),
+        ("- ? k\n- x\n", r#"[{"k":null},"x"]"#),
+        ("? k\n:\n- item\n", r#"{"k":["item"]}"#),
+    ] {
+        let (output, exit_code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!(exit_code, 0, "{input:?}");
+        assert_eq!(output.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn test_yaml_bare_explicit_key_with_same_indent_sequence_still_parses_1104() -> Result<()> {
+    // YAML test suite 6PBE. The sequence is the bare `?`'s own content, so
+    // the rejection above must not reach it. Neither tool is spec-correct on
+    // the value (yq drops the key's content, succinctly merges both
+    // sequences into the value); the pin is that the document still parses.
+    let (_, exit_code) = run_yq_stdin(
+        ".",
+        "---\n?\n- a\n- b\n:\n- c\n- d\n",
+        &["-o=json", "-I=0"],
+    )?;
     assert_eq!(exit_code, 0);
-    assert_eq!(output.trim(), r#"{"k1":["a"],"k2":["b"],"k3":"v3"}"#);
     Ok(())
 }
 
