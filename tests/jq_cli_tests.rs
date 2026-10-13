@@ -69879,6 +69879,30 @@ fn test_try_handler_over_a_destructure_with_a_producer_body_states_the_entry_reg
             "Invalid path expression near attempt to access element 0 of 1",
             5,
         ),
+        // A computed key forks the walk (#4527): a `foreach` UPDATE reads one statement for every
+        // branch, so a producer in the body stays opaque there. jq prints the first emission and raises
+        // on the second, we refuse the first (the safe direction); a `del`/`=` through it is refused.
+        (
+            "[true]",
+            r"path(. as $x | foreach (1,2) as $i (1; try (. as {(try . catch 1):$a} | .) catch 7 | $x; $x))",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"del(. as $x | foreach (1,2) as $i (1; try ((.,1) | . as {(.):$a} | ..) catch 7 | $x; $x))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[[true]]",
+            r"(. as $x | foreach (1,2) as $i (1; try ((.,1) | . as {(try . catch 1):$a} | .) catch 7 | $x; $x)) = 9",
+            "",
+            "Invalid path expression with result [[true]]",
+            5,
+        ),
         // Controls, jq's own refusals: the register moved before the `try`, a handler that navigates
         // the caught payload, and the same bind as a comma sibling ahead of a failing one.
         (

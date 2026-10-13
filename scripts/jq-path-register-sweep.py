@@ -492,6 +492,12 @@ OPERANDS = [
     "(. as [$a] | ..)",
     "(. as [$a] | (., 1))",
     "(.a | . as [$a] | $a)",
+    # (#4527) a computed key forks the walk: a producer in the body stays opaque, and the same
+    # shapes inside a fold UPDATE are where a statement read once for every branch writes.
+    "try (. as {(.):$a} | .) catch 7",
+    "try (. as {(try . catch 1):$a} | .) catch 7",
+    "try ((.,1) | . as {(.):$a} | ..) catch 7",
+    "try ((.,1) | . as {(try . catch 1):$a} | .) catch 7",
     # (#4187) a plain bind in front of the destructure does not move the register (its source is a
     # subexpression), so the destructure behind it is the source's own; the contrasts bind a
     # different value, destructure something the bind produced, or follow it with a navigation.

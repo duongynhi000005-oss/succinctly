@@ -47937,8 +47937,7 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         | Expr::Label { body: inner, .. }
         // #3892: a bare-variable bind's source is a subexp in jq, and
         // `resolve_as_source_sink` resolves the body against this arm's own
-        // input and sink. A destructuring `AsPattern` is read separately, below: its
-        // pattern indexes before the body runs, so a producer in its body stays opaque.
+        // input and sink. A destructuring `AsPattern` is read separately, below (#4129, #4490).
         | Expr::As { body: inner, .. }
         | Expr::Try {
             expr: inner,
@@ -48053,8 +48052,15 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // that took no step (`AtEntry` is put on nothing else) reads as the register the stage
         // entered with. A stage reading this shape therefore recovers the register of an output
         // exactly where it is the entry register, and a `try` around the bind is read for its
-        // handler's outputs plus whatever the body honestly states.
-        Expr::AsPattern { .. } => EntryMarkers::None,
+        // handler's outputs plus whatever the body honestly states. Not for a pattern with a
+        // computed key: its walk forks, and a fold's UPDATE reads one statement for branches that
+        // need not agree (#4527), so a producer in such a body stays opaque.
+        Expr::AsPattern { patterns, body, .. }
+            if !patterns.iter().any(pattern_has_computed_key)
+                || !any_subexpr(body, &mut is_entry_marker_producer) =>
+        {
+            EntryMarkers::None
+        }
         other if hosts_stating_producer(other) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
     }
@@ -143677,6 +143683,12 @@ mod neutral_leaves_register_tests_4028 {
             ("try (.a | . as [$a] | $a) catch 7", "forwarded"),
             (".a | . as [$a] | $a", "none"),
             (".a | . as [$a] | .", "opaque"),
+            // A computed key forks the walk (#4527): a producer in the body stays opaque, a body
+            // without one is read as it was.
+            (". as {(.):$a} | .", "opaque"),
+            (". as {(.):$a} | $a", "none"),
+            ("try (. as {(.):$a} | .) catch 7", "opaque"),
+            ("try (. as {(.):$a} | $a) catch 7", "forwarded"),
             // A `try` with no handler has nothing to state.
             ("try (. as [$a] | $a)", "none"),
         ] {
