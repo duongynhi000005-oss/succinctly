@@ -61795,6 +61795,76 @@ fn test_reduce_update_caught_or_isempty_leaves_the_register_4486() -> Result<()>
     Ok(())
 }
 
+/// #4505: an outer `$x` bound to the register and destructured by a fold source inside another
+/// fold's body is the register's own destructure, as it is outside every fold body: the pattern's
+/// tracked `INDEX` step moves jq's register off the accumulator, so a `foreach` that then emits
+/// the accumulator raises, and `del`/`=`/`|=` write nothing. The by-value drive answered, and
+/// `del` deleted the document. A `reduce` outer backtracks its `UPDATE`, so it still answers.
+/// Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_outer_var_destructured_by_a_fold_source_in_a_fold_body_4505() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"b":null}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"del(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .)) = 5",
+            "",
+            5,
+        ),
+        (
+            r"(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 5",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach ($x as [$a] | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach ($x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach (1) as $y (.; ($x|.a); .); .))",
+            "[\"a\"]\n",
+            0,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4017: a variable bound to the result of a stage that returns its input as the same
 /// `jv` (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
 /// `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`) is the register itself, so

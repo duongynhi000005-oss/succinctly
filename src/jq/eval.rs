@@ -49514,9 +49514,14 @@ fn foreach_source_destructures_register(
 /// (reduce (. as {a:$a} | $a) as $k (.; .)) and .b? | $x)` is a path error in jq, and
 /// the by-value drive answered `[]`. Only the fold's own pattern walk is modelled by the
 /// resolver, so the caller routes a source that holds one through it when the
-/// accumulator is not known to be the register.
-fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
-    source_destructures_register_with(source, through_reduce, Vec::new(), false)
+/// accumulator is not known to be the register. `markers` are the `$x` variables of the source
+/// read as the register (#4505, [`unplaced_register_markers`]).
+fn source_destructures_register(
+    source: &Expr,
+    through_reduce: bool,
+    markers: Vec<*const Tracked>,
+) -> bool {
+    source_destructures_register_with(source, through_reduce, markers, false)
 }
 
 /// [`source_destructures_register`] with the `$x` markers of the source that are jq's register at
@@ -49580,6 +49585,33 @@ fn fold_source_register_markers<S: EvalSemantics>(
             if fold_body::depth() == 0
                 || marker_identical::<S>(marker, ambient.value, &ambient.frame)
             {
+                markers.push(Rc::as_ptr(marker));
+            }
+        }
+        false
+    });
+    markers
+}
+
+/// The `$x` markers in a fold `source` inside another fold's body that equal the accumulator at
+/// this fold (#4505): the ones [`drive_fold_source_with`] reads as the register for its loud
+/// refusal of an unplaced destructure. [`marker_identical`] is the test the resolver applies to a
+/// marker in path position. Empty unless the source holds a destructuring bind, so the O(document)
+/// comparison is not paid by a source that cannot ask.
+fn unplaced_register_markers<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+) -> Vec<*const Tracked> {
+    let mut markers = Vec::new();
+    if !any_subexpr(
+        source,
+        &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+    ) {
+        return markers;
+    }
+    any_subexpr(source, &mut |e| {
+        if let Expr::TrackedVar(marker) = e {
+            if marker_identical::<S>(marker, ambient.value, &ambient.frame) {
                 markers.push(Rc::as_ptr(marker));
             }
         }
@@ -50727,9 +50759,24 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // fold, whose source may have moved it) that step raises in jq; the by-value drive
     // answered, and a `del` through the answer wrote. Read once: the resolver route below
     // and the loud refusal after it are both decided by it.
-    let destructures_unplaced_register = S::TAG == EvalTag::Jq
-        && (!ambient.trackable || !(fold_body::depth() == 0 || fold_body::acc_is_register_here()))
-        && source_destructures_register(source, true);
+    let unplaced_body = S::TAG == EvalTag::Jq
+        && (!ambient.trackable || !(fold_body::depth() == 0 || fold_body::acc_is_register_here()));
+    // #4505: inside another fold's body `.` is not known to be the register, but a `$x` marker
+    // that equals the accumulator at this fold is one jq may have bound to the register, and its
+    // destructure then runs the same tracked `INDEX` step `.`'s does. Read as the register only
+    // for this loud refusal (never for the resolver route above, which needs it *proven*): a
+    // `$x` that is an equal-valued sibling costs an answer, where reading the by-value drive's
+    // answer for the register accepts and `del` deletes the document.
+    // Only for a `foreach` source: a `reduce` backtracks its source, so a destructure of the register
+    // there succeeds (its `INDEX` step passes for a `$x` that is the register) and leaves the
+    // register where it was, which the by-value drive answers as jq does.
+    let unplaced_markers = if unplaced_body && foreach_source && ambient.trackable {
+        unplaced_register_markers::<S>(source, ambient)
+    } else {
+        Vec::new()
+    };
+    let destructures_unplaced_register =
+        unplaced_body && source_destructures_register(source, true, unplaced_markers);
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
     let has_navigation = any_subexpr(source, &mut |e| {
