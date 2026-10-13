@@ -48130,7 +48130,7 @@ fn fans_out(expr: &Expr) -> bool {
 /// identity nothing to state, and a fold whose UPDATE is such a call refused where jq
 /// answers. The exemption is `isempty` alone: an `any`/`all(gen; cond)` whose `cond` binds
 /// runs its live stage against the carried register and trips the resolver's lost-register
-/// assertion. An operand with any other fan-out (a comma, a fold, a call) still counts, and
+/// assertion. An operand with any other fan-out (a comma, a fold that reads a frozen `$var`, a call) still counts, and
 /// so does one that reads a frozen variable (`$k`): the marker re-establishes against the
 /// register the frame would now carry, which is the hazard #3145 withheld it for.
 fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
@@ -48164,7 +48164,11 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         // (a comma in its source, a call) is its own to judge: the walk skips it, and the
         // fold's own entry applies the rules that gate it. Inside an `isempty` operand
         // (`patterns_fan_out` false) a fold still counts.
-        Expr::Reduce { .. } | Expr::Foreach { .. } if patterns_fan_out => Visit::Skip,
+        Expr::Reduce { .. } | Expr::Foreach { .. }
+            if patterns_fan_out && !mentions_marker(expr) =>
+        {
+            Visit::Skip
+        }
         Expr::Comma(_)
         | Expr::AsPattern { .. }
         | Expr::Reduce { .. }
@@ -48184,7 +48188,9 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
 /// resolves against the accumulator, not the register, and raises where jq raises,
 /// so a `try` around the comma catches it as jq's own does. A builtin the register
 /// analysis does not list (`abs`) and a computed key (`.a[.b]`) are neither, so they keep the
-/// register withheld. A bare register-neutral builtin (`now`, `input_line_number`) is read by
+/// register withheld. A `foreach`/`reduce` that reads no frozen `$var` is uniform too (#4499): it
+/// takes the register from the frame it is entered with, as a pipe's stages do. A bare
+/// register-neutral builtin (`now`, `input_line_number`) is read by
 /// [`is_bare_register_neutral_builtin`] where a comma asks (#3960), not here: this predicate's
 /// other readers have holes of their own that a larger set would route programs into.
 ///
@@ -48217,6 +48223,12 @@ fn sibling_sees_register_uniformly(expr: &Expr) -> bool {
         Expr::Alternative(left, right) => {
             sibling_sees_register_uniformly(left) && sibling_sees_register_uniformly(right)
         }
+        // #4499: a fold is one flow that reads the register from the frame it is entered with
+        // (`FoldRegister::enter`), as a pipe's stages do, so a comma of folds and pipes sees the
+        // register the same way on every side (jq forks the comma at its entry).
+        // Unless it reads a frozen `$var` (#3984): a marker in it can re-establish against the
+        // register the comma would now carry, which is what #3145 withheld it for.
+        Expr::Foreach { .. } | Expr::Reduce { .. } => !mentions_marker(expr),
         other => cannot_move_register(other) || is_navigation_node(other),
     }
 }
@@ -48879,6 +48891,21 @@ impl FoldRegister {
         // Widening the other
         // direction (re-establishing in `resolve_node`'s own arms) is
         // #2046's documented scope limit, not this fix's.
+        // #4499: an untracked fold register that still knows jq's live register value (the stage
+        // it was entered on carries it, [`FoldRegister::live_register`]) hands that value to the
+        // body it resolves, as a trackable one hands its own below. A fold nested two levels down
+        // in an UPDATE has an untracked register at the middle level, and dropping the live one
+        // there left the innermost fold none: its caught step on a `null` accumulator was refused,
+        // swallowed by the `try` inside it, and dropped (`foreach .a? as $k (0; foreach (1,2) as
+        // $i (1; reduce (1,2) as $j (1; try .a); .); .)` on `null`). The position stays unknown
+        // (`Frame::unknown`), so only the value is read, never a marker certified against it.
+        // Only a `null`/boolean one, the kinds `jv_identical` compares by value
+        // ([`FoldRegister::trackable_at_live_null_bool`] hands the same two on), and the cheap
+        // test first: `fans_out` walks the body and this runs once per fold step.
+        let live_register = (S::TAG == EvalTag::Jq)
+            .then(|| self.live_register())
+            .flatten()
+            .filter(|live| is_null_or_bool(live) && !fans_out(expr));
         let update_frame = if self.trackable {
             self.frame.clone()
         } else {
@@ -48949,7 +48976,7 @@ impl FoldRegister {
                 snapshot,
                 &update_frame,
                 keep,
-                self.trackable.then_some(&self.value),
+                self.trackable.then_some(&self.value).or(live_register),
                 &mut deliver,
             )
         } else {
@@ -48960,7 +48987,11 @@ impl FoldRegister {
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
             let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
-            let update_frame = update_frame.with_register(carries.then_some(&self.value));
+            let update_frame = update_frame.with_register(if carries {
+                Some(&self.value)
+            } else {
+                live_register
+            });
             resolve_node_sink::<S>(
                 expr,
                 &input,
@@ -142839,7 +142870,16 @@ mod touched_edge_cases_2999 {
             ("reduce (1,2) as $i (1; try .a)", false),
             ("-(foreach (1,2) as $i (1; try .a; .))", false),
             ("try (foreach (1,2) as $i ((1,2); (.a, .b); .))", false),
-            ("(foreach (1,2) as $i (1; try .a; .), 1)", true),
+            // #4499: a fold is a uniform sibling, like a pipe: it reads the register from the frame.
+            ("(foreach (1,2) as $i (1; try .a; .), 1)", false),
+            (
+                "(foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; .a; .))",
+                false,
+            ),
+            ("(foreach (1,2) as $i (1; try .a; .), ($w | .b))", false),
+            ("(foreach (1,2) as $i (1; try .a; .), now)", false),
+            ("(foreach (1,2) as $i (1; try .a; .), f)", true),
+            ("(foreach (1,2) as $i (1; try .a; .), min)", true),
             ("isempty(foreach (1,2) as $i (1; .a; .))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");

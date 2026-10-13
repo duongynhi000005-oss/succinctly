@@ -68753,6 +68753,171 @@ fn test_nested_fold_in_update_follows_null_accumulator_on_live_register_4492() -
     ])
 }
 
+/// #4499: a fold that is a sibling in a comma inside another fold's `UPDATE`, and a fold two
+/// levels down, follow a `null` accumulator against the live register (the #4480/#4492
+/// widening). `sibling_sees_register_uniformly` did not know a fold, so the comma withheld the
+/// register from the `UPDATE`'s frame; and an untracked fold register dropped the live register
+/// its frame carried before resolving its body, so the innermost fold met none. The caught step
+/// then vanished: `path(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), 1); .))` on
+/// `null` printed only the error where jq prints `["a","a"]` first. Every jq side captured from
+/// jq 1.7.1.
+#[test]
+fn test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // A fold as a sibling in a comma: jq forks the comma at its entry, so each side starts from the register the comma was entered with. The fold's caught step still emits before the other side raises, and the write forms land.
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), 1); .))",
+            "[\"a\",\"a\"]\n",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; (1, foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; try .a; .)); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; (reduce (1,2) as $i (1; try .a), 1); .))",
+            "[\"a\"]\n",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), .a); .))",
+            "[\"a\",\"a\"]\n",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; try .a; .)); .)) = 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; try .a; .)); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        // A fold two levels down in a fold's UPDATE: the middle fold's register is untracked, and the live `null` register its frame carries still reaches the innermost fold.
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; try (reduce (1,2) as $j (1; try .a)); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a)); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; try (foreach (1,2) as $j (1; try .a; .)); .); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce .a? as $k (0; reduce (1,2) as $i (1; reduce (1,2) as $j (1; try .a))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $i (1; reduce (1,2) as $j (1; try .a); .); .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(foreach .a? as $k (0; foreach (1,2) as $i (1; reduce (1,2) as $j (1; try .a); .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (null; foreach (1,2) as $j (null; .a; .); .); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        // A pipe-bodied middle fold hands the live register on too.
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (1 | reduce (1,2) as $j (1; try .a)); .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (reduce (1,2) as $j (1; try .a) | .); .); .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        // Controls. A register that is not `null`/boolean stays refused, as jq refuses it (a pointer identity this model cannot compare), and a boolean one yields nothing.
+        (
+            r#"{"a":0}"#,
+            r"path(foreach .a? as $k (0; (foreach (1,2) as $i (1; try .a; .), 1); .))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":0}"#,
+            r"path(foreach .a as $k (0; foreach (1,2) as $i (1; reduce (1,2) as $j (1; try .a); .); .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(foreach .a as $k (0; (foreach (1,2) as $i (1; try .a; .), foreach (1,2) as $j (1; try .a; .)); .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
 /// emission carries is where the pattern walk and `UPDATE` left it. It is the entry's when the
 /// step took no walk step (a bare `$var`, or the bare alternative a failed destructure's
