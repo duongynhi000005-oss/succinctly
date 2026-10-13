@@ -57,37 +57,37 @@ use super::document::{
 use super::error::EvalEscape;
 use super::eval::{
     apply_compare_op, arith_combine, as_var_refs, binary_fanout_rules, bind_def, bind_def_call,
-    boolean_fanout_bools, boolean_fanout_each, bound_shape, cannot_reserve_cross_product,
-    classify_limit_n, classify_nth_n, classify_parent_n, classify_skip_n, clear_nonretryable_stop,
-    collapse_vec, collect_pattern_var_names, compare_key_arrays, compare_values,
-    debug_assert_materialization_error, def_spine_len, demote_for_reentry, descriptor_slice_bounds,
-    each_path_on_owned, each_pattern_binding_set, each_recurse_walk, enter_def_call,
-    entries_to_object, eval_each_owned, eval_full as full_eval, finish_fork_flow,
-    finish_fork_from_flow, finish_short_circuit, fold_escaped_generator_prefix, foreach_forks,
-    format_owned, has_type_mismatch_is_permissive, index_component_value, index_in_array_bounds,
-    index_one_owned_read as index_owned_by_key, is_assignment_expr, is_eager_arg,
-    is_identity_passthrough, is_retryable_control, is_retryable_stop, key_arrays_eq, limit_raising,
-    literal_to_owned, mark_nonretryable_escape, native_stack_exhausted, needs_path_context,
-    numeric_key_to_array_index, numeric_key_to_index, numeric_length_owned, owned_bound_to_i64_for,
-    owned_index_key_to_expr, owned_to_string, pattern_alternatives_var_names,
-    pipe_needs_path_context, prefer_pending_control, probe_def_call, range_from_literal_override,
-    range_max_exceeded_error, range_num, range_values_f64, range_values_int, reads_parent,
-    recurse_walk_flow, reduce_forks, reroot_for_reentry, reroot_markers,
-    resolve_computed_slice_bounds, resume_from_escape, reverse_length_is_empty, select_emits,
-    settle_then_replay, settles_before_consumer, settles_both, shared_arg_depth_refusal,
-    slice_component_value, slice_object_as_yq_children, slice_owned_value_read_computed,
-    stop_with_downstream, stop_with_error, stop_with_escape, streams_escaped_generator_prefix,
-    streams_unbounded, substitute_bound_var_from, substitute_deferred_var, substitute_vars,
-    suppresses, tonumber_from_str, tostring_owned, try_handler_root, vec_with_capacity,
-    yq_absent_key_read_is_empty, yq_assign_rhs_document, yq_bool_null_key_into_null, yq_dedup_key,
-    yq_empty_context_reemit, yq_empty_operand_output, yq_field_index_on_scalar_is_empty,
-    yq_first_of_each_key, yq_index_key_is_numeric, yq_literal_index_text, yq_mapping_index_text,
-    yq_negative_index_check, yq_negative_index_error, yq_numeric_index_on_object_is_null,
-    yq_object_key_stringify, yq_read_only_context, yq_scalar_text, yq_sort_by, BinaryFanoutRules,
-    ComputedSliceBound, Control, Demand, EmptyOperandOp, EvalError, EvalSemantics, EvalTag, Flow,
-    JqSemantics, LimitN, PathTrail, QueryResult, RangeNum, Reentry, RestPipe, RootWitness,
-    SliceTargetKind, StashedEscape, StashedVerdict, YqSemantics, DEFERRED_BIND_UNRESOLVED,
-    WHILE_UNTIL_MAX_STEPS,
+    boolean_fanout_bools, boolean_fanout_each, bound_shape, by_key_scope,
+    cannot_reserve_cross_product, classify_limit_n, classify_nth_n, classify_parent_n,
+    classify_skip_n, clear_nonretryable_stop, collapse_vec, collect_pattern_var_names,
+    compare_key_arrays, compare_values, debug_assert_materialization_error, def_spine_len,
+    demote_for_reentry, descriptor_slice_bounds, each_path_on_owned, each_pattern_binding_set,
+    each_recurse_walk, enter_def_call, entries_to_object, eval_each_owned, eval_full as full_eval,
+    finish_fork_flow, finish_fork_from_flow, finish_short_circuit, fold_escaped_generator_prefix,
+    foreach_forks, format_owned, has_type_mismatch_is_permissive, index_component_value,
+    index_in_array_bounds, index_one_owned_read as index_owned_by_key, is_assignment_expr,
+    is_eager_arg, is_identity_passthrough, is_retryable_control, is_retryable_stop, key_arrays_eq,
+    limit_raising, literal_to_owned, mark_nonretryable_escape, native_stack_exhausted,
+    needs_path_context, numeric_key_to_array_index, numeric_key_to_index, numeric_length_owned,
+    owned_bound_to_i64_for, owned_index_key_to_expr, owned_to_string,
+    pattern_alternatives_var_names, pipe_needs_path_context, prefer_pending_control,
+    probe_def_call, range_from_literal_override, range_max_exceeded_error, range_num,
+    range_values_f64, range_values_int, reads_parent, recurse_walk_flow, reduce_forks,
+    reroot_for_reentry, reroot_markers, resolve_computed_slice_bounds, resume_from_escape,
+    reverse_length_is_empty, select_emits, settle_then_replay, settles_before_consumer,
+    settles_both, shared_arg_depth_refusal, slice_component_value, slice_object_as_yq_children,
+    slice_owned_value_read_computed, stop_with_downstream, stop_with_error, stop_with_escape,
+    streams_escaped_generator_prefix, streams_unbounded, substitute_bound_var_from,
+    substitute_deferred_var, substitute_vars, suppresses, tonumber_from_str, tostring_owned,
+    try_handler_root, vec_with_capacity, yq_absent_key_read_is_empty, yq_assign_rhs_document,
+    yq_bool_null_key_into_null, yq_dedup_key, yq_empty_context_reemit, yq_empty_operand_output,
+    yq_field_index_on_scalar_is_empty, yq_first_of_each_key, yq_index_key_is_numeric,
+    yq_literal_index_text, yq_mapping_index_text, yq_negative_index_check, yq_negative_index_error,
+    yq_numeric_index_on_object_is_null, yq_object_key_stringify, yq_read_only_context,
+    yq_scalar_text, yq_sort_by, BinaryFanoutRules, ComputedSliceBound, Control, Demand,
+    EmptyOperandOp, EvalError, EvalSemantics, EvalTag, Flow, JqSemantics, LimitN, PathTrail,
+    QueryResult, RangeNum, Reentry, RestPipe, RootWitness, SliceTargetKind, StashedEscape,
+    StashedVerdict, YqSemantics, DEFERRED_BIND_UNRESOLVED, WHILE_UNTIL_MAX_STEPS,
 };
 #[cfg(test)]
 use super::expr::FuncDefBound;
@@ -32599,6 +32599,10 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             // Format/Path/GetPath. Defensive today (see `Reverse`'s sibling
             // comment above for why).
             let cursors = owned_or_suppress!(elements.collect_cursors_checked(), optional);
+            // #4054: yq runs a `sort_by`/`unique_by` key filter read-only, so an absent key is no
+            // output (see `eval::by_key_scope`). Not `min_by`/`max_by`, which are gated extensions
+            // that follow jq and sit in the arm below.
+            let _scope = key.and_then(|_| by_key_scope::<S>());
             sort_family_array_generic::<S, _>(cursors, key, optional, |mut keyed| {
                 // #2799: yq's `unique`/`unique_by` keep the first of each distinct text key in
                 // input order and never sort (`sort`/`sort_by` still do: part 3 of the issue).

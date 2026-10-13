@@ -4754,7 +4754,7 @@ untouched. The key is `tostring`'s text, so `==` and `unique` agree about a numb
 Pinned by `dedup_builtins_key_on_text_in_first_occurrence_order_2799` (`tests/yq_cli_tests.rs`)
 and the `dedup_text_keys_2799`/`dedup_containers_2799` goldens.
 
-### `sort`/`sort_by` follow yq's comparator and Go's stable sort -- resolved ([#2799](https://github.com/rust-works/succinctly/issues/2799)); timestamps, absent keys, a literal `{}` and NaN remain
+### `sort`/`sort_by` follow yq's comparator and Go's stable sort -- resolved ([#2799](https://github.com/rust-works/succinctly/issues/2799)); timestamps, a literal `{}` and NaN remain
 
 Real yq's `sort` and `sort_by` are not jq's total order. `sortableNodeArray.compare`
 (`pkg/yqlib/operator_sort.go`, v4.53.3) decides in this order, and the first rule that applies
@@ -4798,11 +4798,13 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   last in yq. An empty mapping read from a document sorts as empty text in both.
 - **Timestamps.** yq compares two `!!timestamp` nodes as times; `OwnedValue` has no timestamp
   type, so they compare by text (equal for an ISO date, different for other layouts).
-- **An absent key in a `sort_by` key filter.** yq evaluates the key in a read-only context where
-  an absent key yields no output, so the element's key is `[]` and sorts before `[null]`; here
-  the absent key reads as `null` and ties with an explicit `null` (`[{k: null}, {n: 1}] |
-  sort_by(.k)` puts the absent one first in yq). `unique_by` and `group_by` read their keys the
-  same way. A separate difference, unchanged by this entry ([#4054](https://github.com/rust-works/succinctly/issues/4054)).
+- **An absent key in a `sort_by` key filter** is no output, as in yq ([#4054](https://github.com/rust-works/succinctly/issues/4054),
+  [#4387](https://github.com/rust-works/succinctly/issues/4387)). yq evaluates the key through `ReadOnlyClone`,
+  so an element lacking the key has a shorter key list (`[]` for `.k`, `[9]` for `.x, .y`) rather than one
+  holding a `null`: `[{k: 3}, {k: null}, {n: 1}] | sort_by(.k)` puts the absent one first, and
+  `sort_by(.x, .y)` over `[{x: 2}, {x: 1}, {y: 9}]` puts `{y: 9}` last. `unique_by`, `group_by` and a
+  mapping's `sort_by` read their keys the same way (`by_key_scope`; the cursor route enters it around
+  `sort_family_array_generic`). The gated `min_by`/`max_by` extensions follow jq and read the absent key as `null`.
 - **Spellings `OwnedValue` cannot keep** ([#2802](https://github.com/rust-works/succinctly/issues/2802)):
   a leading-zero, hex or underscored integer sorts by its resolved value here.
 - **A mapping** (#2064). yq's `sort` and `sort_by(f)` reorder a mapping's entries by their

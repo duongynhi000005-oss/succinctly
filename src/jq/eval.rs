@@ -19258,6 +19258,16 @@ fn builtin_flatten_depth<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     )
 }
 
+/// The scope the key filter of a `_by` builtin runs under (#4054): yq evaluates it through
+/// `ReadOnlyClone`, as it does an assignment's right side (#2470), so a key read that finds
+/// nothing is no node at all. The element's key list is shorter by that output rather than
+/// holding a `null`: `[{"k":3},{"k":null},{}] | sort_by(.k)` puts `{}` first, with an empty key,
+/// where a `null` key ties with the explicit `null`. `None` outside yq mode. Not for `min_by`/
+/// `max_by`: yq has neither, and the gated extensions follow jq.
+pub(crate) fn by_key_scope<S: EvalSemantics>() -> Option<yq_read_only_context::Guard> {
+    S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(yq_read_only_context::enter)
+}
+
 /// Builtin: group_by(f) - group by key function
 fn builtin_group_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     f: &Expr,
@@ -19280,6 +19290,8 @@ fn builtin_group_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
             // Compute keys for each item
             let mut keyed: Vec<(Vec<OwnedValue>, OwnedValue)> = Vec::new();
+            // #4054: see `by_key_scope`.
+            let _scope = by_key_scope::<S>();
             for item in items {
                 // jq keys by `[f]` — the array of *all* outputs of the key
                 // filter — not just its first output, so `sort_by(.a,.b)`
@@ -19470,6 +19482,8 @@ fn builtin_unique_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
             // Compute keys for each item
             let mut keyed: Vec<(Vec<OwnedValue>, OwnedValue)> = Vec::new();
+            // #4054: see `by_key_scope`.
+            let _scope = by_key_scope::<S>();
             for item in items {
                 // jq keys by `[f]` — the array of *all* outputs of the key
                 // filter — not just its first output, so `sort_by(.a,.b)`
@@ -19588,6 +19602,8 @@ fn yq_sort_mapping<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     };
     let mut keyed: Vec<(Vec<OwnedValue>, (String, bool, OwnedValue))> =
         vec_with_capacity(checked.len());
+    // #4054: see `by_key_scope`.
+    let _scope = f.and_then(|_| by_key_scope::<S>());
     for field in checked {
         let Some((key, is_fallback)) = key_display_string_kind(&field.key) else {
             return QueryResult::Error(fields.malformed_member_error());
@@ -19663,6 +19679,8 @@ fn builtin_sort_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
             // Compute keys for each item
             let mut keyed: Vec<(Vec<OwnedValue>, OwnedValue)> = Vec::new();
+            // #4054: see `by_key_scope`.
+            let _scope = by_key_scope::<S>();
             for item in items {
                 // jq keys by `[f]` — the array of *all* outputs of the key
                 // filter — not just its first output, so `sort_by(.a,.b)`
