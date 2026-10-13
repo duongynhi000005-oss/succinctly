@@ -49940,9 +49940,16 @@ impl<'e> RegisterSpine<'e> {
         // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
         // body `.` is the accumulator, which the enclosing source may have moved. Narrower than
         // the `depth() == 0 || acc_is_register_here()` gates of the neighbouring routes on
-        // purpose: the marked body is where the 26 wrong accepts of #4278 were. The memo of a
+        // purpose: the marked body is where the 26 wrong accepts of #4278 were. #4507 adds the
+        // one body where the register is known to be elsewhere, a navigating `reduce` source
+        // ([`fold_body::source_moved_onto_non_null_here`]): `$y` is then `null` on the first
+        // alternative and not the element, so its destructure raises as it does at the top level.
+        // Not onto a `null` element, which a `null` `$y` is identical to, and not in a body the
+        // `reduce (1)` marks, where placing it refused the rows jq answers. The memo of a
         // walk is per [`RegisterSpine`] and so per fold, and the depth is fixed for the walk.
-        let later_holds_register = register && fold_body::depth() == 0;
+        let later_holds_register = register
+            && (fold_body::depth() == 0
+                || (self.through_reduce && fold_body::source_moved_onto_non_null_here()));
         let mut names: Vec<(&'e str, bool)> = Vec::new();
         let mut first_bare = true;
         let mut bind =
@@ -55010,7 +55017,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         .then(fold_body::acc_is_register);
                         // #4484: a navigating `reduce` source leaves jq's register on the element for
                         // the whole step, where a pattern step on the accumulator raises.
-                        let _source_moved = source_moves_register.then(fold_body::source_moved);
+                        let _source_moved = source_moves_register.then(|| {
+                            fold_body::source_moved(matches!(elem.value, OwnedValue::Null))
+                        });
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -64325,6 +64334,8 @@ mod fold_body {
         static ACC_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
         static MOVED_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// Whether the element [`MOVED_DEPTH`]'s register sits on is `null` (#4507).
+        static MOVED_ONTO_NULL: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) struct Guard;
@@ -64355,26 +64366,35 @@ mod fold_body {
     }
 
     /// Restores the previous [`source_moved`] mark.
-    pub(crate) struct MovedGuard(u32);
+    pub(crate) struct MovedGuard(u32, bool);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose enclosing
     /// `reduce` source moved jq's register onto the element (#4484): `.` is the accumulator there,
-    /// and a node the register is not at, so a pattern step on it raises in jq.
-    pub(crate) fn source_moved() -> MovedGuard {
-        let previous = MOVED_DEPTH.with(Cell::get);
+    /// and a node the register is not at, so a pattern step on it raises in jq. `onto_null` is
+    /// whether that element is `null` (#4507): a `null` bound by a failed alternative is then
+    /// `jv_identical` to the register, so the step does not raise.
+    pub(crate) fn source_moved(onto_null: bool) -> MovedGuard {
+        let previous = (MOVED_DEPTH.with(Cell::get), MOVED_ONTO_NULL.with(Cell::get));
         MOVED_DEPTH.with(|a| a.set(depth() + 1));
-        MovedGuard(previous)
+        MOVED_ONTO_NULL.with(|a| a.set(onto_null));
+        MovedGuard(previous.0, previous.1)
     }
 
     impl Drop for MovedGuard {
         fn drop(&mut self) {
             MOVED_DEPTH.with(|a| a.set(self.0));
+            MOVED_ONTO_NULL.with(|a| a.set(self.1));
         }
     }
 
     /// Whether the body being resolved is the one [`source_moved`] marked.
     pub(crate) fn source_moved_here() -> bool {
         depth() > 0 && MOVED_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// [`source_moved_here`], onto an element that is not `null` (#4507).
+    pub(crate) fn source_moved_onto_non_null_here() -> bool {
+        source_moved_here() && !MOVED_ONTO_NULL.with(Cell::get)
     }
 
     pub(crate) fn enter() -> Guard {
@@ -64410,11 +64430,15 @@ mod fold_body {
 
     pub(crate) struct MovedGuard;
 
-    pub(crate) fn source_moved() -> MovedGuard {
+    pub(crate) fn source_moved(_onto_null: bool) -> MovedGuard {
         MovedGuard
     }
 
     pub(crate) fn source_moved_here() -> bool {
+        false
+    }
+
+    pub(crate) fn source_moved_onto_non_null_here() -> bool {
         false
     }
 

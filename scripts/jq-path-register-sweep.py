@@ -1843,6 +1843,9 @@ INPUTS = [
     "null",
     "true",
     "[true]",
+    # (#4507) an element the register can sit on that is `null`: a `null` bound by a failed
+    # alternative is `jv_identical` to it, so a `reduce` over `.[]?` answers where `[true]` raises
+    "[null]",
     "[]",
     "[[]]",
     "[[1],[1]]",
