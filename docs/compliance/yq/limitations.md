@@ -3898,6 +3898,13 @@ accepted (`.[(1.0+1):]` is `.[2:]`). `succinctly yq` raises its usual `Array/str
 indices must be integers` for the first group — again only the message text differs —
 and no longer floors/ceils as jq does (`succinctly jq` still does).
 
+A computed integral float is accepted only while yq renders it as plain digits: Go's shortest
+`%g` switches to exponent form at a magnitude of `1e6` (#3970), so `.[(1.0*999999):]` slices
+and `.[(1.0*1000000):]` raises `strconv.ParseInt: parsing "1e+06": invalid syntax` (a float past
+`i64` that renders as plain digits raises `value out of range`). Swept against yq v4.53.3 for both
+signs; `succinctly yq` refuses every float of that size with its usual text. An *integer*
+product of any size is accepted by both.
+
 A bound with **no** output is not part of that divergence: yq raises `expected to find 1 number,
 got 0 instead` for it wherever the slice is read or written (`.b[select(false):]`, `.b[$typo:]`,
 `.b[1:select(false)] = [9]`, `del(.b[select(false):])`), on every target kind, and neither `?` nor

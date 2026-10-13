@@ -27489,6 +27489,44 @@ fn test_yq_slice_bound_must_be_integer_shaped_3415() -> Result<()> {
     Ok(())
 }
 
+/// #3970: a computed float is handed to `ParseInt` as its rendered text, and yq renders a float
+/// in exponent form from a magnitude of `1e6` (`1.0*1000000` is `1e+06`, which raises), so an
+/// integral float that large is refused in a read, a write and a delete alike -- while one below it
+/// (`999999`), an integer product of any size and a float inside an unreached branch are accepted.
+#[test]
+fn test_yq_computed_float_slice_bound_in_exponent_form_is_refused_3970() -> Result<()> {
+    let args = ["-o=json", "-I=0"];
+    for filter in [
+        ".[(1.0*1000000):]",
+        ".[(1e10*1):]",
+        ".[:(1.0*1234567)]",
+        ".[(-1.0*1000000):]",
+        ".[(0.5*2000000):]",
+        ".[(1.0*100000000000000000000):]",
+        ".[(1.0*1000000):]?",
+        ".[(1.0*1000000):] = [9]",
+        "del(.[(1.0*1000000):])",
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "[1,2,3]", &args)?;
+        assert_eq!(code, 1, "`{filter}` -- stdout: {stdout:?}");
+        assert!(
+            stderr.contains("Array/string slice indices must be integers"),
+            "`{filter}` -- stderr: {stderr:?}"
+        );
+    }
+    for (filter, want) in [
+        ("[.[(1.0*999999):]]", "[[]]\n"),
+        ("[.[(-1.0*999999):]]", "[[1,2,3]]\n"),
+        ("[.[(10000000000*10000000000):]]", "[[]]\n"),
+        ("[.[(1000000*1):]]", "[[]]\n"),
+        ("if false then .[(1.0*1000000):] else 1 end", "1\n"),
+    ] {
+        let (stdout, code) = run_yq_stdin(filter, "[1,2,3]", &args)?;
+        assert_eq!((stdout.as_str(), code), (want, 0), "`{filter}`");
+    }
+    Ok(())
+}
+
 /// Found by review: `path(.[S:E])` on an object used to succeed (the new
 /// `slice_owned_value_read` arm) while the descriptor it returned was
 /// unusable by `getpath` (whose own hand-rolled slice-descriptor dispatch
