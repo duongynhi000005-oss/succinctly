@@ -59622,12 +59622,30 @@ fn resolve_static_tail<'a, S: EvalSemantics>(
     value_after_components::<S>(components, value).map_err(|e| (Vec::new(), e))
 }
 
+/// The position in an array of `len` elements that `.[start:end][idx]` reads (#4356), or `None`
+/// when it falls past either end of the slice (jq reads `null` there). The one definition behind
+/// the resolver's fused read and the path walk's, so the two cannot name different elements.
+fn fused_slice_index_position(
+    start: Option<i64>,
+    end: Option<i64>,
+    len: usize,
+    idx: i64,
+) -> Option<usize> {
+    let range = slice::SliceBounds::from_literals(start, end).resolve(len);
+    let width = range.len() as i64;
+    let resolved = if idx < 0 { width + idx } else { idx };
+    (0..width)
+        .contains(&resolved)
+        .then(|| range.start + resolved as usize)
+}
+
 /// The branch `.[a:b][k]` reaches over `branch`, answered from the slice's resolved range without
 /// building the slice (#4356): a loop over reads at a moving bound was quadratic in the array.
 ///
 /// `flat[stage_index]` must be a computed slice of the pipe's own input and `flat[stage_index + 1]`
 /// an integer-literal index (the first step of the static tail). The bounds must be closed (they
-/// never read `.`, so evaluating them here and then declining is not observable) and each must
+/// never read `.`, so evaluating them here and then declining is not observable: [`closed_expr_shape`]
+/// admits no effect, and the general route re-derives whatever error or value a decline stands for) and each must
 /// produce exactly one value; `branch` must be a trackable array. `None` leaves the pair to the
 /// general route, which re-derives whatever error or value the decline stands for. jq mode only:
 /// yq's negative-index and scalar rules differ.
@@ -59644,7 +59662,16 @@ fn fused_slice_index_branch<'a, S: EvalSemantics>(
     else {
         return None;
     };
-    if S::TAG != EvalTag::Jq || !matches!(**target, Expr::Identity) || !branch.trackable {
+    // A trackable branch carries no register and no frozen-variable snapshot (a snapshot implies
+    // untracked, #1466; a register rides only an untracked branch, #1573), which is why the fused
+    // branch below can start from neither. Checked rather than assumed: a branch that did would
+    // keep the general route and its bookkeeping.
+    if S::TAG != EvalTag::Jq
+        || !matches!(**target, Expr::Identity)
+        || !branch.trackable
+        || !matches!(branch.snapshot, Snapshot::No)
+        || !matches!(branch.register, BranchRegister::None)
+    {
         return None;
     }
     let OwnedValue::Array(items) = branch.value.as_ref() else {
@@ -59660,20 +59687,13 @@ fn fused_slice_index_branch<'a, S: EvalSemantics>(
     let (s, e) = (bound(start, f64::floor)?, bound(end, f64::ceil)?);
     let (start, end) =
         resolve_computed_slice_bounds::<S>(SliceTargetKind::Sliceable, &s.bound, &e.bound).ok()?;
-    let range = slice::SliceBounds::from_literals(start, end).resolve(items.len());
-    let width = range.len() as i64;
-    let resolved = if *idx < 0 { width + *idx } else { *idx };
-    let value = if (0..width).contains(&resolved) {
-        let position = range.start + resolved as usize;
-        match &branch.value {
-            Cow::Borrowed(items) => match items {
-                OwnedValue::Array(items) => Cow::Borrowed(items.get(position)?),
-                _ => return None,
-            },
-            Cow::Owned(_) => Cow::Owned(items.get(position)?.clone()),
-        }
-    } else {
-        Cow::Owned(OwnedValue::Null)
+    let value = match fused_slice_index_position(start, end, items.len(), *idx) {
+        Some(position) => match &branch.value {
+            // Borrowed from the document at its own lifetime, not cloned out of it.
+            Cow::Borrowed(OwnedValue::Array(items)) => Cow::Borrowed(items.get(position)?),
+            _ => Cow::Owned(items.get(position)?.clone()),
+        },
+        None => Cow::Owned(OwnedValue::Null),
     };
     let slice_step = Expr::Slice {
         start,
@@ -69185,7 +69205,7 @@ fn walk_fused_slice_index<'v, S: EvalSemantics>(
             start_key,
             end_key,
         },
-        Some(index @ Expr::Index { idx, key: None }),
+        Some(Expr::Index { idx, key: None }),
     ) = (first, rest.first())
     else {
         return None;
@@ -69196,19 +69216,16 @@ fn walk_fused_slice_index<'v, S: EvalSemantics>(
     if S::TAG != EvalTag::Jq {
         return None;
     }
-    let range = slice::SliceBounds::from_literals(*start, *end).resolve(items.len());
-    let width = range.len() as i64;
-    let resolved = if *idx < 0 { width + *idx } else { *idx };
-    let reached = if (0..width).contains(&resolved) {
-        value.child_at(range.start + resolved as usize)
-    } else {
-        WalkNode::Null
+    // The depth guard `walk_path` applies at each step, which this early return would skip.
+    check_value_tree_depth(current_path.depth()).ok()?;
+    let reached = match fused_slice_index_position(*start, *end, items.len(), *idx) {
+        Some(position) => value.child_at(position),
+        None => WalkNode::Null,
     };
     let slice_step = PathTrail::extend(
         current_path,
         slice_component_value(*start, start_key.as_ref(), *end, end_key.as_ref()),
     );
-    let _ = index;
     Some((
         PathTrail::extend(&slice_step, index_component_value(*idx, None)),
         reached,
