@@ -2643,6 +2643,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// [`Self::looks_like_mapping_entry`] applies to a scalar key, which
     /// deliberately answers `false` for `[`/`{` and is left that way.
     ///
+    /// It is a second, line-bounded lexer for the quoting, nesting and comment
+    /// rules `parse_flow_sequence` / `parse_flow_mapping` apply; a change to
+    /// those rules has to be mirrored here, or the entry is routed wrongly.
+    ///
     /// Answers `false` for anything it cannot place: under `json_strict`
     /// (`{"a": 1}: x` is two JSON values there, not a mapping), when the
     /// collection runs onto another line or past a comment, and when a quote
@@ -2661,6 +2665,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // Whether blanks sit between `prev` and the byte under the cursor: a
         // `#` only starts a comment after one.
         let mut blank_before = false;
+        // The first byte of the word before the current one, so that a quote
+        // after a property (`[!!str "a]", b]`, `[&x "a]"]`) still opens a string.
+        let mut word_first = 0u8;
+        let mut prev_word_first = 0u8;
         while i < input.len() {
             let b = input[i];
             if Self::is_inline_whitespace(b) {
@@ -2668,14 +2676,27 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 i += 1;
                 continue;
             }
+            if blank_before || prev == 0 || matches!(prev, b'[' | b'{' | b',' | b':' | b'?') {
+                prev_word_first = word_first;
+                word_first = b;
+            }
+            let after_property = blank_before && matches!(prev_word_first, b'&' | b'!');
             match b {
-                b'"' | b'\'' if matches!(prev, b'[' | b'{' | b',' | b':' | b'?') => {
+                b'"' | b'\''
+                    if after_property || matches!(prev, b'[' | b'{' | b',' | b':' | b'?') =>
+                {
                     i += 1;
                     loop {
                         match input.get(i) {
                             None => return false,
                             Some(&c) if Self::is_break(c) => return false,
-                            Some(b'\\') if b == b'"' => i += 2,
+                            // An escaped line break would carry the key onto
+                            // another line, which an implicit key cannot do.
+                            Some(b'\\') if b == b'"' => match input.get(i + 1) {
+                                None => return false,
+                                Some(&c) if Self::is_break(c) => return false,
+                                Some(_) => i += 2,
+                            },
                             Some(&c) if c == b => {
                                 if b == b'\'' && input.get(i + 1) == Some(&b'\'') {
                                     i += 2;

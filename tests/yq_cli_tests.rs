@@ -14913,6 +14913,14 @@ fn test_flow_keyed_mapping_predicate_leaves_other_shapes_alone_1188() -> Result<
         ("[a, b]\n: value\n", "[\"a\",\"b\"]\n\"value\""),
         // A quote that closes later, not at the start of a token, is text.
         ("[it's, \"q\"]: v\n", r#"{"":"v"}"#),
+        // A quote after a property still opens a string, whose `]` is text.
+        ("[!!str \"a]\", b]: v\n", r#"{"":"v"}"#),
+        ("[&x \"a]\", b]: v\n", r#"{"":"v"}"#),
+        // CRLF ends the line like LF.
+        ("[a, b]: value\r\nz: 1\r\n", r#"{"":"value","z":1}"#),
+        // An escaped line break carries the key onto a second line, which an
+        // implicit key cannot span: previous handling.
+        ("[\"a\\\n b\"]: x\n", "[\"ab\"]\n\"x\""),
     ] {
         let (out, code) = run_yq_stdin(".", input, &["-o", "json", "-I0"])?;
         assert_eq!(code, 0, "{input:?}");

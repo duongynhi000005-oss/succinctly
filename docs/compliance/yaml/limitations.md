@@ -436,6 +436,8 @@ Still different:
 - **YAML output spells the key `""`** (`"": value`), where `yq` prints `? [a, b]` / `: value`;
   the same as the explicit form has always done, and [the complex-key note in the yq
   limitations](../yq/limitations.md) covers it.
+- **A continuation line after the entry folds into its value** (`[a, b]: v` / `  z: 1` is
+  `{"":"v z"}`), where `yq` errors; the scalar-keyed `a: v` / `  z: 1` already did the same.
 - **`[a, b]: - x`** (a sequence entry on the key's line) is an error in `yq` and is read as the
   value here, as `k: - x` already was.
 
