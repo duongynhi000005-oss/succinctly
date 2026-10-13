@@ -712,9 +712,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   [#4492](https://github.com/rust-works/succinctly/issues/4492) below. **A recorded
   divergence, in the safe direction**: a register that is
   not `null`/boolean (a pointer identity the model cannot compare), a fold that mentions a frozen
-  `$var` (#3984), and an `UPDATE` that nests a `reduce`/`foreach` or a `try ... catch` around the
-  navigation (`reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b))`) still refuse where jq answers
-  (the nested fold's INIT is not read as the register). The first
+  `$var` (#3984; `path(. as $r | .a | 5 | reduce $r as $q (null; .b))` on `{"a":null}`) still refuse
+  where jq answers. Since [#4445](https://github.com/rust-works/succinctly/issues/4445) the step
+  is taken for any `null`/boolean accumulator that is the register by kind, not only when `UPDATE`
+  definitely navigates, so a `reduce`/`foreach` nested in `UPDATE` (`reduce (1,2) as $q (null;
+  reduce (3,4) as $r (.; .b))`) answers jq's `["a"]` as well, and so does a destructure of the
+  accumulator (`. as {x:$z} | .`). A `try ... catch` around the navigation, listed here until then,
+  answered once #4459 and #4480 landed. Pinned by
+  `test_reduce_live_null_register_step_covers_a_nested_fold_update_4445`. Over the 11 operands added
+  to `scripts/jq-path-register-sweep.py` for it (9,795 `--stage-only` rows) DIFF went 15 to 0,
+  REFUSE_WRONG 69 to 48 and MATCH 9,711 to 9,747, with no ACCEPT_WRONG and no regression; the 141
+  `reduce` operands of the existing grid (122,931 rows) did not move, since the grid never generated
+  the shape. The first
   alternative's refusal on the untracked contexts where no register is carried (`var-rebind`,
   `untracked-*`) is unchanged. Over a seeded sample of 30,027 rows of the 20 `?//` fold operands
   (`--sample 30000 --seed 11`, `/usr/bin/jq` 1.7.1) #3999 moved REFUSE_WRONG 1,883 to 1,793 and

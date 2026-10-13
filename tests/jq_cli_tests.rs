@@ -68016,6 +68016,236 @@ fn test_reduce_update_navigates_accumulator_on_untracked_null_register_4131() ->
     ])
 }
 
+/// #4445: the #4131 live-register step of a `reduce` on an untracked entry is taken for any
+/// `null`/boolean accumulator that is the register by kind, not only when `UPDATE` definitely
+/// navigates. A fold nested in the `UPDATE` (`reduce (3,4) as $r (.; .b)`) is not read as
+/// navigating, so its INIT `.` met an untracked accumulator and the navigation was refused where
+/// jq answers `["a"]`. The widening is `jv_identical` by kind (a boolean register raises jq's own
+/// error, a register that is not `null`/boolean stays refused), so it holds whatever `UPDATE`
+/// does. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_reduce_live_null_register_step_covers_a_nested_fold_update_4445() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // A fold nested in the `UPDATE` follows the `null` accumulator along the live register: its INIT `.` is the accumulator, which is on it by kind.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; foreach (3,4) as $r (.; .b)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; foreach (3,4) as $r (.; .b; .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // The write side lands on the register, and a navigation more than one key deep stays on it.
+        (
+            r#"{"a":null}"#,
+            r"del(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b)))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b))) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b.c)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A navigation off a non-register output, and an inner INIT that is not the accumulator, are refused as jq refuses them.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; 5 | .b)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (1; .b)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 1",
+            5,
+        ),
+        // An UPDATE that does not navigate: a computed `null` is the register by kind, anything else is not (the widening reads the accumulator, not the shape of UPDATE).
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; null))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; if $q==1 then . else null end))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; 5))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; empty))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; false))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        // The accumulator is read by a bind or a destructure, and a source that moved the register
+        // (`.b`, `.[]?`) does not change that a `null`/boolean accumulator is the register by kind.
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a | 5 | reduce (1,2) as $q (null; . as {x:$z} | .)) = 3",
+            "{\"a\":3}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; . as $z | $z))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":null}}"#,
+            r"path(.a | 5 | reduce .b as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":5}}"#,
+            r"path(.a | 5 | reduce .b as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"path(.a | 5 | reduce .[]? as $q (null; null))",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"path(.a | 5 | reduce .[]? as $q (null; .x))",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":[null,null]}"#,
+            r"(.a | 5 | reduce .[]? as $q (null; null)) = 9",
+            "",
+            "Invalid path expression near attempt to iterate through 5",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; . as {x:$z} | .))",
+            "",
+            "Cannot index boolean with string \"x\"",
+            5,
+        ),
+        // Controls. A boolean register raises or yields as jq does, and a register that is not `null`/boolean is a pointer identity this model cannot compare.
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; reduce (3,4) as $r (.; .b)))",
+            "",
+            "Cannot index boolean with string \"b\"",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of null",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; false))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; true))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (false; null))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":0}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; reduce (3,4) as $r (.; .b)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of null",
+            5,
+        ),
+        (
+            r#"{"a":0}"#,
+            r"path(.a | 5 | reduce (1,2) as $q (null; null))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
 /// #4480, #4446: the `foreach` twin of #4131. A `foreach` on an untracked entry whose stage
 /// carries a `null`/boolean register follows an `UPDATE` that navigates a `null`/boolean
 /// accumulator, because one equal to the register is `jv_identical` to it by kind. That

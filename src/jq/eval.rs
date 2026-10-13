@@ -54461,8 +54461,11 @@ fn yields_for_certain(item: &Expr) -> bool {
 /// false for every UPDATE that does not provably navigate the accumulator on a path
 /// that always runs -- `.`, a literal, `$var`, `first(.)`, `. // .k`, a `try` -- and
 /// those keep `persistent`, the flag the final re-entry check relies on
-/// (`reduce .a as $k (.; .)` is `[]`). jq mode only: `update_navigates` carries the
-/// gate.
+/// (`reduce .a as $k (.; .)` is `[]`). `persistent` is the previous step's provenance, or,
+/// since #4445, that the accumulator is a `null`/boolean equal to the live register of an
+/// untracked entry, which is the register by kind whatever UPDATE does and whichever
+/// element the source moved to (jq's `jv_identical` compares the kind alone). jq mode only:
+/// `update_navigates` carries the gate, and the live register is built only for it.
 #[allow(clippy::too_many_arguments)] // STYLE-0004: mirrors `foreach_step_register`'s ambient
 fn reduce_update_at_register<S: EvalSemantics>(
     update_navigates: bool,
@@ -54731,6 +54734,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         // #4131: whether the latest step resolved UPDATE against the live `null`/boolean
         // register ([`FoldRegister::trackable_at_live_null_bool`]); read by the final emission.
         let mut navigated_live_register = false;
+        // #4131, #4445: the live `null`/boolean register for this fork, built once -- `reg` is
+        // fixed for the whole fold -- and read per step against that step's accumulator. jq mode
+        // only: on the write side the widening turns a refusal into a write where yq no-ops.
+        let live_reg = (S::TAG == EvalTag::Jq)
+            .then(|| reg.trackable_at_live_null_bool())
+            .flatten();
         // #2896: the accumulator's own position — see `resolve_foreach`'s
         // identical seeding and [`accumulator_provenance`]. `reduce`'s own
         // final re-entry check still refuses whatever this admits inside
@@ -54908,9 +54917,15 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // accumulator equal to that register is on it by kind, so a navigating
                         // UPDATE passes `path_intact` in jq. Only the step's input is widened:
                         // `acc_at_register`, which the final emission reads, is untouched.
-                        let live_step_reg = (update_navigates && is_null_or_bool(acc_effective))
-                            .then(|| reg.trackable_at_live_null_bool())
-                            .flatten()
+                        //
+                        // #4445: taken for any such accumulator, not only when UPDATE definitely
+                        // navigates ([`update_definitely_navigates`]). That read does not see a
+                        // fold nested in UPDATE (`reduce (3,4) as $r (.; .b)`) as navigating, so
+                        // the nested INIT `.` met an untracked accumulator and its navigation was
+                        // refused where jq answers. The identity is by kind, so it holds whatever
+                        // UPDATE does; a body that never reads the accumulator is unaffected.
+                        let live_step_reg = live_reg
+                            .as_ref()
                             .filter(|live| null_bool_identical(acc_effective, &live.value));
                         // #3780: see [`reduce_update_at_register`].
                         let update_at_register = reduce_update_at_register::<S>(
@@ -54934,7 +54949,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && update_at_register
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
-                        let step_reg = live_step_reg.as_ref().filter(|_| update_at_register);
+                        let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
                             &substituted,
