@@ -20435,6 +20435,24 @@ mod meta_assign_798 {
         Ok(())
     }
 
+    /// #2705: a write under `as $var` that fails validation reports yq's own error and prints no
+    /// document, exactly like the same write at the top level.
+    #[test]
+    fn invalid_write_under_an_as_binding_reports_the_error_2705() -> Result<()> {
+        for (filter, message) in [
+            (".b as $x | .a style = \"bogus\"", "unknown style bogus"),
+            (
+                ".b as $x | .a anchor = \"bad name\"",
+                "anchor value must contain valid characters only",
+            ),
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", &[])?;
+            assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+            assert!(err.contains(message), "[{filter}] stderr: {err}");
+        }
+        Ok(())
+    }
+
     /// #2705: a binding whose source yields nothing resolves no write, and the document passes
     /// through unchanged -- what pinned yq v4.53.3 prints for it too (a quirk: jq prints nothing).
     #[test]
