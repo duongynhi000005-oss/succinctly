@@ -51151,13 +51151,12 @@ fn is_walk_identity(expr: &Expr) -> bool {
 /// `setpath([]; .)` (#4295). jq returns the very same `jv`, so a `$y` bound to its result *is* the register
 /// (`path(.b | tostring as $y | $y)` is `["b"]`). These are the static shapes of
 /// `resolve_node_sink`'s pass-through arms (`emit_passthrough` after a `returns_input_as_is`,
-/// `trim_returns_input` ... guard); the arms judge the value
-/// -- and the argument: a non-literal `ltrimstr` argument keeps the refusal -- and
-/// place an input that gets a fresh result as an untracked value, which `path()`'s
+/// `trim_returns_input` ... guard); the arms judge the value and the argument (only a
+/// literal, or a comma of literals, is judged; any other argument is computed by value),
+/// and place an input that gets a fresh result as an untracked value, which `path()`'s
 /// terminal check refuses and a `try`, `?` or `//` therefore has nothing to swallow
-/// (#4444). A new pass-through arm there is owed
-/// a row here; `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`
-/// lists them.
+/// (#4444). A new pass-through arm there is owed a row here;
+/// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795` lists them.
 ///
 /// `del(f)` (empty path set, #4295) and `walk(.)` of a scalar (#4456,
 /// [`is_walk_identity`]) are the pass-through arms *not* here: whether `del(f)` returns

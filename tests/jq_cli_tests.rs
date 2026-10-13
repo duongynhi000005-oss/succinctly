@@ -61796,7 +61796,7 @@ fn test_bound_result_under_swallowing_construct_is_judged_per_value_4444() -> Re
             "{\"n\":5,\"a\":[1]}\n",
             0,
         ),
-        // `del(f)` over an empty path set, and `walk(.)` of a scalar, are the same leaves.
+        // `del(f)` over an empty path set is the same kind of leaf.
         (r"path(.b|(del(.x?) // .) as $y|$y)", "[\"b\"]\n", 0),
         // An input that gets a fresh result is still refused, and so is a container.
         (r"path(.n|(tostring // .) as $y|$y)", "", 5),
