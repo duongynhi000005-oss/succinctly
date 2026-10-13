@@ -49669,12 +49669,13 @@ fn source_destructures_register_with(
 }
 
 /// Whether a `reduce` source destructures a value the resolver proves is not jq's register -- a
-/// call whose `def` builds its result, a fresh value beside the register in a comma (#4494):
-/// the pattern's tracked `INDEX` step raises on it whatever the register is, which only the resolver
-/// models, so the source is routed there instead of being driven by value (`reduce (def f:
-/// {a:1}; f as {a:$a} | .) as $k (.; .)` is an error in jq and printed the root here). A destructure
-/// of the register itself is not asked about: a `reduce` backtracks its source, jq answers, and
-/// the resolver refuses it.
+/// call whose `def` builds its result (#4494): the pattern's tracked `INDEX` step raises on it
+/// whatever the register is, which only the resolver models, so the source is routed there instead
+/// of being driven by value (`reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)` is an error in
+/// jq and printed the root here). A destructure of the register itself is not asked about: a
+/// `reduce` backtracks its source, jq answers, and the resolver refuses it. It answers only for
+/// what [`RegisterSpine::binds_fresh`] reads as fresh, so a fresh value piped into a destructure of
+/// `.`, a parameterised call, and the other shapes listed in #4522 are not reached.
 fn source_destructures_fresh(source: &Expr) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
@@ -50506,25 +50507,18 @@ impl<'e> RegisterSpine<'e> {
                 // register: a `reduce` source inside another fold's body that is a value-mode
                 // subexpression (`del(try (-(reduce 1 as $k (.; reduce (def f: {"a":1}; f as {a:$a}
                 // | .) as $j (.; .)))))`) is answered by jq, and the loud refusal of that route is not.
-                if self.fresh_only {
-                    if routes_destructuring(patterns) && self.binds_fresh(expr, false) {
-                        return Reach::Destructures;
-                    }
-                    let names = self.chain_names(expr, patterns);
-                    return match self.with_vars(&names, body) {
-                        Reach::Destructures => Reach::Destructures,
-                        _ => Reach::Opaque,
-                    };
-                }
-                if !self.through_reduce
+                // #4494: the `fresh_only` walk asks only this question, so it takes the clause the
+                // `through_reduce` walk skips and none of the register clauses below.
+                if (self.fresh_only || !self.through_reduce)
                     && routes_destructuring(patterns)
                     && self.binds_fresh(expr, false)
                 {
                     return Reach::Destructures;
                 }
-                if (routes_destructuring(patterns)
-                    || patterns_all_destructuring_chain(patterns)
-                    || (self.null_register && routes_destructuring_chain(patterns)))
+                if !self.fresh_only
+                    && (routes_destructuring(patterns)
+                        || patterns_all_destructuring_chain(patterns)
+                        || (self.null_register && routes_destructuring_chain(patterns)))
                     && self.binds_register(expr)
                     && (patterns.len() == 1
                         || self.null_register
