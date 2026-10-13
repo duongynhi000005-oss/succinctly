@@ -2362,11 +2362,29 @@ is the revert that established what the other one costs.
    walk was unplaced, and lost `reduce (1) as $i (.; reduce (1) as $j (.; CHAIN))`, `first(CHAIN)` and `limit(1; CHAIN)`
    as the UPDATE, which jq answers. Over the 243 `foreach`/`reduce` pattern operands (`--stage-only`, 206,595 rows) wrong
    accepts go from 1,066 to 1,045 (the 21 rows of the issue), refusals jq does not make from 4,253 to 4,109, and no match is
-   lost. Pinned by `test_foreach_source_pipe_chain_in_a_reduce_update_4484`. Still accepted inside a body: a later bare
-   alternative (`. as $x ?// $y | $y as {a:$a} | .`, 28 rows; #4320's fourth part is gated to outside every fold body);
-   the chain in a `reduce` nested under a navigating `reduce` (`reduce .[]? as $i (.; reduce (1) as $j (.; CHAIN))`, whose
-   inner body is not the marked depth); and a `foreach` source whose own INIT moves the register is placed by the resolver
-   against the marked register, which the sweep has no operand for.
+   lost. Pinned by `test_foreach_source_pipe_chain_in_a_reduce_update_4484`. Still accepted inside a body: the chain in a
+   `reduce` nested under a navigating `reduce` (`reduce .[]? as $i (.; reduce (1) as $j (.; CHAIN))`, whose inner body is
+   not the marked depth). A `foreach` INIT that moves the register (`foreach CHAIN as $k (.a; .; .)`) matches jq.
+
+   A later bare alternative of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) inside a `reduce`
+   UPDATE raises as jq does since [#4507](https://github.com/rust-works/succinctly/issues/4507), where
+   [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part left it to the by-value drive:
+   `del(reduce .[]? as $k (.; foreach (. as $x ?// $y | $y as {a:$a} | .) as $z (.; .; .)))` on `[true]` deleted the document.
+   When the `reduce` source navigates, the first alternative binds `$y` to `null`, which is not the element the register is
+   on, so destructuring it raises, unless the element is itself `null` (jq's `jv_identical` is kind-based for `null`):
+   `[null]`, `{"a":null}` and `[]` answer. `fold_body::source_moved` therefore records whether the node the register sits
+   on is `null`, and `RegisterSpine::chain_names` reads the later name as the register in a body marked onto a non-`null`
+   node (the walk that asks for the unplaced refusal only). That node is the yielded element only for a plain navigation
+   source (`is_register_navigation`: fields, indexes, `.[]`, `first`/`last`/`nth`, `?` and pipes of these); a source that
+   computes its element (`.[]? | tostring`, `.[]? | null`) leaves it unknown and the chain to the routes it had, so
+   `reduce (.[]? | null) as $k (.; CHAIN)` on `[true]` is still accepted where jq raises. A first version marked every
+   navigating source and refused `[null]`, which the sweep had no input for; `[null]` and two computed-source contexts are
+   on the grid since. Over the 80 chain operands (`--stage-only`, 75,843 rows) wrong accepts go from 94 to 80, with no
+   match lost. Pinned by
+   `test_foreach_source_later_bare_alternative_in_a_reduce_update_4507`. Still accepted: the same chain in a body the
+   `reduce (1)` mark covers, on a document the destructure cannot index (`del(reduce 1 as $k (.; CHAIN))` on `[true]`:
+   jq raises `Cannot index array with string "a"`, 16 rows), because placing it there refuses the object documents jq
+   answers; and in a `reduce` nested under a navigating `reduce`.
 
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

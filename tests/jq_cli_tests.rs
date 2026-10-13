@@ -81454,6 +81454,74 @@ fn test_foreach_source_pipe_chain_in_a_reduce_update_4484() -> Result<()> {
     assert_path_rows_both_routes_3749(&rows)
 }
 
+/// #4507: a later bare `?//` alternative of a `foreach` source (`. as $x ?// $y | $y as {a:$a}`)
+/// inside a `reduce` UPDATE. Where the `reduce` source navigates (`.[]?`), jq's register is on the
+/// element: the first alternative binds `$y` to `null`, and destructuring that `null` raises
+/// unless the element is itself `null` (`jv_identical` is kind-based for `null`), so `del` deleted
+/// the document, `=` replaced it, and `|=` wrote. A `null` element, an empty source and a `null`
+/// document answer, as does a `reduce` whose source cannot move the register (`reduce (1)`) over a
+/// document the destructure can index. Every jq side captured from jq 1.7.1 with `-c`; the
+/// message is pinned only as the common prefix.
+#[test]
+fn test_foreach_source_later_bare_alternative_in_a_reduce_update_4507() -> Result<()> {
+    macro_rules! chain {
+        () => {
+            "foreach (. as $x ?// $y | $y as {a:$a} | .) as $z (.; .; .)"
+        };
+    }
+    macro_rules! over {
+        ($src:literal, $pre:literal, $post:literal) => {
+            concat!($pre, "reduce ", $src, " as $k (.; ", chain!(), ")", $post)
+        };
+    }
+    const RAISES: &str = "Invalid path expression";
+    let mut rows: Vec<PathRow3289> = Vec::new();
+    for doc in [
+        "[true]",
+        r#"{"a":false,"b":null}"#,
+        "[false]",
+        "[null,true]",
+        "[[1]]",
+    ] {
+        rows.extend([
+            (doc, over!(".[]?", "del(", ")"), "", RAISES, 5),
+            (doc, over!(".[]?", "(", ") = 9"), "", RAISES, 5),
+            (doc, over!(".[]?", "(", ") |= 9"), "", RAISES, 5),
+            (doc, over!(".[]?", "[path(", ")]"), "", RAISES, 5),
+        ]);
+    }
+    // The register sits on a `null` element, an empty source, or a `null` document: jq answers.
+    for doc in ["[null]", "[]", "null", r#"{"a":null}"#] {
+        rows.extend([
+            (doc, over!(".[]?", "del(", ")"), "null\n", "", 0),
+            (doc, over!(".[]?", "[path(", ")]"), "[[]]\n", "", 0),
+        ]);
+    }
+    // A source that cannot move the register leaves the accumulator on it.
+    for doc in [r#"{"a":false,"b":null}"#, r#"{"a":[1]}"#] {
+        rows.extend([
+            (doc, over!("1", "del(", ")"), "null\n", "", 0),
+            (doc, over!("(1)", "[path(", ")]"), "[[]]\n", "", 0),
+        ]);
+    }
+    // A source that computes its element yields a node the register is not on: `tostring` of a
+    // `null` element is `"null"`, but the register is still on the `null`, so jq answers.
+    rows.push((
+        "[null]",
+        over!("(.[]? | tostring)", "[path(", ")]"),
+        "[[]]\n",
+        "",
+        0,
+    ));
+    // `first` and `.[1+1]` navigate too; onto a `null` element (`[]`) jq answers.
+    rows.extend([
+        ("[]", over!("first", "[path(", ")]"), "[[]]\n", "", 0),
+        ("[true]", over!("first", "[path(", ")]"), "", RAISES, 5),
+        ("[true]", over!(".[1+1]", "[path(", ")]"), "[[]]\n", "", 0),
+    ]);
+    assert_path_rows_both_routes_3749(&rows)
+}
+
 /// #4424 (second part): the register reaches a `foreach` source's `?//` chain through a call to a
 /// `def` with parameters, a comma that is the register on only some outputs (`(., 1) | CHAIN`), or
 /// a nested `foreach` over `.` whose accumulator is the register. The spine walk read each as
