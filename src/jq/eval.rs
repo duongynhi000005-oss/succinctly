@@ -31013,14 +31013,10 @@ fn eval_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// Applies filter to the value at path and updates it.
 ///
 /// `scalar_slice_noop` gates #1101's yq no-op check (see
-/// `is_yq_scalar_slice_assign_path`'s doc comment): `true` for a genuine
-/// `|=` and for `+=` (`AssignOp::Add`), `false` for `-=`/`*=` — real yq's
-/// own no-op for these two doesn't run through this arm's "filter against
-/// a throwaway `[]`" mechanism at all (#1340 code review: `-=` genuinely
-/// does no-op live, just not via anything this codebase implements yet;
-/// `*=` genuinely errors), so both stay excluded here rather than one of
-/// them silently reaching this arm and erroring in a way this codebase
-/// happens to produce instead of the no-op real yq actually performs.
+/// `is_yq_scalar_slice_assign_path`'s doc comment) -- the whole mechanism
+/// ([`ScalarNoop::On`]): `true` for a genuine `|=` and for `+=`
+/// (`AssignOp::Add`). `-=`/`*=` reach the slice half of it through
+/// `eval_update_multi` instead ([`ScalarNoop::SliceOnly`], #1390).
 fn eval_update<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     path_expr: &Expr,
     filter_expr: &Expr,
@@ -31450,11 +31446,7 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // expression it wraps, so an outer `(.a |= f)?` still swallows the
     // discarded filter's error correctly via its own catch, not through
     // this flag.
-    let scalar_noop = if S::TAG == EvalTag::Yq {
-        ScalarNoop::from(scalar_slice_noop)
-    } else {
-        ScalarNoop::Off
-    };
+    let scalar_noop = ScalarNoop::from(scalar_slice_noop).for_mode::<S>();
 
     // #2522: the position every target of this update stands at, assembled
     // from the ambient prefix the routes above named (`eval_generic::
@@ -32719,11 +32711,7 @@ fn eval_update_multi<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // jq mode never reaches here (#3448): see `eval_assign`.
         None => unreachable!("jq mode's `op=`/`//=` is `each_assign` (#3448)"), // patchcov: coverage tolerate-line reason="unreachable: eval_compound_assign/eval_alternative_assign return collect_assign for JqSemantics before this point, and yq_prepare_assign_targets is Some for every YqSemantics call (#3448)"
     };
-    let scalar_noop = if S::TAG == EvalTag::Yq {
-        scalar_slice_noop
-    } else {
-        ScalarNoop::Off
-    };
+    let scalar_noop = scalar_slice_noop.for_mode::<S>();
     // #1351: a compound/alternative assign whose path *ends* at an alias
     // rebinds that position (real yq discards the write outright there -- a
     // data-loss bug succinctly does not reproduce, rule 4(b)); one whose path
@@ -32767,9 +32755,9 @@ fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // #1233: same RHS-discarding no-op as `eval_assign` (see
     // `yq_assign_skip_rhs`'s own doc comment) -- applies uniformly across
     // every compound operator, not just `Add`, unlike the write-level
-    // `scalar_noop` gate further down (`matches!(op, AssignOp::Add)`),
-    // which answers a narrower, operator-specific question about what
-    // happens once the RHS *has* run. Live-verified against yq v4.53.3 for
+    // `scalar_noop` gate further down (`compound_scalar_noop`), which
+    // answers a narrower, operator-specific question about what happens
+    // once the RHS *has* run. Live-verified against yq v4.53.3 for
     // `+=`/`-=`/`*=`; `/=`/`%=` aren't real yq syntax at all (`'/' expects 2
     // args but there is 1`), so their yq-mode answer is judged the same way
     // `//=`'s own comment below judges it -- internal consistency with the
@@ -34360,10 +34348,10 @@ fn slice_has_non_integer_bound(
 /// How far yq's scalar-target no-op reaches for one write (#1101, #1390).
 ///
 /// `On` is the whole mechanism: a slice step on a scalar root, and a field/index step on one
-/// (#1181), discard the write and run the update filter against a throwaway. `SliceNull` is
-/// the slice half for a `null` root only, for the operators `On` excludes (`-=`, `*=`):
-/// real yq no-ops (or raises the arithmetic's own error) on them there, but a field/index
-/// write on a scalar root raises for them (`5 | .a -= 1`), so they must not get the rest.
+/// (#1181), discard the write and run the update filter against a throwaway. `SliceOnly` is
+/// the slice half alone, for the operators `On` excludes (`-=`, `*=`): their field/index
+/// write on a scalar is decided before the right side runs (`yq_assign_skip_rhs`), so only
+/// the slice step needs it. Real yq no-ops (or raises the arithmetic's own error) there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ScalarNoop {
     Off,
@@ -34372,13 +34360,22 @@ enum ScalarNoop {
     /// step after the slice: yq raises there (`.b[0:1].c = 9` is `cannot index array with 'c'`),
     /// where an update operator's autovivifies (#1390).
     OnEmptySeq,
-    SliceNull,
+    SliceOnly,
 }
 
 impl ScalarNoop {
     /// The field/index half (#1181): only the full mechanism has it.
     fn field(self) -> bool {
         matches!(self, Self::On | Self::OnEmptySeq)
+    }
+
+    /// The no-op `mode` allows: jq has none of it.
+    fn for_mode<S: EvalSemantics>(self) -> Self {
+        if S::TAG == EvalTag::Yq {
+            self
+        } else {
+            Self::Off
+        }
     }
 
     /// What `set_path` hands its slice step.
@@ -34408,7 +34405,7 @@ fn compound_scalar_noop(op: AssignOp) -> ScalarNoop {
     if matches!(op, AssignOp::Add) {
         ScalarNoop::On
     } else {
-        ScalarNoop::SliceNull
+        ScalarNoop::SliceOnly
     }
 }
 
@@ -34706,13 +34703,9 @@ fn through_slice<E: From<EvalError>>(
         // still runs, against a throwaway `[]` (matching real yq's actual
         // internal model, #1119's `eval_update` follow-up) so its own
         // errors/halt/break still propagate; only the write to `root` is
-        // skipped. `-=`/`*=` get this arm for a `null` root only (#1390, `ScalarNoop::
-        // SliceNull`): on a non-null scalar yq raises for a scalar right side, as the
-        // catch-all below still does (a container right side no-ops in yq there, an open gap).
-        _ if scalar_noop != ScalarNoop::Off
-            && is_yq_slice_empty_container_scalar(root)
-            && (scalar_noop != ScalarNoop::SliceNull || matches!(root, OwnedValue::Null)) =>
-        {
+        // skipped. `-=`/`*=` reach it too (#1390, `ScalarNoop::SliceOnly`): yq raises for
+        // `5 - 5` and `null * 5` alike, and no-ops for a container right side.
+        _ if scalar_noop != ScalarNoop::Off && is_yq_slice_empty_container_scalar(root) => {
             // The throwaway is what yq's own is: an empty sequence carrying the target's tag
             // (#1390), so arithmetic dispatches on the target's kind. A `null` target is
             // `null` to `-=`/`*=` (identity for any right side, an error for a scalar `*=`),
@@ -34759,14 +34752,14 @@ fn through_slice<E: From<EvalError>>(
         // `S::TAG == EvalTag::Yq` unconditionally, per every call site
         // below) rather than firing unconditionally: an earlier version of
         // this arm ran for yq mode too whenever the arm above didn't claim
-        // it (i.e. for `-=`/`*=`, both `scalar_noop == false`), which
+        // it (i.e. for `-=`/`*=`, which were `scalar_noop == false` then), which
         // #1340 code review caught -- yq never auto-vivifies a null slice
         // target the way jq does, so a yq-mode `Null` that isn't the
         // arm-above's no-op has to fall through to the same catch-all
         // every other unhandled yq shape here already does, leaving
         // `-=`/`*=` on a null slice target exactly as unaffected by this
         // fix as `#1340`'s own issue text was ever scoped to be (jq mode
-        // only) — not newly right, but not newly wrong either.
+        // only); #1390 later gave them the arm above instead.
         //
         // `!terminal_write` no-op (#1873): the doc comment above described
         // `edit`'s result as always having to become an array once it's
@@ -35277,8 +35270,8 @@ fn update_path_with_deletes<S: EvalSemantics>(
         );
     }
     // yq's slice-write container no-op (#1142) is unconditional on the
-    // operator, unlike `scalar_noop` (a caller-gated parameter, `false` for
-    // `-=`/`*=`) -- so it only needs `S::TAG`, not threading through every
+    // operator, unlike `scalar_noop` (a caller-gated parameter: `On` for `|=`/`+=`,
+    // `SliceOnly` for `-=`/`*=`) -- so it only needs `S::TAG`, not threading through every
     // recursive call. Bound once here rather than recomputed inline at each
     // `Expr::Slice` arm below, so the two can't drift out of sync.
     //

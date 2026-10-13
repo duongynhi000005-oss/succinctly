@@ -28269,8 +28269,8 @@ fn test_slice_plain_assign_with_a_step_after_it_still_errors_1390() -> Result<()
     Ok(())
 }
 
-/// #1390: `-=`/`*=` on a scalar (non-null) slice target keep erroring, as yq does for a scalar
-/// right side -- the `null`-seeded slice no-op is all they gain.
+/// #1390: `-=`/`*=` on a scalar (non-null) slice target keep erroring for a scalar right side,
+/// as yq does; a container right side no-ops there (`slice_scalar_*_1390` goldens).
 #[test]
 fn test_sub_mul_on_scalar_slice_targets_unchanged_by_1390() -> Result<()> {
     for filter in [".b[0:1] -= 5", ".b[0:1] *= 5", ".c[0:1] -= 5"] {
