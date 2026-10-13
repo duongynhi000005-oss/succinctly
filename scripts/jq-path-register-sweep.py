@@ -1990,6 +1990,39 @@ OPERANDS = [
     "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))",
     "(reduce (label $o | .) as $z (.; . as {a:$a} | .))",
     "(foreach (label $o | .) as $z (.; . as {a:$a} | .; .))",
+    # (#4514) a source whose FIRST output is the register and whose later outputs need not be: jq
+    # runs the first output first, and its destructure moves the register before the second exists.
+    # A comma as a call argument bound to a `$` parameter, a `limit` with a count past one, and
+    # the contrasts: the register on the second output only, a first output that is not the
+    # register, and a body that does not navigate. The last operand (a call with no arguments
+    # returning such a source) is the open contrast: a routed `def f: ., {a:1}` refuses a negated
+    # operand jq answers (#4452), so the walk does not read a call's body for its first output.
+    "(foreach (def f($x): $x as {a:$a} | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f((1, .))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f(((., 1), 2))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | .; f(limit(2; ., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | $a; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x as [$a] | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (def f($x): $x | .; f((., 1))) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as [$a] | .) as $k (.; .; .))",
+    "(foreach (limit(2; (., 1), 2) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; 1, .) as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as $b | $b as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (limit(2; ., 1) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (limit(2; ., 1) as {a:$a} | .) as $k (.; .))",
+    "(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+    # The wrappers that hand the first output on: `nth(0; ..)`, a pipe with `.`, `try`, and the contrasts
+    # that do not (`nth(1; ..)`, `limit(0; ..)`).
+    "(foreach (nth(0; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (((., 1) | .) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach ((. | (., 1)) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(2; (., 1) | .) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach ((try (., 1)) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (nth(1; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (limit(0; ., 1) as {a:$a} | $a) as $k (.; .; .))",
+    "(foreach (def f($x): $x as {a:$a} | $a; f(limit(2; ., 1) | .)) as $k (.; .; .))",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
