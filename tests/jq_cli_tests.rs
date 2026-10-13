@@ -62181,6 +62181,218 @@ fn test_outer_var_destructured_by_a_fold_source_in_a_fold_body_4505() -> Result<
     Ok(())
 }
 
+/// #4505: a fold source inside another fold's body that runs a path-checked `INDEX` step on the
+/// register -- a navigation, or a destructure behind a `select(f)` -- moves jq's register off the
+/// accumulator, so the enclosing fold's later emission of the accumulator raises and `del`/`=`/`|=`
+/// write nothing. Three readings answered instead: an inner `foreach` emission whose register had
+/// moved below the fold's was re-certified as the outer register's own node, a `reduce` UPDATE
+/// whose nested source navigated only behind a `select(f)` or an outer `$x` was read as passing
+/// the accumulator on, and a `reduce` source's destructure of an outer `$x` was left to the
+/// by-value drive. The rows that end `$y` (the element is the register) and the `reduce` sources
+/// that backtrack still answer. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_fold_source_moving_the_register_inside_a_fold_body_is_refused_4505() -> Result<()> {
+    const DOC: &str = r#"{"a":{"b":1}}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (
+            r"path(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(foreach (1,2) as $i (.; foreach (.[]?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"del(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .)) |= 5",
+            "",
+            5,
+        ),
+        (
+            r"path(foreach (1,2) as $i (.; foreach (.a) as $y (.; $y; .); .))",
+            "[\"a\"]\n",
+            5,
+        ),
+        (
+            r"path(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; $y); .))",
+            "[\"a\"]\n",
+            5,
+        ),
+        (
+            r"path(foreach (1,2) as $i (.; foreach (select(.) | .a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x | .a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"del(. as $x | foreach (1,2) as $i (.; foreach ($x | .[]?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select($x) | .a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce ($x | .a) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"del(. as $x | reduce .[]? as $i (.; reduce ($x | .a?) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"(. as $x | reduce .[]? as $i (.; foreach ($x | .[0]) as $y (.; .; .))) |= 5",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .a? as $i (.; reduce (select(.) | .a) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce ($x as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"del(. as $x | reduce .[]? as $i (.; reduce ($x as [$a] | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (select($x) | $x as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (first($x as {a:$a} | .)) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select($x) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"(. as $x | foreach (1,2) as $i (.; foreach (select($x) | . as [$a] | .) as $y (.; .; .); .)) = 5",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; foreach (select(.) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce (1,2) as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[] as $it (.; reduce ($it as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (try ($x as {a:$a} | .)) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
+/// #4505: on a `null` document the register really is the accumulator's `null` (`jv_identical`
+/// compares it by kind), so the same shapes answer there, as they did before.
+#[test]
+fn test_fold_source_moving_the_register_on_null_still_answers_4505() -> Result<()> {
+    const ROWS: &[(&str, &str, i32)] = &[
+        (
+            r"path(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            0,
+        ),
+        (
+            r"del(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r"(foreach (1,2) as $i (.; foreach (.a) as $y (.; .; .); .)) |= 5",
+            "{\"a\":5}\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x | .a) as $y (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce ($x | .a) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce ($x as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1) as $i (.; foreach (.a) as $y (.; .; .); .))",
+            "[\"a\"]\n",
+            0,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("null"))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an
