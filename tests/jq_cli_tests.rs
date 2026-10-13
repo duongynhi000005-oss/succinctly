@@ -81504,6 +81504,15 @@ fn test_foreach_source_later_bare_alternative_in_a_reduce_update_4507() -> Resul
             (doc, over!("(1)", "[path(", ")]"), "[[]]\n", "", 0),
         ]);
     }
+    // A source that computes its element yields a node the register is not on: `tostring` of a
+    // `null` element is `"null"`, but the register is still on the `null`, so jq answers.
+    rows.push((
+        "[null]",
+        over!("(.[]? | tostring)", "[path(", ")]"),
+        "[[]]\n",
+        "",
+        0,
+    ));
     // `first` and `.[1+1]` navigate too; onto a `null` element (`[]`) jq answers.
     rows.extend([
         ("[]", over!("first", "[path(", ")]"), "[[]]\n", "", 0),

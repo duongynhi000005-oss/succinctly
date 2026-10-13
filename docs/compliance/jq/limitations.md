@@ -2372,11 +2372,15 @@ is the revert that established what the other one costs.
    `del(reduce .[]? as $k (.; foreach (. as $x ?// $y | $y as {a:$a} | .) as $z (.; .; .)))` on `[true]` deleted the document.
    When the `reduce` source navigates, the first alternative binds `$y` to `null`, which is not the element the register is
    on, so destructuring it raises, unless the element is itself `null` (jq's `jv_identical` is kind-based for `null`):
-   `[null]`, `{"a":null}` and `[]` answer. `fold_body::source_moved` therefore records whether the element is `null`, and
-   `RegisterSpine::chain_names` reads the later name as the register in a body marked onto a non-`null` element (the walk
-   that asks for the unplaced refusal only). A first version marked every navigating source and refused `[null]`, which
-   the sweep had no input for; `[null]` is on the grid since. Over the 80 chain operands (`--stage-only`, 71,995 rows)
-   wrong accepts go from 56 to 42, with no match lost. Pinned by
+   `[null]`, `{"a":null}` and `[]` answer. `fold_body::source_moved` therefore records whether the node the register sits
+   on is `null`, and `RegisterSpine::chain_names` reads the later name as the register in a body marked onto a non-`null`
+   node (the walk that asks for the unplaced refusal only). That node is the yielded element only for a plain navigation
+   source (`is_register_navigation`: fields, indexes, `.[]`, `first`/`last`/`nth`, `?` and pipes of these); a source that
+   computes its element (`.[]? | tostring`, `.[]? | null`) leaves it unknown and the chain to the routes it had, so
+   `reduce (.[]? | null) as $k (.; CHAIN)` on `[true]` is still accepted where jq raises. A first version marked every
+   navigating source and refused `[null]`, which the sweep had no input for; `[null]` and two computed-source contexts are
+   on the grid since. Over the 80 chain operands (`--stage-only`, 75,843 rows) wrong accepts go from 94 to 80, with no
+   match lost. Pinned by
    `test_foreach_source_later_bare_alternative_in_a_reduce_update_4507`. Still accepted: the same chain in a body the
    `reduce (1)` mark covers, on a document the destructure cannot index (`del(reduce 1 as $k (.; CHAIN))` on `[true]`:
    jq raises `Cannot index array with string "a"`, 16 rows), because placing it there refuses the object documents jq

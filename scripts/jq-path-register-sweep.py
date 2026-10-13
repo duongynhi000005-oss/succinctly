@@ -1890,6 +1890,9 @@ CONTEXTS = [
     ("alt-pattern", "del(. as [$q] ?// $q | ({X}))"),  # round 2: ?// retry
     ("alt-pattern-pipe", "del(. as [$q] ?// $q | ({X}) | .c)"),  # round 2: stale downstream
     ("reduce-source", "del(reduce .[]? as $k (.; {X}))"),  # round 2: SOURCE navigates
+    # (#4507) a SOURCE that navigates and then computes yields a node the register is not on
+    ("reduce-source-null", "del(reduce (.[]? | null) as $k (.; {X}))"),
+    ("reduce-source-tostring", "del(reduce (.[]? | tostring) as $k (.; {X}))"),
     ("foreach-source", "del(foreach .[]? as $k (.; {X}; .b?))"),  # round 2
     # (#3734) a fold whose SOURCE does not navigate: the whole-array-slice rule
     # (#3504) only applies there, and every context above either navigates in
