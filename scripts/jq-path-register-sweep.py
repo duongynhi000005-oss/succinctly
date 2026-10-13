@@ -509,6 +509,11 @@ OPERANDS = [
     "(. as {(.):$a} | $a, 1)",
     "(. as {(.):$a} ?// $a | $a)",
     "(. as {(.[0]):$a} | $a)",
+    # (#4539) a computed key on a `?//` bind under a `try`: the walk's refused step could never
+    # succeed on its input, so jq retries onto the bare alternative and the fold's emission raises.
+    "try (. as {(.):$a} ?// $a | $a)",
+    "try (. as {(.|tostring):$a} ?// $a | $a)",
+    "try (. as {(.):$a} ?// $a | 5)",
     # (#4187) a plain bind in front of the destructure does not move the register (its source is a
     # subexpression), so the destructure behind it is the source's own; the contrasts bind a
     # different value, destructure something the bind produced, or follow it with a navigation.
