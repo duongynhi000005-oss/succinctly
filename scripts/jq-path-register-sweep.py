@@ -499,6 +499,27 @@ OPERANDS = [
     "(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",
     "(foreach (try (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    # (#4483) the chain directly under `first`/`limit` (jq's `first` is a `label`/`break`, which the
+    # chain's `?//` catches as a body error, so value mode emits twice and path mode once). The
+    # contrasts nest the wrapper (`try`, `nth`, `limit(2; ..)`, `last`), put a stage that is not the
+    # register in front of the chain, or put it under a `reduce`, which backtracks its source.
+    "(foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (limit(2; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as [$a] ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as {a:$a} ?// [$a] ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as {a:$a} ?// $a | $a)) as $k (.; .; .))",
+    "(foreach (first(. as {a:$a} ?// $a | .a)) as $k (.; .; .))",
+    "(foreach (try first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as {a:$a} ?// $a | .)?) as $k (.; .; .))",
+    "(foreach (nth(0; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (last(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(1 | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(.a | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(. as $x | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (first(first(. as {a:$a} ?// $a | .))) as $k (.; .; .))",
+    "(foreach (first((. as {a:$a} ?// $a | .), 1)) as $k (.; .; .))",
+    "(reduce (first(. as {a:$a} ?// $a | .)) as $k (.; .))",
+    "(foreach (first(. as {a:$a} ?// $a | .)) as {b:$b} (.; .; .))",
     "(foreach (label $l | (. as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach ((. as {a:$a} ?// $a | .), 1) as $k (.; .; .))",
     "(foreach (1 | . as {a:$a} ?// $a | .) as $k (.; .; .))",

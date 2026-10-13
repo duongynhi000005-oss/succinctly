@@ -50256,6 +50256,18 @@ impl<'e> RegisterSpine<'e> {
             Expr::Label { body, .. } => self.reach(body),
             other => {
                 let peeled = peel_register_transparent(other);
+                // #4483: the chain directly under `first`/`limit(..)` (jq's `first` is a
+                // `label`/`break`, which the chain's `?//` catches as a body error, so by value
+                // the source emits twice) is the register's own destructure outside every fold
+                // body; inside one the routed chain refuses rows jq answers (`reduce`
+                // UPDATE/source contexts).
+                if fold_body::depth() == 0 {
+                    if let Some(expr) = take_wrapped_bare_chain(other) {
+                        if self.binds_register(expr) {
+                            return Reach::Destructures;
+                        }
+                    }
+                }
                 if !core::ptr::eq(peeled, other) {
                     self.reach(peeled)
                 } else if yields_only_the_register(other) {
@@ -50266,6 +50278,27 @@ impl<'e> RegisterSpine<'e> {
                 }
             }
         }
+    }
+}
+
+/// The bound expression of a `?//` chain with a bare `$var` alternative that is the whole
+/// operand of a `first(..)` or `limit(..; ..)` (#4483). Not behind a `try`/`?` around the
+/// wrapper: those rows are answered by the by-value drive, and routing them accepted a `del`
+/// that jq refuses.
+fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
+    match unwrap_paren(e) {
+        Expr::FirstExpr(inner)
+        | Expr::Limit { expr: inner, .. }
+        | Expr::Builtin(Builtin::FirstStream(inner)) => match unwrap_paren(inner) {
+            Expr::AsPattern { expr, patterns, .. }
+                if routes_destructuring_chain(patterns)
+                    && !patterns_all_destructuring_chain(patterns) =>
+            {
+                Some(expr)
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
