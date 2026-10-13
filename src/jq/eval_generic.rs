@@ -22799,13 +22799,16 @@ fn to_owned_array_slice<S: EvalSemantics, V: DocumentValue>(
         _ => None,
     };
     match crate::jq::array_index::slice_cursors(elements, window, |len| bounds.resolve(len)) {
-        Ok((cursors, range)) => cursors[range]
-            .iter()
-            .map(|cursor| to_owned::<S, _>(&cursor.value()))
-            .collect(),
+        // #4328: through the cursor, which alone carries an explicit tag (`!!str 2` stays the
+        // string `"2"`); a bare value has already lost it.
+        Ok((cursors, range)) => cursors[range].iter().map(to_owned_cursor::<S, _>).collect(),
+        // The collecting read, through cursors for the same reason as above.
         Err(_) => {
-            let items = elements.collect_values();
-            to_owned_all::<S, _>(items[bounds.resolve(items.len())].iter())
+            let cursors = elements.collect_cursors();
+            cursors[bounds.resolve(cursors.len())]
+                .iter()
+                .map(to_owned_cursor::<S, _>)
+                .collect()
         }
     }
 }
@@ -23014,7 +23017,7 @@ fn single_slice_bound<S: EvalSemantics, V: DocumentValue>(
 ///
 /// The value is the one the slice would have held at that position: the same
 /// bound resolution (`resolve_computed_slice_bounds`, `SliceBounds::resolve`)
-/// and the same per-element `to_owned` that `slice_one_generic` ends in. What
+/// and the same per-element `to_owned_cursor` (the cursor carries the explicit tag a bare value has lost, #4328) that `to_owned_array_slice` ends in. What
 /// differs is only the elements the read does not name, which are not
 /// converted -- the way `.[k]` and `length` never look inside a sibling.
 fn try_fused_slice_read<S: EvalSemantics, V: DocumentValue>(
@@ -23033,7 +23036,7 @@ fn try_fused_slice_read<S: EvalSemantics, V: DocumentValue>(
         SliceLanding::Value(owned) => Some(owned),
         SliceLanding::Element(position) => {
             let cursor = crate::jq::array_index::get_cursor_memoized(&elements, position)?;
-            to_owned::<S, _>(&cursor.value()).ok()
+            to_owned_cursor::<S, _>(&cursor).ok()
         }
     }
 }
@@ -23219,7 +23222,7 @@ fn fused_slice_index<S: EvalSemantics, V: DocumentValue>(
     }
     let key = match eval_single::<S, V>(key, value.clone(), false, cursor) {
         GenericResult::One(v) => to_owned::<S, _>(&v).ok()?,
-        GenericResult::OneCursor(c) => to_owned::<S, _>(&c.value()).ok()?,
+        GenericResult::OneCursor(c) => to_owned_cursor::<S, _>(&c).ok()?,
         GenericResult::Owned(v) => v,
         _ => return None,
     };
