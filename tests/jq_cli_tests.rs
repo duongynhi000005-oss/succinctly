@@ -68052,6 +68052,57 @@ fn test_nested_fold_in_update_follows_null_accumulator_on_live_register_4492() -
             "",
             0,
         ),
+        // What the inner fold nests is its own to judge: a comma in its INIT or source, a
+        // wrapper that adds no movement, a call, and the write forms of a comma INIT.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i ((1,2); try .a; .); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; foreach ((1,2),3) as $i (1; try .a; .); .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; first(foreach (1,2) as $i (1; try .a; .)); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; def f: .a; foreach (1,2) as $i (1; try f; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $i ((1,2); try .a; .); .)) = 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(foreach .a? as $k (0; foreach (1,2) as $i ((1,2); try .a; .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; foreach (1,2) as $i (1; (try .a, 5); .); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
         // A construction around the inner fold is still refused, as jq does.
         (
             "null",

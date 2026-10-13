@@ -142391,6 +142391,15 @@ mod touched_edge_cases_2999 {
             ("try (($w | .a), select(.a))", false),
             ("try (($w | .a), select(.a[.b]))", false),
             ("try (($w | .a), f)", true),
+            // #4492: a fold is one flow, not siblings, wherever the walk meets it above a pipe;
+            // what it nests is its own to judge. A comma that has a fold as a sibling still
+            // counts, and so does a fold inside an `isempty` operand.
+            ("foreach (1,2) as $i (1; try .a; .)", false),
+            ("reduce (1,2) as $i (1; try .a)", false),
+            ("-(foreach (1,2) as $i (1; try .a; .))", false),
+            ("try (foreach (1,2) as $i ((1,2); (.a, .b); .))", false),
+            ("(foreach (1,2) as $i (1; try .a; .), 1)", true),
+            ("isempty(foreach (1,2) as $i (1; .a; .))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");
         }
