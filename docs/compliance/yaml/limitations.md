@@ -409,32 +409,37 @@ Two bugs surfaced only once tags could reach positions anchors already could:
   resolving it to `""` (corpus case `LE5A`). Fixed by widening that check to "was there any
   property."
 
-## A flow collection as a same-line explicit key
+## A flow collection as a mapping key — resolved ([#1188])
 
-`? []: x` — a *flow* collection followed by a value indicator on the same line —
-still diverges from `yq`. The whole `[]: x` is a compact block mapping used as the
-key, so the entry has no value:
+`[a, b]: value`, `{a: 1}: value`, `? [a, b]: value` (and the same shapes under `- `, under
+`key:`, after `? k` / `:`, and behind an `&anchor` or `!tag`) used to be read as two or three
+unrelated values: the collection, then the value, then whatever followed. They are mapping
+entries now, built the way `? [a, b]` / `: value` already was (a key node wrapping the
+collection, which the reader answers as `""`), and every shape agrees with `yq`:
 
 ```
-$ printf '? []: x\n' | succinctly yq -o=json -I=0 '.'
-{"":"x"}                             # yq: {"":null}
-$ printf '? {a: 1}: v\n' | succinctly yq -o=json -I=0 '.'
-{"":"v"}                             # yq: {"":null}
+$ printf '[a, b]: value\nz: 1\n' | succinctly yq -o=json -I=0 '.'
+{"":"value","z":1}                   # yq: the same
+$ printf '? [1, 2]: value\n' | succinctly yq -o=json -I=0 '.'
+{"":null}                            # yq: the same — the whole `[1, 2]: value` is the key
 ```
 
-Both output `""` for the key, so this is a divergence in the *value*, not the key.
+`looks_like_flow_keyed_mapping_entry` decides it: the collection must close on the same line
+and be followed by a `:` that is itself followed by whitespace, a break or the end of input.
+`looks_like_mapping_entry`, the scalar-key predicate shared with the `- k: v` path, still answers
+`false` for `[`/`{`. An implicit key spanning two lines, a quote that never closes, or a comment
+in between keeps the previous handling, and so does `-p json` (`{"a": 1}: x` is two JSON values
+there).
 
-`looks_like_mapping_entry` — the predicate the [#346] fix routes through, shared
-with the `- k: v` sequence-item path — deliberately returns `false` for a leading
-`[` or `{`, so these two spellings keep the pre-[#346] flow-collection handling and
-its mid-line exit. Lifting the restriction means teaching
-`parse_compact_mapping_entry` to accept a flow-collection key, which puts a rarer
-shape's fix on the hot sequence-item path; that trade was not worth taking blind.
+Still different:
 
-The scalar spellings — `? k: v`, `? "a": v`, `? 'a': v`, and the same shapes in
-mapping-value and sequence-item position — are correct since [#346], as is the
-mirrored value indicator (`? a` / `: b: c`).
+- **YAML output spells the key `""`** (`"": value`), where `yq` prints `? [a, b]` / `: value`;
+  the same as the explicit form has always done, and [the complex-key note in the yq
+  limitations](../yq/limitations.md) covers it.
+- **`[a, b]: - x`** (a sequence entry on the key's line) is an error in `yq` and is read as the
+  value here, as `k: - x` already was.
 
+[#1188]: https://github.com/rust-works/succinctly/issues/1188
 [#346]: https://github.com/rust-works/succinctly/issues/346
 
 ## Directives — resolved

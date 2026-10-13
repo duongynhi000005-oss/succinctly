@@ -3317,7 +3317,21 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             b'\'' => "single",
             b'|' => "literal",
             b'>' => "folded",
-            b'{' | b'[' => "flow",
+            // A mapping keyed by a flow collection (`[a, b]: v`) begins where
+            // its first key does, so it reads `[`/`{` here without being a
+            // flow node itself (#1188). A real flow container opens on its own
+            // delimiter, one byte before its first child.
+            b'{' | b'[' => {
+                if self.is_container()
+                    && self
+                        .first_child()
+                        .is_some_and(|child| child.text_position() == Some(text_pos))
+                {
+                    ""
+                } else {
+                    "flow"
+                }
+            }
             _ => "",
         }
     }

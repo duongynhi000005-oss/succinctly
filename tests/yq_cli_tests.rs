@@ -14740,22 +14740,15 @@ fn test_flow_collection_as_implicit_mapping_key_still_permitted_878() -> Result<
     //
     // Pins *actual* output, not just exit code (this project's testing
     // conventions treat an exit-code-only assertion here as a false-
-    // confidence anti-pattern) - and deliberately documents a known,
-    // pre-existing gap rather than papering over it: succinctly doesn't
-    // actually implement flow-collection-keyed implicit mappings yet. Real
-    // `yq` folds `[a, b]: value` into a single-entry mapping `{"":
-    // "value"}`; succinctly currently only avoids hard-erroring on it,
-    // emitting the flow collection and the trailing value as two disjoint
-    // results instead (confirmed identical on `main` before this PR - not
-    // introduced or worsened here). This test's job is to confirm the
-    // document doesn't error and to catch a regression in the *current*
-    // output if one occurs; implementing the real feature is tracked as a
-    // follow-up.
+    // confidence anti-pattern). Real `yq` folds `[a, b]: value` into a
+    // single-entry mapping `{"": "value"}`; this used to emit the flow
+    // collection and the trailing value as two disjoint results, until #1188
+    // built the entry (every row below was captured from yq v4.53.3).
     let cases: &[(&str, &str)] = &[
-        ("[a, b]: value\n", "[\"a\",\"b\"]\n\"value\""),
-        ("{a: 1}: value\n", "{\"a\":1}\n\"value\""),
-        ("? k\n: [a, b]: value\n", r#"{"k":["a","b"]}"#),
-        ("? k\n: {a: 1}: value\n", r#"{"k":{"a":1}}"#),
+        ("[a, b]: value\n", r#"{"":"value"}"#),
+        ("{a: 1}: value\n", r#"{"":"value"}"#),
+        ("? k\n: [a, b]: value\n", r#"{"k":{"":"value"}}"#),
+        ("? k\n: {a: 1}: value\n", r#"{"k":{"":"value"}}"#),
     ];
     for (doc, expected) in cases {
         let (out, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
@@ -14889,18 +14882,56 @@ fn test_unambiguous_mapping_value_flow_collection_followed_by_colon_still_errors
 /// false rejection at `parse_explicit_key`'s site, the same way it already
 /// didn't at `parse_value`/`parse_explicit_value` (pinned by
 /// `test_flow_collection_as_implicit_mapping_key_still_permitted_878`
-/// above). Pins the *current* (pre-existing, item-5-scoped) output exactly,
-/// not just the exit code -- confirmed unchanged from before this fix. Real
-/// yq's own answer for this exact one-line form is actually `{"":null}`,
-/// not `{"":"value"}` (it reads the whole `[1, 2]: value` as the *key's*
-/// own compact-mapping content, not this entry's value -- confirmed live)
-/// -- this test only asserts "doesn't error, output unchanged from before
-/// #902," not real-yq equivalence, which is #1188's separate scope.
+/// above). Real yq reads the whole `[1, 2]: value` as the *key's* own
+/// compact-mapping content, so the entry has no value of its own: `{"":null}`
+/// (confirmed live). That is what #1188 builds; until then this answered
+/// `{"":"value"}`.
 #[test]
 fn test_explicit_key_flow_collection_followed_by_colon_still_permitted_902() -> Result<()> {
     let (out, code) = run_yq_stdin(".", "? [1, 2]: value\n", &["-o", "json", "-I0"])?;
     assert_eq!(code, 0, "out: {out:?}");
-    assert_eq!(out.trim(), r#"{"":"value"}"#);
+    assert_eq!(out.trim(), r#"{"":null}"#);
+    Ok(())
+}
+
+/// A flow collection followed by `:` is a mapping key (#1188), but not in
+/// `-p json`, where `{"a":1}: x` is a JSON value followed by garbage, and not
+/// when the collection or its `:` cannot be placed on one line. Each row keeps
+/// the handling it had before the predicate existed.
+#[test]
+fn test_flow_keyed_mapping_predicate_leaves_other_shapes_alone_1188() -> Result<()> {
+    for input in ["{\"a\":1}: x", "[1,2]: 3"] {
+        let (out, err, code) =
+            run_yq_stdin_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+        assert_eq!(code, 1, "{input:?}: stdout {out:?}");
+        assert!(err.contains("not a valid JSON value"), "{input:?}: {err:?}");
+    }
+    for (input, expected) in [
+        // A comment ends the line before any `:` can matter.
+        ("[a, b] # c: x\n", r#"["a","b"]"#),
+        // The `:` on the next line is not on the collection's line.
+        ("[a, b]\n: value\n", "[\"a\",\"b\"]\n\"value\""),
+        // A quote that closes later, not at the start of a token, is text.
+        ("[it's, \"q\"]: v\n", r#"{"":"v"}"#),
+    ] {
+        let (out, code) = run_yq_stdin(".", input, &["-o", "json", "-I0"])?;
+        assert_eq!(code, 0, "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
+/// A mapping keyed by a flow collection is a block mapping: it begins where its
+/// first key does, on a `[`/`{`, which `style()` used to read as a flow node and
+/// print as `{"": value, z: 1}` (#1188). A real flow container is unaffected.
+#[test]
+fn test_flow_keyed_mapping_is_not_reported_as_flow_style_1188() -> Result<()> {
+    let (out, code) = run_yq_stdin(".", "[a, b]: value\nz: 1\n", &[])?;
+    assert_eq!((code, out.as_str()), (0, "\"\": value\nz: 1\n"));
+    let (out, code) = run_yq_stdin(".", "{[a]: v}\n", &[])?;
+    assert_eq!((code, out.as_str()), (0, "{\"\": v}\n"));
+    let (out, code) = run_yq_stdin(".", "k: [a, b]\nm: {c: 1}\n", &[])?;
+    assert_eq!((code, out.as_str()), (0, "k: [a, b]\nm: {c: 1}\n"));
     Ok(())
 }
 
