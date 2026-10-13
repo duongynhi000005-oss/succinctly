@@ -42957,6 +42957,16 @@ fn neutral_leaves_register(expr: &Expr) -> bool {
             (body_always_raises(body) || neutral_leaves_register(body))
                 && neutral_leaves_register(handler)
         }
+        // #4488: a `reduce` backtracks its source, pattern and UPDATE (the `FORK` after INIT), so
+        // only INIT's navigation survives it whatever its pattern destructures
+        // ([`reduce_leaves_register_in_place`], #4048): `cannot_move_register` is `false` for a
+        // destructuring pattern, which is the claim "navigates nothing", not this one.
+        Expr::Reduce {
+            input,
+            init,
+            update,
+            ..
+        } => reduce_leaves_register_in_place(input, init, update),
         other => cannot_move_register(other),
     }
 }
@@ -48033,8 +48043,18 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // register the pattern's walk already moved, which is why it stays opaque). A body
         // with none has nothing to misread, so a `try` around the bind is read for its
         // handler's outputs alone (`try (. as [$a] | $a) catch 7`).
-        Expr::AsPattern { body, .. } if !any_subexpr(body, &mut is_entry_marker_producer) => {
-            EntryMarkers::None
+        //
+        // #4488: but a `?//` chain with a bare `$var` alternative is a producer too: that
+        // alternative runs after jq's fork restored the register, so its outputs state the
+        // entry ([`resolve_as_pattern`]), and a fold's UPDATE reads it.
+        Expr::AsPattern { patterns, body, .. }
+            if !any_subexpr(body, &mut is_entry_marker_producer) =>
+        {
+            if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))) {
+                EntryMarkers::Forwarded
+            } else {
+                EntryMarkers::None
+            }
         }
         other if any_subexpr(other, &mut is_entry_marker_producer) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
@@ -52332,6 +52352,40 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             // Trackable (the register is `value` itself), or
                             // no register in hand: the body resolves exactly
                             // as the `As` arm's does.
+                            _ if register.is_none()
+                                && !trackable
+                                && S::TAG == EvalTag::Jq
+                                && fold_body::depth() > 0
+                                && neutral_leaves_register(&substituted) =>
+                            {
+                                // #4488: a bare alternative inside a fold's UPDATE performs no
+                                // step and its body cannot move the register, so every output
+                                // is at the register the UPDATE entered with: jq's fork
+                                // restored it before this alternative ran, whether the
+                                // earlier one failed at its first step or after walking. The
+                                // fold carries its own register forward on this statement
+                                // (`FoldRegister::advance`); a destructuring bind is never
+                                // `neutral_leaves_register` as a whole, because the
+                                // alternative that walked moved it.
+                                let mut stating = |mut branch: PathBranch<'a>| -> Demand {
+                                    if !branch.trackable
+                                        && branch.path.depth() == 0
+                                        && matches!(branch.register, BranchRegister::None)
+                                    {
+                                        branch = branch.with_register(BranchRegister::AtEntry);
+                                    }
+                                    sink(branch)
+                                };
+                                resolve_node_sink::<S>(
+                                    &substituted,
+                                    value,
+                                    trackable,
+                                    snapshot,
+                                    frame,
+                                    keep,
+                                    &mut stating,
+                                )
+                            }
                             _ => resolve_node_sink::<S>(
                                 &substituted,
                                 value,
@@ -54774,8 +54828,19 @@ fn foreach_emitted_branch<'a>(update_branch: &PathBranch<'a>) -> PathBranch<'a> 
 /// and answer the source drive with its stop. Shared by the two path-mode folds,
 /// [`resolve_reduce`] and [`resolve_foreach`], so their `FoldStepOutcome` retry
 /// rule cannot drift between them (#2979).
-fn fold_escape_outcome(e: EvalEscape, is_last: bool, aborted: &StashedEscape) -> FoldStepOutcome {
-    if path_alternative_retries(&e, is_last) {
+fn fold_escape_outcome<S: EvalSemantics>(
+    e: EvalEscape,
+    is_last: bool,
+    aborted: &StashedEscape,
+) -> FoldStepOutcome {
+    // #4488: a plain (not guessed) navigation refusal out of a non-last alternative's UPDATE is jq's
+    // own path error -- the resolver made every guess an uncatchable `GuessedPathRefusal` -- and
+    // jq retries any body error, the next alternative's UPDATE then starting from the `null`
+    // state slot `LOADVN` left behind.
+    let jq_path_error = S::TAG == EvalTag::Jq
+        && !is_last
+        && matches!(&e, EvalEscape::Error(err) if err.is_untracked_navigation_error());
+    if path_alternative_retries(&e, is_last) || jq_path_error {
         FoldStepOutcome::Retry
     } else {
         FoldStepOutcome::Return(aborted.stop(e.into()))
@@ -55251,7 +55316,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 (acc_at_register, acc_snapshot) =
                                     reg.fold_branch_provenance::<S>(last.as_ref(), frame, slice_ok);
                                 acc = last.map(|b| b.value.into_owned());
-                                outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                                outcome = Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                                 Demand::Stop
                             }
                         }
@@ -55897,7 +55962,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Escaped(e) => {
-                                        outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                                        outcome =
+                                            Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                                         return Demand::Stop;
                                     }
                                     ResolveFlow::Exhausted => {}
@@ -55960,7 +56026,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 reg.branch_provenance::<S>(None, frame);
                         }
                         if let ResolveFlow::Escaped(e) = flow {
-                            outcome = Some(fold_escape_outcome(e, is_last, &aborted));
+                            outcome = Some(fold_escape_outcome::<S>(e, is_last, &aborted));
                             return Demand::Stop;
                         }
                         Demand::Continue

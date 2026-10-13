@@ -1849,6 +1849,40 @@ OPERANDS = [
     "(foreach .[]? as $i (.; isempty(.[]?); .))",
     "(foreach .[]? as $i (.; try .a catch 1; .))",
     "(foreach 1 as $i (.; isempty(empty); .))",
+    # (#4488) a fold UPDATE that binds with a `?//` chain whose first alternative destructures a
+    # state that is not the register (it fails its first step, so the bare alternative runs at the
+    # register the UPDATE entered), a nested `reduce` whose own chain does the same, and a fold
+    # whose own chain retries its UPDATE onto the next alternative with the `null` state slot
+    # `LOADVN` left behind. The contrasts walk successfully (`null` state), keep a navigating body,
+    # or have no bare alternative.
+    "(. as [$a] ?// $a | 0)",
+    "(. as [$a] ?// $a | 1)",
+    "(. as [$a] ?// $a | true)",
+    "(. as [$a] ?// $a | $a)",
+    "(. as {a:$a} ?// $a | 0)",
+    "(. as [$a] ?// {a:$a} ?// $a | 0)",
+    "(. as [$a] ?// [$a] | 0)",
+    "(. as [$a] ?// $a | .a?)",
+    "(. as [$a] ?// $a | .)",
+    "(. as [$a] ?// $a | (0, 1))",
+    "(. as [$a] ?// $a | try .a catch 0)",
+    "(reduce . as [$a] ?// $a (0; .))",
+    "(reduce . as [$a] ?// $a (0; $a))",
+    "(reduce . as {a:$a} ?// $a (0; .))",
+    "(reduce . as [$a] ?// $a (.; .))",
+    "(reduce . as [$a] (0; .))",
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .a; .))",
+    "(foreach . as [$a] ?// $a (null; .a; .))",
+    "(foreach . as [$a] ?// $a (0; .a; .))",
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .; .))",
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .a?; .))",
+    "(foreach . as [$a] ?// $a ({\"a\":5}; .a; $a))",
+    "(foreach . as {a:$a} ?// $a ({\"a\":5}; .a; .))",
+    "(foreach . as $a ?// $b ({\"a\":5}; .a; .))",
+    "try (foreach . as [$a] ?// $a ({\"a\":5}; .a; .)) catch 7",
+    "try (foreach . as [$a] ?// $a (null; .a; .)) catch 7",
+    "try (foreach . as {a:$a} ?// $a ({\"a\":5}; .a; .)) catch 7",
+    "try (foreach . as [$a] ?// $a ({\"a\":5}; .a; .)) catch .a",
 ]
 
 # The other side of a two-operand shape. Chosen so that, against the inputs
@@ -1946,6 +1980,11 @@ CONTEXTS = [
     ("foreach-update-try-del", "del(foreach .a? as $k (0; try ({X}); .))"),
     ("foreach-update-try-assign", "(foreach .a? as $k (0; try ({X}); .)) = 9"),
     ("foreach-update-plain", "path(foreach .a? as $k (0; {X}; .))"),
+    # (#4488) the same with the loop variable as EXTRACT: it is a marker for the source's node, so
+    # it certifies only against the register the UPDATE left.
+    ("foreach-update-var", "path(foreach .a? as $k (0; {X}; $k))"),
+    ("foreach-update-var-del", "del(foreach .a? as $k (0; {X}; $k))"),
+    ("foreach-update-var-assign", "(foreach .a? as $k (0; {X}; $k)) = 9"),
     # ...and the same body as the EXTRACT, and as a `reduce` UPDATE (every fold body
     # goes through `FoldRegister::resolve_sink`).
     ("foreach-extract-try-path", "path(foreach .a? as $k (0; .; try ({X})))"),

@@ -758,6 +758,19 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   caught step or refuse where jq answers; a fold sibling that reads a frozen `$var` is kept out of the
   uniform siblings for the same reason.
 
+  **Since [#4488](https://github.com/rust-works/succinctly/issues/4488)** a fold UPDATE that binds with a
+  `?//` chain states the register per alternative: the bare `$var` alternative runs after jq's fork restored
+  it, so a body that moves nothing leaves it where the UPDATE entered, and a nested `reduce` leaves it at its
+  INIT whatever its pattern destructures (`path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))` on `null`
+  is `["a"]`, pinned by `test_foreach_update_under_alt_bind_states_the_entry_register_4488`). A non-last
+  alternative whose UPDATE raises the resolver's own (plain, not guessed) path error retries onto the next, as
+  jq's `?//` does, with the `null` state slot `LOADVN` left. Over the 28 operands added to
+  `scripts/jq-path-register-sweep.py` (30,603 `--stage-only` rows, `/usr/bin/jq` 1.7.1, against a `main` build)
+  ACCEPT_WRONG went 2 to 0, DIFF 5 to 0, REFUSE_WRONG 1,042 to 644 and MATCH 29,554 to 29,959, with no
+  regression; a seeded 80,027-row sample of all operands moved 54 rows, all to MATCH or fewer refusals.
+  **Still divergent**: a body that holds a `.` stays opaque to the statement (`(. as [$a] ?// $a | .)`), as
+  do the negated and `reduce`-source contexts; all are refusals.
+
 ## A fold over the register itself (#3790)
 
 `path(foreach . as $k (0; $k; .))` is `[]` in jq for any document, and succinctly answers it: a fold

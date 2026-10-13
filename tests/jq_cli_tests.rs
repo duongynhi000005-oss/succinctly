@@ -133667,3 +133667,139 @@ fn test_foreach_source_def_parameter_bound_to_the_register_4485() -> Result<()> 
         ),
     ])
 }
+
+/// #4488: a `foreach` UPDATE under a `?//` chain, and a fold whose own chain retries its UPDATE. The
+/// bare `$var` alternative runs after jq's fork restored the register, so a body that moves nothing
+/// leaves it where the UPDATE entered, and the fold's EXTRACT (`$k`, a marker for the source's node)
+/// certifies against it: `path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))` on `null` is
+/// `["a"]`, was exit 5. A nested `reduce` leaves it at its INIT whatever its pattern destructures.
+/// A non-last alternative's UPDATE that raises jq's own path error retries onto the next, whose
+/// state is the `null` slot `LOADVN` left: that was answered as `[]` through a `try` that swallowed
+/// the resolver's refusal where jq's register moved to `["a"]`. Controls, jq's own refusals: an
+/// EXTRACT that is not the loop variable, a body that navigates a computed state, and a single
+/// destructuring pattern. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_under_alt_bind_states_the_entry_register_4488() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The first alternative fails on the state `0`, the bare one runs at the entry register.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A nested `reduce` backtracks its pattern, so the register is its INIT's.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; reduce . as [$a] ?// $a (0; .); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[0] as $k (0; (reduce . as [$a] ?// $a (0; .)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // The writes through the same path.
+        (
+            "null",
+            r"del(foreach .a? as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach .a as $k (0; (. as [$a] ?// $a | 0); $k))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach .a as $k (0; (. as [$a] ?// $a | 0); $k)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        // A state equal to the register walks the first alternative: it moved the register.
+        (
+            "null",
+            r"path(foreach .a? as $k (null; (. as [$a] ?// $a | 0); $k))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        // The fold's own chain: alternative one walks, its UPDATE refuses the fresh state, and the
+        // retry navigates the `null` slot -- the register moved to `["a"]`, which `$x` follows.
+        (
+            "null",
+            r#"path(. as $x | . | (try (foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7) | $x)"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | .a? | (try (foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7) | $x)"#,
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(foreach . as [$a] ?// $a ({"a":5}; .a; .))"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"del(. as $x | (try (foreach . as [$a] ?// $a ({"a":5}; .a; .)) catch 7) | $x)"#,
+            "null\n",
+            "",
+            0,
+        ),
+        // Controls: the state is not the register, and EXTRACT is not the loop variable.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach .a as $k (0; (. as [$a] ?// $a | 0); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach .a as $k (0; (. as [$a] ?// $a | 0); 1))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        // A body that navigates the computed state, and a pattern with no bare alternative.
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (. as [$a] ?// $a | .a); $k))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 0"#,
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (. as [$a] ?// [$a] | 0); $k))",
+            "",
+            "Invalid path expression near attempt to access element 0 of 0",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (. as [$a] | 0); $k))",
+            "",
+            "Invalid path expression near attempt to access element 0 of 0",
+            5,
+        ),
+    ])
+}
