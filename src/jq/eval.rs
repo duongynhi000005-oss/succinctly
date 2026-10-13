@@ -36571,7 +36571,9 @@ fn is_try_scoped_component(component: &Expr) -> bool {
 /// narrow: `.`, a pipe of such, a single-pattern bind of `.` whose body is one (the
 /// pattern's own steps still run and raise as jq's do), and a `foreach` whose INIT,
 /// UPDATE and EXTRACT are no-ops (its state is then the accumulator throughout) over a
-/// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]).
+/// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
+/// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
+/// its source, so the register is restored on exit and the accumulator is INIT's node.
 /// A `?//` chain is out (a failed alternative leaves `null`), and so is any pattern whose
 /// `$var` could be returned: the body must itself hand its input on.
 fn update_returns_its_input(e: &Expr) -> bool {
@@ -36601,11 +36603,24 @@ fn update_returns_its_input(e: &Expr) -> bool {
                 && extract.as_deref().map_or(true, body_performs_no_step)
                 && foreach_source_is_path_checked(input)
         }
+        // #4320: the nested `reduce`'s source runs on the register as a `foreach`'s does, and the
+        // same vetter decides whether the resolver checks it; INIT is the accumulator it returns.
+        Expr::Reduce {
+            input,
+            patterns,
+            init,
+            update,
+        } => {
+            patterns.len() == 1
+                && body_performs_no_step(init)
+                && body_performs_no_step(update)
+                && foreach_source_is_path_checked(input)
+        }
         _ => false,
     }
 }
 
-/// Whether a nested `foreach` SOURCE is one the resolver checks against jq's register as
+/// Whether a nested `foreach` or `reduce` SOURCE is one the resolver checks against jq's register as
 /// jq does (#3953): it moves nothing, or it is plain navigation or a single-pattern
 /// destructure of `.` that [`drive_fold_source_with`] routes through the resolver. A
 /// destructure hidden under `first`, `limit`, `select`, `//`, `if`, `try` or a nested

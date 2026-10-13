@@ -616,6 +616,22 @@ OPERANDS = [
     "(foreach (def f: .; f as $v | .) as $k (.; .; .))",
     "(foreach (def f: .; def g: f; g as {a:$a} | .) as $k (.; .; .))",
     "(reduce (def f: .; f as {a:$a} | .) as $k (.; .))",
+    # (#4320, eighth part) a `reduce` whose source destructures the register, as a stage of a
+    # `reduce` UPDATE (the nested `reduce` is vetted like a nested `foreach`): the contrasts are a
+    # source that goes on to navigate, an INIT that is not the register, an UPDATE that binds
+    # again, a `reduce` in the nested `reduce`'s UPDATE, a register an earlier stage moved, a
+    # second `reduce` after the first (jq restores the register on exit), and a `?//` chain.
+    "(reduce (. as {a:$a} | .a) as $k (.; .))",
+    "(reduce (. as {a:$a} | .) as $k (1; .))",
+    "(reduce (. as {a:$a} | .) as $k (.; . as {b:$b} | .))",
+    "(reduce (. as {a:$a} | .) as $k (.; reduce (. as {b:$b} | .) as $j (.; .)))",
+    "(reduce (. as {a:$a} | .) as $k (.; .) | reduce (. as {b:$b} | .) as $j (.; .))",
+    "(reduce (first(. as {a:$a} | .)) as $k (.; .))",
+    "(reduce (.[] as $a | .) as $k (.; .))",
+    "(reduce (try (. as {a:$a} | .)) as $k (.; .))",
+    "(reduce ((.|.) as {a:$a} | .) as $k (.; .))",
+    "(. as {a:$q} | reduce (. as {b:$b} | .) as $k (.; .))",
+    "(. as {a:$q} | reduce (def f: .; f as {b:$b} | .) as $k (.; .))",
     "(foreach (def f: .; try f as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, .) as {a:$a} | .) as $k (.; .; .))",
     "(foreach (def f: .; (f, f) as {a:$a} | .) as $k (.; .; .))",
