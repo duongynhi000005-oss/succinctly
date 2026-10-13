@@ -2051,7 +2051,7 @@ also unchanged by #1349 — `evaluate_yaml_cursor` still materializes each resul
 `IndexMap`-backed `OwnedValue` before `output_value` writes it, so the cursor-native route
 preserves *presentation* but not duplicate keys.
 
-### An untracked terminal path branch — resolved for `path()`/`=`/`|=`/compound-assigns, still open for `del()` and for trailing navigation
+### An untracked path branch — resolved for `path()`/`=`/`|=`/compound-assigns, including trailing navigation; still open for `del()` of a container's child
 
 [#1764](https://github.com/rust-works/succinctly/issues/1764): `reject_untracked_at_terminal`
 (`eval.rs`) is the shared check answering "is a `path()`/`del()`/`=`/`|=` branch that resolved
@@ -2090,19 +2090,29 @@ the way it did (and, in jq mode, still does) before this fix. A genuine error/br
 produced *while computing* what would otherwise be an untracked value is not itself
 untracked and still propagates normally: `(.a, error("boom")) = 5` still raises `boom`.
 
-**`path()`'s own trailing-iterate case is covered; `=`/`|=`/compound-assign's is not.**
-`path()` strips a trailing bare iterate off its own path expression before resolving it
-(`defer_trailing_iterate`, #888) and re-splices it after the terminal check runs — so
-`path(1 | .[])` *is* covered by this fix (confirmed live: now no-ops in yq mode, matching
-the same general rule above, where it used to raise jq's "near attempt to iterate through 1"
-wording). `=`/`|=`/compound-assign never defer a trailing iterate at all, so the identical
-shape in *their* context — `(.a, 1 | .[]) = 5`, still real yq's own no-op — never reaches
-the terminal check: `resolve_node`'s own `Expr::Iterate` arm (and `resolve_index_expr`'s
-analogous dynamic-key check) each raise independently and unconditionally first. Fixing that
-needs the same kind of skip-untracked awareness threaded into `resolve_node`, a 21-call-site
-function with its own scattered, independently jq-mode-verified checks — a materially larger
-and riskier surface than this fix's single terminal-position check, so left open rather than
-guessed at here. Tracked as [#1868](https://github.com/rust-works/succinctly/issues/1868).
+**Trailing navigation after a constant is covered too (#1868).** An untracked branch that is a
+*constant* followed by a static navigation step — `(.a, 1 | .[]) = 5`, `(.a, 1 | .b) = 5`,
+`(.a, "s" | .[0]) = 5`, `(.a, 1 | .[0:1]) = 5`, `(1 | .[]) = 5` — is the same silent no-op in real
+yq (captured on v4.53.3: `a: 5` / `b: 2`), because yq has no "untracked" notion at all: a literal
+is a detached node, navigating into a scalar yields zero candidates, and an update on a detached
+node does not touch the document. `succinctly yq` used to raise jq's "Invalid path expression"
+from the resolver's own navigation checks ahead of the terminal check above ever running. The
+resolver now drops such a constant from the pipe before resolving it (`yq` mode only,
+`prune_detached_constants_before_navigation`): a scalar literal (`null`, a boolean, a number or a
+string) that sits first in the pipe or as a member of the comma feeding the step, and is followed by a field,
+an index, a literal-bounded slice, `.[]` or any of those under `?`. `del(.a, [1] | .[])` is
+`b: 2`, as in yq (so is `path(null | .a)`: no path, where jq refuses). jq mode keeps every refusal (#843/#986/#530), and an error raised while
+*producing* a navigation key still propagates (`(.a, 1 | .[error("p")]) = 5` raises `p`, as in
+yq).
+
+The pruning is deliberately syntactic. Every other untracked value stays refused in yq mode,
+because a refusal is the only honest answer where yq would write: a bound `$x` (yq's variables
+hold the document's own nodes, so `.a as $y | .a | ($y.b) = 9` reaches the document; #2072, #3037;
+the owned routes inline such a value as a literal array or object, which is why only a *scalar*
+literal qualifies and `(.a, [1] | .[0]) = 5`, yq `a: 5`, stays refused),
+a register or a fold's accumulator (#3456, #4445), a computed value (`(1 | tostring) | .[0]`), a
+computed key (`(.a, 1 | .[$k]) = 5`, yq `a: 5`), a slice with a computed bound, and `..`
+(`(.a, 1 | ..) = 5`, yq `a: 5`). Those rows are the open residual of #1868.
 
 **`del()` does not share this model and is deliberately excluded from the fix.** Its real
 behaviour, confirmed live across argument-order permutations, is order-*dependent* in a way

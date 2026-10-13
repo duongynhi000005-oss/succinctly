@@ -29568,6 +29568,122 @@ fn test_yq_untracked_comma_branch_del_stops_the_loop_1764() -> Result<()> {
     Ok(())
 }
 
+/// #1868: an untracked branch followed by further navigation is the same silent no-op as the
+/// untracked terminal #1764 fixed. yq has no untracked notion: a literal is a detached node,
+/// navigating into it yields nothing or a detached child, and the write leaves the document
+/// alone while every other branch is still written. Every row is real yq v4.53.3's answer
+/// (`a: 5` / `b: 2` unless noted); each used to raise jq's "Invalid path expression".
+#[test]
+fn test_yq_untracked_branch_then_navigation_is_a_noop_1868() -> Result<()> {
+    let doc = "a: 1\nb: 2\n";
+    for filter in [
+        // Iterate, over a scalar, a string, a container.
+        "(.a, 1 | .[]) = 5",
+        "(.a, \"s\" | .[]) = 5",
+        "(.a, null | .[]) = 5",
+        "(.a, 1 | .[] | .c) = 5",
+        // Field, index and slice steps.
+        "(.a, 1 | .b) = 5",
+        "(.a, 1 | .[0]) = 5",
+        "(.a, 1 | .x.y) = 5",
+        "(.a, 1 | .x?) = 5",
+        "(.a, 1 | .[0:1]) = 5",
+        // The other write operators.
+        "(.a, 1 | .[]) |= 5",
+    ] {
+        let (out, code) = run_yq_stdin(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{filter}: out: {out:?}");
+        assert_eq!(out.trim(), r#"{"a":5,"b":2}"#, "{filter}");
+    }
+
+    let (out, code) = run_yq_stdin("(.a, 1 | .[]) += 5", doc, &["-o=json", "-I=0"])?;
+    assert_eq!(code, 0, "out: {out:?}");
+    assert_eq!(out.trim(), r#"{"a":6,"b":2}"#);
+
+    // Without a trackable sibling there is nothing to write: the document is unchanged.
+    for filter in ["(1 | .[]) = 5", "(1 | .b) = 5"] {
+        let (out, code) = run_yq_stdin(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{filter}: out: {out:?}");
+        assert_eq!(out.trim(), r#"{"a":1,"b":2}"#, "{filter}");
+    }
+    Ok(())
+}
+
+/// #1868: only a *successfully computed* untracked value is a no-op. An error raised while
+/// producing a navigation key is not, so it still propagates (yq says `p` too).
+#[test]
+fn test_yq_untracked_branch_then_navigation_error_still_propagates_1868() -> Result<()> {
+    let (_out, err, code) = run_yq_stdin_with_stderr(
+        "(.a, 1 | .[error(\"p\")]) = 5",
+        "a: 1\nb: 2\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_ne!(code, 0);
+    assert!(err.contains('p'), "err={err}");
+    Ok(())
+}
+
+/// #1868: `del()` over a constant followed by navigation is yq's answer too -- the branch reads
+/// nothing, so only `.a` is deleted (`b: 2`). A lone untracked target still stops the loop as in
+/// #1865 (`del(.a, 1)`).
+#[test]
+fn test_yq_del_after_untracked_branch_navigation_1868() -> Result<()> {
+    for filter in ["del(.a, 1 | .[])", "del(.a, \"s\" | .[0])"] {
+        let (out, code) = run_yq_stdin(filter, "a: 1\nb: 2\n", &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{filter}: out: {out:?}");
+        assert_eq!(out.trim(), r#"{"b":2}"#, "{filter}");
+    }
+    Ok(())
+}
+
+/// #1868: only a scalar literal is pruned. A bound variable's node (the owned routes inline one as
+/// a literal array or object), a computed value, a computed key, `..` and a step with a computed
+/// bound keep the refusal, since yq's variables hold the document's
+/// own nodes and a write through them reaches it (#2072, #3037); `(.a, 1 | .[$k]) = 5` and
+/// `(.a, 1 | ..) = 5` are recorded residuals in `docs/compliance/yq/limitations.md`.
+#[test]
+fn test_yq_untracked_branch_navigation_still_refuses_what_is_not_a_constant_1868() -> Result<()> {
+    for filter in [
+        ".a as $y | .a | ($y.b) = 9",
+        "(.a, (1 | tostring) | .[0]) = 5",
+        "(.a, [1] | .[0]) = 5",
+        "del(.a, [1] | .[])",
+        "\"x\" as $k | (.a, 1 | .[$k]) = 5",
+        "(.a, 1 | ..) = 5",
+    ] {
+        let (_out, err, code) =
+            run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &["-o=json", "-I=0"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(err.contains("Invalid path expression"), "{filter}: {err}");
+    }
+    Ok(())
+}
+
+/// #1868: jq mode keeps every refusal (#843/#986/#530): the same shapes still raise what jq 1.7.1
+/// raises for them (captured with `/usr/bin/jq`), and a caught scalar still reports the
+/// path-iterate wording.
+#[test]
+fn test_jq_untracked_branch_then_navigation_still_raises_1868() -> Result<()> {
+    for (filter, wording) in [
+        ("(.a, 1 | .[]) = 5", "Cannot iterate over number (1)"),
+        ("(.a, 1 | .b) = 5", "Cannot index number with string \"b\""),
+        ("(.a, 1 | .[0:1]) = 5", "Cannot index number with object"),
+        ("(.a, 1 | ..) = 5", "Invalid path expression with result 1"),
+    ] {
+        let (_out, err, code) = run_jq_stdin_with_stderr(filter, r#"{"a":1,"b":2}"#, &["-c"])?;
+        assert_eq!(code, 5, "{filter}: err={err}");
+        assert!(err.contains(wording), "{filter}: err={err}");
+    }
+    let (_out, err, code) =
+        run_jq_stdin_with_stderr("path(try (.a, error(5)) catch .[])", r#"{"a":1}"#, &["-c"])?;
+    assert_eq!(code, 5, "err={err}");
+    assert!(
+        err.contains("near attempt to iterate through 5"),
+        "err={err}"
+    );
+    Ok(())
+}
+
 /// #3207: a `del()` whose every resolved target is a `null`/`true`/`false`
 /// literal identical to its input deletes nothing, as in real yq v4.53.3.
 /// #3125's jq-only identity carve-out used to resolve that literal to the
