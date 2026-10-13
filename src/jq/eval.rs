@@ -36678,9 +36678,10 @@ fn is_try_scoped_component(component: &Expr) -> bool {
 /// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
-/// A `?//` chain is in as the nested fold's source or its own loop pattern (#4506), since the
-/// UPDATE it vets is a no-op that cannot fail and so leaves no `null` behind for a retry; a pattern
-/// whose `$var` could be returned is out: the body must itself hand its input on.
+/// A `?//` chain is in as the nested fold's source (#4506), and as a nested `reduce`'s own loop
+/// pattern when [`reduce_alternative_is_immaterial`] holds; any other chain there is out (a failed
+/// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must
+/// itself hand its input on.
 fn update_returns_its_input(e: &Expr) -> bool {
     match e {
         Expr::Identity => true,
@@ -36702,7 +36703,7 @@ fn update_returns_its_input(e: &Expr) -> bool {
             update,
             extract,
         } => {
-            nested_fold_keeps_state(input, patterns, init, update)
+            nested_fold_keeps_state(input, patterns, init, update, false)
                 && extract.as_deref().map_or(true, body_performs_no_step)
         }
         // #4320: the nested `reduce` is vetted as the `foreach` is; its INIT is the accumulator it
@@ -36714,18 +36715,25 @@ fn update_returns_its_input(e: &Expr) -> bool {
             patterns,
             init,
             update,
-        } => nested_fold_keeps_state(input, patterns, init, update),
+        } => nested_fold_keeps_state(input, patterns, init, update, true),
         _ => false,
     }
 }
 
-/// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): a loop
-/// pattern (a `?//` chain too, #4506: a failed alternative leaves `null` only when UPDATE raises, and
-/// the UPDATE here is a no-op), an INIT and UPDATE that move
+/// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one loop
+/// pattern, or for a `reduce` a `?//` chain the resolver may retry past a guessed refusal
+/// ([`reduce_alternative_is_immaterial`], #4506; any other chain leaves `null` when an alternative's
+/// UPDATE fails, which nothing models here), an INIT and UPDATE that move
 /// nothing, so the fold's state is the accumulator throughout, and a SOURCE the resolver checks
 /// as jq does ([`foreach_source_is_path_checked`]). A `foreach` also needs a no-op EXTRACT.
-fn nested_fold_keeps_state(input: &Expr, patterns: &[Pattern], init: &Expr, update: &Expr) -> bool {
-    !patterns.is_empty()
+fn nested_fold_keeps_state(
+    input: &Expr,
+    patterns: &[Pattern],
+    init: &Expr,
+    update: &Expr,
+    is_reduce: bool,
+) -> bool {
+    (patterns.len() == 1 || (is_reduce && reduce_alternative_is_immaterial(patterns, update)))
         && body_performs_no_step(init)
         && body_performs_no_step(update)
         && foreach_source_is_path_checked(input)
@@ -36778,7 +36786,7 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
     // fresh value is not, and is accepted here where jq raises. A `?//` chain in the source is read as
     // a single pattern is (#4506): the resolver retries the alternatives as jq does, and the fold's
     // state is the accumulator whichever one matches (a chain whose every alternative fails raises
-    // in jq and here). The loop pattern of the nested fold may be a chain too (`nested_fold_keeps_state`).
+    // in jq and here). The loop pattern of a nested `reduce` may be a chain too when it is immaterial (`nested_fold_keeps_state`).
     cannot_move_register(e)
         || navigation(e, None)
         || foreach_source_destructures_register(e, Vec::new(), false)
@@ -54594,6 +54602,11 @@ fn settle_fold_alternative<S: EvalSemantics>(
     }
 }
 
+/// A `foreach` never retries past a guessed refusal on the strength of
+/// [`reduce_alternative_is_immaterial`]: its EXTRACT is emitted with the register the pattern moved,
+/// so which alternative bound is observable.
+const FOREACH_ALTERNATIVE_IS_MATERIAL: bool = false;
+
 /// Whether it does not matter to a `reduce` which `?//` alternative binds its source element
 /// (#4506): a chain whose last alternative is a bare variable and whose UPDATE is a no-op.
 ///
@@ -54608,9 +54621,13 @@ fn settle_fold_alternative<S: EvalSemantics>(
 /// alternative's step, on a source that moved the register), and an enclosing `reduce` UPDATE
 /// that nests it was refused with it. Not a `foreach`, whose EXTRACT is emitted with the register
 /// the pattern moved.
+///
+/// A computed key is not retried past: running its generator twice would repeat its effects, which
+/// the walk cannot show equal to jq's count.
 fn reduce_alternative_is_immaterial(patterns: &[Pattern], update: &Expr) -> bool {
     patterns.len() > 1
         && matches!(patterns.last(), Some(Pattern::Var(_)))
+        && !patterns.iter().any(pattern_has_computed_key)
         && body_performs_no_step(update)
 }
 
@@ -56457,7 +56474,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     &elem,
                     &reg,
                     refused_step_could_succeed.get(),
-                    false,
+                    FOREACH_ALTERNATIVE_IS_MATERIAL,
                     &aborted,
                 ) {
                     FoldStepOutcome::Retry => continue,

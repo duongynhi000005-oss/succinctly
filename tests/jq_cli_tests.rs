@@ -67904,9 +67904,10 @@ fn test_fold_pattern_step_that_never_succeeds_retries_3998() -> Result<()> {
 /// and `or`. The un-wrapped fold now reaches the second alternative's own refusal, the one jq
 /// raises ("element 0"). Contrast: an element that *is* equal to the register by value (a
 /// `map(.)` copy of the array the register sits on) may be its node, so the walk's refusal is
-/// still the loud guess of #3840 -- except for a chain whose last alternative is a bare `$var`
-/// over a no-op UPDATE (#4506), which cannot raise whichever alternative binds and so retries as
-/// jq does and fails at the result ("with result 0"), as jq does. Every jq side captured from jq 1.7.1.
+/// still the loud guess of #3840 -- except for a `reduce` chain whose last alternative is a bare
+/// `$var` over a no-op UPDATE (#4506): that cannot raise whichever alternative binds, so it takes
+/// the retry path like jq and fails at the result ("with result 0"). That row's expected message
+/// moved from "element 0" to "with result 0" because it now matches jq, not because it regressed. Every jq side captured from jq 1.7.1.
 #[test]
 fn test_fold_pattern_against_known_untracked_register_retries_3999() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

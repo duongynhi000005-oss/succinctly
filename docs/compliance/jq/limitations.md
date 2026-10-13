@@ -2240,7 +2240,7 @@ is the revert that established what the other one costs.
    that the walk can only guess at (the source moved the register off the node the step reads) is retried instead of
    refused. A chain whose last alternative can fail (`... as {a:$q} ?// {b:$y} (.; .)`) keeps the guess and refuses
    where jq may answer. Over the
-   158 `reduce` operands (137,259 `--stage-only` rows) 156 refusals become matches and none is lost. The vetter inherits
+   158 `reduce` operands as the sweep stood then (137,259 `--stage-only` rows) 156 refusals become matches and none is lost. The vetter inherits
    the router's reading of a call, so a `def` whose body returns a fresh value (`def f: {a:1}; f as {a:$a}`) is
    accepted in a `reduce` UPDATE where jq raises, exactly as it is at the top level and on a build without this arm ([#4452](https://github.com/rust-works/succinctly/issues/4452)). A `$x` bound outside the
    `foreach` is read since [#4320](https://github.com/rust-works/succinctly/issues/4320)'s second part:
