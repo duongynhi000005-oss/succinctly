@@ -132598,6 +132598,43 @@ fn test_alternative_retries_on_an_uncaught_body_path_error_4487() -> Result<()> 
             "",
             0,
         ),
+        // The retried alternative's rows after the first alternative already emitted a path, and
+        // inside a `try`/collect, where a guess swallowed would lose the write.
+        (
+            "[]",
+            r"path(. as [$q] ?// $q | (., (1 and (.a?))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r#"try path(. as [$q] ?// $q | (1 and (.a?))) catch "c""#,
+            "",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"[path(try (. as [$q] ?// $q | (1 and (.a?))))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"del(try (. as [$q] ?// $q | (1 and (.a?))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[]",
+            r"path(foreach (1,2) as [$q] ?// $q (.; .; (1 and (.a?))))",
+            "",
+            "",
+            0,
+        ),
         // Inside a fold body the retry is not read (it accepted a `del` jq refuses).
         (
             "[true]",

@@ -36692,23 +36692,6 @@ fn body_performs_no_step(e: &Expr) -> bool {
     }
 }
 
-/// Whether the first thing `e` evaluates is a navigation step on its input (#4115): a bare
-/// `.k`/`.[n]`/`.[]`/slice, a bare postfix `?` of one (jq's `INDEX_OPT`/`EACH_OPT`, which does
-/// not catch a path error), the first stage of a pipe, the first branch of a comma, the left operand of a `//`, or a
-/// parenthesised one. Anything else answers `false`, including the `try`-scoped `(.a)?`
-/// and an `if`, whose jq behaviour differs per form -- the safe direction, a refusal stays one.
-fn body_leads_with_navigation(e: &Expr) -> bool {
-    match e {
-        e if is_postfix_optional_primitive(e) => true,
-        Expr::Optional(inner) => is_postfix_optional_primitive(inner),
-        Expr::Paren(inner) => body_leads_with_navigation(inner),
-        Expr::Pipe(stages) => stages.first().is_some_and(body_leads_with_navigation),
-        Expr::Comma(branches) => branches.first().is_some_and(body_leads_with_navigation),
-        Expr::Alternative(lhs, _) => body_leads_with_navigation(lhs),
-        _ => false,
-    }
-}
-
 /// Flatten an expression into the list of path components it denotes.
 ///
 /// `Pipe` and `Paren` are transparent and `Identity` contributes nothing, so
@@ -51819,11 +51802,12 @@ fn each_pattern_walk_probed<S: EvalSemantics>(
 /// end)` is jq's `["a",0]`, and a retry would answer `[]`, which `del`/`=`
 /// then write through. Not retrying costs only the rows where jq's *own*
 /// path error triggers the next alternative -- a refusal, the safe direction.
-/// The one such row this arm can prove is a body that *leads with* a navigation
-/// step ([`body_leads_with_navigation`]) after a destructure that moved the
-/// register onto a node the ambient is not: the first step fails jq's
-/// `path_intact` before the body emits anything, so `path(. as {a:$q} ?// $z |
-/// .a)` retries onto `$z` and answers jq's `["a"]` (#4115). A refusal jq raises
+/// The rows this arm can prove are an untracked navigation the body raises, in jq mode on a
+/// non-last alternative outside every fold body (the `retries` rule in the walk's sink): the
+/// destructure moved the register onto a node the ambient is not, so a navigation of the
+/// ambient fails jq's `path_intact`, and `?//` retries on any body error. The first step of a
+/// body is #4115 (`path(. as {a:$q} ?// $z | .a)` retries onto `$z` and answers jq's `["a"]`),
+/// a later one #4487 (`(1 and (.a?))`). A refusal jq raises
 /// only at `PATH_END` (an untracked branch) reaches this loop as
 /// `ResolveFlow::Stopped` -- `resolve_terminal`'s sink refuses the branch
 /// with `Demand::Stop` -- and retries like jq's fork does, `first`/`limit`
@@ -52067,7 +52051,6 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         &all_names,
                     );
                     clear_nonretryable_stop();
-                    let mut first_step_refused_by_jq = false;
                     let flow = if reg.path.depth() == 0 {
                         match register {
                             // No step ran (a bare `$x` alternative, or an
@@ -52140,10 +52123,6 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         // register the stage entered and fails the same way
                         // (`path(reduce .[1+1] as $k (.; . as [$q] ?// $z | .a?))` on `[[]]`
                         // raises in jq).
-                        first_step_refused_by_jq = S::TAG == EvalTag::Jq
-                            && fold_body::depth() == 0
-                            && !equals_register(value, &reg.value)
-                            && body_leads_with_navigation(&substituted);
                         let seed = if null_bool_identical(value, &reg.value) {
                             PathBranch::new(reg.path, Cow::Borrowed(value), true)
                         } else {
@@ -52204,25 +52183,19 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             Demand::Stop
                         }
                         ResolveFlow::Escaped(escape) => {
-                            // #4115: the first step is the first thing the body evaluates and it
-                            // always raises, so no later step runs and this escape is its refusal.
+                            // #4115, #4487: an untracked navigation the body raised, on a
+                            // non-last alternative, is jq's own path error (the register the
+                            // pattern's walk left is known and the navigated value is not it --
+                            // [`guess_refusal`] already made every guess an uncatchable
+                            // `GuessedPathRefusal`, which is not matched here), and jq's `?//`
+                            // retries on any body error. #4115 is the first step of a body, which
+                            // always raises before anything is emitted (`. as [$q] ?// $z | .a?`);
+                            // #4487 any later step (`(1 and (.a?))`, whose right operand runs on
+                            // the input). Not the terminal `with result` refusal, and only outside
+                            // every fold body: inside one the same retry accepted a `del` jq
+                            // refuses (the sweep's `reduce-source`/`reduce-update-*` contexts, 21
+                            // rows), the accumulator being a state this walk does not track.
                             let retries = path_alternative_retries(&escape, is_last)
-                                || (first_step_refused_by_jq
-                                    && !is_last
-                                    && matches!(
-                                        &escape,
-                                        EvalEscape::Error(e) if e.is_untracked_navigation_error()
-                                    ))
-                                // #4487: an untracked navigation the body raised is jq's own path
-                                // error, not a guess ([`guess_refusal`] already made every guess
-                                // an uncatchable `GuessedPathRefusal`, which is not matched here):
-                                // the register the pattern's walk left is known and the navigated
-                                // value is not it, as for `(1 and (.a?))` whose right operand runs
-                                // on the input. jq's `?//` retries on any body error, so the next
-                                // alternative runs. Not the last alternative (its error is final)
-                                // and not the terminal `with result` refusal. Only outside every fold body: inside one
-                                // the same retry accepted a `del` jq refuses (the sweep's `reduce-source`/`reduce-update-*`
-                                // contexts, 21 rows), the accumulator being a state this walk does not track.
                                 || (S::TAG == EvalTag::Jq
                                     && !is_last
                                     && fold_body::depth() == 0
@@ -53790,6 +53763,11 @@ fn guess_refusal_flow(
 /// a different alternative than jq's, which `del`/`=` then write through.
 /// That costs the rows where jq's own path error triggers the retry, as a
 /// refusal -- the safe direction. See [`resolve_as_pattern`] for the rows.
+///
+/// [`resolve_as_pattern`] itself reads one of those refusals as jq's own on a non-last
+/// alternative outside every fold body in jq mode (#4115, #4487), so the folds' sites
+/// ([`fold_escape_outcome`]) and the walk's ([`walk_escape_retries`]), which call this
+/// unchanged, still decline the same body error.
 fn path_alternative_retries(escape: &EvalEscape, is_last: bool) -> bool {
     match escape {
         EvalEscape::Error(e) => {
