@@ -36646,9 +36646,10 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
     // routing instead of by one hand-written shape (`def f: .`). It is the router's syntactic
     // answer with no outer markers and no `null` register, so a source the live router places
     // only with either stays refused (the safe direction). It inherits the router's own reading
-    // of a call: a `def` whose body returns a fresh value is read as the register too, an
-    // accept jq does not make, identical on a build without this arm (#4452). Not a `?//` chain,
-    // whose failed alternative leaves `null` (the same exclusion as above).
+    // of a call. A `def` whose body builds its result is routed too since #4452 (the resolver
+    // then refuses the pattern's step as jq does); one that hands the register on next to a
+    // fresh value is not, and is accepted here where jq raises. Not a `?//` chain, whose failed
+    // alternative leaves `null` (the same exclusion as above).
     let no_chain = !any_subexpr(
         e,
         &mut |s| matches!(s, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
@@ -49785,7 +49786,8 @@ impl<'e> RegisterSpine<'e> {
     /// (-(foreach (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .; .))))`, where the negated
     /// operand is a value-mode subexpression) the resolver refuses a step jq never runs.
     fn binds_fresh(&mut self, e: &'e Expr, every: bool) -> bool {
-        match unwrap_bind_source(e) {
+        let e = unwrap_bind_source(e);
+        match e {
             Expr::Comma(items) if every => items.iter().all(|item| self.binds_fresh(item, true)),
             Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, false)),
             Expr::FuncCall { name, args, .. } if args.is_empty() => {
@@ -49805,6 +49807,20 @@ impl<'e> RegisterSpine<'e> {
                 let body: &'e Expr = &def.body;
                 self.body_binds_fresh(body, 0, 0)
             }
+            // A pipe ends in what its last stage that is not `.` yields (`def g: f | .`), so a call
+            // there is read through its body; any other last stage is [`yields_only_fresh_values`]'s.
+            Expr::Pipe(stages) => match stages.iter().rev().find(|stage| !is_identity_stage(stage))
+            {
+                Some(last)
+                    if matches!(
+                        unwrap_bind_source(last),
+                        Expr::FuncCall { .. } | Expr::DefCall { .. }
+                    ) =>
+                {
+                    self.binds_fresh(last, every)
+                }
+                _ => yields_only_fresh_values(e),
+            },
             other => yields_only_fresh_values(other),
         }
     }
@@ -50063,8 +50079,15 @@ impl<'e> RegisterSpine<'e> {
                 // CHAIN))` on `[]`) would refuse.
                 // #4452: a single pattern over a bound expression with a fresh leaf (a call whose
                 // `def` builds its result, a fresh value beside the register in a comma): the step
-                // raises on the leaf whatever the register is, which only the resolver models.
-                if routes_destructuring(patterns) && self.binds_fresh(expr, false) {
+                // raises on the leaf whatever the register is, which only the resolver models. Not
+                // for the `through_reduce` walk, which asks where `.` is not known to be the
+                // register: a `reduce` source inside another fold's body that is a value-mode
+                // subexpression (`del(try (-(reduce 1 as $k (.; reduce (def f: {"a":1}; f as {a:$a}
+                // | .) as $j (.; .)))))`) is answered by jq, and the loud refusal of that route is not.
+                if !self.through_reduce
+                    && routes_destructuring(patterns)
+                    && self.binds_fresh(expr, false)
+                {
                     return Reach::Destructures;
                 }
                 if (routes_destructuring(patterns)

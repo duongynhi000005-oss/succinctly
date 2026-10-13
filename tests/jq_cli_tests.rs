@@ -61346,6 +61346,23 @@ fn test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452() -> 
             fresh,
             5,
         ),
+        // Behind a pipe whose last stage is the call.
+        (
+            doc,
+            r#"[path(foreach (def f: {"a":1}; def g: f | .; g as {a:$a} | .) as $y (.; .; .))]"#,
+            "",
+            fresh,
+            5,
+        ),
+        // A `reduce` source nested in another fold's body stays as it was: routed, the loud
+        // refusal of that route would fire in a value-mode operand jq answers.
+        (
+            doc,
+            r#"del(try (-(reduce 1 as $k (.; reduce (def f: {"a":1}; f as {a:$a} | .) as $j (.; .)))))"#,
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
         (
             doc,
             r"[path(foreach (def f: keys; f as [$a] | .) as $y (.; .; .))]",

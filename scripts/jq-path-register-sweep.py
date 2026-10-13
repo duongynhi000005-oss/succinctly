@@ -617,6 +617,10 @@ OPERANDS = [
     "(foreach ((., {a:1}) as {a:$a} | .) as $k (.; .; .))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))",
     "(foreach (def f: [.]; f as [$a] | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; def g: f | .; g as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: {a:1}; def g: . | f; g as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: .; def g: f | .; g as {a:$a} | .) as $k (.; .; .))",
+    "(reduce 1 as $k (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))",
     # (#4320) a `$x` bound outside the `foreach` that is the register at it: certified by
     # marker identity, so it is the source's own destructure as `. as {a:$a}` is. The contrasts
     # are an outer `$x` bound to a member, a `reduce` (which backtracks its source), an outer
