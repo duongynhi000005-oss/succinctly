@@ -3458,6 +3458,113 @@ fn test_yq_paths_preserves_nested_duplicate_mapping_keys_868() -> Result<()> {
     Ok(())
 }
 
+/// #1342: `paths(f)` evaluates `f` on the node each path names, not on
+/// whatever the path resolves to afterwards. It used to materialize the
+/// document and re-resolve each path, so a repeated YAML mapping key
+/// contributed one path (`a` once) where bare `paths` and `to_entries` answer
+/// it twice, and `paths(. == 1)` looked up the surviving `a: 2` and found
+/// nothing. `paths` is a succinctly extension in yq mode (real yq's lexer
+/// rejects it), so the criterion is consistency with `[paths]` (#868).
+#[test]
+fn test_yq_paths_filter_preserves_duplicate_mapping_keys_1342() -> Result<()> {
+    let yaml = "a: 1\na: 2\nb: 3\n";
+    let flags = &["-o=json", "-I=0", "--jq-extensions"];
+    for (filter, expected) in [
+        ("[paths(scalars)]", r#"[["a"],["a"],["b"]]"#),
+        ("[paths(..)]", r#"[["a"],["a"],["b"]]"#),
+        ("[paths(. > 0)]", r#"[["a"],["a"],["b"]]"#),
+        // The discriminator: each occurrence is judged on its own value.
+        ("[paths(. == 1)]", r#"[["a"]]"#),
+        ("[paths(. == 2)]", r#"[["a"]]"#),
+        ("[paths(. == 3)]", r#"[["b"]]"#),
+        // `paths(true)` is `paths`, duplicates and all.
+        ("[paths(true)]", r#"[["a"],["a"],["b"]]"#),
+    ] {
+        let (output, code) = run_yq_stdin(filter, yaml, flags)?;
+        assert_eq!(code, 0, "{filter}: out: {output:?}");
+        assert_eq!(output.trim(), expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// #1342: the same, one mapping deeper and through a sequence, so the
+/// duplicate-key walk is not just a root-level special case.
+#[test]
+fn test_yq_paths_filter_preserves_nested_duplicate_mapping_keys_1342() -> Result<()> {
+    let yaml = "x:\n  a: 1\n  a: 2\n  b: 3\nl:\n  - c: 1\n    c: 2\n";
+    let (output, code) = run_yq_stdin(
+        "[paths(scalars)]",
+        yaml,
+        &["-o=json", "-I=0", "--jq-extensions"],
+    )?;
+    assert_eq!(code, 0, "out: {output:?}");
+    assert_eq!(
+        output.trim(),
+        r#"[["x","a"],["x","a"],["x","b"],["l",0,"c"],["l",0,"c"]]"#
+    );
+
+    let (output, code) = run_yq_stdin(
+        "[paths(type == \"!!map\")]",
+        yaml,
+        &["-o=json", "-I=0", "--jq-extensions"],
+    )?;
+    assert_eq!(code, 0, "out: {output:?}");
+    assert_eq!(output.trim(), r#"[["x"],["l",0]]"#);
+    Ok(())
+}
+
+/// #1342: the filter still sees each node as `paths(f)` always showed it --
+/// an explicit tag resolved (`!!str 3` is a string, not an int), and no
+/// position (`key`/`line` read nothing there) -- so only the duplicate-key
+/// answer moves.
+#[test]
+fn test_yq_paths_filter_shows_the_node_as_before_on_a_duplicate_key_document_1342() -> Result<()> {
+    let yaml = "a: 1\na: 2\nc: !!str 3\n";
+    let flags = &["-o=json", "-I=0", "--jq-extensions"];
+    for (filter, expected) in [
+        (r#"[paths(type == "!!str")]"#, r#"[["c"]]"#),
+        (r#"[paths(type == "!!int")]"#, r#"[["a"],["a"]]"#),
+        (r#"[paths(key == "a")]"#, "[]"),
+        ("[paths(line > 0)]", "[]"),
+    ] {
+        let (output, code) = run_yq_stdin(filter, yaml, flags)?;
+        assert_eq!(code, 0, "{filter}: out: {output:?}");
+        assert_eq!(output.trim(), expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// #1342: a consumer that stops early still stops the walk -- the arm is a
+/// native producer, not a collected list handed to `first`/`limit`.
+#[test]
+fn test_yq_paths_filter_duplicate_keys_under_a_stopping_consumer_1342() -> Result<()> {
+    let yaml = "a: 1\na: 2\nb: 3\n";
+    let flags = &["-o=json", "-I=0", "--jq-extensions"];
+    for (filter, expected) in [
+        ("first(paths(scalars))", r#"["a"]"#),
+        ("[limit(2; paths(scalars))]", r#"[["a"],["a"]]"#),
+        ("[limit(3; paths(scalars))] | length", "3"),
+        ("isempty(paths(. == 2))", "false"),
+        ("isempty(paths(. == 9))", "true"),
+    ] {
+        let (output, code) = run_yq_stdin(filter, yaml, flags)?;
+        assert_eq!(code, 0, "{filter}: out: {output:?}");
+        assert_eq!(output.trim(), expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// #1342: a JSON document read in jq mode collapses a duplicate key to its
+/// first position and last value before any builtin sees it, so `paths(f)`
+/// there is unchanged and still matches real jq.
+#[test]
+fn test_jq_mode_paths_filter_duplicate_key_still_dedupes_1342() -> Result<()> {
+    let (output, code) = run_jq_stdin("[paths(scalars)]", r#"{"a":1,"a":2,"b":3}"#, &["-c"])?;
+    assert_eq!(code, 0, "out: {output:?}");
+    assert_eq!(output.trim(), r#"[["a"],["b"]]"#);
+    Ok(())
+}
+
 /// #1556: `range`'s bound resolution moved to a native `eval_each` lazy arm
 /// (`each_range`), shared unmodified with yq mode via `<S: EvalSemantics>`.
 /// yq mode has no `input` builtin at all, so the jq-mode headline repro

@@ -14928,8 +14928,13 @@ fn eval_each_generic<S: EvalSemantics, V: DocumentValue>(
         // time) and the retry's error, computed after the stop, was a trailing
         // escape the consumer dropped. Same demand-forwarding bridge as
         // `Builtin::Path`'s non-navigational arm above and the arm below.
+        //
+        // #1342: where duplicate keys survive (yq), native here so the walk
+        // sees both occurrences of a mapping key; `each_paths_filter_generic`
+        // keeps the demand-forwarding and sends only a live `input`/`inputs`
+        // queue to the bridge below, which every jq-mode call still takes.
         Expr::Builtin(Builtin::PathsFilter(_)) => {
-            bridge_to_each_owned_flow::<S, V>(expr, value, cursor, optional, sink)
+            each_paths_filter_dispatch::<S, V>(expr, value, cursor, optional, sink)
         }
 
         // #3448: jq's `=`/`op=`/`//=` run their right side as the outer
@@ -23466,6 +23471,13 @@ fn finish_fused_slice_pipe<S: EvalSemantics, V: DocumentValue>(
 /// must stay under the ceiling, so a document nested 383 levels is the deepest
 /// this walk takes.
 ///
+/// `nodes`, when given, receives each non-root node's value and cursor in step with
+/// `paths` (index for index) in the `!leaves_only` mode -- the pairing
+/// `paths(f)` needs (#1342) to run `f` on the node *each* path names rather
+/// than re-resolving the path afterwards, which can only find the first of
+/// two occurrences of a duplicate key. The caller's other two modes pass
+/// `None`.
+///
 /// #1829: `effective_fields_checked`, not the infallible `effective_fields`
 /// -- this is the CLI's own native `Builtin::Paths`/`Builtin::LeafPaths`
 /// dispatch (`eval_generic.rs`'s `eval_builtin`), reached directly by
@@ -23484,6 +23496,7 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
     current_path: &mut Vec<OwnedValue>,
     paths: &mut Vec<OwnedValue>,
     leaves_only: bool,
+    mut nodes: Option<&mut Vec<(V, V::Cursor)>>,
 ) -> Result<(), EvalError> {
     guard_path_walk_depth(current_path.len())?;
     if let Some(fields) = value.as_object() {
@@ -23515,6 +23528,9 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
             });
             if !leaves_only {
                 paths.push(OwnedValue::Array(current_path.clone().into()));
+                if let Some(nodes) = nodes.as_deref_mut() {
+                    nodes.push((field.value.clone(), field.value_cursor));
+                }
             }
             collect_paths_generic::<S, _>(
                 &field.value,
@@ -23522,6 +23538,7 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
                 current_path,
                 paths,
                 leaves_only,
+                nodes.as_deref_mut(),
             )?;
             current_path.pop();
         }
@@ -23552,15 +23569,20 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
         }
         for (i, elem_cursor) in cursors.into_iter().enumerate() {
             current_path.push(OwnedValue::Int(i as i64));
+            let elem = elem_cursor.value();
             if !leaves_only {
                 paths.push(OwnedValue::Array(current_path.clone().into()));
+                if let Some(nodes) = nodes.as_deref_mut() {
+                    nodes.push((elem.clone(), elem_cursor));
+                }
             }
             collect_paths_generic::<S, _>(
-                &elem_cursor.value(),
+                &elem,
                 Some(&elem_cursor),
                 current_path,
                 paths,
                 leaves_only,
+                nodes.as_deref_mut(),
             )?;
             current_path.pop();
         }
@@ -23568,6 +23590,163 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
         paths.push(OwnedValue::Array(current_path.clone().into()));
     }
     Ok(())
+}
+
+/// `paths(f)` where a duplicate mapping key survives (#1342): the
+/// generic-evaluator twin of `eval::each_paths_filter`, sharing its
+/// control-flow contract and differing only in where each node's value comes
+/// from.
+///
+/// `each_paths_filter` materializes the document, lists every path, then
+/// re-resolves each path to its value (`get_value_at_path`). An owned mapping
+/// cannot hold a duplicate key and the re-resolution finds the first of two
+/// equal paths, so `a: 1 / a: 2` answered `paths(scalars)` with `a` once where
+/// `paths` and `to_entries` answer it twice. This walks the document instead
+/// ([`collect_paths_generic`] with its `nodes` side channel), so the second
+/// `a` is a node of its own, and each path is paired with the node it names.
+/// The filter then runs on that node's *owned* value, as it always did: a
+/// filter sees the same tags, number spellings and absence of position it saw
+/// before (`key`, `line` and `anchor` read nothing inside `paths(f)`), and
+/// only which occurrence it is shown moves.
+///
+/// What it keeps from the owned producer, each pinned by the
+/// `*paths_filter*` tests:
+/// - the document is materialized (and so validated) first, ahead of the
+///   filter and with the same 256-level ceiling, and each node is
+///   materialized from its own cursor, so an explicit tag (`!!str 2`) is
+///   still on the value the filter sees;
+/// - the filter runs on the root first, for control only: an
+///   error/break/halt there aborts before any path and its outputs are
+///   discarded (`1 | [paths(error("x"))]` raises though a scalar has no
+///   non-root path);
+/// - one push per *truthy output* of the filter, so `paths(true, true)`
+///   doubles every path (#773);
+/// - an escape mid-walk keeps the paths already pushed and carries the
+///   control after them (#850), and `optional` reaches every per-node
+///   evaluation (#881);
+/// - a stop from the consumer reaches the filter's own generator (#3567), so
+///   `first`/`limit` end the walk where jq's would.
+///
+/// **Only where the format keeps duplicate keys** (`!S::COLLAPSE_DUPLICATE_KEYS`,
+/// yq mode). Where a duplicate collapses to its first position and last value
+/// anyway (jq mode), the owned producer is exact, so those callers keep
+/// `eval::each_paths_filter` untouched.
+///
+/// A mapping nested *inside* a node still reaches the filter in its owned
+/// form, with any duplicate key collapsed -- the same collapse every owned
+/// filter evaluation applies (#1344). An `input`/`inputs` in the filter on a
+/// live queue still goes to `eval.rs`'s producer, the only evaluator with the
+/// native arm for it.
+#[inline(never)]
+fn each_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
+    filter: &Expr,
+    value: V,
+    cursor: Option<V::Cursor>,
+    optional: bool,
+    sink: &mut dyn Sink<V>,
+) -> Flow {
+    if crate::jq::input_queue_is_active() && crate::jq::walk::uses_input_builtins(filter) {
+        return bridge_to_each_owned_flow::<S, V>(
+            &Expr::Builtin(Builtin::PathsFilter(Box::new(filter.clone()))),
+            value,
+            cursor,
+            optional,
+            sink,
+        );
+    }
+
+    // Nothing has been pushed to `sink` yet, so a failure here is a bare
+    // error, never a prefix-carrying one.
+    let mut paths = Vec::new();
+    let mut nodes = Vec::new();
+    let owned_root = match to_owned_with_cursor::<_, S>(&value, cursor).and_then(|owned| {
+        collect_paths_generic::<S, _>(
+            &value,
+            cursor.as_ref(),
+            &mut Vec::new(),
+            &mut paths,
+            false,
+            Some(&mut nodes),
+        )
+        .map(|()| owned)
+    }) {
+        Ok(owned) => owned,
+        Err(e) if suppresses(&e, optional) => return Flow::Exhausted,
+        Err(e) => return Flow::Escaped(Control::Error(e)),
+    };
+
+    if let Flow::Escaped(control) =
+        eval_each_owned::<S>(filter, &owned_root, optional, Reentry::REBUILT, &mut |_| {
+            Demand::Continue
+        })
+    {
+        return Flow::Escaped(control);
+    }
+
+    for (path, (node, node_cursor)) in paths.into_iter().zip(nodes) {
+        // The walk and `to_owned` accepted the same document, so a node of it
+        // materializes; the arm exists only so a future divergence between
+        // them surfaces as the error it is instead of a silent skip.
+        let owned_node = match to_owned_with_cursor::<_, S>(&node, Some(node_cursor)) {
+            Ok(owned) => owned,
+            Err(e) if suppresses(&e, optional) => return Flow::Exhausted, // patchcov: coverage tolerate-line reason="unreachable: the whole-document `to_owned` above accepted every node (#1342)"
+            Err(e) => return Flow::Escaped(Control::Error(e)), // patchcov: coverage tolerate-line reason="unreachable: the whole-document `to_owned` above accepted every node (#1342)"
+        };
+        let flow =
+            eval_each_owned::<S>(filter, &owned_node, optional, Reentry::REBUILT, &mut |v| {
+                if v.is_truthy() {
+                    sink.push(GenericItem::Owned(path.clone()))
+                } else {
+                    Demand::Continue
+                }
+            });
+        match flow {
+            Flow::Exhausted => {}
+            stopped_or_escaped => return stopped_or_escaped,
+        }
+    }
+    Flow::Exhausted
+}
+
+/// Which producer `paths(f)` takes in `eval_each_generic` (#1342): the walk
+/// where duplicate keys survive, the owned bridge where they collapse anyway.
+/// A function of its own, with the same arguments the single bridge call it
+/// replaced took, so `eval_each_generic`'s native frame -- the one the
+/// recursion floor is read against -- is the size it was.
+#[inline(never)]
+fn each_paths_filter_dispatch<S: EvalSemantics, V: DocumentValue>(
+    expr: &Expr,
+    value: V,
+    cursor: Option<V::Cursor>,
+    optional: bool,
+    sink: &mut dyn Sink<V>,
+) -> Flow {
+    match expr {
+        Expr::Builtin(Builtin::PathsFilter(filter)) if !S::COLLAPSE_DUPLICATE_KEYS => {
+            each_paths_filter_generic::<S, V>(filter, value, cursor, optional, sink)
+        }
+        _ => bridge_to_each_owned_flow::<S, V>(expr, value, cursor, optional, sink),
+    }
+}
+
+/// [`each_paths_filter_generic`] collected, out of line so
+/// [`eval_builtin_in`]'s own native frame -- which ADR-0025's recursion floor
+/// is read against -- does not carry this arm's locals (the `r(12000; 7)` row of
+/// `test_literal_dollar_argument_matches_jq_3260` failed under coverage's fatter
+/// frames when they lived in the match).
+#[inline(never)]
+fn collect_paths_filter_generic<S: EvalSemantics, V: DocumentValue>(
+    filter: &Expr,
+    value: V,
+    cursor: Option<V::Cursor>,
+    optional: bool,
+) -> GenericResult<V> {
+    let mut items: Vec<GenericItem<V>> = Vec::new();
+    let flow = each_paths_filter_generic::<S, V>(filter, value, cursor, optional, &mut |item| {
+        items.push(item);
+        Demand::Continue
+    });
+    collected_items_result::<_, S>(items, flow)
 }
 
 /// Native `Builtin::Has` arm for the generic evaluator (#1739): checks
@@ -32213,6 +32392,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 &mut Vec::new(),
                 &mut paths,
                 false,
+                None,
             ) {
                 Ok(()) => collapse_vec(
                     paths,
@@ -32233,6 +32413,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 &mut Vec::new(),
                 &mut paths,
                 true,
+                None,
             ) {
                 Ok(()) => collapse_vec(
                     paths,
@@ -32242,6 +32423,15 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 ),
                 Err(e) => GenericResult::Error(e),
             }
+        }
+
+        // #1342: the eager twin of `eval_each_generic`'s `PathsFilter` arm --
+        // `[paths(f)]`, `paths(f) | ...` collected, and every caller that is
+        // not a demand-driven consumer. It collects what the producer pushes,
+        // so the two routes cannot disagree on a duplicate key. jq mode skips
+        // the guard and reaches the wildcard bridge as before.
+        Builtin::PathsFilter(filter) if !S::COLLAPSE_DUPLICATE_KEYS => {
+            collect_paths_filter_generic::<S, V>(filter, value, cursor, optional)
         }
 
         // The `is*` family reads through `tagged_type_name` rather than

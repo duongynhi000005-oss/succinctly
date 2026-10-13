@@ -922,11 +922,12 @@ alias-bearing document to the DOM path for them instead, losing the marks rather
 emitting a file succinctly could not read back. The gate is on *aliases*, not anchors: an unreferenced
 `&x` is valid YAML wherever it lands.
 
-Four narrower gaps #1398's fix deliberately left alone remain open, each already filed before
-it landed:
+Three narrower gaps #1398's fix deliberately left alone remain open, each already filed before
+it landed (a fourth, [#1342](https://github.com/rust-works/succinctly/issues/1342),
+`paths(node_filter)` collapsing a duplicate key, is closed: `paths(f)` walks the document and
+runs `f` on the node each path names whenever the format keeps duplicates, as `paths` does;
+jq mode, which collapses them anyway, keeps the owned producer):
 
-- [#1342](https://github.com/rust-works/succinctly/issues/1342) — `paths(node_filter)` still
-  collapses (a YAML-only DOM-representation gap, unrelated to the format leak).
 - [#1343](https://github.com/rust-works/succinctly/issues/1343) — `-s`/`--eval-all`/`-i`'s DOM
   fallback still routes through `parse_input`/`OwnedValue` for *both* formats (a pre-existing,
   format-symmetric bug, not a new one #1398 introduced).
