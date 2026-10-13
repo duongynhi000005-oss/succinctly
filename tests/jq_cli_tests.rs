@@ -62053,6 +62053,19 @@ fn test_reduce_update_caught_navigation_last_in_a_comma_is_judged_per_value_4486
             "",
             5,
         ),
+        // Two caught items in one comma, before or after the `.`.
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; ((.a)?, (.b)?, .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(reduce .[]? as $i (.; (., (.a)?, (.b)?)))",
+            "[]\n",
+            0,
+        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
