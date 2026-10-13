@@ -60659,6 +60659,118 @@ fn reestablishes_register<S: EvalSemantics>(
         })
 }
 
+/// Whether `expr` is a scalar literal written in the filter (#1868): `null`, a boolean, a number or
+/// a string. Deliberately not an array or an object of literals, and not [`closed_expr_shape`]:
+/// the owned routes inline a bound variable's value as exactly that (`$y` over `{"b":1}` becomes
+/// the object `{"b": 1}` of literals), where the value is the document's own node and a write
+/// through it must stay refused. A scalar has nothing to step into either way -- yq's `.b` over
+/// `1` yields zero candidates whoever wrote the `1` -- so no write can be hiding behind one.
+fn is_detached_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Paren(inner) => is_detached_constant(inner),
+        _ => false,
+    }
+}
+
+/// A path step that reads one fixed place of its input and cannot raise on a scalar: a field, an
+/// index, a literal-bounded slice, `.[]`, any of them under `?`, or a chain of them (`.x.y`).
+fn is_static_navigation_step(expr: &Expr) -> bool {
+    match expr {
+        Expr::Iterate => true,
+        Expr::Pipe(stages) => !stages.is_empty() && stages.iter().all(is_static_navigation_step),
+        other => navigation_element(other).is_some(),
+    }
+}
+
+/// What [`prune_detached_constants_before_navigation`] decided for a pipe (#1868).
+enum DetachedPrune {
+    /// No detached constant is followed by static navigation: resolve the pipe as written.
+    Unchanged,
+    /// Nothing of the pipe is left to resolve: it yields no branch.
+    Empty,
+    /// The pipe with those constants removed.
+    Stages(Vec<Expr>),
+}
+
+/// `exprs` with every detached constant that is immediately followed by a static navigation step
+/// removed (#1868).
+///
+/// yq has no untracked value to refuse: a literal is a detached node, a step into it yields zero
+/// candidates, and an update through it leaves the document alone while every other branch is
+/// still written. `(.a, 1 | .[]) = 5` is `a: 5` in yq. The constant can sit
+/// first in the pipe (`1 | .[]`) or as a member of the comma feeding the step
+/// (`(.a, 1) | .[]`), and removing it there is the same answer for every consumer: its branch
+/// would only have been dropped for being untracked.
+///
+/// Deliberately syntactic. The resolver's other untracked values -- a bound `$x`, a register, a
+/// fold's accumulator, a computed result -- are not detached in yq (its variables hold the
+/// document's own nodes), and widening their navigation would discard writes yq performs; they keep
+/// the refusals of #2072, #3037, #3456 and #4445, as does a literal array or object (the owned routes
+/// inline a bound variable's value as one). Computed keys, slices with computed bounds and `..`
+/// keep theirs too.
+fn prune_detached_constants_before_navigation(exprs: &[Expr]) -> DetachedPrune {
+    let prunes = |stage: &Expr, next: &Expr| {
+        is_static_navigation_step(next)
+            && match unwrap_paren(stage) {
+                Expr::Comma(members) => members.iter().any(is_detached_constant),
+                other => is_detached_constant(other),
+            }
+    };
+    if !exprs.windows(2).any(|w| prunes(&w[0], &w[1])) {
+        return DetachedPrune::Unchanged;
+    }
+    let mut out: Vec<Expr> = vec_with_capacity(exprs.len());
+    for (i, stage) in exprs.iter().enumerate() {
+        let followed = exprs.get(i + 1).is_some_and(is_static_navigation_step);
+        if !followed {
+            out.push(stage.clone());
+            continue;
+        }
+        match unwrap_paren(stage) {
+            Expr::Comma(members) if members.iter().any(is_detached_constant) => {
+                let mut kept: Vec<Expr> = members
+                    .iter()
+                    .filter(|m| !is_detached_constant(m))
+                    .cloned()
+                    .collect();
+                match kept.len() {
+                    0 => return DetachedPrune::Empty,
+                    1 => out.push(kept.remove(0)),
+                    _ => out.push(Expr::Comma(kept)),
+                }
+            }
+            other if is_detached_constant(other) => return DetachedPrune::Empty,
+            _ => out.push(stage.clone()),
+        }
+    }
+    DetachedPrune::Stages(out)
+}
+
+/// [`resolve_seq_sink`]'s yq-mode pre-pass for [`prune_detached_constants_before_navigation`], out
+/// of line so the recursive resolver's frame is the size it was. `None` leaves the pipe to the
+/// ordinary route.
+#[allow(clippy::too_many_arguments)] // STYLE-0004: the resolver's threaded ambients
+#[inline(never)]
+fn resolve_seq_without_detached_constants<'a, S: EvalSemantics>(
+    exprs: &[Expr],
+    value: &'a OwnedValue,
+    trackable: bool,
+    snapshot: &Snapshot,
+    frame: &Frame,
+    keep: Keep,
+    register: Option<&'a OwnedValue>,
+    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
+) -> Option<ResolveFlow> {
+    match prune_detached_constants_before_navigation(exprs) {
+        DetachedPrune::Unchanged => None,
+        DetachedPrune::Empty => Some(ResolveFlow::Exhausted),
+        DetachedPrune::Stages(pruned) => Some(resolve_seq_sink::<S>(
+            &pruned, value, trackable, snapshot, frame, keep, register, sink,
+        )),
+    }
+}
+
 /// Resolve a pipe of path nodes, threading the value left to right —
 /// depth-first, the way jq's own generator composition does.
 ///
@@ -60716,6 +60828,14 @@ fn resolve_seq_sink<'a, S: EvalSemantics>(
     register: Option<&'a OwnedValue>,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
+    // #1868: a constant followed by static navigation reads nothing in yq.
+    if S::TAG == EvalTag::Yq {
+        if let Some(flow) = resolve_seq_without_detached_constants::<S>(
+            exprs, value, trackable, snapshot, frame, keep, register, sink,
+        ) {
+            return flow;
+        }
+    }
     // The root branch inherits this call's own trackability: seeding it
     // `true` regardless is what made `catch (getpath(["other"]) | .qqq)`
     // and `catch (select(true) | .y)` stop raising, since every later
@@ -61569,24 +61689,14 @@ fn assemble_one_branch(branch: &PathBranch<'_>) -> Expr {
 /// not itself untracked and still propagates normally -- confirmed
 /// live, `(.a, error("boom")) = 5` still raises `boom`, not a no-op.
 ///
-/// **Only reachable call shapes are patched.** `path()` passes
-/// `near_iterate = true` here for a trailing bare iterate stripped
-/// off its own path expression (`defer_trailing_iterate = true`,
-/// #888) -- that case *is* covered (confirmed live: `path(1 | .[])`
-/// in yq mode now no-ops rather than raising jq's "near attempt to
-/// iterate" wording, matching the same general rule above). `=`/
-/// `|=`/compound-assigns never defer a trailing iterate at all, so an
-/// untracked branch followed by further navigation in *those*
-/// contexts (`(.a, 1 | .[]) = 5`) never reaches this function --
-/// `resolve_node`'s own `Expr::Iterate` arm (and `resolve_index_expr`'s
-/// analogous dynamic-key check) each raise independently and
-/// unconditionally first. That gap is real (confirmed live: real yq
-/// still no-ops there too) and deliberately not fixed by this patch --
-/// tracked as [#1868](https://github.com/rust-works/succinctly/issues/1868),
-/// since fixing it needs `Untracked::Skip`-equivalent awareness
-/// threaded into `resolve_node`, a 21-call-site function with its own
-/// independent jq-mode-verified history at each scattered check, not
-/// just this one terminal position.
+/// **Trailing navigation (#1868).** `path()` passes `near_iterate = true` here for a trailing
+/// bare iterate stripped off its own path expression (`defer_trailing_iterate = true`, #888), so
+/// `path(1 | .[])` no-ops in yq mode. `=`/`|=`/compound-assigns never defer a trailing iterate,
+/// so an untracked branch followed by navigation there (`(.a, 1 | .[]) = 5`) never reached this
+/// function: `resolve_node`'s navigation checks raised first. In yq mode
+/// [`prune_detached_constants_before_navigation`] now drops a constant that a static navigation
+/// step would only have read nothing from, before the pipe is resolved. Every other untracked
+/// value keeps those checks.
 ///
 /// `del()` (`Untracked::KeepInOrder`) is deliberately **excluded** from the
 /// skip, unlike its three siblings: real yq's `del()` walks its targets back to
@@ -135997,13 +136107,13 @@ mod tests {
     /// resolver's own pre-#2044 behavior) or no-oping (what real yq
     /// actually does). Live-verified
     /// against yq v4.53.3: `(null | .a) = 5` on `null` is a no-op (`null`
-    /// unchanged), not a write.
+    /// unchanged), not a write. Since #1868 yq mode answers exactly that: a
+    /// scalar literal followed by static navigation reads nothing there, so
+    /// the pin that used to be a refusal is the no-op yq prints.
     #[test]
     fn test_reestablishes_register_stays_jq_mode_only_2044() {
         yq_query!(b"null", r"(null | .a) = 5",
-            QueryResult::Error(e) => {
-                assert!(e.is_untracked_navigation_error());
-            }
+            QueryResult::Owned(OwnedValue::Null) => {}
         );
     }
 
@@ -136023,9 +136133,7 @@ mod tests {
     #[test]
     fn test_reestablishes_register_stays_jq_mode_only_multi_step_2044() {
         yq_query!(b"null", r"(null | null | .a) = 5",
-            QueryResult::Error(e) => {
-                assert!(e.is_untracked_navigation_error());
-            }
+            QueryResult::Owned(OwnedValue::Null) => {}
         );
     }
 
@@ -136034,14 +136142,13 @@ mod tests {
     /// reaches the identical `resolve_seq_sink`/`reestablishes_register` code
     /// (there's no `--jq-extensions` gate on `path` in yq mode), so pin the
     /// bare read form too. Live-verified against yq v4.53.3: `path(null |
-    /// .a)` on `null` still refuses, matching the pre-#2044 behavior this
-    /// gate is meant to preserve for yq mode.
+    /// .a)` on `null` is rejected by yq itself ("bad expression", no
+    /// oracle for a path); #1868 makes yq mode produce no path for it, as
+    /// #1764 did for `path(1 | .[])`, instead of a write-shaped refusal.
     #[test]
     fn test_reestablishes_register_stays_jq_mode_only_read_2044() {
         yq_query!(b"null", r"path(null | .a)",
-            QueryResult::Error(e) => {
-                assert!(e.is_untracked_navigation_error());
-            }
+            QueryResult::None => {}
         );
     }
 
