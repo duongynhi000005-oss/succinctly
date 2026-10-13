@@ -49589,6 +49589,26 @@ fn fold_source_register_markers<S: EvalSemantics>(
     markers
 }
 
+/// `source` with the leading `$x` stage of every pipe dropped when `$x` is one of `markers`
+/// (#4505): a `$x` that is the register hands it on as `.` does, so `$x | . as {a:$a} | .` and
+/// `($x | .) as {a:$a}` destructure the register as `. as {a:$a}` does, which the spine reads
+/// for `.` but not for a pipe headed by the marker (the resolver places both the same way). Only
+/// for [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
+/// marker `Rc`s are shared, so a marker listed from the original is the one the copy holds.
+fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked]) -> Expr {
+    let mapped = map_subexprs(source, &mut |child| collapse_marker_pipes(child, markers));
+    match &mapped {
+        Expr::Pipe(stages)
+            if stages.len() > 1
+                && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
+                    if markers.contains(&Rc::as_ptr(m))) =>
+        {
+            Expr::pipe(stages[1..].to_vec())
+        }
+        _ => mapped,
+    }
+}
+
 /// The `$x` markers in a fold `source` inside another fold's body that equal the accumulator at
 /// this fold (#4505): the ones [`drive_fold_source_with`] reads as the register for its loud
 /// refusal of an unplaced destructure. [`marker_identical`] is the test the resolver applies to a
@@ -49599,10 +49619,10 @@ fn unplaced_register_markers<S: EvalSemantics>(
     ambient: &FoldSourceAmbient<'_>,
 ) -> Vec<*const Tracked> {
     let mut markers = Vec::new();
-    if !any_subexpr(
-        source,
-        &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
-    ) {
+    if !any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { patterns, .. }
+            if routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
+    }) {
         return markers;
     }
     any_subexpr(source, &mut |e| {
@@ -50812,7 +50832,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
             let markers = unplaced_register_markers::<S>(source, ambient);
             !markers.is_empty()
                 && !any_subexpr(source, &mut |e| matches!(e, Expr::Reduce { .. }))
-                && source_destructures_register_with(source, true, markers, false)
+                && source_destructures_register_with(
+                    &collapse_marker_pipes(source, &markers),
+                    true,
+                    markers.clone(),
+                    false,
+                )
         };
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
