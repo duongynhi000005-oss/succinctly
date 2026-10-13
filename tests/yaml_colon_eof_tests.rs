@@ -13,14 +13,12 @@
 //! divergence shape as #370, just reached via absolute EOF instead of a
 //! missing tab.
 //!
-//! Succinctly is a lenient semi-indexer (see `docs/architecture/semi-indexing.md`
-//! on its "minimal validation" trade-off), not a full validator: a bare colon
-//! with nothing to its right cannot legally start a nested node in this
-//! position, and a strict parser (`yq`, PyYAML) rejects the document outright
-//! ("mapping values are not allowed in this context"). Succinctly does not
-//! raise that error; the fix instead makes its two derivations of the value's
-//! extent - the parser's and the cursor's - agree on where the value ends,
-//! rather than the parser alone treating the colon as content.
+//! Since #4463 the document is rejected: a value's scalar must be the last thing on
+//! its line, and a strict parser (`yq`, PyYAML) refuses `key: abc:` outright
+//! ("mapping values are not allowed in this context"), so the scanner stopping at the
+//! colon now surfaces as that error rather than as a silently dropped tail. The two
+//! derivations of a value's extent still agree where the document parses (the
+//! controls below), which is what #434 protected.
 //!
 //! Inputs are byte literals so no editor or formatter can quietly add a
 //! trailing newline that hides the EOF condition under test.
@@ -64,14 +62,15 @@ fn assert_json(yaml: &[u8], expected: &str, why: &str) {
     assert_eq!(actual, expected, "input {:?} — {why}", Text(yaml));
 }
 
-/// The eval half: a colon at absolute EOF (no trailing newline) does not
-/// become part of the value.
+/// The eval half: a colon at absolute EOF ends the value, which #4463 turns into
+/// yq's error instead of the dropped tail it used to be.
 #[test]
 fn a_colon_at_absolute_eof_ends_the_value() {
-    assert_json(
-        b"key: abc:",
-        r#"{"key":"abc"}"#,
-        "the #434 repro: loaded as {\"key\":\"abc:\"} before the fix",
+    let err = to_json(b"key: abc:").expect_err("yq rejects `key: abc:`");
+    assert!(
+        err.to_string()
+            .contains("mapping values are not allowed in this context"),
+        "{err}"
     );
     assert_json(
         b"key: abc",
@@ -85,13 +84,13 @@ fn a_colon_at_absolute_eof_ends_the_value() {
     );
 }
 
-/// The `syq-locate`/`at_offset` half: the byte range for the value must agree
-/// with what `syq` prints for the same node - `find_scalar_end` already
-/// stopped before the trailing colon, so before the fix these two derivations
-/// disagreed on the same span.
+/// The `syq-locate`/`at_offset` half: for a document that parses, the byte range
+/// of the value is what `syq` prints for the same node. (`key: abc:` no longer
+/// builds an index at all, #4463.)
 #[test]
-fn the_located_byte_range_excludes_a_colon_at_absolute_eof() {
-    let yaml: &[u8] = b"key: abc:";
+fn the_located_byte_range_agrees_with_the_printed_value() {
+    assert!(YamlIndex::build(b"key: abc:").is_err());
+    let yaml: &[u8] = b"key: abc";
     let index = YamlIndex::build(yaml).expect("parses");
     let found = locate_offset_detailed(&index, yaml, 5)
         .unwrap_or_else(|| panic!("offset 5 of {:?} located nothing", Text(yaml)));
