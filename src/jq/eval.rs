@@ -46990,9 +46990,17 @@ fn fold_update_movement_tracked(update: &Expr) -> bool {
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
                 cannot_move_register(gen) && cannot_move_register(cond)
             }
-            Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen),
+            Expr::Builtin(Builtin::IsEmpty(gen)) => register_movement_tracked(gen),
             Expr::Paren(inner) | Expr::Optional(inner) => fold_update_movement_tracked(inner),
             Expr::Try { expr, catch: None } => fold_update_movement_tracked(expr),
+            // #4486: a `catch H` whose handler cannot move the register is no different: jq
+            // restores the register to where the `try` entered whether the body raised or not,
+            // so the handler runs on the error payload from there and the fold backtracks it
+            // all the same.
+            Expr::Try {
+                expr,
+                catch: Some(handler),
+            } => fold_update_movement_tracked(expr) && cannot_move_register(handler),
             _ => false,
         }
 }
@@ -130391,6 +130399,21 @@ mod tests {
         ));
         assert!(!fold_update_movement_tracked(
             &parse("try recurse(first(.a))").unwrap()
+        ));
+        // #4486: a `catch H` is seen through when `H` moves nothing, and an `isempty` generator
+        // the resolver path-checks is admitted; a handler that navigates, or a generator it cannot
+        // check, is not.
+        assert!(fold_update_movement_tracked(
+            &parse("try isempty(.[]?) catch 1").unwrap()
+        ));
+        assert!(fold_update_movement_tracked(
+            &parse("isempty(.[]?)").unwrap()
+        ));
+        assert!(!fold_update_movement_tracked(
+            &parse("try .a catch .b").unwrap()
+        ));
+        assert!(!fold_update_movement_tracked(
+            &parse("isempty(first(.a))").unwrap()
         ));
     }
 

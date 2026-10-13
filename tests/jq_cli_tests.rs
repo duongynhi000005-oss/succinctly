@@ -61709,6 +61709,87 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
     Ok(())
 }
 
+/// #4486: a `reduce` whose `UPDATE` is a `try ... catch H` with a handler that moves nothing, or an
+/// `isempty(g)` over a generator the resolver path-checks, leaves jq's register where the fold
+/// entered it (jq backtracks the register to the `try`'s entry whether the body raised or not, and the
+/// fold backtracks its `UPDATE`), so the `.b?` to the right of an `and` is judged against the register
+/// jq has, and the whole thing answers inside a `//` or a `del` as jq does. Rows where the handler
+/// moves the register (`catch .a`) or the generator has a second output the stage cannot place keep
+/// the general route and refuse as jq does. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_reduce_update_caught_or_isempty_leaves_the_register_4486() -> Result<()> {
+    const DOC: &str = r#"{"a":[true]}"#;
+    // (filter, stdout, exit code)
+    const ROWS: &[(&str, &str, i32)] = &[
+        (
+            r"del(((reduce .[]? as $i (.; try isempty(.[]?) catch 1)) and .b?) // .a)",
+            "{}\n",
+            0,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; try isempty(.[]?) catch 1)) and .b?) // .a)",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; isempty(.[]?))) and .b?) // .a)",
+            "",
+            5,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; try .a catch 1)) and .b?) // .a)",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"del(((reduce .[]? as $i (.; try isempty(.a) catch 1)) and .b?) // .a)",
+            "{}\n",
+            0,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; try isempty(.[]?) catch .)) and .b?) // .a)",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r". as $x | del((reduce 1 as $i (.; isempty(.[]?))) | $x)",
+            "null\n",
+            0,
+        ),
+        (
+            r"del(. as $x | (reduce .[]? as $i (.; try .a catch 1)) | $x)",
+            "null\n",
+            0,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; try isempty(.[]?) catch .a)) and .b?) // .a)",
+            "",
+            5,
+        ),
+        (
+            r"path(((reduce .[]? as $i (.; try isempty(.[]?) catch (.a|.b))) and .b?) // .a)",
+            "",
+            5,
+        ),
+        (
+            r"del(((reduce .[]? as $i (.; isempty(.[]?, .b))) and .b?) // .a)",
+            "",
+            5,
+        ),
+        (
+            r"del(((reduce .[]? as $i (.; isempty(empty))) and .b) // .a)",
+            "{}\n",
+            0,
+        ),
+    ];
+    for (filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
+        assert_eq!(stdout, *want_stdout, "`{filter}`: stderr: {stderr:?}");
+        assert_eq!(code, *want_code, "`{filter}`: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4017: a variable bound to the result of a stage that returns its input as the same
 /// `jv` (`tostring`/`@text` of a string, `tonumber` of a number, a non-matching
 /// `ltrimstr`/`rtrimstr`, `delpaths([])`, `setpath([]; .)`) is the register itself, so
