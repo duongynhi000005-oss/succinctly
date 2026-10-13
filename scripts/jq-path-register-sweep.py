@@ -491,6 +491,12 @@ OPERANDS = [
     "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach ((.|.|.) as [$a] ?// {a:$a} ?// $b | .) as $k (.; .; .))",
     "(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+    # (#4484) the same chain where the fold around it decides whether `.` is the register: a
+    # `foreach` INIT that moves it, a nested `reduce`, and `first`/`limit` as the UPDATE.
+    "(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.a; .; .))",
+    "(reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
+    "(first(foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
+    "(limit(1; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
     "(foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))",
     "(foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach ((.a|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
