@@ -29024,10 +29024,19 @@ pub(crate) fn owned_bound_to_i64_for<S: EvalSemantics>(
     owned_bound_to_i64(v, round)
 }
 
-/// Whether yq's `ParseInt` would refuse this bound's scalar text (#3415).
+/// Whether yq's `ParseInt` would refuse this bound's scalar text (#3415, #3970).
+///
+/// A computed float is handed over as its rendered text, and yq renders a float with Go's shortest
+/// `%g`, whose exponent form starts at a magnitude of `1e6` (`1.0*999999` is `999999` and slices,
+/// `1.0*1000000` is `1e+06` and raises `strconv.ParseInt: parsing "1e+06": invalid syntax`,
+/// `1.0*1234567` is `1.234567e+06`; swept against yq v4.53.3, both signs). Every float of that
+/// size is refused, whichever of the exponent form or an out-of-range plain-digit text (which yq
+/// shows for some operand spellings past `i64`) it would have been handed over as. Only `Float` is
+/// subject to it: an integer product stays an `Int` (`10000000000*10000000000` slices in yq) and
+/// must keep doing so.
 fn yq_slice_bound_not_integral(v: &OwnedValue) -> bool {
     match v {
-        OwnedValue::Float(f) => !f.is_finite() || f.fract() != 0.0,
+        OwnedValue::Float(f) => !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6,
         OwnedValue::NumberLiteral(NumberRepr::Float(_), _) => true,
         _ => false,
     }
