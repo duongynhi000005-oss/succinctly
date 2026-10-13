@@ -1160,17 +1160,15 @@ either way (`test_yq_slurp_fast_path_rejects_trailing_comma_2276`/
 key assertions) — a `[1,2,3]`-shaped well-formed check alone can't distinguish "the fast path
 ran" from "silently fell back and produced the same bytes."
 
-**A further collateral cost, spelled out explicitly rather than left implicit in "conservative
-for mixed-format"**: `any_input_is_json` is one run-wide boolean with no per-file M2-vs-DOM
-switch (a per-file version was not attempted — each of `can_inplace_fast_path`'s two branches
-is its own, separately-parsed loop, decided once before either starts, so routing within one
-file at a time would mean restructuring both loops into one, a materially larger change for a
-cost real yq has no equivalent to weigh against). `succinctly yq -i '.' a.yaml b.json`, where
-`a.yaml` alone (genuinely YAML, well-formed) would be safe on the M2 fast path and `b.json` is
-what forces the whole run onto the DOM fallback, now collapses `a.yaml`'s own duplicate mapping
-keys too — the exact #442/#1343 loss the M2 fast path exists to avoid, even though `a.yaml` in
-isolation would not lose them. Pinned by
-`test_yq_inplace_mixed_yaml_json_files_collapses_yaml_duplicate_keys_too_2276`.
+**A further collateral cost, narrowed by #4394**: `any_input_is_json` is one run-wide boolean with
+no per-file M2-vs-DOM switch (a per-file version was not attempted — each of
+`can_inplace_fast_path`'s two branches is its own, separately-parsed loop, decided once before
+either starts). Real yq decodes every file of a run with the *first* file's decoder, and so does
+this, so a mixed run no longer exists: `succinctly yq -i '.' a.yaml b.json` reads both as YAML and
+keeps the M2 fast path (and `a.yaml`'s duplicate keys), while `b.json a.yaml` reads both as JSON and
+declines it for the whole run, which collapses a YAML file's duplicate mapping keys — the #442/#1343
+loss the fast path exists to avoid — but only where the JSON file leads, and then yq fails on the
+YAML file anyway. Pinned by `test_yq_inplace_mixed_yaml_json_files_keeps_yaml_duplicate_keys_2276`.
 
 **The plain stdout fast path (`can_json_fast_path`/`can_yaml_fast_path`, no `--slurp`/
 `--inplace`) has the identical underlying gap and was deliberately left alone**, confirmed
@@ -5686,6 +5684,8 @@ reads the byte column, with no scan of the line); `YamlIndex::to_line_column`, `
 ([#4382](https://github.com/rust-works/succinctly/issues/4382)): yq decodes JSON without keeping
 positions, so `echo '{"a":1}' | yq -p json '.a | [line,column]'` and the same over a `.json` file are
 `[0,0]`, where the text read as YAML (no `-p json`, or a `.yaml` file) keeps `[1,6]`. A YAML index marked
-JSON-sourced (`YamlIndex::mark_json_sourced`) answers `0` from `YamlCursor::line`/`column`. Not done: yq picks
-the decoder from the *first* file's extension for every file (`yq '.a | line' t.json t.yaml` is `[0,0]` twice),
-where this picks it per file ([#4394](https://github.com/rust-works/succinctly/issues/4394)).
+JSON-sourced (`YamlIndex::mark_json_sourced`) answers `0` from `YamlCursor::line`/`column`. The decoder is
+picked once per run, from the *first* file's extension, for every file, as in yq (`yq '.a | line' t.json t.yaml` is
+`[0,0]` twice, `t.yaml t.json` is `[1,6]` twice; an explicit `-p` is not looked at per file;
+[#4394](https://github.com/rust-works/succinctly/issues/4394)). `--eval-all` is the exception: it still reports
+`[1,6]` for a JSON input (yq: `[0,0]`), tracked as #4544.

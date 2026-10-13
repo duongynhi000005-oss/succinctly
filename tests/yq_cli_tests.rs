@@ -5488,45 +5488,19 @@ fn test_yq_top_level_stray_comma_in_empty_container_rejected_on_dom_bridge_route
     Ok(())
 }
 
-/// #2276 review: `any_input_is_json` is one run-wide boolean, not a
-/// per-file switch (see its own doc comment in `yq_runner.rs` for why a
-/// per-file version wasn't attempted here) -- so a single JSON-sourced
-/// file anywhere in a multi-file `--inplace` invocation declines the M2
-/// fast path for *every* file in that run, including a genuinely YAML
-/// file that would have been perfectly safe on its own. Pinned as a known,
-/// deliberately-accepted collateral cost rather than left to be discovered
-/// by a future regression report: `a.yaml`'s own duplicate mapping key
-/// (`a: 1`/`a: 2`) survives `succinctly yq -i '.' a.yaml` in isolation
-/// (M2 fast path, #442/#1343's own guarantee), but collapses to the last
-/// value once `b.json` is added to the same invocation and forces the
-/// whole run onto the DOM fallback.
+/// #2276 review: `any_input_is_json` is one run-wide boolean, and a single JSON-sourced input
+/// declines the M2 fast path for the whole `--inplace` run, which collapses a YAML file's duplicate
+/// mapping keys (`a: 1`/`a: 2` -> `a: 2`). Since #4394 the run has one decoder, the first file's, so
+/// that collateral cost only arises when the first file is the JSON one: a `.yaml` first file keeps
+/// every file on the fast path, and its duplicates survive next to a `.json` file read as YAML.
 #[test]
-fn test_yq_inplace_mixed_yaml_json_files_collapses_yaml_duplicate_keys_too_2276() -> Result<()> {
+fn test_yq_inplace_mixed_yaml_json_files_keeps_yaml_duplicate_keys_2276() -> Result<()> {
     let dir = TempDir::new()?;
     let yaml_file = dir.path().join("a.yaml");
     let json_file = dir.path().join("b.json");
     std::fs::write(&yaml_file, "a: 1\na: 2\n")?;
     std::fs::write(&json_file, "{\"b\":1,\"b\":2}")?;
 
-    // Baseline: `a.yaml` alone keeps both duplicate values via the M2 fast
-    // path -- confirms the "collateral" framing (it really was safe alone).
-    let solo_yaml = dir.path().join("solo.yaml");
-    std::fs::write(&solo_yaml, "a: 1\na: 2\n")?;
-    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
-        .arg("yq")
-        .arg("-i")
-        .arg(".")
-        .arg(&solo_yaml)
-        .stdin(Stdio::null())
-        .output()?;
-    assert!(output.status.success());
-    assert_eq!(
-        std::fs::read_to_string(&solo_yaml)?,
-        "a: 1\na: 2\n",
-        "a.yaml alone must keep both duplicate values (M2 fast path)"
-    );
-
-    // Together with a JSON source, the same YAML file's duplicates collapse.
     let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
         .arg("yq")
         .arg("-i")
@@ -5538,9 +5512,8 @@ fn test_yq_inplace_mixed_yaml_json_files_collapses_yaml_duplicate_keys_too_2276(
     assert!(output.status.success());
     assert_eq!(
         std::fs::read_to_string(&yaml_file)?,
-        "a: 2\n",
-        "a known, accepted collateral cost -- update this alongside \
-         yq_runner.rs's own doc comment if a per-file switch closes it later"
+        "a: 1\na: 2\n",
+        "a `.yaml` first file keeps the fast path, so its duplicate keys survive"
     );
 
     Ok(())
@@ -13709,6 +13682,72 @@ fn test_line_and_column_of_json_input_are_zero_4382() -> Result<()> {
         )?;
         assert_eq!((stdout.trim(), code), (expected, 0), "{name}");
     }
+    Ok(())
+}
+
+/// #4394: yq picks one input decoder for a whole run, from the *first* file argument's extension
+/// (`.json` is JSON; `.yaml`, `.yml`, `.txt`, no extension and `-` are YAML), and reads every file
+/// with it. An explicit `-p` overrides the extension for all of them. Each row is a live yq v4.53.3
+/// capture of `yq -o json -I=0 '.a | [line,column]' <files>` over files holding `{"a":[1,{"b":2}]}`
+/// (JSON-decoded positions are `[0,0]`, YAML-decoded `[1,6]`).
+#[test]
+fn test_input_format_is_picked_from_the_first_file_for_every_file_4394() -> Result<()> {
+    let dir = TempDir::new()?;
+    for name in ["t.json", "t.yaml", "t.yml", "t.txt", "t"] {
+        std::fs::write(dir.path().join(name), "{\"a\":[1,{\"b\":2}]}")?;
+    }
+    let path = |name: &str| {
+        dir.path()
+            .join(name)
+            .to_str()
+            .expect("utf-8 path")
+            .to_string()
+    };
+    // (files, extra args, expected stdout)
+    let rows: &[(&[&str], &[&str], &str)] = &[
+        (&["t.json", "t.yaml"], &[], "[0,0]\n[0,0]\n"),
+        (&["t.yaml", "t.json"], &[], "[1,6]\n[1,6]\n"),
+        (&["t.json", "t.yml"], &[], "[0,0]\n[0,0]\n"),
+        (&["t.yml", "t.json"], &[], "[1,6]\n[1,6]\n"),
+        (&["t.txt", "t.json"], &[], "[1,6]\n[1,6]\n"),
+        (&["t.json", "t.txt"], &[], "[0,0]\n[0,0]\n"),
+        (&["t", "t.json"], &[], "[1,6]\n[1,6]\n"),
+        (&["t.json", "t"], &[], "[0,0]\n[0,0]\n"),
+        // An explicit `-p` is not looked at per file.
+        (&["t.json", "t.yaml"], &["-p", "yaml"], "[1,6]\n[1,6]\n"),
+        (&["t.yaml", "t.json"], &["-p", "json"], "[0,0]\n[0,0]\n"),
+        (&["t.json", "t.yaml"], &["-p", "auto"], "[0,0]\n[0,0]\n"),
+    ];
+    for (files, args, expected) in rows {
+        let paths: Vec<String> = files.iter().map(|f| path(f)).collect();
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(std::path::Path::new).collect();
+        let mut argv = vec!["-o", "json", "-I", "0"];
+        argv.extend_from_slice(args);
+        let (stdout, stderr, code) = run_yq_files(".a | [line,column]", &path_refs, &argv)?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (*expected, 0),
+            "{files:?} {args:?}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
+/// #4394: the decoder is the first file's, so YAML-only syntax in a later file is a JSON parse
+/// error after a `.json` first file (yq: `bad file 'y.yaml': invalid character 'a' looking for
+/// beginning of value`), and fine after a `.yaml` one.
+#[test]
+fn test_yaml_only_file_after_a_json_first_file_is_a_parse_error_4394() -> Result<()> {
+    let dir = TempDir::new()?;
+    let json = dir.path().join("t.json");
+    let yaml = dir.path().join("y.yaml");
+    std::fs::write(&json, "{\"a\":1}")?;
+    std::fs::write(&yaml, "a: 1\n")?;
+    let (stdout, stderr, code) = run_yq_files(".a", &[&json, &yaml], &["-o", "json", "-I", "0"])?;
+    assert_eq!(code, 1, "stdout {stdout:?}");
+    assert!(stderr.contains("parse error"), "{stderr}");
+    let (stdout, _, code) = run_yq_files(".a", &[&yaml, &json], &["-o", "json", "-I", "0"])?;
+    assert_eq!((stdout.as_str(), code), ("1\n1\n", 0));
     Ok(())
 }
 
@@ -36527,20 +36566,13 @@ fn test_yq_auto_output_resolves_per_file_1493() -> Result<()> {
     Ok(())
 }
 
-/// Known gap (#1493's own scope note, same reasoning as the `--slurp`
-/// mixed-format gap above): a YAML file and a JSON file processed
-/// independently (not `--slurp`) in one `-o=auto` invocation each resolve
-/// to their own format correctly, but the combined output doesn't fully
-/// match real yq's own mixed-format multi-doc rendering, which treats the
-/// whole stream as one YAML sequence with the JSON-sourced document
-/// embedded flow-style and a `---` between every document regardless of
-/// format (confirmed live: `a: 1\n---\n{"b": 2}\n`). This fix gives each
-/// document its own correct format independently, but neither inserts a
-/// separator between differently-formatted documents nor renders the
-/// JSON one in YAML's flow style -- pinning the current (correct-per-file,
-/// not fully oracle-matching) behavior.
+/// A YAML file followed by a JSON file in one `-o=auto` invocation. Real yq decodes *every* file
+/// with the first file's decoder (#4394), so the JSON file is read as YAML and the whole stream
+/// prints as YAML, the JSON document in flow style with a `---` between (confirmed live:
+/// `a: 1\n---\n{"b": 2}\n`). This pinned a per-file rendering with no separator, which was a
+/// known gap of #1493's until the decoder became a property of the run.
 #[test]
-fn test_yq_auto_output_mixed_format_multi_file_known_gap_1493() -> Result<()> {
+fn test_yq_auto_output_mixed_format_multi_file_matches_yq_1493() -> Result<()> {
     let dir = TempDir::new()?;
     let yaml_file = dir.path().join("a.yaml");
     let json_file = dir.path().join("b.json");
@@ -36557,9 +36589,7 @@ fn test_yq_auto_output_mixed_format_multi_file_known_gap_1493() -> Result<()> {
         .output()?;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
-    // Real yq: `a: 1\n---\n{"b": 2}\n` -- not replicated here; if this ever
-    // changes, update or remove this test.
-    assert_eq!(stdout, "a: 1\n{\n  \"b\": 2\n}\n");
+    assert_eq!(stdout, "a: 1\n---\n{\"b\": 2}\n");
     Ok(())
 }
 
@@ -36723,15 +36753,13 @@ fn test_yq_auto_output_inplace_multi_doc_no_leading_separator_1493() -> Result<(
     Ok(())
 }
 
-/// The multi-doc `---` separator decision for a mixed-format, non-slurp
-/// multi-file run must not depend on file *order* -- #1497 review found
-/// `any_doc_output` (now `any_yaml_doc_output`, tracked only for
-/// YAML-resolved documents) flipped true even for a JSON-resolved
-/// document, making a YAML document immediately after a JSON one wrongly
-/// get a leading separator while the same YAML document appearing first
-/// would not.
+/// The first file picks the decoder for the run (#4394), so the order of a mixed pair is not
+/// symmetric: `a.yaml b.json` reads both as YAML, while `b.json a.yaml` reads both as JSON and
+/// fails on the YAML file, as real yq does (`bad file 'a.yaml': invalid character 'a' looking for
+/// beginning of value`). #1497 once pinned that the separator decision did not depend on order;
+/// with one decoder per run there is no mixed-format run left to be order-dependent.
 #[test]
-fn test_yq_auto_output_mixed_format_separator_order_independent_1493() -> Result<()> {
+fn test_yq_auto_output_mixed_format_order_picks_the_decoder_1493() -> Result<()> {
     let dir = TempDir::new()?;
     let yaml_file = dir.path().join("a.yaml");
     let json_file = dir.path().join("b.json");
@@ -36756,21 +36784,9 @@ fn test_yq_auto_output_mixed_format_separator_order_independent_1493() -> Result
         .arg(&yaml_file)
         .stdin(Stdio::null())
         .output()?;
-    assert!(json_then_yaml.status.success());
-
-    // Neither order should insert a `---` before the lone YAML document
-    // (see the mixed-format known-gap test above for why there's no
-    // separator here at all, only order-independence is asserted).
-    let yaml_then_json_stdout = String::from_utf8(yaml_then_json.stdout)?;
-    let json_then_yaml_stdout = String::from_utf8(json_then_yaml.stdout)?;
-    assert!(
-        !yaml_then_json_stdout.contains("---"),
-        "yaml-then-json: {yaml_then_json_stdout:?}"
-    );
-    assert!(
-        !json_then_yaml_stdout.contains("---"),
-        "json-then-yaml: {json_then_yaml_stdout:?}"
-    );
+    assert_eq!(json_then_yaml.status.code(), Some(1));
+    let stderr = String::from_utf8(json_then_yaml.stderr)?;
+    assert!(stderr.contains("not a valid JSON value"), "{stderr}");
     Ok(())
 }
 

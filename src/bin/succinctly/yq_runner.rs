@@ -1105,6 +1105,17 @@ fn resolve_input_format(format: InputFormat, path: Option<&Path>) -> InputFormat
     }
 }
 
+/// The input format every file of one run is decoded with (#4394). Real yq
+/// picks its decoder once, from the *first* file argument's extension
+/// (`.json` is JSON; anything else -- `.yaml`, `.yml`, no extension, `-` --
+/// is YAML), and reads every file with it: `yq '.a' t.json t.yaml` reads both
+/// as JSON, and `yq '.a' t.yaml t.json` reads both as YAML. An explicit
+/// `-p` is not looked at. With no file arguments (stdin) it is the same
+/// resolution with no path.
+fn resolve_run_input_format(format: InputFormat, files: &[String]) -> InputFormat {
+    resolve_input_format(format, files.first().map(|f| Path::new(f.as_str())))
+}
+
 /// Applies `--front-matter`, if set, to raw input bytes before format
 /// resolution and validation: the raw bytes (e.g. Markdown) aren't valid
 /// standalone YAML, so extraction must happen first. Returns
@@ -1161,9 +1172,9 @@ fn gather_input_sources(
     output_format: OutputFormat,
 ) -> Result<(Vec<GatheredSource>, Option<i32>)> {
     let mut sources = Vec::new();
+    let resolved_format = resolve_run_input_format(input_format, input_files);
     if input_files.is_empty() {
         let raw_bytes = read_stdin()?;
-        let resolved_format = resolve_input_format(input_format, None);
         let (input_bytes, format, body) =
             apply_front_matter(raw_bytes, resolved_format, front_matter, "<stdin>")?;
         let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
@@ -1178,7 +1189,6 @@ fn gather_input_sources(
                 continue;
             }
             let raw_bytes = read_file(path)?;
-            let resolved_format = resolve_input_format(input_format, Some(path));
             let (input_bytes, format, body) =
                 apply_front_matter(raw_bytes, resolved_format, front_matter, file_path)?;
             let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
@@ -8172,40 +8182,19 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // than and independent of `#2276`'s `--slurp`/`--inplace` finding,
     // filed separately rather than folded in here.
     //
-    // Conservative for a mixed-format multi-file `--inplace`/`--slurp`
-    // invocation, same trade-off #978's original version accepted: this
-    // disables the relevant fast path for *every* source in the run, not
-    // just the JSON one(s), since `can_inplace_fast_path`/
-    // `can_slurp_fast_path` are single, run-wide booleans with no
-    // per-file M2-vs-DOM switch to hook into instead. A per-file switch
-    // was not attempted (#2276 review): each of `can_inplace_fast_path`'s/
-    // `can_slurp_fast_path`'s two branches is its own, separately-parsed
-    // loop over `input_files`/`input_sources` (M2 branch vs. DOM branch),
-    // decided once before either loop starts -- routing *within* one file
-    // at a time, rather than picking one branch for the whole run, would
-    // mean restructuring both loops into one that decides per file, a
-    // materially larger change than this fix's own scope for a collateral
-    // cost real yq itself has no equivalent to weigh against (it has no
-    // M2-style fast path to decline in the first place).
-    //
-    // **The concrete cost, spelled out rather than left implicit**:
-    // `succinctly yq -i '.' a.yaml b.json`, where `a.yaml` alone
-    // (genuinely YAML, well-formed) is safe on the M2 fast path and
-    // `b.json` is what forces this whole run onto the DOM fallback --
-    // `a.yaml`'s own duplicate mapping keys (`a: 1` / `a: 2`, both
-    // present) now silently collapse to the last value (`a: 2`) too, the
-    // exact #442/#1343 loss the M2 fast path exists to avoid, even though
-    // `a.yaml` in isolation (`succinctly yq -i '.' a.yaml`, no JSON file
-    // in the same invocation) would not lose them. Confirmed live and
-    // pinned by
-    // `test_yq_inplace_mixed_yaml_json_files_collapses_yaml_duplicate_keys_too_2276`.
-    let any_input_is_json = if input_files.is_empty() {
-        resolve_input_format(args.input_format, None) == InputFormat::Json
-    } else {
-        input_files.iter().any(|f| {
-            resolve_input_format(args.input_format, Some(Path::new(f))) == InputFormat::Json
-        })
-    };
+    // Since #4394 this is a property of the run's *decoder*, which real yq picks
+    // from the first file's extension for every file, so there is no mixed-format
+    // run left for a run-wide boolean to be conservative about: `a.yaml b.json`
+    // is all YAML (and keeps the fast paths), `b.json a.yaml` is all JSON (and
+    // fails on the YAML file). The collateral cost this comment used to spell
+    // out -- a JSON file anywhere in a `-i` run collapsing a YAML file's
+    // duplicate keys -- now arises only for a JSON *first* file, where yq has the
+    // same decoder; pinned by
+    // `test_yq_inplace_mixed_yaml_json_files_keeps_yaml_duplicate_keys_2276`.
+    // One decoder serves the whole run (#4394), so this is a property of the
+    // first file, not an `any` over all of them.
+    let any_input_is_json =
+        resolve_run_input_format(args.input_format, &input_files) == InputFormat::Json;
     // #2276 review: one shared term for the three JSON-declining gates
     // below (`can_inplace_json_fast_path`/`can_inplace_yaml_fast_path`/
     // `can_slurp_fast_path`) to `&&` in, rather than `&& !any_input_is_json`
@@ -8918,6 +8907,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 }
             }
         } else {
+            let run_input_format = resolve_run_input_format(args.input_format, &input_files);
             'm2_files: for (file_index, file_path) in input_files.iter().enumerate() {
                 // #2427: `file_index` is a per-file constant on this path -- each
                 // file is evaluated independently, so there is no combined
@@ -8941,7 +8931,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     Ok(bytes) => bytes,
                     Err(e) => return flush_then_err(&mut writer, e),
                 };
-                let fmt = resolve_input_format(args.input_format, Some(path));
+                // #4394: the first file's extension decides for all of them.
+                let fmt = run_input_format;
                 // #1616: see the stdin block above.
                 let yaml_bytes = substitute_json_utf8(yaml_bytes, fmt, args.output_format);
                 if let Some(code) =
@@ -9698,6 +9689,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         }
 
         let mut global_doc_index: usize = 0;
+        let run_input_format = resolve_run_input_format(args.input_format, &input_files);
         'inplace_files: for (file_index, file_path) in input_files.iter().enumerate() {
             // #2427: `file_index` is a per-file constant on this path -- each
             // file is evaluated independently, so there is no combined
@@ -9713,7 +9705,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 continue;
             }
             let raw_bytes = read_file(path)?;
-            let resolved_format = resolve_input_format(args.input_format, Some(path));
+            // #4394: the first file's extension decides for all of them.
+            let resolved_format = run_input_format;
             let (input_bytes, format, front_matter_body) =
                 apply_front_matter(raw_bytes, resolved_format, args.front_matter, file_path)?;
             // #1616: `-i` rewrites the file with the substitution only when
