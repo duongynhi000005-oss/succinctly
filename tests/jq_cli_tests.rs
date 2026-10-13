@@ -80174,6 +80174,130 @@ fn test_foreach_source_bare_alternative_chain_behind_register_stages_4420() -> R
     ])
 }
 
+/// #4483: a `?//` chain with a bare `$var` alternative that is the whole operand of `first(..)` or
+/// `limit(..; ..)`, as a `foreach` source. jq's `first` is a `label`/`break`, which the chain's `?//`
+/// catches as a body error, so value mode emits the element twice but `path()` once; the by-value
+/// drive reproduced the double emission in path mode. The register spine walk now reads the chain
+/// under the wrapper as the register's destructure, so the resolver places it. A stage in front of
+/// the chain, a `reduce` source, a loop pattern that destructures and a body that navigates keep the
+/// by-value drive. A `try` around the wrapper is not routed either (it still prints `[]` twice
+/// where jq prints it once: routing it accepted a `del` jq refuses). Every row captured from jq
+/// 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_bare_alternative_chain_under_first_limit_4483() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (limit(2; . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach (first(. as [$a] ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        // A `null` register: the first alternative's walk moves the register onto the matched member.
+        (
+            "null",
+            r"path(foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        // Controls: the value-mode source (two emissions), a body that navigates, a stage in front
+        // of the chain, a `reduce` source and a destructuring loop pattern.
+        (
+            r#"{"a":true}"#,
+            r"[foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .)]",
+            "[{\"a\":true},{\"a\":true}]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (first(. as {a:$a} ?// $a | .a?)) as $k (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (first(1 | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        // Inside a fold body the routed chain would refuse these, which jq answers.
+        (
+            "[true]",
+            r"del(reduce .[]? as $k (.; (foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(reduce .[]? as $k (.; (foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce (first(. as {a:$a} ?// $a | .)) as $k (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (first(. as {a:$a} ?// $a | .)) as {b:$b} (.; .; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+    ])
+}
+
 /// #4424: a pipe source of a `?//` chain, `(.|.) as P ?// $v | body`, as a `foreach` source. The
 /// pipe of `.` is the register, so the chain meets it as a bare `.` does. On a `null` register the
 /// first alternative's walk cannot fail, jq moves the register onto the matched member, and the
