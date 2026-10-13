@@ -59639,10 +59639,8 @@ fn fused_slice_index_branch<'a, S: EvalSemantics>(
     stage_index: usize,
     branch: &PathBranch<'a>,
 ) -> Option<PathBranch<'a>> {
-    let (
-        Expr::SliceExpr { target, start, end },
-        index @ Expr::Index { idx, key: None },
-    ) = (flat.get(stage_index)?, flat.get(stage_index + 1)?)
+    let (Expr::SliceExpr { target, start, end }, index @ Expr::Index { idx, key: None }) =
+        (flat.get(stage_index)?, flat.get(stage_index + 1)?)
     else {
         return None;
     };
@@ -59654,7 +59652,10 @@ fn fused_slice_index_branch<'a, S: EvalSemantics>(
     };
     let bound = |bound: &Option<Box<Expr>>, round: fn(f64) -> f64| match bound {
         None => Some(PathSliceBound::open()),
-        Some(expr) => Some(PathSliceBound::classify(eval_owned_closed::<S>(expr)?, round)),
+        Some(expr) => Some(PathSliceBound::classify(
+            eval_owned_closed::<S>(expr)?,
+            round,
+        )),
     };
     let (s, e) = (bound(start, f64::floor)?, bound(end, f64::ceil)?);
     let (start, end) =
@@ -136766,6 +136767,74 @@ mod tests {
     fn resolver_passes_through(doc: &str, stage: &str) -> bool {
         let (values, error) = outputs_and_error(doc.as_bytes(), &format!("path(.x | {stage})"));
         error.is_none() && values == [r#"["x"]"#]
+    }
+
+    /// #4356: `fused_slice_index_branch` answers `.[a:b][k]` over a trackable array from the
+    /// slice's range, naming the slice component as spelled and the index as written, and
+    /// declines everything the general route owns. The loop test cannot tell this half from the
+    /// path walk's (the resolver's slice is cheap beside the walk's bridge), so it is pinned here.
+    #[test]
+    fn test_fused_slice_index_branch_answers_a_trackable_array_and_declines_the_rest_4356() {
+        let flat_of = |filter: &str| {
+            let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
+            let mut flat = Vec::new();
+            push_path_components(&mut flat, &expr);
+            flat
+        };
+        let array = |items: &[i64]| {
+            OwnedValue::Array(
+                items
+                    .iter()
+                    .map(|n| OwnedValue::Int(*n))
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+        };
+        let branch_over = |value: OwnedValue, trackable: bool| {
+            PathBranch::new(PathPrefix::root(), Cow::Owned(value), trackable)
+        };
+        let fused = |filter: &str, value: OwnedValue, trackable: bool| {
+            fused_slice_index_branch::<JqSemantics>(
+                &flat_of(filter),
+                0,
+                &branch_over(value, trackable),
+            )
+            .map(|b| (b.path.to_vec().len(), b.value.into_owned()))
+        };
+        // The bound `(1+1)` is closed but not folded at parse time, so the slice stays computed.
+        let xs = || array(&[10, 20, 30, 40]);
+        assert_eq!(
+            fused(".[(1+1):][0]", xs(), true),
+            Some((2, OwnedValue::Int(30)))
+        );
+        assert_eq!(
+            fused(".[(1+1):][-1]", xs(), true),
+            Some((2, OwnedValue::Int(40)))
+        );
+        // Past either end of the slice is `null`, as the general route reads it.
+        assert_eq!(
+            fused(".[(1+1):][9]", xs(), true),
+            Some((2, OwnedValue::Null))
+        );
+        assert_eq!(
+            fused(".[(1+1):][-9]", xs(), true),
+            Some((2, OwnedValue::Null))
+        );
+        // Declined: untracked branch, a non-array, a bound that reads `.`, a generator bound, a
+        // slice of something other than the input, and a float-spelled index.
+        assert_eq!(fused(".[(1+1):][0]", xs(), false), None);
+        assert_eq!(fused(".[(1+1):][0]", OwnedValue::Null, true), None);
+        assert_eq!(fused(".[length:][0]", xs(), true), None);
+        assert_eq!(fused(".[(1,2):][0]", xs(), true), None);
+        assert_eq!(fused(".a[(1+1):][0]", xs(), true), None);
+        assert_eq!(fused(".[(1+1):][0.0]", xs(), true), None);
+        // yq reads a slice and an index by its own rules.
+        assert!(fused_slice_index_branch::<YqSemantics>(
+            &flat_of(".[(1+1):][0]"),
+            0,
+            &branch_over(xs(), true)
+        )
+        .is_none());
     }
 
     /// #4443: `is_input_returning_stage` and `is_transparent_leaf` restate, by shape,

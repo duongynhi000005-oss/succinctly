@@ -130753,7 +130753,8 @@ fn test_computed_slice_read_loop_does_not_grow_with_the_slice_4286() -> Result<(
 /// float-spelled index, a generator bound) unchanged. Every row is a live jq 1.7.1 capture.
 #[test]
 fn test_path_of_a_computed_slice_read_names_the_slice_and_the_index_4356() -> Result<()> {
-    const DOC: &str = r#"{"xs":[10,20,30,40],"e":[],"s":"hey","n":null,"o":{"k":1},"r":[{"a":1},{"a":2}]}"#;
+    const DOC: &str =
+        r#"{"xs":[10,20,30,40],"e":[],"s":"hey","n":null,"o":{"k":1},"r":[{"a":1},{"a":2}]}"#;
     // (filter, stdout, exit code)
     const ROWS: &[(&str, &str, i32)] = &[
         (r#"1 as $i | path(.xs[$i:][0])"#, "[\"xs\",{\"start\":1,\"end\":null},0]\n", 0),
