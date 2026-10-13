@@ -3741,22 +3741,18 @@ known-but-out-of-scope at the time (`del(.missing[], .x)`, no `?` needed, now co
 gives `{}` rather than raising) -- see the "dropped `?`" bullet above, which predates this
 fix.
 
-**Residual gap, not yet fixed:** a comma-grouped sibling whose own trailing shape is `.[]`
-*followed by more path* (not a bare trailing `.[]`) still raises, because
-`vivify_del_comma_iterate_targets`'s `trailing_bare_iterate_prefix` only recognizes a
-prefix ending in a bare (optionally `?`-suppressed) `.[]` -- a sibling like
-`.missing[].x` falls through to the ordinary, read-based comma-branch resolution instead,
-which raises the same way #2324's own fan-out gap does:
+**Fixed since ([#2380](https://github.com/rust-works/succinctly/issues/2380)):** a
+comma-grouped sibling whose shape is `.[]` *followed by more path* (`del(.missing[].x,
+.y)`, `.missing[].x.z[0]`, `.missing[].x[]`, `.n[].x` over a stored `null`, `.[5][].x`
+past the end of an array) used to fall through to the read-based comma-branch resolution,
+which raises "Cannot iterate over null". `iterate_then_static_suffix` now recognises it
+beside the bare trailing `.[]`, in either position of the group, and the same
+`contains_length_dependent_index` guard applies: a sibling with a negative or computed
+index still declines the whole pre-pass.
 
-```bash
-$ echo '{"y":1}' | yq -o=json 'del(.missing[].x, .y)'   # {} in real yq
-$ echo '{"y":1}' | succinctly yq -o json 'del(.missing[].x, .y)'   # still raises
-```
-
-The non-comma single-target form (`del(.missing[].x)` alone) is fixed and does not have
-this gap -- only the comma-grouped combination of "suffix after the tolerated `.[]`" *and*
-"another sibling in the same call" is affected. Tracked as
-[#2380](https://github.com/rust-works/succinctly/issues/2380).
+The pre-pass also takes a prefix that reads as any other non-container (`{"s":5,"y":1} |
+del(.s[], .y)`, a string or a bool), which yq's `.[]` skips just the same (#2346): that
+shape raised `Cannot iterate over number (5)` before.
 
 ### `.[]` over a non-container is now a silent no-op — two residual gaps remain (#2346)
 

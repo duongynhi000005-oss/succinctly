@@ -41893,23 +41893,26 @@ fn test_yq_iterate_plain_read_non_container_is_noop_2346() -> Result<()> {
     Ok(())
 }
 
-/// Residual gap, not fixed here (tracked as #2380): a comma-grouped
-/// sibling whose own trailing shape is `.[]` *followed by more path* (not
-/// a bare trailing `.[]`) still raises, because
-/// `vivify_del_comma_iterate_targets`'s `trailing_bare_iterate_prefix` only
-/// recognizes a prefix ending in a bare (optionally `?`-suppressed) `.[]`
-/// -- a sibling like `.missing[].x` falls through to the ordinary,
-/// read-based comma-branch resolution instead. The non-comma single-target
-/// form (`del(.missing[].x)` alone, covered by the mid-chain test above) is
-/// unaffected. Pinning the current (unfixed) behavior rather than leaving
-/// it untested.
+/// #2380 (the residual gap #2347 left): a comma-grouped sibling shaped `.[]` *followed by more
+/// path* (`.missing[].x`) is tolerated like the bare trailing `.[]` (#2324), wherever it sits in
+/// the group; the `del_comma_*_2380` goldens pin the matching yq output byte for byte.
 #[test]
-fn test_2347_del_comma_grouped_tolerated_null_iterate_suffix_residual_gap() -> Result<()> {
-    let (_out, code) = run_yq_stdin("del(.missing[].x, .y)", r#"{"y":1}"#, &["-o=json", "-I=0"])?;
-    assert_eq!(
-        code, 1,
-        "residual gap: comma-grouped .[]-then-more-path sibling still errors"
-    );
+fn test_2347_del_comma_grouped_tolerated_null_iterate_suffix_2380() -> Result<()> {
+    for filter in ["del(.missing[].x, .y)", "del(.y, .missing[].x)"] {
+        let (out, code) = run_yq_stdin(filter, r#"{"y":1}"#, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.as_str()), (0, "{}\n"), "[{filter}]");
+    }
+    Ok(())
+}
+
+/// #2380: a negative index anywhere in the group still declines the whole pre-pass (yq's own
+/// answer depends on the order of the siblings there), so the shape that raised before keeps
+/// raising rather than guessing.
+#[test]
+fn test_2347_del_comma_iterate_suffix_with_length_dependent_sibling_still_declines_2380(
+) -> Result<()> {
+    let (_out, code) = run_yq_stdin("del(.[5][].x, .[-1])", "[1,2]", &["-o=json", "-I=0"])?;
+    assert_eq!(code, 1);
     Ok(())
 }
 
