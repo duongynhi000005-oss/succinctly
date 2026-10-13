@@ -143503,8 +143503,13 @@ mod neutral_leaves_register_tests_4028 {
         for (src, shape) in [
             (". as [$a] | $a", "none"),
             (". as {a:$a} | $a", "none"),
-            (". as [$a] ?// $a | 1", "none"),
             (". as {(.a):$a} | $a", "none"),
+            // #4488: a `?//` chain with a bare `$var` alternative is a producer: that alternative
+            // runs after the fork restored the register and states the entry. No bare alternative,
+            // or a producer in the body (`.`), keeps the previous answer.
+            (". as [$a] ?// $a | 1", "forwarded"),
+            (". as [$a] ?// [$a] | 1", "none"),
+            (". as [$a] ?// $a | .", "opaque"),
             // A producer in a computed key or in the source states nothing into the sink.
             (". as {(try .a catch 1):$a} | $a", "none"),
             ("(.. | .) as [$a] | $a", "none"),
