@@ -3825,11 +3825,17 @@ fn writes_head_foot_or_comments(expr: &Expr) -> bool {
 /// evaluation errors -- the real evaluation reports that, so the pass just
 /// stops resolving there.
 ///
-/// A metadata write anywhere *other* than a top-level pipe stage (inside a
-/// `reduce`/`foreach` body, an `as` binding's body, a `def`, ...) is refused
-/// explicitly: this pass can't see the document such a write would run
-/// against, and a silent no-op is the one outcome #798's own triage ruled
-/// out.
+/// A write under a variable binding (`.b as $x | .a line_comment = $x`, #2705) is a pipe stage
+/// of the binding's body, which the real evaluation reaches with `$x` already spliced in as a
+/// literal: this pass does the same, evaluating the binding's source against the stage's
+/// document and resolving the body once per output with `$x` substituted. Every fork's writes
+/// are kept, in order, and applied to every result -- real yq's forks share the node, so the
+/// last write wins in each result (`.[] as $x | .a line_comment = $x` prints the last `$x` in
+/// both documents, live-verified).
+///
+/// A metadata write anywhere *else* (inside a `reduce`/`foreach` body, a destructuring `as`
+/// pattern, a `def`, ...) is refused explicitly: this pass can't see the document such a write
+/// would run against, and a silent no-op is the one outcome #798's own triage ruled out.
 fn resolve_meta_assign_writes(
     expr: &Expr,
     root_value: &OwnedValue,
@@ -3845,18 +3851,7 @@ fn resolve_meta_assign_writes(
     // which document or file it is on before a write (`select(di == 1) | .b comments = ""`)
     // would resolve for the wrong one and silently write nothing for the rest (#2796). A `di`
     // after the last write only shapes what is printed, which this pass never sees.
-    let through_last_meta = stages
-        .iter()
-        .rposition(|s| matches!(s, Expr::MetaAssign { .. }))
-        .map_or(0, |last| last + 1);
-    if stages[..through_last_meta].iter().any(|stage| {
-        jq::walk::contains_builtin(stage, |b| {
-            matches!(
-                b,
-                Builtin::DocumentIndex | Builtin::FileIndex | Builtin::Filename
-            )
-        })
-    }) {
+    if pipeline_asks_which_document(&stages) {
         sink.report(
             DiagStyle::Yq,
             &EvalError::new(
@@ -3867,40 +3862,108 @@ fn resolve_meta_assign_writes(
         );
         return None;
     }
-    let top_level = stages
-        .iter()
-        .filter(|s| matches!(s, Expr::MetaAssign { .. }))
-        .count();
-    if top_level != total {
+    if reachable_meta_assigns(&stages) != total {
         sink.report(
             DiagStyle::Yq,
             &EvalError::new(
                 "metadata assignment (line_comment/head_comment/foot_comment/comments/style/anchor \
-                 = ...) is only supported as a top-level pipe stage",
+                 = ...) is only supported as a pipe stage, or under a plain `as $var` binding",
             ),
             &no_location(),
         );
         return None;
     }
+    let mut out = Vec::new();
+    resolve_pipeline_writes(&stages, root_value, sink, &mut out).then_some(out)
+}
+
+/// Whether `expr` asks which document or file it is on.
+fn asks_which_document(expr: &Expr) -> bool {
+    jq::walk::contains_builtin(expr, |b| {
+        matches!(
+            b,
+            Builtin::DocumentIndex | Builtin::FileIndex | Builtin::Filename
+        )
+    })
+}
+
+/// Whether a stage of `stages` up to and including the last one that holds a metadata write asks
+/// which document or file it is on (#2796). A stage under a plain `as $var` binding counts the
+/// same way, the binding's source included: [`resolve_pipeline_writes`] resolves its body against
+/// the document it is handed, with nothing to answer `di` from.
+fn pipeline_asks_which_document(stages: &[&Expr]) -> bool {
+    let through_last_meta = stages
+        .iter()
+        .rposition(|s| reachable_meta_assigns(&[*s]) > 0)
+        .map_or(0, |last| last + 1);
+    stages[..through_last_meta].iter().any(|stage| match stage {
+        Expr::As { expr, body, .. } if reachable_meta_assigns(&[*stage]) > 0 => {
+            let mut inner = Vec::new();
+            flatten_pipe_stages(body, &mut inner);
+            asks_which_document(expr) || pipeline_asks_which_document(&inner)
+        }
+        _ => asks_which_document(stage),
+    })
+}
+
+/// How many `Expr::MetaAssign` nodes [`resolve_pipeline_writes`] reaches in `stages`: the
+/// stages that are one, plus those under a plain `as $var` binding's body, however deep.
+fn reachable_meta_assigns(stages: &[&Expr]) -> usize {
+    stages
+        .iter()
+        .map(|stage| match stage {
+            Expr::MetaAssign { .. } => 1,
+            Expr::As { body, .. } => {
+                let mut inner = Vec::new();
+                flatten_pipe_stages(body, &mut inner);
+                reachable_meta_assigns(&inner)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Resolve the metadata writes of one flattened pipeline into `out`, `current` being the
+/// document its first stage sees. Returns `false` (already reported via `sink`) only on a
+/// genuine validation failure; see [`resolve_meta_assign_writes`] for what is not one.
+fn resolve_pipeline_writes(
+    stages: &[&Expr],
+    current: &OwnedValue,
+    sink: &mut ErrorSink,
+    out: &mut Vec<ResolvedMetaWrite>,
+) -> bool {
     let last_meta = stages
         .iter()
-        .rposition(|s| matches!(s, Expr::MetaAssign { .. }))
+        .rposition(|s| reachable_meta_assigns(&[*s]) > 0)
         .unwrap_or(0);
-
-    let mut out = Vec::new();
-    let mut current = std::borrow::Cow::Borrowed(root_value);
+    let mut current = std::borrow::Cow::Borrowed(current);
     for (i, stage) in stages.iter().enumerate() {
-        if let Expr::MetaAssign {
-            target,
-            slot,
-            value,
-            is_update,
-        } = stage
-        {
-            if !resolve_one_meta_assign(target, *slot, value, *is_update, &current, sink, &mut out)
-            {
-                return None;
+        match stage {
+            Expr::MetaAssign {
+                target,
+                slot,
+                value,
+                is_update,
+            } => {
+                if !resolve_one_meta_assign(target, *slot, value, *is_update, &current, sink, out) {
+                    return false;
+                }
             }
+            Expr::As { expr, var, body } if reachable_meta_assigns(&[*stage]) > 0 => {
+                // A source whose evaluation fails is the real evaluation's to report.
+                let Some(bound) = evaluate_input_quiet(&current, expr) else {
+                    break;
+                };
+                for value in &bound {
+                    let body = jq::substitute_vars(body, [(var.as_str(), value)]);
+                    let mut inner = Vec::new();
+                    flatten_pipe_stages(&body, &mut inner);
+                    if !resolve_pipeline_writes(&inner, &current, sink, out) {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
         }
         if i >= last_meta {
             break;
@@ -3912,7 +3975,7 @@ fn resolve_meta_assign_writes(
             }
         }
     }
-    Some(out)
+    true
 }
 
 /// Resolve one `Expr::MetaAssign` stage against `current`, the document it
@@ -12300,6 +12363,12 @@ mod tests {
         for filter in [
             "select(di == 1) | .a comments = \"\"",
             ".a comments = (fi | tostring)",
+            // #2705: a write under an `as` binding is held to the same rule, wherever the
+            // question sits -- ahead of the binding, in its source, or in the write itself.
+            "select(di == 1) | .b as $x | .a line_comment = $x",
+            "(di | tostring) as $x | .a line_comment = $x",
+            ".b as $x | .a line_comment = (di | tostring)",
+            ".b as $x | select(fi == 0) | .a line_comment = $x",
         ] {
             let expr = jq::parse_with_mode(filter, jq::ParserMode::Yq).unwrap();
             let mut sink = ErrorSink::default();
@@ -12310,11 +12379,19 @@ mod tests {
             );
             assert_eq!(sink.report_count(), 1, "{filter}");
         }
+        // A `di` after the last write only shapes what is printed, under a binding too.
+        for filter in [
+            ".a comments = \"\"",
+            ".b as $x | .a comments = \"\" | select(di == 0)",
+        ] {
+            let expr = jq::parse_with_mode(filter, jq::ParserMode::Yq).unwrap();
+            assert!(
+                resolve_meta_assign_writes(&expr, &OwnedValue::Null, &mut ErrorSink::default())
+                    .is_some(),
+                "{filter}"
+            );
+        }
         let expr = jq::parse_with_mode(".a comments = \"\"", jq::ParserMode::Yq).unwrap();
-        assert!(
-            resolve_meta_assign_writes(&expr, &OwnedValue::Null, &mut ErrorSink::default())
-                .is_some()
-        );
         assert_eq!(eval_yaml(yaml, &expr).len(), 1);
     }
 

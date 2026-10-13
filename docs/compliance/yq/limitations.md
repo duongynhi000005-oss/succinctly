@@ -4435,11 +4435,20 @@ ruled out), even though real yq supports every one of them:
   measured one, not YAML 1.2's: printable ASCII except `,`/`[`/`]`/`{`/`}`/`:` and
   whitespace, and nothing non-ASCII. Without the check the emitter wrote `&bad name 1`
   for `"bad name"`, which reads back as a different value.
-- **A metadata write anywhere other than a top-level pipe stage** (inside a `reduce`/
-  `foreach` body, an `as` binding's body — `.b as $x | .a line_comment = $x` — a `def`,
-  ...) raises `metadata assignment (...) is only supported as a top-level pipe stage`. The
-  write pass resolves stages against the document each one sees and can't see the input
-  such a nested write would run against; real yq handles all of them.
+- **A metadata write under a plain `as $var` binding works** (`.b as $x | .a line_comment =
+  $x`, [#2705](https://github.com/rust-works/succinctly/issues/2705)): the write pass
+  evaluates the binding's source against the document the stage sees and resolves the body
+  once per output with `$x` substituted, exactly as the real evaluation reaches it. Every
+  fork's writes are kept in order and applied to every result, which is yq's own behaviour
+  (the forks share the node, so `.[] as $x | .a line_comment = $x` on `a: 1` / `b: 2`
+  prints `# 2` in both documents).
+- **A metadata write anywhere else than a pipe stage** (inside a `reduce`/`foreach` body, the
+  *source* of an `as` binding — `(.b as $x | .a line_comment = "x") as $y | ...` — a
+  destructuring `as` pattern, a `def`, ...) raises `metadata assignment (...) is only
+  supported as a pipe stage, or under a plain `as $var` binding`. The write pass resolves
+  stages against the document each one sees and can't see the input such a nested write
+  would run against; real yq handles the source case (it has no `reduce`/`foreach`, a `def`
+  or `?//`, and refuses a destructuring `as` itself).
 
 A line comment on an element of a flow sequence or mapping (`.a[-1] line_comment = "y"` on
 `a: [1, 2]`) is written the way go-yaml writes it, since
@@ -5036,7 +5045,7 @@ Four known gaps this write shares with every other write form, none specific to 
 - **A multi-result filter carries no `CommentTree` at all** (`.a line_comment = "y" | .,
   .` prints two uncommented copies) — #1349's `GenericResult::Many` limitation, above.
 - **A preceding stage outside the shapes `is_alias_sensitive_assign` admits silently drops
-  the write**, rather than raising the "top-level pipe stage" refusal above: `.a | .b
+  the write**, rather than raising the "pipe stage" refusal above: `.a | .b
   line_comment = "hi"` on `a:\n  b: 1\n` prints `b: 1` where real yq prints `b: 1 # hi`
   (live-verified), because `resolve_meta_assign_writes` only runs at all when the whole
   expression passes `is_shape_preserving` (`src/jq/eval.rs`) — a bare navigation stage like

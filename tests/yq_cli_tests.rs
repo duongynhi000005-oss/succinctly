@@ -20225,16 +20225,18 @@ mod meta_assign_798 {
         Ok(())
     }
 
-    /// A metadata write anywhere other than a top-level pipe stage is
-    /// refused out loud: the write pass can't see the document such a
-    /// nested write runs against, and a silent no-op is the one outcome
-    /// #798's triage ruled out. Real yq supports these; recorded in
-    /// `docs/compliance/yq/limitations.md`.
+    /// A metadata write anywhere other than a pipe stage (or a pipe stage of a plain `as $var`
+    /// binding's body, #2705) is refused out loud: the write pass can't see the document such a
+    /// nested write runs against, and a silent no-op is the one outcome #798's triage ruled out.
+    /// Real yq supports some of these; recorded in `docs/compliance/yq/limitations.md`.
     #[test]
     fn nested_metadata_assignment_is_refused_explicitly() {
         for filter in [
-            ".b as $x | .a line_comment = $x",
-            ".b as $x | (.a style = \"double\")",
+            // #2705: a write in the *source* of a binding is not a stage of anything the pass
+            // resolves (the body's `$y` binds the source's output).
+            "(.b as $x | .a line_comment = \"x\") as $y | .b line_comment = \"y\"",
+            // A destructuring binding is not the plain `as $var` the pass substitutes.
+            ".b as [$x] | .a line_comment = \"x\"",
             // #3017: a metadata write buried in a destructuring pattern's
             // computed key. `count_meta_assigns` is built on `any_subexpr`,
             // which used to skip `patterns` entirely, so this used to be a
@@ -20257,7 +20259,7 @@ mod meta_assign_798 {
             assert_eq!(code, 1, "[{filter}] stderr: {err}");
             assert_eq!(out, "", "[{filter}]");
             assert!(
-                err.contains("only supported as a top-level pipe stage"),
+                err.contains("only supported as a pipe stage, or under a plain `as $var` binding"),
                 "[{filter}] stderr: {err}"
             );
         }
@@ -20275,7 +20277,7 @@ mod meta_assign_798 {
         assert_eq!(code, 0, "[{filter}] stderr: {err}");
         assert_eq!(out, "a: k\nk: 1\n", "[{filter}]");
         assert!(
-            !err.contains("only supported as a top-level pipe stage"),
+            !err.contains("only supported as a pipe stage, or under a plain `as $var` binding"),
             "[{filter}] stderr: {err}"
         );
     }
@@ -20390,6 +20392,98 @@ mod meta_assign_798 {
             &[],
         )?;
         assert_eq!((code, out.as_str(), err.as_str()), (1, "", "2\n"));
+        Ok(())
+    }
+
+    /// #2705: a write under `as $var` is resolved by substituting each output of the binding's
+    /// source into its body, so a side effect in the source (which the real evaluation also runs)
+    /// still fires once, and one in the body's right-hand side (which only the pass evaluates)
+    /// fires once per fork of the source.
+    #[test]
+    fn side_effects_under_an_as_binding_fire_once_2705() -> Result<()> {
+        let debug_line = "[\"DEBUG:\",2]\n";
+        for (filter, expected_out, expected_err) in [
+            (
+                "(.b | debug) as $x | .a line_comment = ($x | tostring)",
+                "a: 1 # 2\nb: 2\n",
+                debug_line,
+            ),
+            (
+                ".b as $x | .a line_comment = ($x | debug | tostring)",
+                "a: 1 # 2\nb: 2\n",
+                debug_line,
+            ),
+            (
+                ".b as $x | .a = ($x | debug) | .a line_comment = \"y\"",
+                "a: 2 # y\nb: 2\n",
+                debug_line,
+            ),
+            (
+                ".[] as $x | .a line_comment = ($x | debug | tostring)",
+                "a: 1 # 2\nb: 2\na: 1 # 2\nb: 2\n",
+                "[\"DEBUG:\",1]\n[\"DEBUG:\",2]\n",
+            ),
+        ] {
+            let (out, err, code) =
+                run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", &["--jq-extensions"])?;
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (0, expected_out, expected_err),
+                "[{filter}]"
+            );
+        }
+        Ok(())
+    }
+
+    /// #2705: a write under `as $var` that fails validation reports yq's own error and prints no
+    /// document, exactly like the same write at the top level.
+    #[test]
+    fn invalid_write_under_an_as_binding_reports_the_error_2705() -> Result<()> {
+        for (filter, message) in [
+            (".b as $x | .a style = \"bogus\"", "unknown style bogus"),
+            (
+                ".b as $x | .a anchor = \"bad name\"",
+                "anchor value must contain valid characters only",
+            ),
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", &[])?;
+            assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+            assert!(err.contains(message), "[{filter}] stderr: {err}");
+        }
+        Ok(())
+    }
+
+    /// #2705 (review): a write under an `as` binding that asks which document it is on is refused
+    /// like the same write at the top level (#2796), not resolved against the first document --
+    /// `select(di == 1) | .b as $x | .a line_comment = $x` printed the second document with no
+    /// comment before the guard saw through the binding.
+    #[test]
+    fn as_binding_write_that_asks_which_document_is_refused_2705() -> Result<()> {
+        for filter in [
+            "select(di == 1) | .b as $x | .a line_comment = $x",
+            ".b as $x | .a line_comment = (di | tostring)",
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(
+                filter,
+                "a: 1\nb: 2\n---\na: 2\nb: 3\n",
+                &["--jq-extensions"],
+            )?;
+            assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
+            assert!(
+                err.contains("cannot depend on document_index/file_index/filename"),
+                "[{filter}] stderr: {err}"
+            );
+        }
+        Ok(())
+    }
+
+    /// #2705: a binding whose source yields nothing resolves no write, and the document passes
+    /// through unchanged -- what pinned yq v4.53.3 prints for it too (a quirk: jq prints nothing).
+    #[test]
+    fn as_binding_over_an_empty_source_writes_nothing_2705() -> Result<()> {
+        let (out, err, code) =
+            run_yq_stdin_with_stderr(".zz[] as $x | .a line_comment = $x", "a: 1\nb: 2\n", &[])?;
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "a: 1\nb: 2\n", ""));
         Ok(())
     }
 

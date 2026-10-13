@@ -1,0 +1,1 @@
+error("e") as $x | .a line_comment = $x
