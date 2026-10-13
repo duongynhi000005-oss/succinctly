@@ -28263,10 +28263,9 @@ fn test_slice_noop_throwaway_seed_by_position_1390() -> Result<()> {
 /// sequence throwaway there.
 #[test]
 fn test_slice_plain_assign_with_a_step_after_it_still_errors_1390() -> Result<()> {
-    for filter in [".b[0:1].c = 9"] {
-        let (out, err, code) = run_yq_stdin_with_stderr(filter, "c: 0\n", &[])?;
-        assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
-    }
+    let filter = ".b[0:1].c = 9";
+    let (out, err, code) = run_yq_stdin_with_stderr(filter, "c: 0\n", &[])?;
+    assert_eq!((code, out.as_str()), (1, ""), "[{filter}] stderr: {err}");
     Ok(())
 }
 
