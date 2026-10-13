@@ -55301,6 +55301,32 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // escapes first, must not leave the old node's path behind).
                         state_path = None;
                         let entry_snapshot = state_snapshot.clone();
+                        // #4480/#4446: `resolve_reduce`'s #4131 widening, for the step of a
+                        // `foreach`. An untracked entry whose stage carries a `null`/boolean
+                        // register has no path to navigate the accumulator along, but a
+                        // `null`/boolean accumulator equal to that register is on it by
+                        // kind (`jv_identical`), so a navigating UPDATE passes `path_intact`
+                        // in jq. That includes the `null` a step that delivered nothing
+                        // leaves behind (`foreach (1,2) as $i (1; try .a; .)`: step 1's
+                        // `.a` raises and is caught, step 2 navigates `null` and emits
+                        // `["a"]`). Without it the refusal of that navigation read as
+                        // jq's own, a `try` caught it, and the step vanished -- so a
+                        // consumer of the stream never saw the output jq raises on
+                        // (`-(foreach ...)`, #4480). jq mode only: on the write side the
+                        // widening turns a refusal into a write where yq no-ops. Unlike
+                        // `resolve_reduce`'s, it is not gated on the UPDATE definitely
+                        // navigating: `foreach` emits from inside the loop, so a body that
+                        // computes (`.`, `5`, `.a // 5`) must also state its output against
+                        // the register an equal `null`/boolean accumulator is on, and the
+                        // stage's own emission check judges what UPDATE then yields.
+                        let live_step = (S::TAG == EvalTag::Jq && is_null_or_bool(&entry_state))
+                            .then(|| active_reg.trackable_at_live_null_bool())
+                            .flatten()
+                            .filter(|live| null_bool_identical(&entry_state, &live.value));
+                        let (active_reg, active_at_register) = match live_step {
+                            Some(live) => (live, true),
+                            None => (active_reg, active_at_register),
+                        };
                         let mut delivered = false;
                         let update_stop_at = core::cell::Cell::new(None::<u64>);
                         let mut on_update = |update_branch: PathBranch<'a>| -> Demand {

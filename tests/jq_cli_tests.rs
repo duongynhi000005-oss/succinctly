@@ -67598,6 +67598,216 @@ fn test_reduce_update_navigates_accumulator_on_untracked_null_register_4131() ->
     ])
 }
 
+/// #4480, #4446: the `foreach` twin of #4131. A `foreach` on an untracked entry whose stage
+/// carries a `null`/boolean register follows an `UPDATE` that navigates a `null`/boolean
+/// accumulator, because one equal to the register is `jv_identical` to it by kind. That
+/// includes the `null` a step that delivered nothing leaves behind (jq's `LOADVN` moves the
+/// state out): in `foreach (1,2) as $i (1; try .a; .)` step 1's `.a` raises and is caught,
+/// and step 2 navigates `null` and emits `["a"]`. The resolver refused that navigation, the
+/// `try` swallowed the refusal as jq's own, and the step vanished -- so `-(foreach ...)`
+/// never met the `null` jq raises on and `del` of it deleted the document. Controls that
+/// still refuse as jq does: a register that is not `null`/boolean, an accumulator that is
+/// not the register, a boolean register (the step is intact and `jv_get` raises). Every jq
+/// side captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_navigates_accumulator_on_untracked_null_register_4480() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The filed rows: a negation of the stream meets the `null` and raises.
+        (
+            "null",
+            r"path(1 | -(foreach (1,2) as $i (1; try .a; .)))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        (
+            "null",
+            r"del(1 | -(foreach (1,2) as $i (1; try .a; .)))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        (
+            "null",
+            r"path(1 | -(foreach (1,2) as $i (.; try .a; .)))",
+            "",
+            "null (null) cannot be negated",
+            5,
+        ),
+        // The stream itself: step 1 is caught, every later step navigates `null`.
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $i (1; try .a; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | foreach (1,2,3) as $i (1; try .a; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $i (1; try .a; .b))",
+            "[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        // A navigation that is not caught, and an accumulator that never left the register.
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $i (null; .a; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $i (null; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (null; .b; .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (null; .b; .b))",
+            "[\"a\",\"b\",\"b\"]\n[\"a\",\"b\",\"b\"]\n",
+            "",
+            0,
+        ),
+        // A destructuring source moves the step's register by its walk, which is not the live
+        // one; a `?//` chain's alternative that binds a plain variable keeps it; a consumer that
+        // stops early reads the same stream.
+        (
+            "null",
+            r"path(1 | foreach (1,2) as [$x] (1; try .a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(1 | foreach ([1],[2]) as [$x] (null; .a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $a ?// [$a] (1; try .a; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | first(foreach (1,2,3) as $i (1; try .a; .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | limit(1; foreach (1,2,3) as $i (null; .a; .)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(1 | limit(2; foreach (1,2,3,4) as $i (1; try .a; .)))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        // The write side lands on the register.
+        (
+            "null",
+            r"(1 | foreach (1,2) as $i (1; try .a; .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(1 | foreach (1,2) as $i (1; try .a; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a | 5 | foreach (1,2) as $q (null; .b; .)) = 7",
+            "{\"a\":{\"b\":7}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a | 5 | foreach (1,2) as $q (null; .b; .))",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        // Controls. An EXTRACT that is not the register is still refused after the step.
+        (
+            "null",
+            r"path(1 | foreach (1,2) as $i (1; try .a; $i))",
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        // The register is `false`, not `null`: a `null` accumulator is not on it, and a
+        // `false` one is on it and raises `jv_get`'s own error.
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (null; .b; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of null"#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (false; .b; .))",
+            "",
+            r#"Cannot index boolean with string "b""#,
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (false; .; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        // A register that is not `null`/boolean is a pointer identity this model cannot compare.
+        (
+            r#"{"a":0}"#,
+            r"path(.a | 5 | foreach (1,2) as $q (null; .b; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of null"#,
+            5,
+        ),
+        (
+            "true",
+            r"path(1 | foreach (1,2) as $i (1; try .a; .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
 /// emission carries is where the pattern walk and `UPDATE` left it. It is the entry's when the
 /// step took no walk step (a bare `$var`, or the bare alternative a failed destructure's
