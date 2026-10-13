@@ -41511,7 +41511,7 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         //   $x))`, whose SOURCE is the literal `([1])`) — see
         //   `resolve_reduce`/`resolve_foreach` and `FoldRegister` for how a
         //   register-derived element's own destructuring is walked
-        //   (`each_pattern_walk`, shared with #2649), and
+        //   (`each_pattern_walk_probed`, shared with #2649), and
         //   `docs/compliance/jq/limitations.md` for the residual refuse-only
         //   gap this still leaves (yq mode, and jq mode's own known
         //   `resolve_leaf`-message-wording gap on an ordinary accumulator
@@ -52073,7 +52073,7 @@ fn fold_pattern_seed<S: EvalSemantics>(
     }
 }
 
-/// One binding produced by a path-mode walk ([`each_pattern_walk`]): the
+/// One binding produced by a path-mode walk ([`each_pattern_walk_probed`]): the
 /// variable, its value, and -- when the value is provably the register's
 /// node at that point -- the [`Origin::At`] marker that lets a `$var`
 /// reference in the body re-establish the register ([`Frame::certifies`]).
@@ -52131,8 +52131,9 @@ struct PathPatternMode<'f> {
     /// for a key with no kind, or before any refusal. A walk ends at its first
     /// refusal (`step(..)?`) and a fold makes the cell afresh for each alternative,
     /// so a value read after a refusal is that refusal's. A fold's
-    /// [`settle_fold_alternative`] reads it to tell a refusal that is the walk's
-    /// guess from one jq raises whatever its register is (#3840, #3998).
+    /// [`settle_fold_alternative`] and a bind's [`resolve_as_pattern`] (its `refusal_is_exact`)
+    /// read it to tell a refusal that is the walk's guess from one jq raises whatever its
+    /// register is (#3840, #3998, #4539): change when a step sets it and both move.
     refused_step_could_succeed: Option<&'f core::cell::Cell<Option<bool>>>,
 }
 
@@ -52220,20 +52221,9 @@ impl PatternMode for PathPatternMode<'_> {
 /// The returned [`Flow`] is the walk's own: `Stopped` means `sink` stopped
 /// it, `Escaped` a step's refusal or a key generator's trailing control,
 /// raised after every branch completed before it was offered.
-fn each_pattern_walk<S: EvalSemantics>(
-    pattern: &Pattern,
-    input: &OwnedValue,
-    seed: PatternRegister,
-    frame: &Frame,
-    invert: bool,
-    sink: &mut dyn FnMut(PatternRegister, &[PatternBinding]) -> Demand,
-) -> Flow {
-    each_pattern_walk_probed::<S>(pattern, input, seed, frame, invert, None, sink)
-}
-
-/// [`each_pattern_walk`], noting in `refused_step_could_succeed` whether a
-/// refusal is of a step that could have succeeded on the value it refused (#3840,
-/// #3998).
+///
+/// `refused_step_could_succeed` notes whether a refusal is of a step that could have succeeded
+/// on the value it refused (#3840, #3998, #4539).
 fn each_pattern_walk_probed<S: EvalSemantics>(
     pattern: &Pattern,
     input: &OwnedValue,
@@ -52487,10 +52477,17 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             // source with no register in hand (`0 as [$q] ?// $z` in an INIT-navigated
             // fold's EXTRACT) was a guess here yet an exact refusal to the catchability
             // test below, and a `try` around the bind swallowed it.
+            // #4539: or the step the walk refused could never succeed on its input, which
+            // [`pattern_walk_fails_by_value`] cannot judge for a computed key (running its key again
+            // would repeat its effects) but the walk itself saw: jq raises that whatever its register
+            // is, and `?//` retries it (#3998, as the folds' [`settle_fold_alternative`] reads it).
+            let refused_could_succeed: core::cell::Cell<Option<bool>> = core::cell::Cell::new(None);
             let refusal_is_exact = || {
                 fresh_head
                     || register.is_some_and(|reg| bound != reg)
-                    || (S::TAG == EvalTag::Jq && pattern_walk_fails_by_value::<S>(pattern, bound))
+                    || (S::TAG == EvalTag::Jq
+                        && (refused_could_succeed.get() == Some(false)
+                            || pattern_walk_fails_by_value::<S>(pattern, bound)))
             };
             let seed = match register {
                 Some(reg) => PatternRegister {
@@ -52524,12 +52521,13 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             // rules below apply per branch, partway through the stream:
             // a body error after k branches moves to the next alternative
             // and the paths already emitted stand (jq never un-emits).
-            let walk = each_pattern_walk::<S>(
+            let walk = each_pattern_walk_probed::<S>(
                 pattern,
                 bound,
                 seed,
                 frame,
                 invert_dedup,
+                Some(&refused_could_succeed),
                 &mut |reg, bindings| {
                     // #3843: a re-invocation after a stop is a `?//` retry inside a
                     // computed key, which supersedes what the retried-past branch
@@ -52939,7 +52937,7 @@ fn body_can_swallow_an_error(body: &Expr) -> bool {
 /// `identity_at` (#2978) -- exactly as under `As`. Names any *other*
 /// alternative binds become `null`, as in value mode
 /// (`each_pattern_alternatives`). `bindings` arrive already deduplicated
-/// ([`each_pattern_walk`]).
+/// ([`each_pattern_walk_probed`]).
 #[allow(clippy::too_many_arguments)] // STYLE-0004: one splice per alternative, the walk's own inputs
 fn bind_pattern_body(
     source: &Expr,
@@ -53611,7 +53609,7 @@ impl FoldBind<'_> {
 /// single pattern: then there is nothing to null-fill, and the duplicate-name
 /// rule is not inverted.
 ///
-/// The returned [`Flow`] is the walk's own ([`each_pattern_walk`]):
+/// The returned [`Flow`] is the walk's own ([`each_pattern_walk_probed`]):
 /// `Stopped` means `sink` stopped it, `Escaped` a pattern step's refusal or
 /// the key generator's own trailing control, raised after every branch
 /// that completed before it. Whether a refusal may retry the next
@@ -132755,12 +132753,13 @@ mod tests {
         // refusal unwinds its bindings (the sink never runs).
         let mut out = Vec::new();
         let mut reached: Option<PatternRegister> = None;
-        let flow = each_pattern_walk::<JqSemantics>(
+        let flow = each_pattern_walk_probed::<JqSemantics>(
             &patterns[alt],
             input,
             seed,
             &frame,
             false,
+            None,
             &mut |reg, bindings| {
                 reached = Some(reg);
                 out = bindings.to_vec();

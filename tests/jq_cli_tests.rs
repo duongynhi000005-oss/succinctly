@@ -70070,6 +70070,112 @@ fn test_pattern_key_that_is_an_array_is_a_subarray_search_in_path_position_4527(
     ])
 }
 
+/// #4539: a fold's `try` over a computed-key `?//` bind. The walk's first step (`0 | .[0]`, the accumulator
+/// as the key) could never succeed, which jq raises whatever its register is and `?//` retries onto the
+/// bare alternative; `pattern_walk_fails_by_value` cannot judge a computed key, so the refusal read as a
+/// guess, never retried, and the plain error it returned was swallowed by the `try`: the fold's element
+/// vanished (`path(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | $a); $k))` is `["a"]`, was nothing)
+/// where jq raises at the emission. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_fold_try_over_a_computed_key_alternative_chain_retries_a_step_that_cannot_succeed_4539(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | 5); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as {(.|tostring):$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "null",
+            r#"path(foreach .a? as $k ("x"; try (. as {(.):$a} ?// $a | $a); .))"#,
+            "",
+            "Invalid path expression with result \"x\"",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k (0; try (. as {(.):$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; (. as {(.):$a} ?// $a | $a) or true; .))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | $a); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"del(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | $a); $k))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(foreach .a? as $k (0; try (. as {(.):$a} ?// $a | $a); $k)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        // Controls: a step that could succeed on a container accumulator is the walk's guess, not
+        // retried; both still raise (jq at the emission, here at the step).
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; . as {(.|tostring):$a} ?// $a | $a; .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce .a? as $k ({}; . as {(.|tostring):$a} ?// $a | $a))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as {a:$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (0; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
