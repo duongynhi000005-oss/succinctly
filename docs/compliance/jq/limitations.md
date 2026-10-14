@@ -2203,10 +2203,22 @@ is the revert that established what the other one costs.
    accumulator and the `foreach` emits from inside the loop, so `. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a}
    | .) as $y (.; .; .); .)` raises, and `del` of it deleted the document. A `reduce` source keeps the by-value answer,
    which backtracks. A pipe headed by the `$x` (`$x | . as {a:$a}`, `($x | .) as {a:$a}`) and a `?//` chain of
-   destructuring patterns are the same destructure and are refused too. Still accepted: the same `$x` behind
-   `select($x) | ...` or a `try ... catch` around the destructure (a `.` source is accepted there as well), a navigation
-   of it (`foreach ($x | .a)`), and an outer `reduce` whose own source navigates (`reduce .[]? as $it (.;
-   foreach ($x | .a) ...)`). Outside a fold body, a bound expression
+   destructuring patterns are the same destructure and are refused too, as is one behind a `select(f)` stage (`f` is a
+   subexpression that moves nothing: `select($x) | $x as {a:$a} | .`, `select(.) | . as {a:$a} | .`) and a navigation
+   of the register that a `foreach` source does not backtrack (`foreach ($x | .a)`, `.[0]`, `.[]?`, `select(.) | .a`): the
+   inner fold's emission is no longer at the register, which the outer fold had re-certified from the emitted value
+   alone ([#4505](https://github.com/rust-works/succinctly/issues/4505)'s third part). Inside the body of a `reduce`
+   whose own source navigates (`reduce .[]? as $it (.; ...)`) jq's register is on the element, so neither `.` nor an
+   outer `$x` is it and a navigation or destructure of either raises there for a `reduce` source too (the
+   by-value drive answered): the nested source is resolved with no position to certify a marker against, and
+   `update_navigates_within` reads a nested source past the stages that hand their input on (`.`, an outer `$x`, `select(f)`).
+   A `select(f)` stage is looked through only when `f` is the accumulator's own truthiness (`.`, the `$x`, a literal) and the
+   accumulator is truthy: `select(empty)` or `select($x|not)` pass nothing, and the destructure behind them never runs.
+   Still accepted ([#4575](https://github.com/rust-works/succinctly/issues/4575)): a `try ... catch` around the destructure
+   (`foreach (try ($x as {a:$a} | .) catch .)`), or a `select(.) | (. as [$a] | .)?`; a refusal there would cost the rows
+   where the pattern's type error is what the `try` catches, which jq answers. And ([#4576](https://github.com/rust-works/succinctly/issues/4576))
+   the same shapes on a `null` accumulator, which the resolver's `null` clause owns (it prints `[]` where jq prints the moved
+   path). `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`

@@ -49240,6 +49240,13 @@ impl FoldRegister {
         b: PathBranch<'a>,
         identical_eligible: bool,
     ) -> PathBranch<'a> {
+        // #4505: a branch that navigated below this register and states jq's register there
+        // (`Unmoved`, #4063) is not at it, whatever its value or snapshot say: an inner `foreach`
+        // whose source moved the register emits its accumulator, which equals this register's by
+        // value and snapshot, but jq's register is where the source left it.
+        // Jq mode only, like every register admission here (ADR-0018).
+        let register_moved_below =
+            S::TAG == EvalTag::Jq && b.path.depth() > 0 && b.register.unmoved_value().is_some();
         if b.trackable {
             let path = PathPrefix::extend_many(&self.path, b.path.to_vec());
             PathBranch::new(path, b.value, true)
@@ -49277,10 +49284,11 @@ impl FoldRegister {
             // The empty path says the branch navigated nothing from the
             // register's own node, and the value comparison says the
             // register in hand is this fold's.
-            identical_eligible
-                || b.snapshot.proves_position()
-                || (b.path.depth() == 0
-                    && b.register.unmoved_value().is_some_and(|r| *r == self.value)),
+            !register_moved_below
+                && (identical_eligible
+                    || b.snapshot.proves_position()
+                    || (b.path.depth() == 0
+                        && b.register.unmoved_value().is_some_and(|r| *r == self.value))),
         ) {
             PathBranch::new(Rc::clone(&self.path), b.value, true)
         } else {
@@ -49793,21 +49801,64 @@ fn fold_source_register_markers<S: EvalSemantics>(
 /// `source` with the leading `$x` stage of every pipe dropped when `$x` is one of `markers`
 /// (#4505): a `$x` that is the register hands it on as `.` does, so `$x | . as {a:$a} | .` and
 /// `($x | .) as {a:$a}` destructure the register as `. as {a:$a}` does, which the spine reads
-/// for `.` but not for a pipe headed by the marker (the resolver places both the same way). Only
-/// for [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
+/// for `.` but not for a pipe headed by the marker (the resolver places both the same way). With
+/// `selects`, a `select(c)` stage of a pipe is dropped too when `c` is the accumulator's own
+/// truthiness (`.`, or a listed marker or a literal): the condition runs as a subexpression, which
+/// moves nothing, and the caller knows the accumulator is truthy, so the stage after it meets the
+/// register where the one before it did (`select($x) | . as {a:$a} | .`); the spine reads only a
+/// `select` with a literal condition. Another condition may be false at run time (`select(.a)`,
+/// `select(empty)`), and then the destructure behind it never runs. Only for
+/// [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
 /// marker `Rc`s are shared, so a marker listed from the original is the one the copy holds.
-fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked]) -> Expr {
-    let mapped = map_subexprs(source, &mut |child| collapse_marker_pipes(child, markers));
+fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked], selects: bool) -> Expr {
+    let mapped = map_subexprs(source, &mut |child| {
+        collapse_marker_pipes(child, markers, selects)
+    });
     match &mapped {
-        Expr::Pipe(stages)
-            if stages.len() > 1
-                && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
-                    if markers.contains(&Rc::as_ptr(m))) =>
-        {
-            Expr::pipe(stages[1..].to_vec())
+        Expr::Pipe(stages) if stages.len() > 1 => {
+            let headed = matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
+                if markers.contains(&Rc::as_ptr(m)));
+            let drops = |e: &Expr| selects && is_register_truthy_select(e, markers);
+            if !headed && !stages.iter().any(drops) {
+                return mapped;
+            }
+            let kept: Vec<Expr> = stages
+                .iter()
+                .enumerate()
+                .filter(|(at, stage)| (*at != 0 || !headed) && !drops(stage))
+                .map(|(_, stage)| stage.clone())
+                .collect();
+            if kept.is_empty() {
+                Expr::Identity
+            } else {
+                Expr::pipe(kept)
+            }
         }
         _ => mapped,
     }
+}
+
+/// Whether `e` is a `select(c)` whose condition is the accumulator's own truthiness: `.`, a
+/// `$x` in `markers` (equal to it), or a literal ([`collapse_marker_pipes`]).
+fn is_register_truthy_select(e: &Expr, markers: &[*const Tracked]) -> bool {
+    let Expr::Builtin(Builtin::Select(cond)) = unwrap_paren(e) else {
+        return false;
+    };
+    match unwrap_paren(cond) {
+        Expr::Identity | Expr::Literal(_) => true,
+        Expr::TrackedVar(m) => markers.contains(&Rc::as_ptr(m)),
+        _ => false,
+    }
+}
+
+/// Whether some pipe of `source` has a `select(f)` stage, which [`collapse_marker_pipes`] may drop.
+fn has_select_stage(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| {
+        matches!(e, Expr::Pipe(stages) if stages.len() > 1
+            && stages
+                .iter()
+                .any(|stage| matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Select(_)))))
+    })
 }
 
 /// The `$x` markers in a fold `source` inside another fold's body that equal the accumulator at
@@ -51310,19 +51361,56 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // and the loud refusal after it are both decided by it.
     let unplaced_body = S::TAG == EvalTag::Jq
         && (!ambient.trackable || !(fold_body::depth() == 0 || fold_body::acc_is_register_here()));
-    let destructures_unplaced_register =
-        unplaced_body && source_destructures_register(source, true);
+    // #4505: the body of a `reduce` whose source moved jq's register (onto a descendant, so a
+    // container accumulator is not the register, and neither is a `$x` equal to it). A pattern step
+    // on either raises there whether or not the source backtracks it.
+    let in_moved_body =
+        S::TAG == EvalTag::Jq && fold_body::source_moved_here() && !is_null_or_bool(ambient.value);
+    // #4505: a `try` or `?` in the source swallows the destructure's raise (`reduce (try ($x as
+    // {a:$a} | .)) as $y (.; .)` is answered), which a refusal raised outside it would not. The
+    // spine peels a `try` of a `foreach` source itself; the cases below that are new leave it out.
+    // Evaluated only when an unplaced body asks.
+    let try_free = || {
+        !any_subexpr(source, &mut |e| {
+            matches!(e, Expr::Try { .. } | Expr::Optional(_))
+        })
+    };
+    let raise_reaches_fold = foreach_source || (in_moved_body && try_free());
+    // #4505: the accumulator is truthy, so a `select(.)`/`select($x)` stage in front of a destructure
+    // passes it on ([`collapse_marker_pipes`]); a falsy one passes nothing and the destructure never
+    // runs.
+    let select_passes = unplaced_body && ambient.trackable && has_select_stage(source) && {
+        !matches!(ambient.value, OwnedValue::Null | OwnedValue::Bool(false)) && try_free()
+    };
+    // #4505: the destructure of `.` behind a `select(f)` stage is the same one (`f` is a
+    // subexpression that moves nothing; the spine reads only a `select` with a literal condition).
+    // Only for a `foreach` source and in a moved body: elsewhere a `reduce` source backtracks a
+    // destructure of the register, which succeeds.
+    let destructures_unplaced_register = unplaced_body
+        && (source_destructures_register(source, true)
+            || (raise_reaches_fold
+                && select_passes
+                && source_destructures_register(
+                    &collapse_marker_pipes(
+                        source,
+                        &unplaced_register_markers::<S>(source, ambient),
+                        true,
+                    ),
+                    true,
+                )));
     // #4505: inside another fold's body `.` is not known to be the register, but a `$x` marker
     // that equals the accumulator at this fold is one jq may have bound to the register, and its
     // destructure then runs the same tracked `INDEX` step `.`'s does. Read as the register only
     // for the loud refusal below (never for the resolver route, which needs it *proven*, nor
     // through a nested `reduce`, which backtracks): a `$x` that is an equal-valued sibling costs
     // an answer, where reading the by-value drive's answer for the register accepts and `del`
-    // deletes the document. Only for a `foreach` source: a `reduce` backtracks its source, so a
-    // destructure of the register there succeeds (its `INDEX` step passes for a `$x` that is the
-    // register) and leaves the register where it was, which the by-value drive answers as jq does.
+    // deletes the document. Only for a `foreach` source, and in a moved body (`in_moved_body`):
+    // a `reduce` backtracks its source, so a destructure of the register there succeeds (its
+    // `INDEX` step passes for a `$x` that is the register) and leaves the register where it was,
+    // which the by-value drive answers as jq does. In a moved body the step raises on the marker
+    // instead (`raise_reaches_fold` leaves out a source with a `try`/`?`).
     let marker_destructures_unplaced_register = unplaced_body
-        && foreach_source
+        && raise_reaches_fold
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && {
@@ -51330,16 +51418,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
             // left to the by-value drive that answers it.
             let markers = unplaced_register_markers::<S>(source, ambient);
             !markers.is_empty()
-                && !any_subexpr(source, &mut |e| matches!(e, Expr::Reduce { .. }))
+                && (in_moved_body
+                    || !any_subexpr(source, &mut |e| matches!(e, Expr::Reduce { .. })))
                 && {
                     // The copy is only built when some pipe is headed by a listed marker.
-                    let headed = any_subexpr(source, &mut |e| {
-                        matches!(e, Expr::Pipe(stages)
-                            if stages.len() > 1
-                                && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
-                                    if markers.contains(&Rc::as_ptr(m))))
-                    });
-                    let collapsed = headed.then(|| collapse_marker_pipes(source, &markers));
+                    let headed = select_passes
+                        || any_subexpr(source, &mut |e| {
+                            matches!(e, Expr::Pipe(stages)
+                                if stages.len() > 1
+                                    && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
+                                        if markers.contains(&Rc::as_ptr(m))))
+                        });
+                    let collapsed =
+                        headed.then(|| collapse_marker_pipes(source, &markers, select_passes));
                     source_destructures_register_with(
                         collapsed.as_ref().unwrap_or(source),
                         true,
@@ -51475,12 +51566,26 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let nested_fold_navigates = any_subexpr(source, &mut |e| {
         matches!(e, Expr::Foreach { .. }) && any_subexpr(e, &mut is_fold_source_navigation)
     });
+    // #4505: inside the body of a `reduce` whose source moved jq's register onto a non-null
+    // element, neither `.` nor a `$x` bound outside is that register, whichever position and
+    // snapshot the ambient claims for the fold's entry (the step runs against the persistent
+    // register, [`resolve_reduce`]): a navigation of one (`select(.) | .a`, `$x | .a`) is
+    // path-checked against the element and raises. Resolving the source with no position to
+    // certify against refuses it, as the bare `.a` already is.
+    let moved_frame;
+    let (source_snapshot, source_frame) =
+        if S::TAG == EvalTag::Jq && fold_body::source_moved_onto_non_null_here() {
+            moved_frame = ambient.frame.unknown();
+            (Snapshot::No, &moved_frame)
+        } else {
+            (ambient.snapshot.clone(), &ambient.frame)
+        };
     let flow = resolve_node_sink::<S>(
         source,
         ambient.value,
         ambient.trackable,
-        &ambient.snapshot,
-        &ambient.frame,
+        &source_snapshot,
+        source_frame,
         Keep::AtMost(usize::MAX),
         &mut |branch| {
             // #2031: a trackable branch's own path rides along as
@@ -55177,10 +55282,35 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
         Expr::Reduce { input, init, .. } | Expr::Foreach { input, init, .. } => {
             update_navigates_within(init, false)
                 || (!matches!(unwrap_paren(init), Expr::Builtin(Builtin::Empty))
-                    && update_navigates_within(input, false))
+                    && nested_source_navigates(input))
         }
         other => is_fold_source_navigation(other),
     }
+}
+
+/// [`update_navigates_within`] for the SOURCE of a fold nested in an UPDATE (#4505). A pipe is read
+/// past the stages that hand their input on (`.`, an outer `$x` marker, `select(f)`, whose condition is a
+/// subexp): `select(.) | .a` and `$x | .a` run the same path-checked `INDEX` as `.a` on the node
+/// the source meets, which is not the register once an enclosing `reduce` source moved it, so
+/// reading only the head left the nested fold's step trackable and the accumulator answered where
+/// jq raises (`reduce .[]? as $i (.; reduce ($x | .a) as $y (.; .))`). A stage that computes
+/// (`1 | .a`) meets another value and ends the read, as [`update_navigates_within`]'s own pipe does.
+fn nested_source_navigates(source: &Expr) -> bool {
+    let Expr::Pipe(stages) = unwrap_paren(source) else {
+        return update_navigates_within(source, false);
+    };
+    for stage in stages {
+        if update_navigates_within(stage, false) {
+            return true;
+        }
+        if !matches!(
+            unwrap_paren(stage),
+            Expr::Identity | Expr::TrackedVar(_) | Expr::Builtin(Builtin::Select(_))
+        ) {
+            return false;
+        }
+    }
+    false
 }
 
 /// A comma item that is a caught navigation along a chain of fields and indexes (`(.k)?`,
