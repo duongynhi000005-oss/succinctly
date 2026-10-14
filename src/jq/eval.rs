@@ -51501,7 +51501,7 @@ fn routes_destructuring(patterns: &[Pattern]) -> bool {
 }
 
 /// Whether every output of `e` is a freshly built value -- a number or string
-/// literal, an array or object construction, a builtin that always builds its
+/// literal, an array or object construction, `$__loc__` (#4582), a builtin that always builds its
 /// result, or a comma/paren/pipe of them -- and so can never be jq's path register
 /// (#3489, #3745). Deliberately an allow-list: anything it does not name (`.`, a
 /// call, an arithmetic that may return its input) may preserve the register and is

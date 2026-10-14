@@ -62203,6 +62203,37 @@ fn test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582() -> Result
             "",
             0,
         ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce ((., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (($__loc__, .) | . as {file:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        // An `if` takes one branch at run time, so a fresh branch is not a fresh item: here the
+        // `else` runs and the register is destructured, which jq answers.
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (if .b then {a:1} else . end | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // An array pattern raises on the fresh item as well.
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (({a:1}, .) | . as [$a] | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
     ])?;
     Ok(())
 }
