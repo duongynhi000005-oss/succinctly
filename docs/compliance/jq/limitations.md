@@ -2182,9 +2182,13 @@ is the revert that established what the other one costs.
    so the same fold there answers `[]` as jq does. The refusal is the walk's and is blind to where the fold sits, so
    `(CHAIN-FOLD) and (.a)?` in a `foreach` EXTRACT, which jq answers (the `and` operand is a boolean test, not a path), is
    now refused (150 of 31,617 rows in the sweep's literal-source `foreach` contexts; the same shape with a single pattern
-   was refused before). Still accepted where jq raises: a nested `foreach` whose source navigates and then binds with a
-   plain `as $v` (`foreach (1,2) as $k (.; .; (foreach (.a | . as $a | .) as $j (.; .; .)))` on `{"a":true}`), and the `try (. as
-   {(.):$a} ?// $a | $a)` rows of [#4550](https://github.com/rust-works/succinctly/issues/4550).
+   was refused before). A nested `foreach` whose source navigates and then binds with a
+   plain `as $v` (`foreach (1,2) as $k (.; .; (foreach (.a | . as $a | .) as $j (.; .; .)))` on `{"a":true}`) raises as jq does
+   since `FoldRegister::relocate_one` stopped re-seating an emission that navigated below the register and states the register
+   there (#4505; pinned by `test_nested_foreach_after_a_navigating_bind_source_raises_4564`). Still accepted where jq raises: the
+   `try (. as {(.):$a} ?// $a | $a)` rows of [#4550](https://github.com/rust-works/succinctly/issues/4550), and a `foreach`
+   `?//` chain source in a `reduce` UPDATE whose first alternative's later step raises
+   ([#4578](https://github.com/rust-works/succinctly/issues/4578)).
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
    {a:$a}`, whose bare alternative holds the register when it matches; a name two alternatives bind may hold it if

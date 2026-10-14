@@ -61978,6 +61978,77 @@ fn test_reduce_update_label_wrapped_destructure_4567() -> Result<()> {
     Ok(())
 }
 
+/// #4564: a `foreach` nested in another `foreach`'s UPDATE or EXTRACT whose source navigates and then
+/// binds (`.a | . as $z | .`, or a `?//` chain) moves jq's register onto `.a` and does not
+/// backtrack it, so the state it emits (the accumulator, a different node) fails `path_intact`
+/// and jq raises. The emission read as the register's own node because an untracked branch that
+/// navigated and then computed was compared with the outer register by value alone, ignoring
+/// the register statement it carried. A source that moves nothing still answers. Every row is
+/// a live jq 1.7.1 capture.
+#[test]
+fn test_nested_foreach_after_a_navigating_bind_source_raises_4564() -> Result<()> {
+    let invalid = "Invalid path expression";
+    assert_path_rows_3289(&[
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (.a | . as $z | .) as $j (.; .; .)); .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach (1,2) as $k (.; (foreach (.a | . as $z | .) as $j (.; .; .)); .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach (1,2) as $k (.; (foreach (.a | . as $z | .) as $j (.; .; .)); .)) = 9",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (1,2) as $k (.; .; (foreach (.a | . as $z | .) as $j (.; .; .))))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (.a | . as {a:$a} ?// $a | .) as $j (.; .; .)); .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach (1,2) as $k (.; (foreach (.a | . as {a:$a} ?// $a | .) as $j (.; .; .)); .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $k (.; .; ((foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (. as $z | .) as $j (.; .; .)); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #4486: a `reduce` whose `UPDATE` is a `try ... catch H` with a handler that moves nothing, or an
 /// `isempty(g)` over a generator the resolver path-checks, leaves jq's register where the fold
 /// entered it (jq backtracks the register to the `try`'s entry whether the body raised or not, and the
