@@ -49844,7 +49844,11 @@ fn source_destructures_register_with(
 /// register on next to a fresh value (`def f: ., {a:1}`) as fresh on its other output: the register
 /// output is bound per leaf of the body ([`call_comma_leaves`]), where a `reduce` backtracks its
 /// destructure, and the fresh one raises. A `reduce` inside another fold's body asks too.
-fn source_destructures_fresh(source: &Expr, non_null_register: bool) -> bool {
+fn source_destructures_fresh(
+    source: &Expr,
+    non_null_register: bool,
+    dot_off_register: bool,
+) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
         fresh_only: true,
@@ -49858,7 +49862,7 @@ fn source_destructures_fresh(source: &Expr, non_null_register: bool) -> bool {
         binding: Vec::new(),
         held: Vec::new(),
         markers: Vec::new(),
-        dot_fresh: false,
+        dot_fresh: dot_off_register,
         moved: false,
     };
     walk.reach(source) == Reach::Destructures
@@ -51978,7 +51982,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
             && !foreach_source
             && source_destructures_fresh(
                 source,
-                ambient.trackable && !matches!(ambient.value, OwnedValue::Null),
+                // #4581: where INIT moved the register off the document, the register's own value.
+                if ambient.trackable {
+                    !matches!(ambient.value, OwnedValue::Null)
+                } else {
+                    ambient.register_non_null
+                },
+                // ...and `.` is then not the register, as a fresh value is not (a `null` or boolean
+                // is identical to one of its kind, so those are left to the register rule). The top
+                // level only: inside another fold's body `.` is the accumulator, which an
+                // untrackable ambient says nothing about.
+                fold_body::depth() == 0
+                    && !ambient.trackable
+                    && !matches!(ambient.value, OwnedValue::Null | OwnedValue::Bool(_)),
             ))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
@@ -54123,6 +54139,9 @@ struct FoldSourceAmbient<'v> {
     /// The frame `value` sits in (#2042): the fold's own for the document
     /// ambient, unknown for the later forks' `null`.
     frame: Frame,
+    /// Whether the value jq's register holds is known not to be `null` (#4581): the fold's own
+    /// register after INIT, which `trackable` does not say when INIT moved it off the document.
+    register_non_null: bool,
 }
 
 impl FoldSourceAmbient<'_> {
@@ -54284,6 +54303,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             trackable: source_trackable,
             snapshot: path_snapshot,
             frame: frame.clone(),
+            register_non_null: !matches!(reg.value, OwnedValue::Null),
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s
@@ -54312,6 +54332,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         trackable: at_register,
         snapshot: Snapshot::No,
         frame: frame.unknown(),
+        register_non_null: !matches!(reg.value, OwnedValue::Null),
     }
 }
 
