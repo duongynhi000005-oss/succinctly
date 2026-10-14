@@ -30889,9 +30889,10 @@ fn yq_assign_noop_check<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ) -> Result<YqAssignNoopCheck, EvalError> {
     // A dynamic path is only resolved ahead of the right side when yq tracks
     // every step of it; anything else keeps the caller's own route.
-    if S::TAG != EvalTag::Yq
-        || (needs_path_prepass(path_expr) && !yq_assign_path_is_tracked(path_expr))
-    {
+    if S::TAG != EvalTag::Yq {
+        return Ok(YqAssignNoopCheck::NotChecked);
+    }
+    if needs_path_prepass(path_expr) && !yq_assign_path_is_tracked(path_expr) {
         return Ok(YqAssignNoopCheck::NotChecked);
     }
     let pristine = to_owned::<S, _>(input)?;
