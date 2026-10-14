@@ -62864,6 +62864,30 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             "[]\n[]\n",
             0,
         ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
