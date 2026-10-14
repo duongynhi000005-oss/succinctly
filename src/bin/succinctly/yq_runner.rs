@@ -3811,6 +3811,20 @@ fn count_meta_assigns(expr: &Expr) -> usize {
     count
 }
 
+/// The names of the `def`s [`flatten_pipe_stages`] looks through, so a stage calling one can be
+/// told from one that does not.
+fn leading_def_names<'e>(expr: &'e Expr, out: &mut Vec<&'e str>) {
+    match expr {
+        Expr::Paren(inner) | Expr::Optional(inner) => leading_def_names(inner, out),
+        Expr::Pipe(stages) => stages.iter().for_each(|s| leading_def_names(s, out)),
+        Expr::FuncDef { name, then, .. } => {
+            out.push(name);
+            leading_def_names(then, out);
+        }
+        _ => {}
+    }
+}
+
 /// Is a stage nothing but navigation (`.a`, `.[0]`, `.[]`, `..`, and pipes of them)?
 fn is_navigation_stage(stage: &Expr) -> bool {
     match stage {
@@ -3825,17 +3839,30 @@ fn is_navigation_stage(stage: &Expr) -> bool {
     }
 }
 
-/// Does `expr` have a top-level metadata write that comes after a navigation stage (#2679)?
+/// Does `expr` have a top-level metadata write that comes after a navigation stage, or after a
+/// stage that calls a `def` (#2679)?
 fn meta_write_behind_navigation(expr: &Expr) -> bool {
     let mut stages = Vec::new();
     flatten_pipe_stages(expr, &mut stages);
     let Some(first_write) = stages
         .iter()
-        .position(|s| matches!(s, Expr::MetaAssign { .. }))
+        .position(|s| reachable_meta_assigns(&[*s]) > 0)
     else {
         return false;
     };
-    stages[..first_write].iter().any(|s| is_navigation_stage(s))
+    let mut defs = Vec::new();
+    leading_def_names(expr, &mut defs);
+    stages[..first_write]
+        .iter()
+        .any(|s| is_navigation_stage(s) || calls_any_def(s, &defs))
+}
+
+/// Does `stage` call one of the `def`s named in `defs`?
+fn calls_any_def(stage: &Expr, defs: &[&str]) -> bool {
+    jq::walk::any_subexpr(
+        stage,
+        &mut |e| matches!(e, Expr::FuncCall { name, .. } if defs.contains(&name.as_str())),
+    )
 }
 
 /// The top-level pipe stages of `expr`, flattened through `Paren`/
@@ -3945,23 +3972,23 @@ fn resolve_meta_assign_writes(
         );
         return None;
     }
-    // A `def` ahead of a stage that has to be evaluated to reach the document a write sees
-    // (#2679): each stage is re-evaluated alone, with no `def` in scope, so a call to it
-    // fails, the pass stops resolving there and the write is dropped without a word.
+    // A `def` that a stage ahead of the last write calls (#2679): each stage is re-evaluated
+    // alone, with no `def` in scope, so the call fails, the pass stops resolving there and the
+    // write is dropped without a word.
+    let mut defs = Vec::new();
+    leading_def_names(expr, &mut defs);
     let last_meta = stages
         .iter()
         .rposition(|s| reachable_meta_assigns(&[*s]) > 0)
         .unwrap_or(0);
     if stages[..last_meta]
         .iter()
-        .any(|s| !is_value_identity_stage(s))
-        && jq::walk::any_subexpr(expr, &mut |e| matches!(e, Expr::FuncDef { .. }))
+        .any(|stage| calls_any_def(stage, &defs))
     {
         sink.report(
             DiagStyle::Yq,
             &EvalError::new(
-                "metadata assignment is not supported behind a `def` and a stage that reads \
-                 through it (#2679)",
+                "metadata assignment is not supported behind a stage that calls a `def` (#2679)",
             ),
             &no_location(),
         );
@@ -5170,7 +5197,8 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
                 DiagStyle::Yq,
                 &EvalError::new(
                     "metadata assignment (line_comment/style/anchor = ...) is not supported \
-                     behind a navigation stage (`.a | .b line_comment = ...`) (#2679)",
+                     behind a navigation stage (`.a | .b line_comment = ...`) or a stage that \
+                     calls a `def` (#2679)",
                 ),
                 &no_location(),
             );
