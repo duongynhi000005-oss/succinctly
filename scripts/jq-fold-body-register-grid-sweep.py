@@ -42,6 +42,14 @@ INNER = [
     ("rd", "reduce ({S}) as $y (.; .)"),
 ]
 SOURCES = [
+    # a freshly built value bound to a variable and destructured (#4616): the step raises on a node
+    # that is not the register, for a `foreach` source as for a `reduce` one
+    ("fresh-obj-var", "{a:1} as $n | $n as {b:$b} | ."),
+    ("fresh-arr-var", "[1] as $n | $n as [$b] | ."),
+    ("fresh-var-pipe", "{a:1} as $n | $n | . as {b:$b} | ."),
+    ("fresh-var-try", "try ({a:1} as $n | $n as {b:$b} | .)"),
+    ("fresh-var-try-catch", "try ({a:1} as $n | $n as {b:$b} | .) catch ."),
+    ("fresh-var-comma", "{a:1} as $n | ($n as {b:$b} | .), 1"),
     ("x-pat", "$x as {a:$a} | ."),
     ("x-pat-arr", "$x as [$a] | ."),
     ("sel-x-xpat", "select($x) | $x as {a:$a} | ."),
@@ -143,7 +151,12 @@ DOCS = [
 # The ACCEPT_WRONG rows left: none. (A `try ... catch` or `?` around a single destructure was listed
 # here until #4575, a comma beside the destructure on a `null` document until #4576, and a
 # `try ... catch` around a `?//` chain of destructures until #4585.)
-KNOWN_ACCEPT_WRONG = set()
+KNOWN_ACCEPT_WRONG = {
+    # a `try ... catch .` over a fresh-variable destructure, whose caught message an `fe-y` EXTRACT
+    # then reads as the register: jq raises, and so does the build on a document that has the key
+    # (#4616 follow-up); `main` accepted these rows too.
+    ("fresh-var-try-catch", None),
+}
 
 
 def run(prefix, prog, doc, timeout=10):

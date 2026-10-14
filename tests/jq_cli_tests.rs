@@ -62773,6 +62773,197 @@ fn test_fold_source_moving_the_register_on_null_still_answers_4505() -> Result<(
     Ok(())
 }
 
+/// #4616: a `foreach` source that binds a freshly built value to a variable and destructures the
+/// variable runs the pattern's tracked `INDEX` step on a node that is not the register, so jq
+/// raises (`Invalid path expression near attempt to access element`) in path position, whatever the
+/// document is. The `foreach` route asked only for a destructure of the register itself and drove
+/// the source by value, so `del`/`=`/`|=` wrote through; a `reduce` source already asked
+/// `source_destructures_fresh` and refused. Every row is a live jq 1.7.1 capture. A `null` or
+/// boolean literal bound to the variable is not covered here: the register may be that very node.
+#[test]
+fn test_foreach_source_destructuring_a_fresh_value_bound_to_a_variable_4616() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ([1] as $n | $n as [$b] | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ({a:1} as $n | $n | . as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (try ({a:1} as $n | $n as {b:$b} | .)) as $y (.; .; .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; $y; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ({a:1} as $n | $n | .a) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ({a:1} as $n | [$n.a] | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce ({a:1} as $n | $n as {b:$b} | .) as $y (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (. as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"try (foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) catch "caught""#,
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach ([1] as $n | $n as [$b] | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach ({a:1} as $n | $n | . as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (try ({a:1} as $n | $n as {b:$b} | .)) as $y (.; .; .))",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; $y; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach ({a:1} as $n | $n | .a) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach ({a:1} as $n | [$n.a] | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce ({a:1} as $n | $n as {b:$b} | .) as $y (.; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (. as $n | $n as {b:$b} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r#"try (foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)) catch "caught""#,
+            "true\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4585: a `try ... catch` around a `?//` chain of destructures of the register in a fold source
 /// inside another fold's body ends on the chain's *last* alternative. A matched alternative moves
 /// jq's register, so the code after the chain raises and `?//` retries the next alternative; the

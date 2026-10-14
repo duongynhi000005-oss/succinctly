@@ -2508,6 +2508,18 @@ is the revert that established what the other one costs.
    spine's call budget (`SPINE_CALL_BUDGET`), where the walk stops reading bodies. Pinned by
    `test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452`.
 
+   A `foreach` source that binds a freshly built value to a variable and destructures the variable (`{a:1} as $n | $n as
+   {b:$b} | .`, `[1] as $n | $n as [$b] | .`, `$n | . as {b:$b}`) raises in path position as jq does since
+   [#4616](https://github.com/rust-works/succinctly/issues/4616): the pattern's step runs on a node that is never the
+   register, and the `foreach` route asked only for a destructure of the register itself, so the by-value drive answered
+   the root (`del` returned `null`, `=`/`|=` wrote). A `reduce` source already asked `source_destructures_fresh`; a
+   `foreach` source asks it too. Over the grid's six `fresh-*` sources (9,828 rows, `main` against the change)
+   `ACCEPT_WRONG` goes from 1,241 to 36 and `DIFF` from 92 to 0 with no match lost. Still accepted: a `try ... catch .` over
+   such a destructure whose caught message an `fe-y` EXTRACT then reads as the register (24 rows, identical on `main`),
+   and a `null` or boolean literal bound to the variable (`null as $n | $n as {b:$b} | .`), which may be the register
+   itself ([#4603](https://github.com/rust-works/succinctly/issues/4603)). Pinned by
+   `test_foreach_source_destructuring_a_fresh_value_bound_to_a_variable_4616`.
+
    A top-level `reduce` source whose pipe stage is a bare comma with a fresh item (`({a:1}, .) | . as {a:$a} | .`, in either
    order) or `$__loc__` raises as jq does since [#4582](https://github.com/rust-works/succinctly/issues/4582): the source is
    generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Behind
