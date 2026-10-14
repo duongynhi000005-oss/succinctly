@@ -49644,30 +49644,25 @@ impl FoldRegister {
 }
 
 /// Whether `update` is a verdict builtin over operands that cannot move jq's register
-/// (#4611): `isempty(g)`, `any(g; c)` or `all(g; c)`. The bare and one-argument spellings
-/// iterate their input, which moves it, so they are not admitted.
+/// (#4611): `isempty(g)`, `any(g; c)` or `all(g; c)`, alone or as a stage of a pipe whose other
+/// stages leave the register too (`1 | isempty(.)`, `(isempty(1) | not) | .`). The bare and
+/// one-argument spellings iterate their input, which moves it, so they are not admitted, and an
+/// all-neutral pipe is [`neutral_leaves_register`]'s, not this one's.
 fn verdict_builtin_leaves_register(update: &Expr) -> bool {
-    match unwrap_paren(update) {
-        Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen),
-        Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
-            cannot_move_register(gen) && cannot_move_register(cond)
+    /// `Some(has_verdict)` when `expr` leaves the register, `None` when it may move it.
+    fn leaves(expr: &Expr) -> Option<bool> {
+        match unwrap_paren(expr) {
+            Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen).then_some(true),
+            Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
+                (cannot_move_register(gen) && cannot_move_register(cond)).then_some(true)
+            }
+            Expr::Pipe(stages) => stages.iter().try_fold(false, |seen, stage| {
+                leaves(stage).map(|verdict| seen || verdict)
+            }),
+            other => neutral_leaves_register(other).then_some(false),
         }
-        // A pipe of stages that each leave the register (`1 | isempty(.)`), at least one of
-        // them a verdict builtin: the all-neutral pipe is [`neutral_leaves_register`]'s.
-        Expr::Pipe(stages) => {
-            stages.iter().any(|s| {
-                matches!(
-                    unwrap_paren(s),
-                    Expr::Builtin(
-                        Builtin::IsEmpty(_) | Builtin::AnyCond(..) | Builtin::AllCond(..)
-                    )
-                )
-            }) && stages
-                .iter()
-                .all(|s| verdict_builtin_leaves_register(s) || neutral_leaves_register(s))
-        }
-        _ => false,
     }
+    leaves(update) == Some(true)
 }
 
 /// The node `root` holds at `components` (a path's field, index and slice steps, root to leaf),
@@ -57357,10 +57352,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // root-seated INIT `.` is not whatever their values are; only a `null` or
                         // boolean state is still `jv_identical` to it by kind (`foreach .[]? as $k
                         // (.; try (. as [$a] ?// $a | $a); .)` on `[1]`). Not for a builtin call as
-                        // UPDATE (`isempty(g)`, `any(g; c)`): EXTRACT then reads a lost register
-                        // (`foreach .[]? as $k (0; isempty(1); $k)` is refused where jq answers
-                        // `[0]`, #4611), and an exact refusal there would surface that refusal
-                        // through a `try` that a guess one lets the fold swallow.
+                        // UPDATE (`isempty(g)`, `any(g; c)`): where an operand can move the register
+                        // (or [`verdict_builtin_leaves_register`] does not admit it, #4623) EXTRACT
+                        // reads a lost register, and an exact refusal there would surface that
+                        // refusal through a `try` that a guess one lets the fold swallow.
                         let update_is_builtin_call =
                             matches!(unwrap_paren(update), Expr::Builtin(_));
                         let outermost_fold = S::TAG == EvalTag::Jq && fold_body::depth() == 0;

@@ -815,9 +815,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   on `[1]` raises, it answered nothing; with `$k` as EXTRACT it is `[0]`, it was nothing): the root the state starts as is no
   node of the element the register moved onto, so the step compares the state with the *step* register once a source or
   walk moved it (only a `null`/boolean state is still identical to it, by kind). Not applied when the UPDATE is itself a
-  builtin call (`isempty(g)`, `any(g; c)`), whose EXTRACT reads a lost register
-  ([#4611](https://github.com/rust-works/succinctly/issues/4611)). Pinned by
+  builtin call (`isempty(g)`, `any(g; c)`), which keeps the older guessed comparison. Pinned by
   `test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternative_bind_4610`.
+  **Since [#4611](https://github.com/rust-works/succinctly/issues/4611)** a `foreach` whose source navigates the register
+  and whose UPDATE is `isempty(g)`, `any(g; c)` or `all(g; c)` over operands that cannot move it (alone, or as a stage of a
+  pipe of such stages) leaves the register where UPDATE entered, so EXTRACT's `$k` names its path
+  (`path(foreach .[]? as $k (0; isempty(1); $k))` on `[1]` is `[0]`, it was refused). Pinned by
+  `test_foreach_navigating_source_with_a_verdict_builtin_update_keeps_the_register_4611`.
+  **Still refused where jq answers** (the safe direction; the operands are not ones
+  `cannot_move_register` admits): a comma of verdicts (`(isempty(1), isempty(2))`), `isempty(first(1))`,
+  `isempty(path(.[]?))`, `isempty(empty | .a)`, `isempty(1) and isempty(2)` and a verdict piped into a builtin outside the
+  neutral list (`isempty(1) | tostring`)
+  ([#4623](https://github.com/rust-works/succinctly/issues/4623)).
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare

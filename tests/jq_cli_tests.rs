@@ -72259,6 +72259,50 @@ fn test_foreach_navigating_source_with_a_verdict_builtin_update_keeps_the_regist
             "",
             0,
         ),
+        // A pipe of verdict and neutral stages, a nested pipe, and an EXTRACT that reads the retained
+        // register through a `try`, an `if` and a navigating tail.
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; all(1; .)|not; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1)|not) | .; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); try $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); $k | if . then $k else empty end))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); try ($k|.a)))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); $k|.a?))",
+            "",
+            "",
+            0,
+        ),
         // Controls.
         (
             "[1]",
