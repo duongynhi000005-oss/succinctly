@@ -2290,7 +2290,16 @@ is the revert that established what the other one costs.
    leaves the raise uncaught (`foreach (try ($x as {a:$a} ?// [$a] | .) catch .)` raises on `[true]` and is answered on
    `{"a":true}`; `caught_chain_raises`). A chain with a nested pattern, a last alternative of several entries that matches (jq answers
    it: `{a:$a} ?// [$a,$b]` on `[1,2]`), a body that is not `.`/a variable/a literal (`.a` can raise inside the `try`,
-   `empty` emits nothing), and a `try`/`?` with no handler, are read as before. On a `null` accumulator a `$x` marker
+   `empty` emits nothing), and a `try`/`?` with no handler, are read as before.
+   A `try ... catch H` around a destructure of `.` with an `empty` body, in the body of a fold whose accumulator the
+   resolver cannot place (an enclosing source navigated), raises when `H` emits
+   ([#4621](https://github.com/rust-works/succinctly/issues/4621): `caught_destructure_in_unrouted_body` reads the body
+   with the handler's `try` dropped; pinned by
+   `test_foreach_source_caught_empty_body_destructure_in_navigating_fold_raises_4621`). Still accepted
+   ([#4626](https://github.com/rust-works/succinctly/issues/4626)): the same with an outer `$x` and an array pattern
+   (`foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); .)` on `[true]`; a marker is not
+   certified against an accumulator the resolver cannot place), and refused where jq answers when the outer `EXTRACT` is
+   `$i` ([#4627](https://github.com/rust-works/succinctly/issues/4627)). On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
