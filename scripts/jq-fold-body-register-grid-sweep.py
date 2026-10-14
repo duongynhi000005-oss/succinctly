@@ -108,13 +108,12 @@ DOCS = [
 ]
 
 # The ACCEPT_WRONG rows #4505's third part leaves: a `try ... catch` or a `?` around the destructure
-# (it also swallows the pattern's type errors, which jq answers, so refusing the shape costs rows),
-# and a comma beside the destructure on a `null` document, which the resolver's `null` clause
-# owns. Recorded in docs/compliance/jq/limitations.md.
+# (it also swallows the pattern's type errors, which jq answers, so refusing the shape costs rows).
+# Recorded in docs/compliance/jq/limitations.md. (A comma beside the destructure on a `null`
+# document was listed here until #4576.)
 KNOWN_ACCEPT_WRONG = {
     ("try-xpat-catch", None),
     ("try-dotpat-catch", None),
-    ("comma-xpat", "null"),
     ("sel-dot-opt-pat", None),
 }
 

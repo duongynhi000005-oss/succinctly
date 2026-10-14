@@ -62049,6 +62049,86 @@ fn test_nested_foreach_after_a_navigating_bind_source_raises_4564() -> Result<()
     Ok(())
 }
 
+/// #4576: on a `null` document an outer fold's emission after an inner `foreach` whose source
+/// destructures `$x` (bound to the register) is at the path the pattern moved jq's register to
+/// (`["a"]`, `[0]`), because a `foreach` does not backtrack its source. The `$x` marker was not read as
+/// the register inside a `foreach` body (only a `reduce` UPDATE marked `.` as the register), so the source
+/// was driven by value and the emission printed the root, where the same source headed by `.` already
+/// moved it. A `null` marker that equals a `null` accumulator is the register by kind, as `.` is.
+/// Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_4576() -> Result<()> {
+    let invalid = "Invalid path expression";
+    assert_path_rows_3289(&[
+        (
+            r"null",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as [$a] | .) as $y (.; .; .); .))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach .a? as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .)) = 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | reduce (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach (1,2) as $i (.; foreach (($x as {a:$a} | .), 1) as $y (.; .; .); .)) |= 9",
+            "",
+            "Cannot index number with string",
+            5,
+        ),
+        // A `null` loop variable of an enclosing `reduce` is another node, not the register: its
+        // destructure stays by value and the path is the root, as jq prints.
+        (
+            r"null",
+            r"path(reduce (null,null) as $it (.; foreach ($it as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            invalid,
+            5,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #4486: a `reduce` whose `UPDATE` is a `try ... catch H` with a handler that moves nothing, or an
 /// `isempty(g)` over a generator the resolver path-checks, leaves jq's register where the fold
 /// entered it (jq backtracks the register to the `try`'s entry whether the body raised or not, and the
