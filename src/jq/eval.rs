@@ -52043,6 +52043,40 @@ fn drive_foreach_source<S: EvalSemantics>(
     drive_fold_source_with::<S>(source, true, ambient, relocate_base, step)
 }
 
+/// #4621: a `foreach` source in the body of a fold whose accumulator the resolver cannot place
+/// (`ambient.trackable` is false: an enclosing source moved jq's register) that destructures `.`
+/// inside a `try ... catch H`. The pattern's tracked `INDEX` step raises a path error on a value the
+/// register is not on, `H` runs and emits, and the fold's own emission of the accumulator then
+/// raises; the spine reads a `try` with a handler as opaque and the by-value drive never sees the
+/// raise when the body is `empty` (`try (. as [$a] | empty) catch .`), so the fold was answered and
+/// `del` through it deleted the document. Read with the handler's `try` dropped, as the spine
+/// reads a handler-less one. Jq mode only; a `catch empty` raises nothing in jq and is left alone.
+fn caught_destructure_in_unrouted_body(
+    source: &Expr,
+    foreach_source: bool,
+    ambient: &FoldSourceAmbient<'_>,
+) -> bool {
+    foreach_source
+        && !ambient.trackable
+        && fold_body::depth() != 0
+        && any_subexpr(
+            source,
+            &mut |e| matches!(e, Expr::Try { catch: Some(handler), .. } if !matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty))),
+        )
+        && source_destructures_register(&drop_caught_handlers(source), true)
+}
+
+/// `source` with every `try BODY catch H` replaced by `BODY` ([`caught_destructure_in_unrouted_body`]).
+fn drop_caught_handlers(source: &Expr) -> Expr {
+    match source {
+        Expr::Try {
+            expr,
+            catch: Some(_),
+        } => drop_caught_handlers(expr),
+        other => map_subexprs(other, &mut |child| drop_caught_handlers(child)),
+    }
+}
+
 fn drive_fold_source_with<S: EvalSemantics>(
     source: &Expr,
     foreach_source: bool,
@@ -52147,6 +52181,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // destructure of the register, which succeeds.
     let destructures_unplaced_register = unplaced_body
         && (source_destructures_register(pruned.as_ref().unwrap_or(source), true)
+            || caught_destructure_in_unrouted_body(source, foreach_source, ambient)
             || (raise_reaches_fold
                 && select_passes
                 && pruned.is_none()

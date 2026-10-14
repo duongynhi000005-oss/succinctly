@@ -103,6 +103,11 @@ SOURCES = [
     ("try-empty-catch", "try ($x as {} | .) catch ."),
     ("sel-x-opt-pat", "select($x) | (. as {a:$a} | .)?"),
     ("try-arr-catch", "try ($x as [$a] | .) catch ."),
+    # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
+    # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
+    ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
+    ("try-dotpat-empty-catch-empty", "try (. as [$a] | empty) catch empty"),
+    ("try-dotpat-empty", "try (. as [$a] | empty)"),
     # the outer fold's own loop variable is another value, not the register
     ("i-idx", "$i | .[0]"),
     ("i-nava", "$i | .a?"),
