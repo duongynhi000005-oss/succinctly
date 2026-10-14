@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x forty x four x thirteen.
+document, six x three x forty-seven x four x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -81,6 +81,15 @@ SOURCES = [
     ("sel-not-x-dotpat", "select($x|not) | . as {a:$a} | ."),
     ("sel-dot-opt-pat", "select(.) | (. as [$a] | .)?"),
     ("dot-opt-pat", "(. as [$a] | .)?"),
+    # a `try`/`?` catches the pattern's type error (nothing moved the register) but not a success;
+    # a `?//` chain retries the next alternative past the pattern
+    ("try-chain-catch", "try ($x as {a:$a} ?// [$a] | .) catch ."),
+    ("try-chain", "try ($x as {a:$a} ?// [$a] | .)"),
+    ("opt-chain", "($x as {a:$a} ?// [$a] | .)?"),
+    ("try-var-catch", "try ($x as $v | .) catch ."),
+    ("try-empty-catch", "try ($x as {} | .) catch ."),
+    ("sel-x-opt-pat", "select($x) | (. as {a:$a} | .)?"),
+    ("try-arr-catch", "try ($x as [$a] | .) catch ."),
     # the outer fold's own loop variable is another value, not the register
     ("i-idx", "$i | .[0]"),
     ("i-nava", "$i | .a?"),
@@ -107,14 +116,13 @@ DOCS = [
     '[{"a":1}]',
 ]
 
-# The ACCEPT_WRONG rows #4505's third part leaves: a `try ... catch` or a `?` around the destructure
-# (it also swallows the pattern's type errors, which jq answers, so refusing the shape costs rows).
-# Recorded in docs/compliance/jq/limitations.md. (A comma beside the destructure on a `null`
-# document was listed here until #4576.)
+# The ACCEPT_WRONG rows left: a `try ... catch` around a `?//` chain of destructures (jq answers where
+# the first alternative matched and raises where a later one did, which the by-value route does not
+# tell apart, #4585). Recorded in docs/compliance/jq/limitations.md. (A `try ... catch` or `?` around
+# a single destructure was listed here until #4575, and a comma beside the destructure on a `null`
+# document until #4576.)
 KNOWN_ACCEPT_WRONG = {
-    ("try-xpat-catch", None),
-    ("try-dotpat-catch", None),
-    ("sel-dot-opt-pat", None),
+    ("try-chain-catch", None),
 }
 
 
