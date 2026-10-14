@@ -130852,13 +130852,56 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
         ),
         (
             "[[1],[1]]",
-            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a)",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | if true then . else .a end) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | if true then .a else . end) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        // The register is re-established for real: navigating from `$x` after the fold lands on the
+        // document, so a wrong state would change the path or the write, not just the exit status.
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x.a)",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x.a) = 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        // Inside another fold's UPDATE the fold's `Unmoved` source element is no evidence of a bare
+        // fallback; jq prints nothing and the first draft of the gate answered `["a"]`.
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(foreach .a? as $k (.; try ((foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .)) and .[0]); $k))",
+            "",
+            0,
+        ),
+        // Still refused where jq answers (`[]`): the `reduce` twin, a `limit` source (a `?//` chain
+        // beneath one that yields several outputs emitted an extra element when it was admitted) and
+        // a nested `foreach` source. A change that admits them should move these rows to `[]`.
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
             "",
             5,
         ),
         (
             "[[1],[1]]",
-            r"(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x.a) = 9",
+            r"path(. as $x | 1 | (foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .)) | $x)",
             "",
             5,
         ),
@@ -130879,7 +130922,6 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
     }
     Ok(())
 }
-
 
 /// #4581: a `reduce` whose INIT is a path expression (`.a`) moved jq's register off the document, so
 /// a source that destructures a variable or call bound to the document (`. as $x | .. | $x as

@@ -565,6 +565,8 @@ OPERANDS = [
     "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .a; .))",
     "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a))",
     "(foreach ((.|.) as {a:$a} ?// [$a] ?// $b | $b) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | if true then . else .a end) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | if true then .a else . end) as $k (.; .; .))",
     "(reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .))",
     "(foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
     "(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",

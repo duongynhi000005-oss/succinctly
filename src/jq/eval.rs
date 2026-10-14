@@ -47270,20 +47270,36 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
     match unwrap_paren(expr) {
-        Expr::AsPattern { body, .. } | Expr::As { body, .. } | Expr::Label { body, .. } => {
+        // A destructuring chain that ends in a bare `$var`: when every pattern before it raises,
+        // `?//` restores the path and the bare alternative leaves the register alone. A chain that
+        // ends in a pattern either walks a step or raises, so it is not read here (`cannot_move_register`
+        // below sees an all-bare chain, and refuses the rest).
+        Expr::AsPattern { patterns, body, .. }
+            if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) =>
+        {
+            source_moves_register_only_by_binds(body)
+        }
+        Expr::As { body, .. } | Expr::Label { body, .. } => {
             source_moves_register_only_by_binds(body)
         }
         Expr::Pipe(stages) => stages.iter().all(source_moves_register_only_by_binds),
         Expr::Comma(stages) => stages.iter().all(source_moves_register_only_by_binds),
-        // Only the condition is a subexpression; the branch that runs is not.
+        // Only the condition is a subexpression; the branch that runs is not. A literal condition
+        // runs one branch only ([`cannot_move_register`]'s #4124).
         Expr::If {
+            cond,
             then_branch,
             else_branch,
-            ..
-        } => {
-            source_moves_register_only_by_binds(then_branch)
-                && source_moves_register_only_by_binds(else_branch)
-        }
+        } => match &**cond {
+            Expr::Literal(Literal::Bool(true)) => source_moves_register_only_by_binds(then_branch),
+            Expr::Literal(Literal::Bool(false) | Literal::Null) => {
+                source_moves_register_only_by_binds(else_branch)
+            }
+            _ => {
+                source_moves_register_only_by_binds(then_branch)
+                    && source_moves_register_only_by_binds(else_branch)
+            }
+        },
         // `last(f)` is a `reduce`, which backtracks `f`: the register is back where it entered.
         other if is_last_stage(other) => true,
         other => cannot_move_register(other),
@@ -57013,20 +57029,25 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         first_step_on_register && extract.is_some_and(update_is_alt_bind);
     // #4130: everything in the loop body but the pattern walk, judged once: an untracked
     // entry's emission is at the entry register when this holds and the step walked nothing.
+    let input_cannot_move = cannot_move_register(input);
     let entry_stays_at_register = states_untracked
         && init_keeps_register
         && !mentions_frozen_var
-        && cannot_move_register(input)
+        && input_cannot_move
         && step_cannot_move;
     // #4489: a source whose only movement is a destructuring bind (a `?//` chain that falls back
     // to its bare alternative on an entry that is not the register) still leaves the register at
     // the entry on an element that took no walk step ([`source_moves_register_only_by_binds`]).
     // The element says so itself, below.
+    // Not inside another fold's body, where the ambient register is not known to be jq's and the
+    // element's `Unmoved` is not evidence of a bare fallback (the whole-grid sample found a `try`
+    // in a `foreach` UPDATE that answered `["a"]` where jq prints nothing).
     let entry_stays_unless_source_walks = states_untracked
+        && fold_body::depth() == 0
         && init_keeps_register
         && !mentions_frozen_var
         && step_cannot_move
-        && !cannot_move_register(input)
+        && !input_cannot_move
         && source_moves_register_only_by_binds(input);
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
