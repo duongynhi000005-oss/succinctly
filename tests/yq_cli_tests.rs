@@ -13868,6 +13868,12 @@ fn test_eval_all_line_and_column_of_json_input_are_zero_4544() -> Result<()> {
     // The document index and file index still come from the origin.
     let (stdout, code) = run_yq_file("[document_index, file_index]", json, &argv)?;
     assert_eq!((stdout.trim(), code), ("[0,0]", 0));
+    // YAML input keeps a non-zero position (the flag is set from the source's format only).
+    let yaml = dir.path().join("t.yaml");
+    std::fs::write(&yaml, "a:\n  - 1\n")?;
+    let (stdout, code) = run_yq_file(".a | line", yaml.to_str().expect("utf-8 temp path"), &argv)?;
+    assert_eq!(code, 0);
+    assert_ne!(stdout.trim(), "0", "YAML input must keep its position");
     Ok(())
 }
 
