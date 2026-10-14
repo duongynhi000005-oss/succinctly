@@ -129352,6 +129352,38 @@ fn test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565
             "{}\n",
             0,
         ),
+        // A leaf that may yield several outputs, a chain of calls (and one past the walk's call budget), and a
+        // recursive body are not placed per leaf: routed and refused at the first output.
+        (
+            r"{}",
+            r"del(try foreach (def f: first((., range(2))); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(foreach (def f: limit(2; ., range(2)); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f1: (., 1); def f2: f1; def f3: f2; def f4: f3; def f5: f4; def f6: f5; def f7: f6; def f8: f7; def f9: f8; f9 as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f1: (., 1); def f2: f1; def f3: f2; def f4: f3; def f5: f4; def f6: f5; def f7: f6; def f8: f7; def f9: f8; def f10: f9; def f11: f10; def f12: f11; def f13: f12; def f14: f13; def f15: f14; def f16: f15; def f17: f16; def f18: f17; def f19: f18; def f20: f19; f20 as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f: (., f); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
     ];
     for &(input, filter, stdout, exit) in rows {
         let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
