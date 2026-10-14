@@ -36683,6 +36683,7 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
+/// A `label` is read through (#4567), since no shape admitted here can `break` out of it.
 /// A `?//` chain is in as the nested fold's source (#4506), and as a nested `reduce`'s own loop
 /// pattern when [`reduce_alternative_is_immaterial`] holds; any other chain there is out (a failed
 /// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must
@@ -36691,7 +36692,9 @@ fn update_returns_its_input(e: &Expr) -> bool {
     match e {
         Expr::Identity => true,
         Expr::Paren(inner) => update_returns_its_input(inner),
-        // #4567: a `label` hands its body's outputs on; no arm here can `break`, so it is transparent.
+        // #4567: a `label` hands its body's outputs on, so it is read through. Sound only while no arm
+        // of this function admits a `break` (a comma, an `if`, a call or a `break` itself); the
+        // `break $q` rows of `test_reduce_update_label_wrapped_destructure_4567` fail if one starts to.
         Expr::Label { body, .. } => update_returns_its_input(body),
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
