@@ -9868,6 +9868,8 @@ fn test_yaml_merge_key_traversal_is_last_writer_wins_2478() -> Result<()> {
         (".two_fields.x", "3"),
         (".inline.x", "3"),
         (".seq[\"x\"]", "3"),
+        (".seq | .x", "3"),
+        ("[.seq] | .[0].x", "3"),
     ];
     for (filter, expected) in rows {
         let (output, exit_code) = run_yq_stdin(filter, input, &["-o", "json", "-I0"])?;
