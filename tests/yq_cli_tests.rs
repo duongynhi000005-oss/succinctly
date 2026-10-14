@@ -29617,6 +29617,7 @@ fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<
             "\"x\" as $k | .a[$k] += error(\"boom\")",
             r#"{"a":5}"#,
         ),
+        ("5\n", "(\"a\" as $k | .[$k]) = error(\"boom\")", "5"),
         // No target at all.
         ("a: 1\n", "select(false) = error(\"boom\")", r#"{"a":1}"#),
         ("a: 1\n", "select(. == 2) += error(\"boom\")", r#"{"a":1}"#),
