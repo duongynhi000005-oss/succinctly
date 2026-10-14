@@ -30600,6 +30600,7 @@ pub fn enter_file_index_scope(file_index: usize) -> FileIndexScope {
             // The ordinary path's cursor answers `document_index` from the
             // YAML index itself, so only the file number is missing there.
             document: None,
+            json_sourced: false,
         },
     ))
 }
@@ -30624,9 +30625,10 @@ pub struct FileIndexScope(#[allow(dead_code)] super::eval_generic::NodeOriginGua
 /// Evaluate `expr` once over every document of every `--eval-all` input file
 /// (#2427) -- succinctly's `allAtOnceEvaluator.EvaluateFiles`.
 ///
-/// `documents` is `(value, file index, document index within that file)`, in
-/// the order real yq reads them: every document of file 0, then of file 1, and
-/// so on. Each one becomes a context-list entry carrying real yq's
+/// `documents` is `(value, file index, document index within that file, read
+/// from JSON)`, in the order real yq reads them: every document of file 0,
+/// then of file 1, and so on. A document read from JSON answers `0` for `line`
+/// and `column`, as yq does (#4544). Each one becomes a context-list entry carrying real yq's
 /// `EvaluateTogether` flag and its own origin, and
 /// `eval_generic::eval_yq_documents_together` (private, so named rather than
 /// linked) runs the expression once over that list -- see its doc comment for
@@ -30641,7 +30643,7 @@ pub struct FileIndexScope(#[allow(dead_code)] super::eval_generic::NodeOriginGua
 /// value and loses only the position, not the value.
 pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     expr: &Expr,
-    documents: &[(OwnedValue, usize, usize)],
+    documents: &[(OwnedValue, usize, usize, bool)],
 ) -> QueryResult<'a, W> {
     use super::eval_generic::{reindex_bridge_is_identity, NodeOrigin, YqDocument};
 
@@ -30654,7 +30656,7 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // `.collect::<Result<_, _>>()` produces on its own first `Err`.
     let docs: Vec<Option<super::value::ReindexedDoc>> = match documents
         .iter()
-        .map(|(value, _, _)| {
+        .map(|(value, ..)| {
             reindex_bridge_is_identity(value)
                 .then(|| value.reindexed::<S>())
                 .transpose()
@@ -30667,12 +30669,13 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     let inputs: Vec<YqDocument<_>> = documents
         .iter()
         .zip(&docs)
-        .map(|((value, file, document), doc)| YqDocument {
+        .map(|((value, file, document, json_sourced), doc)| YqDocument {
             cursor: doc.as_ref().map(super::value::ReindexedDoc::root),
             value: value.clone(),
             origin: NodeOrigin {
                 file: *file,
                 document: Some(*document),
+                json_sourced: *json_sourced,
             },
         })
         .collect();
