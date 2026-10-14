@@ -72164,6 +72164,154 @@ fn test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternativ
     ])
 }
 
+/// #4611: a `foreach` whose source navigates the register onto an element and whose UPDATE is a verdict
+/// builtin (`isempty(g)`, `any(g; c)`, `all(g; c)`) over operands that cannot move it. jq runs `g` and
+/// backtracks, so the register is where UPDATE entered, which is the element: EXTRACT `$k` IS the
+/// register and answers its path. The fold treated the builtin call as one that lost the register and
+/// refused `$k` ("Invalid path expression with result 1") where jq answers `[0]`. Controls: an operand that
+/// navigates (or a bare `any`, which iterates its input) still moves the register off the state, and a
+/// computed boolean is no node of it, both as in jq. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_navigating_source_with_a_verdict_builtin_update_keeps_the_register_4611(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(empty); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (1|isempty(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1)|not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; any(1; .); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; all(1; .); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; isempty(1); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; any(1; .); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":[1]}",
+            r"path(foreach .a? as $k (0; isempty(1); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1],[2]]",
+            r"path(foreach .[]? as $k (0; isempty(1); $k))",
+            "[0]\n[1]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(foreach .[]? as $k (0; isempty(1); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"(foreach .[]? as $k (0; isempty(1); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        // Controls.
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); .))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1); $k, .))",
+            "[0]\n",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(.a?); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(.[]?); $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; any(.[]?; .); $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; any; $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach (1,2) as $k (.; isempty(.[0]?); .[0]))",
+            "",
+            "Invalid path expression near attempt to access element 0 of false",
+            5,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the

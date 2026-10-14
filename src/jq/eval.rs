@@ -49580,6 +49580,10 @@ impl FoldRegister {
                     Expr::Reduce { input, init, update, .. }
                         if reduce_leaves_register_in_place(input, init, update)
                 ))
+            // #4611: `isempty(g)`, `any(g; c)` and `all(g; c)` are `label`/`first` loops over
+            // `g` that emit a boolean once `g` has run and backtracked, so when neither operand
+            // can move the register it is where UPDATE entered. Jq mode only (ADR-0018).
+            || (S::TAG == EvalTag::Jq && verdict_builtin_leaves_register(update_expr))
             // #3580: UPDATE could navigate, but this output is one it emitted
             // before it did (a recursion's seed, a caught body's handler): the
             // register is where UPDATE entered, which is `self`.
@@ -49636,6 +49640,33 @@ impl FoldRegister {
                 live_register_known: false,
             }
         }
+    }
+}
+
+/// Whether `update` is a verdict builtin over operands that cannot move jq's register
+/// (#4611): `isempty(g)`, `any(g; c)` or `all(g; c)`. The bare and one-argument spellings
+/// iterate their input, which moves it, so they are not admitted.
+fn verdict_builtin_leaves_register(update: &Expr) -> bool {
+    match unwrap_paren(update) {
+        Expr::Builtin(Builtin::IsEmpty(gen)) => cannot_move_register(gen),
+        Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
+            cannot_move_register(gen) && cannot_move_register(cond)
+        }
+        // A pipe of stages that each leave the register (`1 | isempty(.)`), at least one of
+        // them a verdict builtin: the all-neutral pipe is [`neutral_leaves_register`]'s.
+        Expr::Pipe(stages) => {
+            stages.iter().any(|s| {
+                matches!(
+                    unwrap_paren(s),
+                    Expr::Builtin(
+                        Builtin::IsEmpty(_) | Builtin::AnyCond(..) | Builtin::AllCond(..)
+                    )
+                )
+            }) && stages
+                .iter()
+                .all(|s| verdict_builtin_leaves_register(s) || neutral_leaves_register(s))
+        }
+        _ => false,
     }
 }
 
