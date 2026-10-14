@@ -62335,6 +62335,33 @@ fn test_fold_source_moving_the_register_inside_a_fold_body_is_refused_4505() -> 
             "",
             5,
         ),
+        // A `select` that passes nothing never reaches the destructure behind it, and a `?` swallows
+        // its type error: jq answers, so the refusal must not read either as the register's own.
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (select(.) | (. as [$a] | .)?) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select(empty) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (select(.a) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
     ];
     for (filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;

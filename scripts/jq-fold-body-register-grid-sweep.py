@@ -8,14 +8,14 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x thirty-three x four x thirteen.
+document, six x three x forty x four x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
 through it), REFUSE_WRONG (the safe direction) and DIFF. Exit status 1 when the candidate has an
-ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), or an ACCEPT_WRONG / DIFF /
-REFUSE_WRONG row that matched jq on `--base` (a lost match: a refuse-only fallback has leaked under
-`try` before, #3186/#3267). Run it against a `main` build as `--base` to see what a change moved.
+ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that matched jq on
+`--base` and no longer does (a lost match: a refuse-only fallback has leaked under `try` before,
+#3186/#3267), or a candidate timeout. Run it against a `main` build as `--base` to see what a change moved.
 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
                                                    [--only SUBSTR] [--jobs N]
@@ -75,6 +75,15 @@ SOURCES = [
     ("dot-sel-nav", "select(.) | .a"),
     ("dot-try-nav", "try .a"),
     ("dot-try-pat", "try (. as [$a] | .)"),
+    # a `select` that passes nothing never reaches the destructure behind it; a `?` swallows its raise
+    ("sel-false-dotpat", "select(false) | . as {a:$a} | ."),
+    ("sel-empty-dotpat", "select(empty) | . as {a:$a} | ."),
+    ("sel-not-x-dotpat", "select($x|not) | . as {a:$a} | ."),
+    ("sel-dot-opt-pat", "select(.) | (. as [$a] | .)?"),
+    ("dot-opt-pat", "(. as [$a] | .)?"),
+    # the outer fold's own loop variable is another value, not the register
+    ("i-idx", "$i | .[0]"),
+    ("i-nava", "$i | .a?"),
 ]
 CONTEXTS = [
     ("path", "path(. as $x | {O})"),
@@ -98,14 +107,15 @@ DOCS = [
     '[{"a":1}]',
 ]
 
-# The ACCEPT_WRONG rows #4505's third part leaves: a `try ... catch` around the destructure
-# (the handler's `try` also swallows the pattern's type errors, which jq answers, so refusing
-# the shape costs rows), and a comma beside the destructure on a `null` document, which the
-# resolver's `null` clause owns. Recorded in docs/compliance/jq/limitations.md.
+# The ACCEPT_WRONG rows #4505's third part leaves: a `try ... catch` or a `?` around the destructure
+# (it also swallows the pattern's type errors, which jq answers, so refusing the shape costs rows),
+# and a comma beside the destructure on a `null` document, which the resolver's `null` clause
+# owns. Recorded in docs/compliance/jq/limitations.md.
 KNOWN_ACCEPT_WRONG = {
     ("try-xpat-catch", None),
     ("try-dotpat-catch", None),
     ("comma-xpat", "null"),
+    ("sel-dot-opt-pat", None),
 }
 
 
@@ -171,7 +181,8 @@ def main():
         results = [r for r in ex.map(work, rows) if r]
 
     totals = collections.Counter(r[5] for r in results)
-    print(f"rows={len(results)} candidate={dict(sorted(totals.items()))}")
+    print(f"rows={len(results)} of {len(rows)} (the pinned oracle timed out on the rest)")
+    print(f"candidate={dict(sorted(totals.items()))}")
     if args.base:
         print(f"           base={dict(sorted(collections.Counter(r[7] for r in results).items()))}")
 
@@ -181,12 +192,13 @@ def main():
     fresh = [r for r in results if r[5] == "ACCEPT_WRONG" and not known(r)]
     residual = [r for r in results if r[5] == "ACCEPT_WRONG" and known(r)]
     lost = [r for r in results if args.base and r[7] == "MATCH" and r[5] != "MATCH"]
+    hung = [r for r in results if r[5] == "TIMEOUT"]
     print(f"ACCEPT_WRONG outside the documented residual: {len(fresh)}; documented residual: {len(residual)}")
-    print(f"lost matches against --base: {len(lost)}")
-    for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost)):
+    print(f"lost matches against --base: {len(lost)}; candidate timeouts: {len(hung)}")
+    for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
-    return 1 if fresh or lost else 0
+    return 1 if fresh or lost or hung else 0
 
 
 sys.exit(main())

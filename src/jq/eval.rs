@@ -49801,26 +49801,31 @@ fn fold_source_register_markers<S: EvalSemantics>(
 /// `source` with the leading `$x` stage of every pipe dropped when `$x` is one of `markers`
 /// (#4505): a `$x` that is the register hands it on as `.` does, so `$x | . as {a:$a} | .` and
 /// `($x | .) as {a:$a}` destructure the register as `. as {a:$a}` does, which the spine reads
-/// for `.` but not for a pipe headed by the marker (the resolver places both the same way). Every
-/// `select(f)` stage of a pipe is dropped too: `f` runs as a subexpression, which moves nothing and
-/// path-checks nothing, so the stage after it meets the register where the one before it did
-/// (`select($x) | . as {a:$a} | .`); the spine reads only a `select` with a literal condition.
-/// Only for [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
+/// for `.` but not for a pipe headed by the marker (the resolver places both the same way). With
+/// `selects`, a `select(c)` stage of a pipe is dropped too when `c` is the accumulator's own
+/// truthiness (`.`, or a listed marker or a literal): the condition runs as a subexpression, which
+/// moves nothing, and the caller knows the accumulator is truthy, so the stage after it meets the
+/// register where the one before it did (`select($x) | . as {a:$a} | .`); the spine reads only a
+/// `select` with a literal condition. Another condition may be false at run time (`select(.a)`,
+/// `select(empty)`), and then the destructure behind it never runs. Only for
+/// [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
 /// marker `Rc`s are shared, so a marker listed from the original is the one the copy holds.
-fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked]) -> Expr {
-    let mapped = map_subexprs(source, &mut |child| collapse_marker_pipes(child, markers));
+fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked], selects: bool) -> Expr {
+    let mapped = map_subexprs(source, &mut |child| {
+        collapse_marker_pipes(child, markers, selects)
+    });
     match &mapped {
         Expr::Pipe(stages) if stages.len() > 1 => {
             let headed = matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                 if markers.contains(&Rc::as_ptr(m)));
-            let is_select = |e: &Expr| matches!(unwrap_paren(e), Expr::Builtin(Builtin::Select(_)));
-            if !headed && !stages.iter().any(is_select) {
+            let drops = |e: &Expr| selects && is_register_truthy_select(e, markers);
+            if !headed && !stages.iter().any(drops) {
                 return mapped;
             }
             let kept: Vec<Expr> = stages
                 .iter()
                 .enumerate()
-                .filter(|(at, stage)| (*at != 0 || !headed) && !is_select(stage))
+                .filter(|(at, stage)| (*at != 0 || !headed) && !drops(stage))
                 .map(|(_, stage)| stage.clone())
                 .collect();
             if kept.is_empty() {
@@ -49833,7 +49838,20 @@ fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked]) -> Expr {
     }
 }
 
-/// Whether some pipe of `source` has a `select(f)` stage, which [`collapse_marker_pipes`] drops.
+/// Whether `e` is a `select(c)` whose condition is the accumulator's own truthiness: `.`, a
+/// `$x` in `markers` (equal to it), or a literal ([`collapse_marker_pipes`]).
+fn is_register_truthy_select(e: &Expr, markers: &[*const Tracked]) -> bool {
+    let Expr::Builtin(Builtin::Select(cond)) = unwrap_paren(e) else {
+        return false;
+    };
+    match unwrap_paren(cond) {
+        Expr::Identity | Expr::Literal(_) => true,
+        Expr::TrackedVar(m) => markers.contains(&Rc::as_ptr(m)),
+        _ => false,
+    }
+}
+
+/// Whether some pipe of `source` has a `select(f)` stage, which [`collapse_marker_pipes`] may drop.
 fn has_select_stage(source: &Expr) -> bool {
     any_subexpr(source, &mut |e| {
         matches!(e, Expr::Pipe(stages) if stages.len() > 1
@@ -51348,15 +51366,38 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // on either raises there whether or not the source backtracks it.
     let in_moved_body =
         S::TAG == EvalTag::Jq && fold_body::source_moved_here() && !is_null_or_bool(ambient.value);
+    // #4505: a `try` or `?` in the source swallows the destructure's raise (`reduce (try ($x as
+    // {a:$a} | .)) as $y (.; .)` is answered), which a refusal raised outside it would not. The
+    // spine peels a `try` of a `foreach` source itself; the cases below that are new leave it out.
+    // Evaluated only when an unplaced body asks.
+    let try_free = || {
+        !any_subexpr(source, &mut |e| {
+            matches!(e, Expr::Try { .. } | Expr::Optional(_))
+        })
+    };
+    let raise_reaches_fold = foreach_source || (in_moved_body && try_free());
+    // #4505: the accumulator is truthy, so a `select(.)`/`select($x)` stage in front of a destructure
+    // passes it on ([`collapse_marker_pipes`]); a falsy one passes nothing and the destructure never
+    // runs.
+    let select_passes = unplaced_body && ambient.trackable && has_select_stage(source) && {
+        !matches!(ambient.value, OwnedValue::Null | OwnedValue::Bool(false)) && try_free()
+    };
     // #4505: the destructure of `.` behind a `select(f)` stage is the same one (`f` is a
     // subexpression that moves nothing; the spine reads only a `select` with a literal condition).
     // Only for a `foreach` source and in a moved body: elsewhere a `reduce` source backtracks a
     // destructure of the register, which succeeds.
     let destructures_unplaced_register = unplaced_body
         && (source_destructures_register(source, true)
-            || ((foreach_source || in_moved_body)
-                && has_select_stage(source)
-                && source_destructures_register(&collapse_marker_pipes(source, &[]), true)));
+            || (raise_reaches_fold
+                && select_passes
+                && source_destructures_register(
+                    &collapse_marker_pipes(
+                        source,
+                        &unplaced_register_markers::<S>(source, ambient),
+                        true,
+                    ),
+                    true,
+                )));
     // #4505: inside another fold's body `.` is not known to be the register, but a `$x` marker
     // that equals the accumulator at this fold is one jq may have bound to the register, and its
     // destructure then runs the same tracked `INDEX` step `.`'s does. Read as the register only
@@ -51367,15 +51408,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // a `reduce` backtracks its source, so a destructure of the register there succeeds (its
     // `INDEX` step passes for a `$x` that is the register) and leaves the register where it was,
     // which the by-value drive answers as jq does. In a moved body the step raises on the marker
-    // instead, except under a `try` or `?` in the source, which swallows the raise
-    // (`reduce (try ($x as {a:$a} | .)) as $y (.; .)` is answered) where this refusal, raised
-    // outside it, would not.
+    // instead (`raise_reaches_fold` leaves out a source with a `try`/`?`).
     let marker_destructures_unplaced_register = unplaced_body
-        && (foreach_source
-            || (in_moved_body
-                && !any_subexpr(source, &mut |e| {
-                    matches!(e, Expr::Try { .. } | Expr::Optional(_))
-                })))
+        && raise_reaches_fold
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && {
@@ -51387,14 +51422,15 @@ fn drive_fold_source_with<S: EvalSemantics>(
                     || !any_subexpr(source, &mut |e| matches!(e, Expr::Reduce { .. })))
                 && {
                     // The copy is only built when some pipe is headed by a listed marker.
-                    let headed = has_select_stage(source)
+                    let headed = select_passes
                         || any_subexpr(source, &mut |e| {
                             matches!(e, Expr::Pipe(stages)
                                 if stages.len() > 1
                                     && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                                         if markers.contains(&Rc::as_ptr(m))))
                         });
-                    let collapsed = headed.then(|| collapse_marker_pipes(source, &markers));
+                    let collapsed =
+                        headed.then(|| collapse_marker_pipes(source, &markers, select_passes));
                     source_destructures_register_with(
                         collapsed.as_ref().unwrap_or(source),
                         true,
@@ -55253,7 +55289,7 @@ fn update_navigates_within(expr: &Expr, first_only: bool) -> bool {
 }
 
 /// [`update_navigates_within`] for the SOURCE of a fold nested in an UPDATE (#4505). A pipe is read
-/// past the stages that hand their input on (`.`, a `$var`, `select(f)`, whose condition is a
+/// past the stages that hand their input on (`.`, an outer `$x` marker, `select(f)`, whose condition is a
 /// subexp): `select(.) | .a` and `$x | .a` run the same path-checked `INDEX` as `.a` on the node
 /// the source meets, which is not the register once an enclosing `reduce` source moved it, so
 /// reading only the head left the nested fold's step trackable and the accumulator answered where
@@ -55269,7 +55305,7 @@ fn nested_source_navigates(source: &Expr) -> bool {
         }
         if !matches!(
             unwrap_paren(stage),
-            Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Builtin(Builtin::Select(_))
+            Expr::Identity | Expr::TrackedVar(_) | Expr::Builtin(Builtin::Select(_))
         ) {
             return false;
         }
