@@ -113,6 +113,11 @@ SOURCES = [
     ("fresh-var-wrapped", "{a:1} as $n | [$n as {b:$b} | .]"),
     ("fresh-lit-wrapped", "[{a:1} as {b:$b} | .]"),
     ("dotpat-wrapped", "[. as {b:$b} | .]"),
+    # ...but not on a branch that never runs (#4632): jq answers these
+    ("wrapped-sel-false", "[select(false) | . as {b:$b} | .]"),
+    ("wrapped-limit-0", "[limit(0; . as {b:$b} | .)]"),
+    ("wrapped-if-false", "[if false then . as {b:$b} | . else 1 end]"),
+    ("wrapped-first", "[first(1, (. as {b:$b} | .))]"),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
@@ -162,9 +167,6 @@ KNOWN_ACCEPT_WRONG = {
     # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
     # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
     ("lit-null-var", None),
-    # (#4632) a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source
-    # moved the register: `.` is on the element there, the by-value drive answers
-    ("dotpat-wrapped", None),
 }
 
 

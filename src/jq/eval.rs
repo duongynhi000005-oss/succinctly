@@ -52072,6 +52072,38 @@ fn caught_destructure_in_unrouted_body(
         && source_destructures_register(&drop_caught_handlers(source), true)
 }
 
+/// #4632: in the body of a `reduce` whose source moved jq's register onto an element, a destructure of
+/// `.` inside `[ ... ]` (`[. as {b:$b} | .]`) raises as it does outside the brackets: `.` is not the
+/// register there. The register walk reads `[E]` as opaque (a destructure of the register inside the
+/// brackets is answered everywhere else), so the source was driven by value. Read with the brackets
+/// dropped, for a moved body only.
+fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
+        && source_destructures_register(&drop_array_wrappers(source), true)
+}
+
+/// `source` with every `[E]` whose `E` is a plain bind chain replaced by `E`
+/// ([`array_wrapped_destructure_of_register`]). Not an `E` with control flow around the bind
+/// (`select(false) | ...`, `limit(0; ...)`, an `if`, `first(...)`): the destructure may sit on a branch
+/// that never runs, which jq answers and the syntactic walk would refuse.
+fn drop_array_wrappers(source: &Expr) -> Expr {
+    match source {
+        Expr::Array(inner) if is_plain_bind_chain(inner) => drop_array_wrappers(inner),
+        other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
+    }
+}
+
+/// `E` is a destructuring `as` bind (or a pipe of `.` and such binds) whose body is another such bind,
+/// `.` or a variable: every stage runs once, on every output of the stage before it.
+fn is_plain_bind_chain(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Literal(_) => true,
+        Expr::AsPattern { body, .. } | Expr::As { body, .. } => is_plain_bind_chain(body),
+        Expr::Pipe(stages) => stages.iter().all(is_plain_bind_chain),
+        _ => false,
+    }
+}
+
 /// `source` with every `try BODY catch H` replaced by `BODY` ([`caught_destructure_in_unrouted_body`]).
 fn drop_caught_handlers(source: &Expr) -> Expr {
     match source {
@@ -52188,6 +52220,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let destructures_unplaced_register = unplaced_body
         && (source_destructures_register(pruned.as_ref().unwrap_or(source), true)
             || caught_destructure_in_unrouted_body(source, foreach_source, ambient)
+            || (in_moved_body && array_wrapped_destructure_of_register(source))
             || (raise_reaches_fold
                 && select_passes
                 && pruned.is_none()

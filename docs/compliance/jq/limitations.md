@@ -2321,7 +2321,10 @@ is the revert that established what the other one costs.
    `source_destructures_fresh` as a `reduce` source does (pinned by
    `test_foreach_source_destructuring_a_fresh_variable_raises_4616`); `$ENV`/`env` as a source are fresh since [#4630](https://github.com/rust-works/succinctly/issues/4630) (pinned by
    `test_fold_source_destructuring_the_environment_raises_4630`), and so is a destructure of a fresh value wrapped in `[ ... ]` (`RegisterSpine`'s `fresh_only` walk reads
-   `Expr::Array`, #4630; pinned by `test_fold_source_destructuring_a_fresh_value_inside_an_array_raises_4630`); a `null` literal bound to a variable, in the body
+   `Expr::Array`, #4630; pinned by `test_fold_source_destructuring_a_fresh_value_inside_an_array_raises_4630`); a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source moved the register raises too
+   ([#4632](https://github.com/rust-works/succinctly/issues/4632): `array_wrapped_destructure_of_register`; pinned by
+   `test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632`), but a `$x` marker destructured there is the
+   #4604 family; a `null` literal bound to a variable, in the body
    of another fold, is still accepted, because the register's own null-ness is not known there
    (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
