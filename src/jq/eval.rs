@@ -30738,10 +30738,12 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// evaluating it, once, and the resolved paths are reused by the write
 /// instead of being re-derived (#1414). So `5 | (.a, .b) = error("boom")`
 /// and `a: 5 | "x" as $k | .a[$k] = error("boom")` are no-ops that never
-/// run the right side, exactly as for a single static path. A left side
-/// that resolves to no target at all (`select(false) = error("r")`,
-/// `.a[] = error("r")` on `a: []`) answers the document unchanged the same
-/// way (`yq_zero_target_document`).
+/// run the right side, exactly as for a single static path, but only for a
+/// left side every step of which yq tracks as a path
+/// ([`yq_assign_path_is_tracked`]): `1 = error("boom")` and `[.a] = ...` still
+/// raise there. A left side that only filters and resolves to no target
+/// (`select(false) = error("r")`) answers the document unchanged the same way
+/// ([`yq_assign_path_survives_empty`]).
 ///
 /// "Discards the RHS entirely" is meant literally, not "evaluates it but
 /// discards the result" -- a `halt`/`break`/`stderr`/`debug` reachable only
@@ -30784,32 +30786,72 @@ fn yq_resolve_assign_targets<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             return Err(QueryResult::None)
         }
         Ok(YqAssignNoopCheck::Failed(escape)) => return Err(escape.into()),
-        Err(e) => return Err(QueryResult::Error(e)),
+        Err(e) => return Err(suppress_or_raise(e, optional)),
     };
-    let targets = yq_prepare_assign_targets::<W, S>(
+    yq_prepare_assign_targets::<W, S>(
         path_expr,
         value_expr,
         input,
         resolved,
         optional,
         scalar_slice_noop,
-    )?;
-    if let Some(unchanged) = yq_zero_target_document(targets.as_ref()) {
-        return Err(QueryResult::Owned(unchanged));
-    }
-    Ok(targets)
+    )
 }
 
-/// #1412: real yq never evaluates an assignment's right side when its left
-/// side resolved to no target at all -- `.a[] = error("r")` on `a: []`,
-/// `select(false) = error("r")` and `.a[.z] += error("r")` on `a: {}` all
-/// answer the document unchanged (v4.53.3), where evaluating it first raised
-/// `r`. `Some(document)` is that answer; `None` means at least one target
-/// resolved (or this is jq mode, which has no targets up front).
-fn yq_zero_target_document(targets: Option<&YqAssignTargets>) -> Option<OwnedValue> {
-    targets
-        .filter(|targets| targets.paths.is_empty())
-        .map(|targets| targets.doc.clone())
+/// Is every step of `path_expr` one yq tracks as a path (#1412)? Only then can
+/// resolving it to nothing, or to nothing but no-ops, mean "no target": a
+/// constructed or computed left side (`[.a]`, `1`, `.a | length`, `.a + 1`)
+/// resolves to no path here too, yet yq still runs the right side for it and
+/// raises there.
+fn yq_assign_path_is_tracked(path_expr: &Expr) -> bool {
+    match path_expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::Builtin(Builtin::Select(_)) => true,
+        Expr::Pipe(stages) => stages.iter().all(yq_assign_path_is_tracked),
+        Expr::Comma(branches) => branches.iter().all(yq_assign_path_is_tracked),
+        Expr::Optional(inner) | Expr::Paren(inner) => yq_assign_path_is_tracked(inner),
+        Expr::As { body, .. } => yq_assign_path_is_tracked(body),
+        // `E[K]` / `E[S:T]` with a computed bound: the postfix chain is the path.
+        Expr::IndexExpr { target, .. } | Expr::SliceExpr { target, .. } => {
+            yq_assign_path_is_tracked(target)
+        }
+        _ => false,
+    }
+}
+
+/// May a tracked `path_expr` that resolved to no path be answered with the
+/// document unchanged (#1412)? Yes unless it navigates and then filters: yq
+/// creates the steps it walked before a later `select` drops them
+/// (`(.b | select(.)) = x` on `{}` is `{"b":null}`), which the unchanged
+/// document would not show. Pure navigation that resolved to nothing was
+/// pruned as a scalar-target no-op (`(.a, .b) = x` on `5`), and pure
+/// filtering navigates nowhere (`select(false) = x`).
+fn yq_assign_path_survives_empty(path_expr: &Expr) -> bool {
+    fn has_select(expr: &Expr) -> bool {
+        match expr {
+            Expr::Builtin(Builtin::Select(_)) => true,
+            Expr::Pipe(stages) => stages.iter().any(has_select),
+            Expr::Comma(branches) => branches.iter().any(has_select),
+            Expr::Optional(inner) | Expr::Paren(inner) => has_select(inner),
+            Expr::As { body, .. } => has_select(body),
+            Expr::IndexExpr { target, .. } | Expr::SliceExpr { target, .. } => has_select(target),
+            _ => false,
+        }
+    }
+    fn navigates_nowhere(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identity | Expr::Builtin(Builtin::Select(_)) => true,
+            Expr::Pipe(stages) => stages.iter().all(navigates_nowhere),
+            Expr::Comma(branches) => branches.iter().all(navigates_nowhere),
+            Expr::Optional(inner) | Expr::Paren(inner) => navigates_nowhere(inner),
+            _ => false,
+        }
+    }
+    !has_select(path_expr) || navigates_nowhere(path_expr)
 }
 
 /// What [`yq_assign_noop_check`] found, plus (code review, #1233) the
@@ -30845,7 +30887,11 @@ fn yq_assign_noop_check<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     path_expr: &Expr,
     input: &StandardJson<'_, W>,
 ) -> Result<YqAssignNoopCheck, EvalError> {
-    if S::TAG != EvalTag::Yq {
+    // A dynamic path is only resolved ahead of the right side when yq tracks
+    // every step of it; anything else keeps the caller's own route.
+    if S::TAG != EvalTag::Yq
+        || (needs_path_prepass(path_expr) && !yq_assign_path_is_tracked(path_expr))
+    {
         return Ok(YqAssignNoopCheck::NotChecked);
     }
     let pristine = to_owned::<S, _>(input)?;
@@ -30876,6 +30922,17 @@ fn yq_assign_noop_check<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         .iter()
         .map(|p| yq_assign_classify(p, &pristine))
         .collect();
+    // Nothing resolved: every branch was pruned as a scalar-target no-op, or a
+    // filter dropped them. That leaves the document alone unless a filter
+    // dropped a step yq had already created (see
+    // [`yq_assign_path_survives_empty`]).
+    if paths.is_empty() {
+        return Ok(if yq_assign_path_survives_empty(path_expr) {
+            YqAssignNoopCheck::Skip(pristine)
+        } else {
+            YqAssignNoopCheck::Continue { pristine, paths }
+        });
+    }
     if outcomes.iter().all(PathAssignOutcome::is_total_noop) {
         return Ok(YqAssignNoopCheck::Skip(pristine));
     }
@@ -32788,16 +32845,12 @@ fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         let kind = AssignKind::Compound(compound_arith_op(op));
         return collect_assign::<W, S>(kind, path_expr, value_expr, input, optional);
     }
-    // #1233: same RHS-discarding no-op as `eval_assign` (see
-    // `yq_resolve_assign_targets`'s own doc comment) -- applies uniformly across
-    // every compound operator, not just `Add`, unlike the write-level
-    // `scalar_noop` gate further down (`compound_scalar_noop`), which
-    // answers a narrower, operator-specific question about what happens
-    // once the RHS *has* run. Live-verified against yq v4.53.3 for
-    // `+=`/`-=`/`*=`; `/=`/`%=` aren't real yq syntax at all (`'/' expects 2
-    // args but there is 1`), so their yq-mode answer is judged the same way
-    // `//=`'s own comment below judges it -- internal consistency with the
-    // already-correct, already-lazy `|=`, not an external-compat claim.
+    // #1233: the RHS-discarding no-op applies uniformly across every compound
+    // operator (see `yq_resolve_assign_targets`'s doc comment), unlike the
+    // write-level `scalar_noop` gate below (`compound_scalar_noop`), which
+    // answers what happens once the RHS *has* run. `/=`/`%=` aren't real yq
+    // syntax (`'/' expects 2 args but there is 1`), so their yq-mode answer
+    // follows the already-lazy `|=` for internal consistency.
 
     // Convert to update: .path op= value  becomes  .path |= . op value
     let arith_op = compound_arith_op(op);
@@ -32873,14 +32926,9 @@ fn eval_alternative_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         return collect_assign::<W, S>(AssignKind::Alt, path_expr, value_expr, input, optional);
     }
     // #1233: same RHS-discarding no-op as `eval_assign`/`eval_compound_assign`
-    // (see `yq_resolve_assign_targets`'s own doc comment). `//=` isn't real yq
-    // syntax at all (confirmed live, same as `/=`/`%=`), so this is judged
-    // by internal consistency with the already-correct, already-lazy `|=`
-    // this desugars to below, not an external-compat claim -- live-verified
-    // that the literal desugared equivalent (`.a |= (. // error("b"))`) is
-    // already correctly a no-op on a scalar target, so leaving `//=` itself
-    // to still evaluate its RHS eagerly would make two spellings of the
-    // identical operation disagree.
+    // (`yq_resolve_assign_targets` below). `//=` isn't real yq syntax at all,
+    // so this follows the already-lazy `|=` it desugars to, for internal
+    // consistency: `.a |= (. // error("b"))` already no-ops on a scalar.
 
     // Same root-vs-sub-value fix as eval_compound_assign: evaluate
     // `value_expr` once against the original input before splicing it into

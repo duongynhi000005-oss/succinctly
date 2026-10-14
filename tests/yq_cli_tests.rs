@@ -29619,14 +29619,10 @@ fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<
         ),
         // No target at all.
         ("a: 1\n", "select(false) = error(\"boom\")", r#"{"a":1}"#),
+        ("a: 1\n", "select(. == 2) += error(\"boom\")", r#"{"a":1}"#),
         (
             "a: 1\n",
-            "(.a | select(. == 2)) += error(\"boom\")",
-            r#"{"a":1}"#,
-        ),
-        (
-            "a: 1\n",
-            "(.a | select(false)) -= error(\"boom\")",
+            "(select(false), select(false)) -= error(\"boom\")",
             r#"{"a":1}"#,
         ),
     ];
@@ -29640,6 +29636,28 @@ fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<
     let (_out, err, code) = run_yq_stdin_with_stderr(
         "(.a, .b) = error(\"boom\")",
         "a: 1\n",
+        &["-o", "json", "-I0"],
+    )?;
+    assert_ne!(code, 0);
+    assert!(err.contains("boom"), "err={err}");
+
+    // Unchanged: a left side yq does not track as a path still runs the right side.
+    for filter in [
+        "[.a] = error(\"boom\")",
+        "1 = error(\"boom\")",
+        "(.a | length) += error(\"boom\")",
+        "(.a, 1) = error(\"boom\")",
+    ] {
+        let (_out, err, code) = run_yq_stdin_with_stderr(filter, "5\n", &["-o", "json", "-I0"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(err.contains("boom"), "{filter}: {err}");
+    }
+
+    // Unchanged: a filter after a step yq creates still evaluates the right
+    // side here (yq answers `{"b":null}`, which this does not reproduce).
+    let (_out, err, code) = run_yq_stdin_with_stderr(
+        "(.b | select(.)) = error(\"boom\")",
+        "{}\n",
         &["-o", "json", "-I0"],
     )?;
     assert_ne!(code, 0);
