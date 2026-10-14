@@ -5139,19 +5139,18 @@ Four known gaps this write shares with every other write form, none specific to 
   existing alias and merge-key behaviour, not specific to the tail.
 - **A multi-result filter carries no `CommentTree` at all** (`.a line_comment = "y" | .,
   .` prints two uncommented copies) — #1349's `GenericResult::Many` limitation, above.
-- **A preceding stage outside the shapes `is_alias_sensitive_assign` admits silently drops
-  the write**, rather than raising the "pipe stage" refusal above: `.a | .b
-  line_comment = "hi"` on `a:\n  b: 1\n` prints `b: 1` where real yq prints `b: 1 # hi`
-  (live-verified), because `resolve_meta_assign_writes` only runs at all when the whole
-  expression passes `is_shape_preserving` (`src/jq/eval.rs`) — a bare navigation stage like
-  `.a` is not in that fixed operator list, so the entire write pass, not just that one
-  stage, is skipped. A leading user-defined `def` compounds this: `def f: .; f | .a
-  line_comment = "hi"` also drops the write, since `resolve_meta_assign_writes` resolves
-  each preceding stage in total isolation (`evaluate_input_quiet`, a fresh re-index with no
-  access to the surrounding scope) and a bare `f` is unresolvable outside the `def` that
-  introduced it — real yq has no `def`/user-defined-function syntax at all, so there is no
-  oracle for that second case. Tracked as #2679; pinned by
-  `preceding_stage_outside_the_admitted_shapes_silently_drops_the_write`.
+- **A metadata write behind a navigation stage is refused, where real yq applies it**: `.a |
+  .b line_comment = "hi"` on `a:\n  b: 1\n` prints `b: 1 # hi` in yq (live-verified) and
+  raises here (#2679). `resolve_meta_assign_writes` only runs when the whole expression
+  passes `is_shape_preserving` (`src/jq/eval.rs`), whose fixed operator list has no bare
+  navigation stage, and a write after one belongs on the navigated subtree, which no route
+  here has a presentation tree for. It used to exit 0 with the write silently dropped, the
+  outcome #798's triage ruled out; the refusal is the divergence ADR-0018 allows when matching
+  would discard a write. A leading user-defined `def` that a stage ahead of the write reads
+  through (`def f: .; f | .a line_comment = "hi"`) is refused the same way, since each stage
+  is re-evaluated alone with no `def` in scope; real yq has no `def`, so there is no oracle.
+  Pinned by `metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679`.
+  Applying the write (tracking the navigated prefix through the pass) is what is left of #2679.
   [#2855](https://github.com/rust-works/succinctly/issues/2855)'s `sort_keys(f)` hits this
   same gap through a value, not just a comment: `.a | sort_keys(.)` correctly reorders
   `.a`'s own keys and returns just `.a` (matching real yq), but loses `.a.y`'s flow style —

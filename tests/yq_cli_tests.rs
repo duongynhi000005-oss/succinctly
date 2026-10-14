@@ -20460,7 +20460,7 @@ mod meta_assign_798 {
     /// only a fixed operator list, not arbitrary navigation), and that a
     /// user-defined function call falls into doubly, since `f` alone is
     /// unresolvable outside the `def` that introduced it. Both cases here
-    /// exit 0 with the write silently dropped rather than raising the
+    /// exited 0 with the write silently dropped rather than raising the
     /// "top-level pipe stage" refusal #798's triage otherwise prefers
     /// (`docs/compliance/yq/limitations.md`'s #798 entry) -- pinning the
     /// current (non-ideal, but intentional-for-PR1) output so a future fix
@@ -20469,14 +20469,44 @@ mod meta_assign_798 {
     /// lexer rejects it outright, so there is no oracle for the second
     /// case.
     #[test]
-    fn preceding_stage_outside_the_admitted_shapes_silently_drops_the_write() -> Result<()> {
-        let (out, code) = run_yq_stdin(".a | .b line_comment = \"hi\"", "a:\n  b: 1\n", &[])?;
-        assert_eq!(code, 0);
-        assert_eq!(out, "b: 1\n");
+    fn metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679() -> Result<()> {
+        // Real yq prints `b: 1 # hi` for the first; the write needs the navigated
+        // subtree's own presentation, so it is refused out loud.
+        for filter in [
+            ".a | .b line_comment = \"hi\"",
+            ".a | .b style = \"double\"",
+            ".a | .b anchor = \"x\"",
+            ".a | .b | .c line_comment = \"hi\"",
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
+            assert_eq!(code, 1, "{filter}: {err}");
+            assert_eq!(out, "", "{filter}");
+            assert!(err.contains("#2679"), "{filter}: {err}");
+        }
 
-        let (out, code) = run_yq_stdin("def f: .; f | .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        // A `def` that a stage ahead of the write reads through (succinctly's own surface;
+        // real yq's lexer rejects `def`).
+        let (out, err, code) =
+            run_yq_stdin_with_stderr("def f: .; f | .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(out, "");
+        assert!(err.contains("#2679"), "{err}");
+
+        // Unchanged: the same write as the first stage, a `def` nothing reads through, a
+        // write a later stage replaces, and JSON output (no comments to lose).
+        let (out, code) = run_yq_stdin(".a.b line_comment = \"hi\"", "a:\n  b: 1\n", &[])?;
         assert_eq!(code, 0);
-        assert_eq!(out, "a: 1\n");
+        assert_eq!(out, "a:\n  b: 1 # hi\n");
+        let (out, code) = run_yq_stdin("def f: .; .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        assert_eq!(code, 0);
+        assert_eq!(out, "a: 1 # hi\n");
+        let (out, code) = run_yq_stdin(
+            ".a | .b line_comment = \"hi\"",
+            "a:\n  b: 1\n",
+            &["-o", "json", "-I0"],
+        )?;
+        assert_eq!(code, 0);
+        assert_eq!(out.trim(), r#"{"b":1}"#);
         Ok(())
     }
 

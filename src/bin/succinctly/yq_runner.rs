@@ -3811,6 +3811,33 @@ fn count_meta_assigns(expr: &Expr) -> usize {
     count
 }
 
+/// Is a stage nothing but navigation (`.a`, `.[0]`, `.[]`, `..`, and pipes of them)?
+fn is_navigation_stage(stage: &Expr) -> bool {
+    match stage {
+        Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::RecursiveDescent => true,
+        Expr::Paren(inner) | Expr::Optional(inner) => is_navigation_stage(inner),
+        Expr::Pipe(stages) => stages.iter().all(is_navigation_stage),
+        _ => false,
+    }
+}
+
+/// Does `expr` have a top-level metadata write that comes after a navigation stage (#2679)?
+fn meta_write_behind_navigation(expr: &Expr) -> bool {
+    let mut stages = Vec::new();
+    flatten_pipe_stages(expr, &mut stages);
+    let Some(first_write) = stages
+        .iter()
+        .position(|s| matches!(s, Expr::MetaAssign { .. }))
+    else {
+        return false;
+    };
+    stages[..first_write].iter().any(|s| is_navigation_stage(s))
+}
+
 /// The top-level pipe stages of `expr`, flattened through `Paren`/
 /// `Optional`/`Shared` and a leading `def`'s `then` -- the same shapes
 /// [`is_alias_sensitive_assign`]'s `is_shape_preserving` sees through, so a
@@ -3913,6 +3940,28 @@ fn resolve_meta_assign_writes(
             &EvalError::new(
                 "metadata assignment (line_comment/head_comment/foot_comment/comments/style/anchor \
                  = ...) is only supported as a pipe stage, or under a plain `as $var` binding",
+            ),
+            &no_location(),
+        );
+        return None;
+    }
+    // A `def` ahead of a stage that has to be evaluated to reach the document a write sees
+    // (#2679): each stage is re-evaluated alone, with no `def` in scope, so a call to it
+    // fails, the pass stops resolving there and the write is dropped without a word.
+    let last_meta = stages
+        .iter()
+        .rposition(|s| reachable_meta_assigns(&[*s]) > 0)
+        .unwrap_or(0);
+    if stages[..last_meta]
+        .iter()
+        .any(|s| !is_value_identity_stage(s))
+        && jq::walk::any_subexpr(expr, &mut |e| matches!(e, Expr::FuncDef { .. }))
+    {
+        sink.report(
+            DiagStyle::Yq,
+            &EvalError::new(
+                "metadata assignment is not supported behind a `def` and a stage that reads \
+                 through it (#2679)",
             ),
             &no_location(),
         );
@@ -5106,6 +5155,22 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
                 &EvalError::new(
                     "head_comment/foot_comment/comments = ... is only supported as a top-level \
                      pipe stage of a plain write (#2796)",
+                ),
+                &no_location(),
+            );
+            return Ok(Vec::new());
+        }
+        // The same refusal for a write behind a navigation (#2679): `.a | .b line_comment =
+        // "x"` places the comment on a node of the *navigated* subtree, which this route has
+        // no tree for, and it was dropped without a word -- the outcome #798's own triage ruled
+        // out. Only that shape: a write that a later stage replaces (`.a style = "double" |
+        // .a + 1`) has nothing to lose.
+        None if need_comments && meta_write_behind_navigation(expr) => {
+            sink.report(
+                DiagStyle::Yq,
+                &EvalError::new(
+                    "metadata assignment (line_comment/style/anchor = ...) is not supported \
+                     behind a navigation stage (`.a | .b line_comment = ...`) (#2679)",
                 ),
                 &no_location(),
             );
