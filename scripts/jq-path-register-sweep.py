@@ -792,6 +792,24 @@ OPERANDS = [
     "(reduce (def f(x): x; f(.) as {a:$a} | .) as $k (.; .))",
     "(reduce (def f($x): $x; f(.) as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))",
+    # (#4582) a comma fresh on only some outputs, then a destructure of `.`: the source is generated
+    # whole, so the fresh item reaches it and raises. And `$__loc__`, the object the evaluator builds.
+    # The contrasts: a `first`/`limit(1; ..)` that stops before the fresh item, an `if` that takes one
+    # branch at run time, an array pattern, a body that is not `.`, and a `foreach`.
+    "(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (({a:1}, 1) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (({a:1}, .) | . as [$a] | .) as $k (.; .))",
+    "(reduce (({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
+    "(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.a; .))",
+    "(reduce (first((., {a:1}) | . as {a:$a} | .)) as $k (.; .))",
+    "(reduce (limit(1; (., {a:1}) | . as {a:$a} | .)) as $k (.; .))",
+    "(reduce (if .a then {a:1} else . end | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (($__loc__, .) | . as {file:$a} | .) as $k (.; .))",
+    "(reduce ($__loc__ | . as {file:$a} | .) as $k (.; .))",
+    "(reduce (keys | $__loc__ | . as {file:$a} | .) as $k (.; .))",
+    "(reduce ($__loc__ | . as {file:$a} ?// $a | .) as $k (.; .))",
+    "(foreach (({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
     "(reduce (def f: .|tostring; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: .; try f as {a:$a} | .) as $k (.; .))",
