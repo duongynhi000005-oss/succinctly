@@ -691,6 +691,30 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `foreach` operands, `--stage-only` (185,211 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   REFUSE_WRONG went 4,464 to 4,424 and MATCH 180,267 to 180,307, with no regression and
   ACCEPT_WRONG (303) and DIFF (177) unchanged. Since
+  [#4489](https://github.com/rust-works/succinctly/issues/4489) a `foreach` whose *source* is a
+  destructuring `?//` chain states that register too on an element that took no walk step
+  (`resolve_foreach`'s `entry_stays_unless_source_walks`): the pattern's first `INDEX` raises on a value
+  that is not the register, `?//` restores the path, and the bare alternative leaves the register
+  where the fold entered, so `path(. as $x | 1 | (foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .;
+  .)) | $x)` on `[[1],[1]]` is jq's `[]` (it refused "with result [[1],[1]]"). The gate
+  (`source_moves_register_only_by_binds`) reads a source whose only movement is such a bind, through a
+  pipe, comma, plain `as`, `label`, `if` and `last(f)`; the body, `UPDATE` and `EXTRACT` must still
+  not navigate. Only a chain that ends in a bare `$var` is read (a chain of patterns alone either walks
+  a step or raises), and only for a fold that is not inside another fold's body, where the source
+  element's `Unmoved` is no evidence of a bare fallback (a whole-grid sample found a `try` in a
+  `foreach` UPDATE that answered `["a"]` where jq prints nothing, which this gate then dropped). Left refused: a source through `first`/`limit`/`nth` (a `?//` chain beneath one that
+  yields several outputs retries after the consumer's stop and emitted an extra element:
+  `foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three here, so the loss was
+  kept rather than traded for a wrong count), a `def` call with arguments, a nested `foreach`, and the
+  `reduce` twin (`path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .)) | $x)`: jq
+  `[]`). A `null` source on a `null` document is unchanged: the first alternative *succeeds* there and
+  jq's path is `["a"]`, which was already a `DIFF` on `main`. Pinned by
+  `test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489`. Over the 91 `foreach`
+  operands with a `?//` source, `--stage-only` (20,027 rows, `--sample 20000 --seed 4489`, `/usr/bin/jq`
+  1.7.1, against a `main` build) MATCH went 18,803 to 19,053 and REFUSE_WRONG 1,156 to 906, with no
+  regression and ACCEPT_WRONG (15) and DIFF (53) unchanged; a whole-grid sample (`--sample 60000
+  --seed 77`) went MATCH 59,038 to 59,073 and REFUSE_WRONG 908 to 873, with ACCEPT_WRONG (46) and DIFF (33)
+  unchanged. Since
   [#4131](https://github.com/rust-works/succinctly/issues/4131) a `reduce` whose `UPDATE` navigates
   the accumulator is followed on that untracked entry when the register the stage carries is `null` or
   a boolean (identical to an equal one by kind): `path(.a | 5 | reduce null as {a:$q} (null; .b))` on
