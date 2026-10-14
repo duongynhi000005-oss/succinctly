@@ -53394,6 +53394,17 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // jq's `value_at_path` entering this stage: `value` itself while
     // trackable, otherwise whatever the enclosing pipe carried in (#3120).
     let register = if trackable { Some(value) } else { register };
+    // #4596: a `?//` chain in the body of a `reduce` whose source moved jq's register onto a
+    // non-`null` element: the accumulator is no node of that register, so the chain's first step
+    // fails `path_intact` and jq retries onto the bare alternative.
+    let accumulator_off_register = S::TAG == EvalTag::Jq
+        && patterns.len() > 1
+        && (fold_body::source_moved_onto_non_null_here() || fold_body::acc_off_register_here())
+        && matches!(unwrap_paren(source), Expr::Identity);
+    // ... and the retried body navigates a `.` that is no node of the register, so it is refused
+    // like any untracked navigation (`.a?` there raises: `INDEX_OPT` skips a type error, not
+    // `path_intact`).
+    let trackable = trackable && !accumulator_off_register;
     // jq's `path_intact` at the pattern's first step: is the source value
     // the register's own node? `resolves_to_register` (#3119) answers this
     // for `head`/`trackable`/`register`/`frame`, which are all fixed before
@@ -53414,8 +53425,9 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // #4320: and a `$x` marker behind the wrappers [`wrapped_marker`] names (`first`/`last`/`limit`/`nth`/`try`/`?`/`label`,
     // nested, and `first` over a comma) is the
     // register when the marker is, again for a single pattern only.
-    let head_resolves_to_register = register.is_some_and(|reg| {
-        resolves_to_register::<S>(head, trackable, reg, frame)
+    let head_resolves_to_register = !accumulator_off_register
+        && register.is_some_and(|reg| {
+            resolves_to_register::<S>(head, trackable, reg, frame)
             // #4424: a destructuring-only chain too, for a body that performs no step: the pipe is
             // the register, no alternative is a bare `$var` to retry onto, and the refusal at the
             // end of the path is jq's own (`del(try ((.|.) as {a:$a} ?// [$a] | .))` raises). A body
@@ -53431,7 +53443,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                 && S::TAG == EvalTag::Jq
                 && wrapped_marker(head)
                     .is_some_and(|marker| marker_identical::<S>(marker, reg, frame)))
-    });
+        });
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
     // last alternative never retries, so a single pattern skips the walk.
@@ -53525,6 +53537,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                     || (S::TAG == EvalTag::Jq
                         && (refused_could_succeed.get() == Some(false)
                             || pattern_walk_fails_by_value::<S>(pattern, bound)
+                            || accumulator_off_register
                             || (register.is_none()
                                 && fold_body::acc_off_register_here()
                                 && !could_be_lost_register(
