@@ -61923,7 +61923,7 @@ fn test_reduce_update_label_wrapped_destructure_4567() -> Result<()> {
             0,
         ),
         (
-            r#"{}"#,
+            r"{}",
             r"[path(reduce (label $o | .) as $z (.; label $q | label $p | (. as {a:$a} | .)))]",
             "[[]]\n",
             "",
@@ -61937,7 +61937,7 @@ fn test_reduce_update_label_wrapped_destructure_4567() -> Result<()> {
             0,
         ),
         (
-            r#"null"#,
+            r"null",
             r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))]",
             "[[]]\n",
             "",
