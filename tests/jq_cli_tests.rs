@@ -131028,7 +131028,7 @@ fn test_reduce_source_destructuring_the_register_twice_raises_4583() -> Result<(
 /// source's destructure used to cause (`cannot_move_register` is false for any destructuring bind)
 /// refused every such row. The contrasts stay refused, as in jq: a body, UPDATE or EXTRACT that
 /// navigates, a source that navigates before its bind, a chain with no bare alternative, and the
-/// bare `reduce` twin (refused here, answered by jq). Every row captured from jq 1.7.1; stdout and
+/// `reduce` twin (answered since #4613). Every row captured from jq 1.7.1; stdout and
 /// the exit status are pinned.
 #[test]
 fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -> Result<()> {
@@ -131153,15 +131153,10 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
             "",
             0,
         ),
-        // Still refused where jq answers (`[]`): the `reduce` twin, a `limit` source (a `?//` chain
-        // beneath one that yields several outputs emitted an extra element when it was admitted) and
-        // a nested `foreach` source. A change that admits them should move these rows to `[]`.
-        (
-            "[[1],[1]]",
-            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
-            "",
-            5,
-        ),
+        // Still refused where jq answers (`[]`): a `limit` source (a `?//` chain beneath one that
+        // yields several outputs emitted an extra element when it was admitted) and a nested
+        // `foreach` source. A change that admits them should move these rows to `[]`. (The `reduce`
+        // twin is answered since #4613.)
         (
             "[[1],[1]]",
             r"path(. as $x | 1 | (foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x)",
@@ -131171,6 +131166,110 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
         (
             "[[1],[1]]",
             r"path(. as $x | 1 | (foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4613: a `reduce` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
+/// (`1 | reduce ...`), states the register it entered with, as the `foreach` twin does since #4489.
+/// jq backtracks a `reduce`'s source (the `FORK` after INIT), so the register it leaves is INIT's
+/// whichever alternative bound; the destructure's walk steps and the pattern's `INDEX` refusals are
+/// still checked per element. [`register_movement_tracked`] did not read an `as` pattern, so the fold
+/// stated nothing and the `$x` after it was refused (`Invalid path expression with result ...`) where
+/// jq answers `[]`, and `del` through it wrote nothing. Only a chain that ends in a bare `$var`, in a
+/// fold that is not inside another fold's body, is read. The contrasts stay refused, as in jq. Every
+/// row captured from jq 1.7.1; stdout and the exit status are pinned.
+#[test]
+fn test_reduce_source_alt_chain_on_untracked_entry_states_the_register_4613() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|1) as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"del(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k)) | $x.a?)",
+            "[[1],[1]]\n",
+            0,
+        ),
+        (
+            r"[null]",
+            r"del(. as $x | 1 | (reduce (last(. as {a:$a} ?// $a | .)) as $k (.; .)) | $x.a?)",
+            "[null]\n",
+            0,
+        ),
+        (
+            r"[1,2]",
+            r"(. as $x | 1 | (reduce ((., 1) | . as {a:$a} ?// [$a] ?// $a | .) as $k (.; .)) | $x) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (reduce (. as $y | . as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        // Contrasts jq refuses: UPDATE navigates, the source navigates before its bind, a chain with no
+        // bare alternative, a body that navigates, and a bare destructure of a value that is not the register.
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .a)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce (.a? | . as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce (.[0]? | . as {a:$a} ?// $a | .) as $k (.; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (reduce ((.|.) as {a:$a} ?// $a | .a) as $k (.; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r#"path(. as $x | {"a":1} | (reduce ((.|.) as {a:$a} | .) as $k (.; .)) | $x)"#,
             "",
             5,
         ),

@@ -47190,8 +47190,19 @@ fn reduce_cannot_move_register(
 /// not for `foreach`, which emits from inside the loop.)
 fn reduce_leaves_register_in_place(input: &Expr, init: &Expr, update: &Expr) -> bool {
     cannot_move_register(init)
-        && register_movement_tracked(input)
+        && (register_movement_tracked(input) || reduce_source_is_bare_final_bind_chain(input))
         && fold_update_movement_tracked(update)
+}
+
+/// Whether a `reduce` SOURCE is one the resolver follows only because its sole movement is a
+/// destructuring bind that ends in a bare `$var` ([`source_moves_register_only_by_binds`], #4489),
+/// which [`register_movement_tracked`] does not read (`(.|.) as {a:$a} ?// $a | .`). The `foreach`
+/// twin states the register per source element; a `reduce` backtracks its source, so the register it
+/// leaves is INIT's whichever alternative bound, and only the shape the gate was written for is
+/// admitted: not inside another fold's body, where the ambient register is not known to be jq's
+/// (#4613).
+fn reduce_source_is_bare_final_bind_chain(input: &Expr) -> bool {
+    fold_body::depth() == 0 && source_moves_register_only_by_binds(input)
 }
 
 /// [`register_movement_tracked`] for a fold's `UPDATE`, which also admits a `try`
