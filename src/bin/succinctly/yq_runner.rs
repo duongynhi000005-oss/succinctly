@@ -3833,8 +3833,8 @@ fn is_navigation_stage(stage: &Expr) -> bool {
         | Expr::Slice { .. }
         | Expr::Iterate
         | Expr::RecursiveDescent => true,
-        Expr::Paren(inner) | Expr::Optional(inner) => is_navigation_stage(inner),
-        Expr::Pipe(stages) => stages.iter().all(is_navigation_stage),
+        // `Paren`, `Optional` and `Pipe` never reach here: `flatten_pipe_stages` has already
+        // looked through them.
         _ => false,
     }
 }
