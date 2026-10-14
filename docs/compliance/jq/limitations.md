@@ -2523,6 +2523,16 @@ is the revert that established what the other one costs.
    branch runs). A `foreach` source with a closure-taking `def` called twice is still accepted (the register walk does not read a
    closure argument). Pinned by `test_reduce_source_destructuring_the_register_twice_raises_4583`.
 
+   [#4581](https://github.com/rust-works/succinctly/issues/4581) closes the shapes #4566 left where a path-expression INIT moved the
+   register off the document: `reduce SRC as $k (.a; .)` runs SRC against the document, which is then not the register, so a
+   destructure of a variable or call bound to it (`. as $x | .. | $x as {a:$a}`, `def f($x): $x; f(.) as {a:$a}`) or a `?//`
+   chain's later bare alternative raises in jq as a fresh value's does (`path(reduce (. as $d | {a:1} | $d | . as {a:$a} | .) as $k
+   (.a; .))` on `{"a":{"a":2,"b":1},"b":null}`), and `del`/`=`/`|=` over it deleted or replaced the document. `FoldSourceAmbient` carries
+   the register's own value and the `fresh_only` walk starts with `.` off the register where the ambient is not at it (not for a
+   `null` or boolean document, which is identical to one of its kind), so the existing fresh-value rules fire. A `null` register still
+   answers (`{"a":null}` with INIT `.a`: the first alternative's destructure does not raise, so nothing is retried). Pinned by
+   `test_reduce_source_destructuring_the_document_after_a_moving_init_raises_4581`.
+
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
    | `.a as $y \| path(.a \| $y)`                             | `["a"]`                     | value-mode binding — `eval_as` never resolves its source in path position; the *positional* half of #3037 (its root-of-invocation half is closed)                                                                                                          |

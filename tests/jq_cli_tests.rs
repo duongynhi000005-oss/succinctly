@@ -130406,6 +130406,133 @@ fn test_reduce_source_destructuring_the_register_twice_raises_4583() -> Result<(
     Ok(())
 }
 
+/// #4581: a `reduce` whose INIT is a path expression (`.a`) moved jq's register off the document, so
+/// a source that destructures a variable or call bound to the document (`. as $x | .. | $x as
+/// {a:$a}`, `f(.) as {a:$a}` with `def f($x): $x`, a `?//` chain whose later bare alternative is
+/// destructured) destructures something that is not the register and raises, as a fresh value does
+/// (#4522, #4566). The walk was a function of the source alone and read those as the register; it now
+/// starts with `.` off the register where the fold's ambient is not at it, and reads the register's own
+/// value for the `?//` retry rule. `del`, `=` and `|=` over them deleted or replaced the document. The
+/// contrast jq answers keeps answering: a `null` register (`{"a":null}` with INIT `.a`: the first
+/// alternative's destructure of `null` does not raise, so nothing is retried), and so does a `null` document. Every row captured from jq
+/// 1.7.1; stdout and the exit status are pinned.
+#[test]
+fn test_reduce_source_destructuring_the_document_after_a_moving_init_raises_4581() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":5}"#,
+            r#"path(reduce (def f: {"a":1}; . as $x | f as $y | $y | $x as {a:$a} | .) as $k (.a; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"del(reduce (def f: {"a":1}; . as $x | f as $y | $y | $x as {a:$a} | .) as $k (.a; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"(reduce (def f: {"a":1}; . as $x | f as $y | $y | $x as {a:$a} | .) as $k (.a; .)) = 9"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"(reduce (def f: {"a":1}; . as $x | f as $y | $y | $x as {a:$a} | .) as $k (.a; .)) |= 9"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"path(reduce (def f: {"a":1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.a; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"a":2,"b":1},"b":null}"#,
+            r#"path(reduce (. as $d | {"a":1} | $d | . as {a:$a} | .) as $k (.a; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"a":2,"b":1},"b":null}"#,
+            r#"del(reduce (. as $d | {"a":1} | $d | . as {a:$a} | .) as $k (.a; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"a":2,"b":1},"b":null}"#,
+            r"path(reduce (def f($x): $x; f(.) as {a:$a} | .) as $k (.a; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"path(reduce (. as {a:$a} | .) as $k (.a; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"path(reduce (. as $x | $x as {a:$a} | .) as $k (.a; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce (. as {a:$a} | .) as $k (.a; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(reduce (def f: {"a":1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.a; .))"#,
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(reduce (def f: {"a":1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"path(reduce (def f: {"a":1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))"#,
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (. as {a:$a} | .) as $k (.a; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce (def f($x): $x; f(.) as {a:$a} | .) as $k (.a; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
 /// from. When a write raises, jq's `reduce` has handed its state slot back as
 /// `null` (`DUPN`), so the retried alternative's paths are written onto `null`:

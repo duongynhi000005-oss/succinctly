@@ -745,6 +745,13 @@ OPERANDS = [
     "(reduce (def f: {a:1}; f as [$a] ?// {a:$a} | .) as $k (.; .))",
     "(reduce (def f: {a:1}; f as [$a] ?// $a | .) as $k (.; .))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .))",
+    # (#4581) a path-expression INIT moved the register off the document: a variable or call bound to the
+    # document is then not the register, as a fresh value is not
+    "(reduce (def f: {a:1}; . as $x | f as $y | $y | $x as {a:$a} | .) as $k (.a; .))",
+    "(reduce (. as $d | {a:1} | $d | . as {a:$a} | .) as $k (.a; .))",
+    "(reduce (def f($x): $x; f(.) as {a:$a} | .) as $k (.a; .))",
+    "(reduce (. as {a:$a} | .) as $k (.a; .))",
+    "(reduce (. as $x | $x as {a:$a} | .) as $k (.a; .))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.[]?; .))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (tostring; .))",
     "(reduce (def f: {a:1}; f as $x | $x as {a:$a} | .) as $k (.; .))",
