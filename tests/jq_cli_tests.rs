@@ -129165,6 +129165,211 @@ fn test_nested_foreach_alt_chain_source_in_a_foreach_body_refuses_4564() -> Resu
     Ok(())
 }
 
+/// #4565: a `foreach` source that destructures a call with no arguments whose `def` body hands the
+/// register on as its *first* output (`def f: (., 1)`, `limit(2; ., 1)`) raises in jq at that first
+/// output: the pattern's step moves the register and the fold's emission is checked against it.
+/// The by-value drive ran every output and answered a later one's error, so `del(try ..)` deleted the
+/// document. A comma body (or `limit`/`first` of one over `.`/literal leaves) is placed per leaf like the written-out comma (also behind a call to a
+/// call), so a negated operand jq answers (the object cannot be negated, which `try` catches before the
+/// path error) still answers; the other bodies are routed and refused, as `limit(2; ., 1) as ..` is.
+/// On a `null` document the destructure succeeds and prints the moved path before the terminal
+/// refusal. Every row captured from jq 1.7.1; stdout and the exit status are pinned, since the
+/// message jq names differs from ours on some rows.
+#[test]
+fn test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r"{}",
+            r"del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r#"del(try foreach (def f: (., {"a":1}); f as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r#"path(foreach (def f: (., {"a":1}); f as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r#"del(foreach (def f: (., {"a":1}); def g: f; g as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(try foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"del(try foreach (def f: (., {"a":1}); f as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"path(foreach (def f: (., {"a":1}); f as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"del(foreach (def f: (., {"a":1}); def g: f; g as {a:$a} | .) as $k (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try (-(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))))",
+            "{}\n",
+            0,
+        ),
+        (
+            r"{}",
+            r#"del(try (-(foreach (def f: (., {"a":1}); def g: f; g as {a:$a} | .) as $k (.; .; .))))"#,
+            "{}\n",
+            0,
+        ),
+        (
+            r"null",
+            r"del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "null\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            5,
+        ),
+        (
+            r"{}",
+            r"[path(reduce 1 as $k (.; foreach (def f: (., 1); f as {a:$a} | .) as $y (.; .; .)))]",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try (-(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))))",
+            "{}\n",
+            0,
+        ),
+        (
+            r"{}",
+            r"del(try (-(foreach (def f: first((., 1)); f as {a:$a} | .) as $k (.; .; .))))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a? as $y | try (((foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .)))) | try ($y | .b))",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f: first((., 1)); f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try foreach (def f: (., 1) | .; f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(try (-(foreach (def f: (., 1) | .; f as {a:$a} | .) as $k (.; .; .))))",
+            "{}\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
 /// from. When a write raises, jq's `reduce` has handed its state slot back as
 /// `null` (`DUPN`), so the retried alternative's paths are written onto `null`:

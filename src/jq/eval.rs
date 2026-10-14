@@ -39802,6 +39802,70 @@ fn comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
     Some(leaves)
 }
 
+/// [`comma_leaves`] of the body of a call with no arguments (#4565): `def f: (., 1); f as {a:$a}`
+/// binds the call's outputs as the comma does, so the register leaf is placed and a later leaf
+/// jq never reaches (the first output's step raises first) is not asked. A body that is not a
+/// comma, a call with arguments and a recursive body are left to the by-value drive.
+fn call_comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut current = unwrap_bind_source(expr);
+    // A call to a call (`def f: (., 1); def g: f; g`) reads through; the bound keeps a recursive
+    // body from looping.
+    for _ in 0..8 {
+        match current {
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                // `(., 1) | .` hands the comma's outputs on as the comma does.
+                let body = peel_identity_stages(&def.body);
+                if let Some(leaves) = comma_leaves::<S>(body) {
+                    return Some(leaves);
+                }
+                if let Some(leaves) = bounded_comma_leaves::<S>(body) {
+                    return Some(leaves);
+                }
+                current = unwrap_bind_source(body);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// `expr` without the `.` stages of a pipe that has exactly one other stage (#4565): the stage
+/// itself, which the pipe hands its outputs through.
+fn peel_identity_stages(expr: &Expr) -> &Expr {
+    match unwrap_bind_source(expr) {
+        Expr::Pipe(stages) => {
+            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+            match (rest.next(), rest.next()) {
+                (Some(only), None) => peel_identity_stages(only),
+                _ => expr,
+            }
+        }
+        other => other,
+    }
+}
+
+/// The leaves a `limit(N; a, b)` or `first((a, b))` takes, when every leaf is a single output
+/// (`.` or a literal) so that counting leaves is counting outputs (#4565).
+fn bounded_comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
+    let (inner, take) = match unwrap_bind_source(expr) {
+        Expr::FirstExpr(inner) => (inner, 1),
+        Expr::Limit { n, expr: inner } => {
+            let count = limit_literal_count(n).filter(|count| *count >= 1.0)?;
+            (inner, count.ceil() as usize)
+        }
+        _ => return None,
+    };
+    let mut leaves = comma_leaves::<S>(inner)?;
+    if !leaves
+        .iter()
+        .all(|leaf| matches!(leaf, Expr::Identity | Expr::Literal(_)))
+    {
+        return None;
+    }
+    leaves.truncate(take);
+    Some(leaves)
+}
+
 /// Runs `resolve_leaf` once per [`comma_leaves`] leaf, in order, stopping at
 /// the first flow that is not [`ResolveFlow::Exhausted`] -- a sink's stop or
 /// an escape ends the whole source, as it ends jq's `FORK` (#3334).
@@ -50331,8 +50395,47 @@ impl<'e> RegisterSpine<'e> {
             Expr::Comma(items) => items
                 .first()
                 .is_some_and(|first| self.binds_register_first(first)),
+            // #4565: a call with no arguments returns what its body does, read in the scope the
+            // definition was written in.
+            Expr::FuncCall { name, args, .. } if args.is_empty() => {
+                match self
+                    .defs
+                    .iter()
+                    .rposition(|def| def.name == name && def.arity == 0)
+                {
+                    Some(at) => {
+                        let SpineDef { body, vars, .. } = self.defs[at];
+                        body.is_some_and(|body| {
+                            self.body_first_output_is_register(body, vars, at + 1)
+                        })
+                    }
+                    None => false,
+                }
+            }
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let body: &'e Expr = &def.body;
+                self.body_first_output_is_register(body, 0, 0)
+            }
             _ => false,
         }
+    }
+
+    /// [`first_output_is_register`](Self::first_output_is_register) of a `def` body, scoped as
+    /// [`body_binds_register`](Self::body_binds_register) is (#4565).
+    fn body_first_output_is_register(&mut self, body: &'e Expr, vars: usize, defs: usize) -> bool {
+        let key: *const Expr = body;
+        if self.binding.contains(&key) || self.calls == 0 {
+            return false;
+        }
+        self.calls -= 1;
+        self.binding.push(key);
+        let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
+        let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
+        let first = self.first_output_is_register(body);
+        self.vars.extend(vars_tail);
+        self.defs.extend(defs_tail);
+        self.binding.pop();
+        first
     }
 
     /// [`binds_register`](Self::binds_register), or [`first_output_is_register`]
@@ -52657,7 +52760,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // `identity_at` and `bound_is_frozen` below are each computed for the
     // leaf that produced the value -- `(., 1)` tracks its first output --
     // rather than once for the whole comma. See [`comma_leaves`].
-    if let Some(leaves) = comma_leaves::<S>(source) {
+    if let Some(leaves) = comma_leaves::<S>(source).or_else(|| call_comma_leaves::<S>(source)) {
         return resolve_each_leaf(leaves, |leaf| {
             resolve_as_pattern::<S>(
                 leaf, patterns, body, value, trackable, snapshot, frame, keep, register, sink,

@@ -2467,6 +2467,18 @@ is the revert that established what the other one costs.
    f(first(.))`), which needs `Reach::Partial` for the comma; a comma of held pipes (`($x|.), ($x|.)`, which
    `binds_variable` does not see); and a pipe whose last stage is itself a parenthesised pipe or a wrapper of `.`. Pinned by `test_foreach_source_held_var_behind_a_pipe_or_if_4514`.
 
+   A call with no arguments whose `def` body hands the register on as its *first* output is routed since
+   [#4565](https://github.com/rust-works/succinctly/issues/4565): `RegisterSpine::first_output_is_register` reads such a
+   call's body as it reads the written-out source, so `del(try foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))`
+   on `{}` raises as jq does at the first output, where the by-value drive ran every output, swallowed the later one's
+   error under the `try`, and `del` returned `null`. A body that is a comma (also behind a call to a call) is placed per
+   leaf by the resolver, as the written-out comma is (`call_comma_leaves`), so a negated operand jq answers (the object
+   cannot be negated, which the `try` catches before the path error) still answers
+   (`test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452`). A body that is `limit(N; a, b)` or `first((a, b))` over leaves that are `.` or a literal is placed the
+   same way (`bounded_comma_leaves`), so `del(try (-(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))))` still
+   answers. A pipe of `.` stages around such a body (`(., 1) | .`) reads as the body. Any other wrapper (`(., 1) | (. | .)`, a leaf that may yield several outputs) is routed and refused outright, as the
+   written-out `limit(2; ., 1) as {a:$a}` is. Pinned by `test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565`.
+
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
    | `.a as $y \| path(.a \| $y)`                             | `["a"]`                     | value-mode binding — `eval_as` never resolves its source in path position; the *positional* half of #3037 (its root-of-invocation half is closed)                                                                                                          |
