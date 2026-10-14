@@ -50371,7 +50371,9 @@ impl<'e> RegisterSpine<'e> {
         // walk is per [`RegisterSpine`] and so per fold, and the depth is fixed for the walk.
         let later_holds_register = register
             && (fold_body::depth() == 0
-                || (self.through_reduce && fold_body::source_moved_onto_non_null_here()));
+                || (self.through_reduce
+                    && (fold_body::source_moved_onto_non_null_here()
+                        || fold_body::foreach_body_here())));
         let mut names: Vec<(&'e str, bool)> = Vec::new();
         let mut first_bare = true;
         let mut bind =
@@ -50614,6 +50616,9 @@ impl<'e> RegisterSpine<'e> {
                 // (`path(reduce (1) as $i (.; CHAIN))` on `[]`, #4429); the mark is what keeps
                 // that row, and the unplaced refusal is what raises on `reduce .[]? as $k (.;
                 // CHAIN)`, where the source leaves jq's register on the element.
+                // #4564: and inside a `foreach` UPDATE or EXTRACT ([`fold_body::foreach_body_here`]),
+                // which emits from inside the loop, so the nested fold's emission is checked against
+                // the register the chain moved; a `reduce` UPDATE backtracks it and jq answers.
                 // #4452: a single pattern over a bound expression with a fresh leaf (a call whose
                 // `def` builds its result, a fresh value beside the register in a comma): the step
                 // raises on the leaf whatever the register is, which only the resolver models. Not
@@ -50640,7 +50645,9 @@ impl<'e> RegisterSpine<'e> {
                         || (patterns_all_destructuring_chain(patterns)
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
-                                || (self.through_reduce && fold_body::source_moved_here())))
+                                || (self.through_reduce
+                                    && (fold_body::source_moved_here()
+                                        || fold_body::foreach_body_here()))))
                         || (!matches!(unwrap_bind_source(expr), Expr::Pipe(_))
                             && wrapped_marker(expr).is_none()))
                 {
@@ -56405,6 +56412,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 let _acc_is_register = (alt_bind_extract_on_register
                                     && extract_at_register)
                                     .then(fold_body::acc_is_register);
+                                let _foreach_body = fold_body::foreach_body();
                                 match extract_reg.resolve_sink::<S>(
                                     ext_expr,
                                     update_branch.value.clone().into_owned(),
@@ -56440,6 +56448,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _acc_is_register =
                             (alt_bind_update_on_register && active_at_register && !live_stepped)
                                 .then(fold_body::acc_is_register);
+                        let _foreach_body = fold_body::foreach_body();
                         let flow = active_reg.resolve_sink::<S>(
                             &bound_update,
                             entry_state,
@@ -65153,6 +65162,8 @@ mod fold_body {
         static ACC_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
         static MOVED: Cell<Moved> = const { Cell::new(Moved { depth: 0, onto_null: None }) };
+        /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none.
+        static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
     }
 
     pub(crate) struct Guard;
@@ -65226,6 +65237,30 @@ mod fold_body {
         source_moved_here() && MOVED.with(Cell::get).onto_null == Some(false)
     }
 
+    /// Restores the previous [`foreach_body`] mark.
+    pub(crate) struct LoopGuard(u32);
+
+    /// Marks the body about to be entered (one level deeper than now) as a `foreach` UPDATE or
+    /// EXTRACT (#4564): jq emits from inside the loop there, so a fold it holds checks its
+    /// emission against the register where its source left it, where a `reduce` UPDATE hands the
+    /// result back as the state and the register is restored on exit.
+    pub(crate) fn foreach_body() -> LoopGuard {
+        let previous = LOOP_DEPTH.with(Cell::get);
+        LOOP_DEPTH.with(|l| l.set(depth() + 1));
+        LoopGuard(previous)
+    }
+
+    impl Drop for LoopGuard {
+        fn drop(&mut self) {
+            LOOP_DEPTH.with(|l| l.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`foreach_body`] marked.
+    pub(crate) fn foreach_body_here() -> bool {
+        depth() > 0 && LOOP_DEPTH.with(Cell::get) == depth()
+    }
+
     pub(crate) fn enter() -> Guard {
         DEPTH.with(|d| d.set(d.get() + 1));
         Guard
@@ -65268,6 +65303,16 @@ mod fold_body {
     }
 
     pub(crate) fn source_moved_onto_non_null_here() -> bool {
+        false
+    }
+
+    pub(crate) struct LoopGuard;
+
+    pub(crate) fn foreach_body() -> LoopGuard {
+        LoopGuard
+    }
+
+    pub(crate) fn foreach_body_here() -> bool {
         false
     }
 

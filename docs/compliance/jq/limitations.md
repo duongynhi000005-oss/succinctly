@@ -2171,6 +2171,20 @@ is the revert that established what the other one costs.
    left as it was; closed at the top level by #4320's fourth part, below, and still accepted inside another fold's
    body). `[path(reduce . as {a:$a} ?// $a (0; .a?) and true)]`, listed with them, refuses as jq does (exit 5) with a
    different message, on `main` too.
+   [#4564](https://github.com/rust-works/succinctly/issues/4564) closes the accepting half of two shapes that stayed inside
+   another fold's body: a `foreach` UPDATE or EXTRACT that holds a `foreach` whose source is a `?//` chain of destructuring
+   patterns behind a `(.|.)` head (`path(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))`
+   on `[true]`), or whose later bare alternative is destructured (`. as $x ?// $y | $y as {a:$a} | .`). jq emits from inside
+   the outer loop, so the inner fold's emission is checked against the register the chain moved and raises
+   (`Invalid path expression with result [true]`); the resolver answered `[]`, and `del`/`=` over it deleted the document or
+   wrote through (`test_nested_foreach_alt_chain_source_in_a_foreach_body_refuses_4564`). Only inside a `foreach` body
+   (`fold_body::foreach_body_here`): a `reduce` UPDATE hands the fold's result back as its state and backtracks the register,
+   so the same fold there answers `[]` as jq does. The refusal is the walk's and is blind to where the fold sits, so
+   `(CHAIN-FOLD) and (.a)?` in a `foreach` EXTRACT, which jq answers (the `and` operand is a boolean test, not a path), is
+   now refused (150 of 31,617 rows in the sweep's literal-source `foreach` contexts; the same shape with a single pattern
+   was refused before). Still accepted where jq raises: a nested `foreach` whose source navigates and then binds with a
+   plain `as $v` (`foreach (1,2) as $k (.; .; (foreach (.a | . as $a | .) as $j (.; .; .)))` on `{"a":true}`), and the `try (. as
+   {(.):$a} ?// $a | $a)` rows of [#4550](https://github.com/rust-works/succinctly/issues/4550).
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
    {a:$a}`, whose bare alternative holds the register when it matches; a name two alternatives bind may hold it if

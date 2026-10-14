@@ -128668,6 +128668,150 @@ fn test_destructuring_alt_bind_retries_in_a_fold_step_on_the_register_4440() -> 
     ])
 }
 
+/// #4564: a `foreach` nested in another `foreach`'s UPDATE or EXTRACT whose own SOURCE is a `?//`
+/// chain that destructures the register (a `(.|.)` head, or a bare `$x` alternative whose later
+/// `$y` is destructured) is refused where jq raises, instead of accepted at the register. jq
+/// emits from inside the outer loop, so the inner fold's emission is checked against the
+/// register the chain moved (`Invalid path expression with result [true]`); a `reduce` UPDATE
+/// hands the result back as its state and backtracks the register, so the same fold there
+/// answers `[]`, and on a `null` document the chain's first step succeeds and so does the
+/// outer fold. `del` and `=` over it follow. Every row captured from jq 1.7.1; only stdout and
+/// the exit status are pinned, since the message jq names differs from ours on some rows.
+#[test]
+fn test_nested_foreach_alt_chain_source_in_a_foreach_body_refuses_4564() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(foreach (1,2) as $k (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; .; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $k (.; .; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(foreach (1,2) as $k (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"del(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"(foreach (1,2) as $k (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(foreach (1,2) as $k (.; .; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"del(foreach (1,2) as $k (.; .; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .)); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path((foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (1,2) as $k (.; .; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "[\"a\"]\n[\"a\"]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
 /// from. When a write raises, jq's `reduce` has handed its state slot back as
 /// `null` (`DUPN`), so the retried alternative's paths are written onto `null`:
