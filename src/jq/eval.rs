@@ -50968,15 +50968,17 @@ impl<'e> RegisterSpine<'e> {
 
     /// The reach of alternatives that each meet the register where their parent did (a comma's
     /// branches, an `if`'s): any that destructures, else hands-on only if all do.
-    fn reach_any<I: IntoIterator<Item = &'e Expr>>(&mut self, branches: I) -> Reach {
+    fn reach_any<I: IntoIterator<Item = &'e Expr>>(&mut self, branches: I, all_run: bool) -> Reach {
         let (mut hands_on, mut other) = (false, false);
-        // #4583: a destructure moved the register for what follows only if every branch moved it.
+        // #4583: a destructure moved the register for what follows if every branch moved it, or
+        // (`all_run`, a comma, whose branches all run and so all reach what follows) if any did.
         let entry_moved = self.moved;
-        let mut every_moved = true;
+        let (mut every_moved, mut some_moved) = (true, false);
         for branch in branches {
             self.moved = false;
             let reach = self.reach(branch);
             every_moved &= self.moved;
+            some_moved |= self.moved;
             match reach {
                 Reach::Destructures => return Reach::Destructures,
                 Reach::Opaque => other = true,
@@ -50987,7 +50989,7 @@ impl<'e> RegisterSpine<'e> {
                 Reach::HandsOn => hands_on = true,
             }
         }
-        self.moved = entry_moved || every_moved;
+        self.moved = entry_moved || if all_run { some_moved } else { every_moved };
         match (hands_on, other) {
             (_, false) => Reach::HandsOn,
             // Only outside every fold body, where `.` may be an accumulator the enclosing source
@@ -51155,12 +51157,12 @@ impl<'e> RegisterSpine<'e> {
                     _ => Reach::Opaque,
                 }
             }
-            Expr::Comma(branches) => self.reach_any(branches),
+            Expr::Comma(branches) => self.reach_any(branches, true),
             // #4566: either operand of a `//` meets `.` where the `//` did, and the resolver runs
             // only the one jq does, so a fresh destructure in either is the source's own. For the
             // `fresh_only` walk only: the register walks read a `//` as opaque.
             Expr::Alternative(left, right) if self.fresh_only => {
-                self.reach_any([&**left, &**right])
+                self.reach_any([&**left, &**right], false)
             }
             // #3940: a stage that only hands the register on (`.`, `(.|.)`, `(., .)`) moves
             // nothing, so the stage after it is the one that meets the register. #4278: so does
@@ -51174,12 +51176,15 @@ impl<'e> RegisterSpine<'e> {
             Expr::Pipe(stages) if self.fresh_only => {
                 let entry = self.dot_fresh;
                 let mut reach = Reach::HandsOn;
+                let mut moved = false;
                 for stage in stages {
                     self.moved = false;
                     match self.reach(stage) {
                         Reach::HandsOn => {
                             // #4583: a stage that destructured the register left it elsewhere.
-                            self.dot_fresh |= core::mem::take(&mut self.moved);
+                            let stage_moved = core::mem::take(&mut self.moved);
+                            self.dot_fresh |= stage_moved;
+                            moved |= stage_moved;
                         }
                         Reach::Destructures => {
                             self.dot_fresh = entry;
@@ -51196,6 +51201,8 @@ impl<'e> RegisterSpine<'e> {
                     }
                 }
                 self.dot_fresh = entry;
+                // ...and a pipe nested in another leaves it there for the stages after it.
+                self.moved = moved;
                 reach
             }
             Expr::Pipe(stages) => {
@@ -51219,7 +51226,7 @@ impl<'e> RegisterSpine<'e> {
                 then_branch,
                 else_branch,
                 ..
-            } => self.reach_any([&**then_branch, &**else_branch]),
+            } => self.reach_any([&**then_branch, &**else_branch], false),
             // #4278: a call with no arguments runs its body where the call is, in the scope the
             // definition was written in. Only such a call: a closure or `$param` binds code the
             // walk would have to substitute. A definition with parameters is another arity: it

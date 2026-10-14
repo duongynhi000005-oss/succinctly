@@ -130005,6 +130005,37 @@ fn test_reduce_source_destructuring_the_register_twice_raises_4583() -> Result<(
             "[]\n",
             0,
         ),
+        // A pipe nested in a pipe, and a comma, leave the register moved for the stages after them.
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .) | .) | . as {a:$b} | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .) | .) | (. as {a:$b} | .)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .), .) | . as {a:$b} | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; (g(.), g(.)) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (((. as {a:$a} | .), .) | . as {a:$b} | .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
     ];
     for &(input, filter, stdout, exit) in rows {
         let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
