@@ -62362,6 +62362,28 @@ fn test_fold_source_moving_the_register_inside_a_fold_body_is_refused_4505() -> 
             "",
             5,
         ),
+        // Stages that all hand the register on: the pipe collapses to `.`, and a source that never
+        // navigates is left to the by-value drive.
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ((select(.) | select(.)) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select(1) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce (select(.) | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"path(. as $x | reduce .[]? as $i (.; reduce ($x | select(.)) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
     ];
     for (filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(DOC))?;
