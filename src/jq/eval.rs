@@ -52201,11 +52201,26 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let foreign_markers: Vec<*const Tracked> = foreign_pairs.iter().map(|(m, _)| *m).collect();
     // What a `select` on a marker passes on: the accumulator's own for one equal to it, and a
     // foreign marker's own value when that is truthy.
-    let truthy_markers: Vec<*const Tracked> = unplaced_markers
+    let mut truthy_markers: Vec<*const Tracked> = unplaced_markers
         .iter()
         .copied()
         .chain(foreign_pairs.iter().filter(|(_, t)| *t).map(|(m, _)| *m))
         .collect();
+    // #4604: `select($x)` passes by `$x`'s own truthiness, whatever node it is bound to, so a marker
+    // holding a truthy value passes the register on even where it is not certified as the register
+    // (the body of a `reduce` whose source moved it).
+    if refusal_eligible && has_select_stage(source) {
+        any_subexpr(source, &mut |e| {
+            if let Expr::TrackedVar(marker) = e {
+                if !matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false))
+                    && !truthy_markers.contains(&Rc::as_ptr(marker))
+                {
+                    truthy_markers.push(Rc::as_ptr(marker));
+                }
+            }
+            false
+        });
+    }
     let pruned = prunable.then(|| {
         prune_caught_destructures(
             &collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, select_passes),

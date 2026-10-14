@@ -143,7 +143,7 @@ CONTEXTS = [
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 147
+RESIDUAL_NAV_MAX = 63
 DOCS = [
     "null",
     "true",
@@ -200,6 +200,7 @@ def main():
     ap.add_argument("--show", type=int, default=20, help="max rows printed per section")
     ap.add_argument("--only", default="", help="restrict to rows whose name contains this")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
 
     rows = []
@@ -241,7 +242,9 @@ def main():
         return (r[1], None) in KNOWN_ACCEPT_WRONG or (r[1], r[3]) in KNOWN_ACCEPT_WRONG
 
     residual_nav = [
-        r for r in results if r[5] == "ACCEPT_WRONG" and r[0].split("/")[3] in RESIDUAL_CONTEXTS
+        r
+        for r in results
+        if r[5] == "ACCEPT_WRONG" and not known(r) and r[0].split("/")[3] in RESIDUAL_CONTEXTS
     ]
     fresh = [
         r
@@ -255,8 +258,14 @@ def main():
     hung = [r for r in results if r[5] == "TIMEOUT"]
     print(
         f"ACCEPT_WRONG outside the documented residual: {len(fresh)}; documented residual: "
-        f"{len(residual)}; of a non-register `$x` (#4588): {len(residual_nav)}"
+        f"{len(residual)} (known sources included); of a non-register `$x` (#4588): {len(residual_nav)}"
     )
+    if args.breakdown:
+        by = collections.Counter(
+            (r[0].split("/")[0], r[0].split("/")[2]) for r in residual_nav
+        )
+        for (outer, source), n in sorted(by.items()):
+            print(f"  residual {outer} {source}: {n}")
     print(f"lost matches against --base: {len(lost)}; candidate timeouts: {len(hung)}")
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
