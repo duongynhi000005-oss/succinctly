@@ -72356,6 +72356,96 @@ fn test_foreach_navigating_source_with_a_verdict_builtin_update_keeps_the_regist
     ])
 }
 
+/// #4623: #4611's verdict-builtin UPDATE, widened to a comma of verdicts and to an operand that is
+/// itself a `first`/`limit` of something that leaves the register (which jq runs and backtracks, so
+/// the register is where UPDATE entered and EXTRACT's `$k` names its path). Controls: a sibling or
+/// operand that navigates, which jq refuses on the state, and a computed boolean as EXTRACT. Every jq side
+/// captured from jq 1.7.1.
+#[test]
+fn test_foreach_navigating_source_with_a_comma_or_wrapped_verdict_update_keeps_the_register_4623(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), isempty(2)); $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), 5); $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), isempty(2)) | not; $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; (isempty(1), isempty(2)); $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(first(1)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(limit(1; 1, 2)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; any(first(1); .); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(foreach .[]? as $k (0; (isempty(1), isempty(2)); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"(foreach .[]? as $k (0; (isempty(1), isempty(2)); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        // Controls: an operand or sibling that navigates, and a computed boolean as EXTRACT.
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), isempty(2)); $k, .))",
+            "[0]\n",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(first(.a?)); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the
