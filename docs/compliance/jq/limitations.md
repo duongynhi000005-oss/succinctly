@@ -2319,7 +2319,9 @@ is the revert that established what the other one costs.
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by
-   `test_foreach_source_destructuring_a_fresh_variable_raises_4616`); a `null` literal bound to a variable, in the body
+   `test_foreach_source_destructuring_a_fresh_variable_raises_4616`); `$ENV`/`env` as a source are fresh since [#4630](https://github.com/rust-works/succinctly/issues/4630) (pinned by
+   `test_fold_source_destructuring_the_environment_raises_4630`), but a destructure wrapped in `[ ... ]` is still
+   accepted; a `null` literal bound to a variable, in the body
    of another fold, is still accepted, because the register's own null-ness is not known there
    (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved

@@ -51884,6 +51884,8 @@ fn yields_only_fresh_values(e: &Expr) -> bool {
         Expr::Literal(_) | Expr::Array(_) | Expr::Object(_) => true,
         // #4582: `$__loc__` is the object `{file, line}` the evaluator builds.
         Expr::Loc { .. } => true,
+        // #4630: `$ENV` and `env` build the environment object afresh; the register cannot be it.
+        Expr::Env | Expr::Builtin(Builtin::Env) => true,
         // #3745: a builtin whose every output is a container it builds itself --
         // jq defines each over a fresh `[]`/`{}` (`reduce`/`[... | f]`), so its
         // result is never `jv_identical` to the register (an empty one is a fresh

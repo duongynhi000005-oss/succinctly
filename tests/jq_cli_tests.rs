@@ -131366,6 +131366,69 @@ fn test_foreach_source_destructuring_a_fresh_variable_raises_4616() -> Result<()
     Ok(())
 }
 
+/// #4630: `$ENV` and `env` build the environment object afresh, so a `reduce`/`foreach` source that
+/// destructures it (directly or through a variable) destructures a node the register is not on and the
+/// pattern's tracked `INDEX` step raises in jq. `yields_only_fresh_values` did not list either, so the
+/// source was driven by value and answered (`[]`), and `del`, `=` and `|=` wrote through the answer. A
+/// bare rebind and a source that only measures it still answer. Only stdout and the exit status are
+/// pinned: the message names the process's environment. Every row captured from jq 1.7.1.
+#[test]
+fn test_fold_source_destructuring_the_environment_raises_4630() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ($ENV as $n | $n as {b:$x} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (env as $n | $n as {b:$x} | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach ($ENV as {b:$x} | .) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce ($ENV as {b:$x} | .) as $y (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (env | . as [$x] | .) as $y (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ($ENV as $e | .) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (env | length) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4489: a `foreach` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
 /// (`1 | foreach ...`, a literal or a computed `.`), states the register it entered with when the
 /// element took no walk step. jq's chain tries the array/object pattern first; its `INDEX` step on a

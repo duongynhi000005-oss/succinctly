@@ -27,7 +27,7 @@ DOCS = ['{"a":1}', '[1,2]', '[]', '{}', 'null', '[[1],[2]]', '{"a":[1]}', '"s"',
 FRESH = ['keys', 'keys_unsorted', 'to_entries', 'map(.)', 'paths', 'paths(true)',
          'flatten', 'flatten(1)', 'flatten(0)', 'tostream', 'sort', 'sort_by(.)',
          'reverse', 'group_by(.)', 'unique', 'unique_by(.)', 'transpose',
-         '(keys | .)', '(to_entries | . | .)']
+         '(keys | .)', '(to_entries | . | .)', '$ENV', 'env']
 CONTROL = ['select(true)', 'first(.)', '(.|.)', 'limit(1; .)', '.', 'getpath([])',
            'add', 'first', 'last', '.[0]?', 'tostring', '[.]', '([.] | add)',
            '[.[]?]', 'values', 'arrays', 'objects', '.[]?', 'min', 'max',
