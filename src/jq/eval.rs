@@ -57173,11 +57173,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // (or walk) that moved it off the root put it on another node, which the
                         // root-seated INIT `.` is not whatever their values are; only a `null` or
                         // boolean state is still `jv_identical` to it by kind (`foreach .[]? as $k
-                        // (.; try (. as [$a] ?// $a | $a); .)` on `[1]`).
+                        // (.; try (. as [$a] ?// $a | $a); .)` on `[1]`). Not for a builtin call as
+                        // UPDATE (`isempty(g)`, `any(g; c)`): EXTRACT then reads a lost register
+                        // (`foreach .[]? as $k (0; isempty(1); $k)` is refused where jq answers
+                        // `[0]`, #4611), and an exact refusal there would surface that refusal
+                        // through a `try` that a guess one lets the fold swallow.
+                        let update_is_builtin_call =
+                            matches!(unwrap_paren(update), Expr::Builtin(_));
                         let outermost_fold = S::TAG == EvalTag::Jq && fold_body::depth() == 0;
                         let state_off_register = outermost_fold
                             && !(active_at_register
-                                || if *active_reg.path == *reg.path {
+                                || if *active_reg.path == *reg.path || update_is_builtin_call {
                                     state_at_register
                                         || reg.identical::<S>(&state, &state_snapshot, true)
                                 } else {
