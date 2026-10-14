@@ -555,6 +555,16 @@ OPERANDS = [
     "(foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))",
     "(foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach ((.a|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    # (#4489) a source whose only movement is a destructuring bind, on an untracked entry: the
+    # fold's emission is at the entry register when the bind fell back to its bare alternative, and
+    # the contrasts where the body, UPDATE or EXTRACT navigates (jq refuses) or the bound value is
+    # `null`/a literal that the register may be identical to
+    "(foreach (null as {a:$a} ?// $a | 2) as $k (.; .; .))",
+    "(foreach (1 as {a:$a} ?// $a | 2) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .a; .))",
+    "(foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a))",
+    "(foreach ((.|.) as {a:$a} ?// [$a] ?// $b | $b) as $k (.; .; .))",
     "(reduce ((.|.) as {a:$a} ?// $a | .) as $k (.; .))",
     "(foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
     "(foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .))",

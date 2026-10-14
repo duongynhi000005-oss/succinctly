@@ -130750,6 +130750,137 @@ fn test_reduce_source_destructuring_the_register_twice_raises_4583() -> Result<(
     Ok(())
 }
 
+/// #4489: a `foreach` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
+/// (`1 | foreach ...`, a literal or a computed `.`), states the register it entered with when the
+/// element took no walk step. jq's chain tries the array/object pattern first; its `INDEX` step on a
+/// value that is not the register raises, `?//` backtracks and restores the path, and the bare
+/// alternative's element leaves the register where the fold entered, so the `$x` after the fold is
+/// the register (`path(...)` is `[]`) and a `del` through it lands on the document. The loss the
+/// source's destructure used to cause (`cannot_move_register` is false for any destructuring bind)
+/// refused every such row. The contrasts stay refused, as in jq: a body, UPDATE or EXTRACT that
+/// navigates, a source that navigates before its bind, a chain with no bare alternative, and the
+/// bare `reduce` twin (refused here, answered by jq). Every row captured from jq 1.7.1; stdout and
+/// the exit status are pinned.
+#[test]
+fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|1) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            "[true]",
+            r"path(. as $x | {a:{b:1}} | (foreach ((., .) | . as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            "[[1],[1]]",
+            r"del(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .)) | $x.a?)",
+            "[[1],[1]]\n",
+            0,
+        ),
+        // The wrappers that hand the register on: `last`, a `label`, an `if`, a plain `as`.
+        (
+            "[null]",
+            r"del(. as $x | 1 | (foreach (last(. as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "[null]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(. as $x | {a:{b:1}} | (foreach (if true then (. as {a:$a} ?// $a | .) else . end) as $k (.; .; .)) | $x.a?)",
+            "{\"b\":null}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (label $l | (. as [$a] ?// $a | .)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (. as $y | . as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            "[1,2]",
+            r"(. as $x | 1 | (foreach ((., 1) | . as {a:$a} ?// [$a] ?// $a | .) as $k (.; .; .)) | $x) = 9",
+            "9\n",
+            0,
+        ),
+        // Contrasts jq refuses: something after the bind navigates.
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .a; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a)) | $x)",
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (.a | . as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r#"path(. as $x | {"a":1} | (foreach ((.|.) as {a:$a} | .) as $k (.; .; .)) | $x)"#,
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"path(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a)",
+            "",
+            5,
+        ),
+        (
+            "[[1],[1]]",
+            r"(. as $x | 1 | (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x.a) = 9",
+            "",
+            5,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
+
 /// #4581: a `reduce` whose INIT is a path expression (`.a`) moved jq's register off the document, so
 /// a source that destructures a variable or call bound to the document (`. as $x | .. | $x as
 /// {a:$a}`, `f(.) as {a:$a}` with `def f($x): $x`, a `?//` chain whose later bare alternative is

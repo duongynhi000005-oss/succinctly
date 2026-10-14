@@ -47254,6 +47254,42 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
         && extract.map_or(true, cannot_move_register)
 }
 
+/// Whether a `foreach` SOURCE moves jq's register at most through the tracked `INDEX` steps of a
+/// destructuring bind (#4489): [`cannot_move_register`] everywhere except an `as` bind, whose
+/// patterns may be an array or object one, over a pipe or comma of such binds and stages that
+/// cannot navigate. Those steps move the register only on an emission that took them, which
+/// [`resolve_foreach`] reads per emission (a source element that walked a step is not an
+/// unmoved root branch), so the source as a whole is not the reason an untracked entry's
+/// emission cannot state the register. Only the bind itself is relaxed: its bound expression is
+/// a subexpression, and its body still has to be [`cannot_move_register`] or another such
+/// source. Read through a `label`, a plain `as`, an `if` and `last(f)`. Not through `first`,
+/// `limit` or `nth`: they answer the register correctly, but a `?//` chain beneath one that
+/// yields several outputs retries after the consumer's stop, and the fold then emitted an extra
+/// element (`foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three here), a
+/// wrong answer where the loss was a refusal. Conservative: a `false` only leaves the source to
+/// the loss it had.
+fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
+    match unwrap_paren(expr) {
+        Expr::AsPattern { body, .. } | Expr::As { body, .. } | Expr::Label { body, .. } => {
+            source_moves_register_only_by_binds(body)
+        }
+        Expr::Pipe(stages) => stages.iter().all(source_moves_register_only_by_binds),
+        Expr::Comma(stages) => stages.iter().all(source_moves_register_only_by_binds),
+        // Only the condition is a subexpression; the branch that runs is not.
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            source_moves_register_only_by_binds(then_branch)
+                && source_moves_register_only_by_binds(else_branch)
+        }
+        // `last(f)` is a `reduce`, which backtracks `f`: the register is back where it entered.
+        other if is_last_stage(other) => true,
+        other => cannot_move_register(other),
+    }
+}
+
 /// [`reduce_cannot_move_register`]'s `foreach` twin: EXTRACT runs in the same
 /// extent, so it has to be unable to navigate too.
 fn foreach_cannot_move_register(
@@ -56982,6 +57018,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && !mentions_frozen_var
         && cannot_move_register(input)
         && step_cannot_move;
+    // #4489: a source whose only movement is a destructuring bind (a `?//` chain that falls back
+    // to its bare alternative on an entry that is not the register) still leaves the register at
+    // the entry on an element that took no walk step ([`source_moves_register_only_by_binds`]).
+    // The element says so itself, below.
+    let entry_stays_unless_source_walks = states_untracked
+        && init_keeps_register
+        && !mentions_frozen_var
+        && step_cannot_move
+        && !cannot_move_register(input)
+        && source_moves_register_only_by_binds(input);
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
     // own trailing escape, which jq never reaches once a consumer has
@@ -57177,7 +57223,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // step took no walk step (a bare `$var`, or the one a failed
                         // destructure's restored fork reached) and nothing else in the loop
                         // body can have moved it. Read by the sink above, per emission.
-                        step_at_entry.set(entry_stays_at_register && walked.is_none());
+                        // #4489: ...and a source element that the resolver left an unmoved root
+                        // branch, untracked, walked no step of a destructuring bind either.
+                        let source_unmoved = entry_stays_unless_source_walks
+                            && elem.register_path.is_none()
+                            && matches!(elem.moved, MovedRegister::Unmoved);
+                        step_at_entry
+                            .set((entry_stays_at_register || source_unmoved) && walked.is_none());
                         // #4129: this step's emissions state the entry when no walk step
                         // moved the register off it.
                         let update_states_entry =
