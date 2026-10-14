@@ -109,6 +109,10 @@ SOURCES = [
     ("fresh-var-arr", "[1] as $n | $n as [$b] | ."),
     ("lit-null-var", "null as $n | $n as {b:$b} | ."),
     ("lit-true-var", "true as $n | $n as {b:$b} | ."),
+    # (#4630) the destructure inside `[ ... ]`: a fresh value raises there too, the register's own does not
+    ("fresh-var-wrapped", "{a:1} as $n | [$n as {b:$b} | .]"),
+    ("fresh-lit-wrapped", "[{a:1} as {b:$b} | .]"),
+    ("dotpat-wrapped", "[. as {b:$b} | .]"),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
@@ -158,6 +162,9 @@ KNOWN_ACCEPT_WRONG = {
     # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
     # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
     ("lit-null-var", None),
+    # (#4632) a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source
+    # moved the register: `.` is on the element there, the by-value drive answers
+    ("dotpat-wrapped", None),
 }
 
 
