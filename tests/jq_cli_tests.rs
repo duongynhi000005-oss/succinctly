@@ -135852,3 +135852,253 @@ fn test_reduce_source_destructuring_a_fresh_value_residual_shapes_4522() -> Resu
         ),
     ])
 }
+
+/// #4566 (the residual of #4522): a `reduce` source that destructures a fresh value is routed
+/// through the resolver for the shapes #4522 left to the by-value drive, which answered where jq
+/// raises (and `del`, `=` and `|=` deleted or replaced the document): a fresh value piped into a
+/// destructure of `.` (a literal, a variable, a builtin's result, a call), a parameterised call or
+/// a forwarded closure as the bound expression, a `//` operand, a `?//` chain whose bare
+/// alternative the body destructures, and a fresh destructure after a destructure of the register.
+/// The controls jq answers stay answered: a destructure that is never reached (`empty`,
+/// `select(false)`, the truthy side of `//`), the register behind a call, and a variable bound
+/// before the fresh value. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+// The filters hold `{a:1}`, which clippy reads as a format argument.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_destructuring_a_fresh_value_pipe_param_alt_residual_4566() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"b":null}"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            DOC,
+            r"[path(reduce ({a:1} | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x | $x | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (keys | . as [$a] | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of ["a","b"]"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f(x): {a:1}; f(.) as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f($x): $x; f({a:1}) as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; def g(x): x; g(f) as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; (f as {a:$a} | .) // .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; null // (f as {a:$a} | .)) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g(x): x as {a:$a} | .; g(.) | g({a:1})) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f(x): x; f({a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce ({a:1} | . as {a:$a} | .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as $x | $x | . as {a:$a} | .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (keys | . as [$a] | .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of ["a","b"]"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f(x): {a:1}; f(.) as {a:$a} | .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; (f as {a:$a} | .) // .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; null // (f as {a:$a} | .)) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def g(x): x as {a:$a} | .; g(.) | g({a:1})) as $k (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce ({a:1} | . as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f(x): {a:1}; f(.) as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def g(x): x as {a:$a} | .; g(.) | g({a:1})) as $k (.; .)) |= 9",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        // Controls: never reached, the register itself, a variable bound before the fresh value.
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; . // (f as {a:$a} | .)) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; (empty | f as {a:$a} | .) // .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce ({a:1} | select(false) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f(x): x; f(.) as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f($x): $x; f(.) as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (. as $d | {a:1} | $d as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}; f as $x ?// $y | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[reduce ({a:1} | . as {a:$a} | .) as $k (.; .)]",
+            "[{\"a\":false,\"b\":null}]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce ({a:1} | . as {a:$a} | .) as $k (.; .))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+    ])
+}
