@@ -2218,9 +2218,13 @@ is the revert that established what the other one costs.
    `update_navigates_within` reads a nested source past the stages that hand their input on (`.`, an outer `$x`, `select(f)`).
    A `select(f)` stage is looked through only when `f` is the accumulator's own truthiness (`.`, the `$x`, a literal) and the
    accumulator is truthy: `select(empty)` or `select($x|not)` pass nothing, and the destructure behind them never runs.
-   Still accepted ([#4575](https://github.com/rust-works/succinctly/issues/4575)): a `try ... catch` around the destructure
-   (`foreach (try ($x as {a:$a} | .) catch .)`), or a `select(.) | (. as [$a] | .)?`; a refusal there would cost the rows
-   where the pattern's type error is what the `try` catches, which jq answers. On a `null` accumulator a `$x` marker
+   A `try`/`?` around the destructure catches its *type error* (`{a:$a}` on an array), where nothing moved the register
+   and jq answers, and not a success, which moves it ([#4575](https://github.com/rust-works/succinctly/issues/4575)): the
+   refusal reads the accumulator's type, replacing a single destructure of the register that raises by `empty` and
+   dropping its handler (`prune_caught_destructures`). Still accepted
+   ([#4585](https://github.com/rust-works/succinctly/issues/4585)): a `try ... catch` around a `?//` chain of
+   destructures (`foreach (try ($x as {a:$a} ?// [$a] | .) catch .)` on `[true]`: jq answers where the first alternative
+   matched and raises where a later one did, which the by-value route does not tell apart). On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
