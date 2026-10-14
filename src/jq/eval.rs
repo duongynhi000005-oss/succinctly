@@ -49840,8 +49840,10 @@ fn source_destructures_register_with(
 /// destructuring patterns, a `(def f: ..; f)` bound expression, a variable bound to a fresh value
 /// and a closure argument), and #4566 to a fresh `.` (a fresh stage earlier in a pipe), a call with
 /// arguments and a `//` operand, and, where `non_null_register` (jq's register is the document, and
-/// it is not `null`), a later bare `?//` alternative. A call whose `def` hands the register on next
-/// to a fresh value is not reached.
+/// it is not `null`), a later bare `?//` alternative. #4522 reads a call whose `def` hands the
+/// register on next to a fresh value (`def f: ., {a:1}`) as fresh on its other output: the register
+/// output is bound per leaf of the body ([`call_comma_leaves`]), where a `reduce` backtracks its
+/// destructure, and the fresh one raises. A `reduce` inside another fold's body asks too.
 fn source_destructures_fresh(source: &Expr, non_null_register: bool) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
@@ -50624,11 +50626,13 @@ impl<'e> RegisterSpine<'e> {
     /// already routed by [`is_fold_source_destructuring`] (a context-free test); this reads what
     /// that cannot: a definition in scope on the spine, and a fresh leaf next to the register.
     ///
-    /// A call's body must be fresh on *every* output. A body that hands the register on next to
-    /// a fresh value (`def f: ., {a:1}`) is left to the routes it had: routed, the register
-    /// leaf is placed through the call, and in a context where `.` is not the register (`del(try
-    /// (-(foreach (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .; .))))`, where the negated
-    /// operand is a value-mode subexpression) the resolver refuses a step jq never runs.
+    /// A call's body is read as its caller is: fresh on some output (`every` false) or on every
+    /// one. A body that hands the register on next to a fresh value (`def f: ., {a:1}`) is fresh
+    /// on some output, and is routed (#4522): the resolver binds such a call per leaf of its body
+    /// ([`call_comma_leaves`]), so the register leaf is placed as the register -- a `reduce`
+    /// backtracks that destructure -- and only the fresh leaf raises. Placed as one value, the
+    /// register leaf was refused as a guess no `try` catches (`del(try (-(foreach (def f: ., {a:1};
+    /// f as {a:$a} | .) as $k (.; .; .))))`).
     fn binds_fresh(&mut self, e: &'e Expr, every: bool) -> bool {
         let e = unwrap_bind_source(e);
         match e {
@@ -50682,7 +50686,7 @@ impl<'e> RegisterSpine<'e> {
                         } = self.defs[at];
                         match (body, self.defs[at].closure.clone()) {
                             (Some(body), _) => {
-                                self.body_binds_fresh(body, vars, at + 1, params, args)
+                                self.body_binds_fresh(body, vars, at + 1, params, args, every)
                             }
                             (None, Some(closure)) => self
                                 .in_closure_scope(&closure, |walk, arg| {
@@ -50698,7 +50702,7 @@ impl<'e> RegisterSpine<'e> {
                 if args.len() == def.params.len() && (args.is_empty() || self.fresh_only) =>
             {
                 let (body, params): (&'e Expr, &'e [Param]) = (&def.body, &def.params);
-                self.body_binds_fresh(body, 0, 0, params, args)
+                self.body_binds_fresh(body, 0, 0, params, args, every)
             }
             // `(def f: ..; f) as {a:$a}`: the definition is in scope for the call that follows it.
             Expr::FuncDef {
@@ -50765,6 +50769,7 @@ impl<'e> RegisterSpine<'e> {
         defs: usize,
         params: &'e [Param],
         args: &'e [Expr],
+        every: bool,
     ) -> bool {
         let key: *const Expr = body;
         if self.binding.contains(&key) || self.calls == 0 || params.len() != args.len() {
@@ -50813,7 +50818,19 @@ impl<'e> RegisterSpine<'e> {
                     .push((param.name(), holds.get(i).copied().unwrap_or(false)));
             }
         }
-        let fresh = self.binds_fresh(body, true);
+        // #4522: fresh on some output only counts for a body [`call_comma_leaves`] binds per leaf
+        // (a call with no arguments whose body is a comma, also behind `.` stages): any other body
+        // is placed as one value, whose register output the resolver refuses as a guess no `try`
+        // catches. And only at the top level: inside another fold's body `.` is not known to be
+        // the register, and a value-mode operand there (`reduce 1 as $i (.; -(reduce (def f: .,
+        // {a:1}; f as {a:$a} | .) as $j (.; .)))` under a `try`) is answered by jq, where the
+        // register leaf refuses as a guess.
+        let fresh = self.binds_fresh(body, true)
+            || (!every
+                && fold_body::depth() == 0
+                && params.is_empty()
+                && matches!(peel_identity_stages(body), Expr::Comma(_))
+                && self.binds_fresh(body, false));
         self.vars.truncate(vars_base);
         self.defs.truncate(defs_base);
         self.vars.extend(vars_tail);
@@ -50843,10 +50860,21 @@ impl<'e> RegisterSpine<'e> {
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
         // A wrapped marker is the register for a single pattern only (#4320): a `?//` chain keeps
         // the retry rules of #3279/#3781, which a placed head would change.
-        let register = (self.binds_held(expr)
-            && (patterns.len() == 1 || wrapped_marker(expr).is_none()))
-            // #4514: for a single pattern, the register on the source's first output is enough.
-            || (!self.fresh_only && patterns.len() == 1 && self.first_output_is_register(expr));
+        // #4522: inside another fold's body, which alternative a `?//` chain with a bare `$var`
+        // lands on depends on where the enclosing source left jq's register (the retried body
+        // destructures `null`, which is that register when the source moved it onto a `null`
+        // element), so the `fresh_only` walk reads no variable of such a chain as a fresh value.
+        let nested_retry = self.fresh_only
+            && fold_body::depth() != 0
+            && patterns.len() > 1
+            && patterns
+                .iter()
+                .any(|pattern| matches!(pattern, Pattern::Var(_)));
+        let register = !nested_retry
+            && ((self.binds_held(expr)
+                && (patterns.len() == 1 || wrapped_marker(expr).is_none()))
+                // #4514: for a single pattern, the register on the source's first output is enough.
+                || (!self.fresh_only && patterns.len() == 1 && self.first_output_is_register(expr)));
         // #4320: a later bare alternative binds the register only after the body raised on
         // the earlier one. At the top level the walk is then the register's (`. as $x ?//
         // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
@@ -51912,15 +51940,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
         ))
         || destructures_unplaced_register
         // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
-        // result, a fresh value beside the register in a comma) at the top level, where `.` is the
-        // register: the pattern's step raises on it whatever the register is. Inside another
-        // fold's body it is a value-mode subexpression in some contexts jq answers (see
-        // [`RegisterSpine::reach_node`]'s #4452 comment), so the top level only. Not gated on
-        // `ambient.trackable` (#4522): the step raises on a fresh value whatever the register is,
-        // so a path-expression INIT that moved it (`reduce SRC as $k (.a; .)`) changes nothing.
+        // result, a fresh value beside the register in a comma): the pattern's step raises on it
+        // whatever the register is. Not gated on `ambient.trackable` (#4522): a path-expression
+        // INIT that moved the register (`reduce SRC as $k (.a; .)`) changes nothing. Not gated on
+        // the fold depth either (#4522): inside another fold's body the same step raises, and the
+        // value-mode spelling jq answers (`del(try (-(reduce 1 as $k (.; reduce SRC as $j (.; .)))))`)
+        // is answered by the resolver, for a source whose fresh leaf is the only output. A source
+        // that hands the register on next to the fresh one (`def f: ., {a:1}`) is routed at the
+        // top level only ([`RegisterSpine::body_binds_fresh`]): nested, the register leaf refuses
+        // as a guess where jq answers a value-mode operand, and a nested chain with a bare
+        // alternative is read by value ([`RegisterSpine::chain_names`]). Pinned by
+        // `test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_4522`.
         || (S::TAG == EvalTag::Jq
             && !foreach_source
-            && fold_body::depth() == 0
             && source_destructures_fresh(
                 source,
                 ambient.trackable && !matches!(ambient.value, OwnedValue::Null),
