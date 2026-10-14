@@ -2239,6 +2239,16 @@ is the revert that established what the other one costs.
    ([#4588](https://github.com/rust-works/succinctly/issues/4588)): a `null` that is not the register, bound by a navigation
    or a literal (`.a as $x` on `{"a":null}`, `null as $n`), carries no register marker and is driven by value: the `del` form
    deletes the document where jq raises, and the `path()` form on a `null` document prints the root where jq prints the moved path.
+   A `$x` that is *not* the register -- bound to a node elsewhere (`.a as $x`, `null` included), not equal to it by kind
+   -- raises at the pattern's first step whatever the source is, a `reduce` that backtracks included
+   ([#4588](https://github.com/rust-works/succinctly/issues/4588): `foreign_register_markers`, for a trackable non-`null`
+   accumulator in any fold body, not under a `try`/`?`, not in a source with an `if`, `and`/`or` or `//` (one branch may
+   not run: `if $x then . else $x as {b:$b} | . end` is answered), and a `null`/`false` one not behind a `select`; the body of a
+   `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). Still accepted: that moved body
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)), a literal bound expression (`null as $n`,
+   `{a:1} as $n`: no marker, [#4603](https://github.com/rust-works/succinctly/issues/4603)), and the same shapes on a
+   `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
+   jq's register to).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which

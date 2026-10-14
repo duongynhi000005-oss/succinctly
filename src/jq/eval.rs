@@ -49928,19 +49928,26 @@ fn fold_source_register_markers<S: EvalSemantics>(
 /// truthiness (`.`, or a listed marker or a literal): the condition runs as a subexpression, which
 /// moves nothing, and the caller knows the accumulator is truthy, so the stage after it meets the
 /// register where the one before it did (`select($x) | . as {a:$a} | .`); the spine reads only a
-/// `select` with a literal condition. Another condition may be false at run time (`select(.a)`,
-/// `select(empty)`), and then the destructure behind it never runs. Only for
+/// `select` with a literal condition; `truthy` are the markers equal to the accumulator, whose truthiness
+/// that is (a marker that is not the register, [`foreign_register_markers`], has its own). Another
+/// condition may be false at run time (`select(.a)`, `select(empty)`), and then the destructure behind
+/// it never runs. Only for
 /// [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
 /// marker `Rc`s are shared, so a marker listed from the original is the one the copy holds.
-fn collapse_marker_pipes(source: &Expr, markers: &[*const Tracked], selects: bool) -> Expr {
+fn collapse_marker_pipes(
+    source: &Expr,
+    markers: &[*const Tracked],
+    truthy: &[*const Tracked],
+    selects: bool,
+) -> Expr {
     let mapped = map_subexprs(source, &mut |child| {
-        collapse_marker_pipes(child, markers, selects)
+        collapse_marker_pipes(child, markers, truthy, selects)
     });
     match &mapped {
         Expr::Pipe(stages) if stages.len() > 1 => {
             let headed = matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                 if markers.contains(&Rc::as_ptr(m)));
-            let drops = |e: &Expr| selects && is_register_truthy_select(e, markers);
+            let drops = |e: &Expr| selects && is_register_truthy_select(e, truthy);
             if !headed && !stages.iter().any(drops) {
                 return mapped;
             }
@@ -50073,6 +50080,102 @@ fn unplaced_register_markers<S: EvalSemantics>(
         if let Expr::TrackedVar(marker) = e {
             if marker_identical::<S>(marker, ambient.value, &ambient.frame) {
                 markers.push(Rc::as_ptr(marker));
+            }
+        }
+        false
+    });
+    markers
+}
+
+/// Whether no stage of `source` can end it before a destructure runs: a `select` or `limit` that
+/// may pass nothing (`select(false)`, `limit(0; ..)`), a bind whose source may be empty
+/// (`(.a | select(.zz)) as $y | $x as P`), `empty`, a nested `foreach` or a `label` all skip the
+/// destructure behind them, and jq answers (#4588 review). The refusal of a marker that is not the
+/// register is read from the source's text, so it reads only a source that cannot do that.
+fn source_always_reaches_destructure(source: &Expr) -> bool {
+    !any_subexpr(source, &mut |e| match e {
+        Expr::Builtin(Builtin::Select(cond)) => {
+            !matches!(
+                unwrap_paren(cond),
+                Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
+            ) || matches!(
+                unwrap_paren(cond),
+                Expr::Literal(Literal::Null | Literal::Bool(false))
+            )
+        }
+        Expr::Limit { n, .. } => !matches!(unwrap_paren(n), Expr::Literal(lit)
+            if literal_to_owned(lit).as_f64().is_some_and(|n| n >= 1.0)),
+        Expr::As { .. } | Expr::Foreach { .. } | Expr::Label { .. } => true,
+        Expr::Builtin(Builtin::Empty | Builtin::NthStream(..)) | Expr::NthExpr { .. } => true,
+        Expr::AsPattern { expr, .. } => !matches!(
+            unwrap_paren(expr),
+            Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
+        ),
+        _ => false,
+    })
+}
+
+/// The `$x` markers in a fold `source` inside another fold's body that are provably *not* the
+/// register (#4588): bound to a node at another position than the one the fold's register stands
+/// on (`.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) ...)`), and not `jv_identical`
+/// to it by kind (`null`/booleans compare by value). A pattern's tracked `INDEX` step on such a node
+/// is path-checked against the register and raises, whether the source is a `foreach` or a `reduce`
+/// that backtracks it. Empty in the body of a `reduce` whose source moved the register, where the
+/// register is on an element and the ambient position is not its own, and unless the source holds
+/// a destructuring bind. Each is paired with whether it holds a truthy value, which a `select`
+/// on it needs ([`collapse_marker_pipes`]).
+fn foreign_register_markers<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+) -> Vec<(*const Tracked, bool)> {
+    let mut markers = Vec::new();
+    if S::TAG != EvalTag::Jq
+        || fold_body::source_moved_here()
+        || !any_subexpr(
+            source,
+            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+        )
+    {
+        return markers;
+    }
+    // An `if`, `and`/`or` or `//` runs one branch, so a destructure in the other may never run
+    // (`if $x then . else $x as {b:$b} | . end` with a truthy `$x` is answered): such a source is
+    // left to the by-value route. A `select` passes a truthy marker on and nothing for a
+    // `null`/`false` one, which is then not read.
+    if any_subexpr(source, &mut |e| {
+        matches!(
+            e,
+            Expr::If { .. } | Expr::And(..) | Expr::Or(..) | Expr::Alternative(..)
+        )
+    }) {
+        return markers;
+    }
+    let selects = any_subexpr(source, &mut |e| {
+        matches!(e, Expr::Builtin(Builtin::Select(_)))
+    });
+    if !source_always_reaches_destructure(source) {
+        return markers;
+    }
+    any_subexpr(source, &mut |e| {
+        if let Expr::TrackedVar(marker) = e {
+            if selects && matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false)) {
+                return false;
+            }
+            let elsewhere = match &marker.origin {
+                Origin::At { invocation, path } | Origin::SnapshotAt { invocation, path } => {
+                    *invocation == ambient.frame.invocation
+                        && ambient.frame.at.is_some()
+                        && !ambient.frame.names(*invocation, path)
+                }
+                // A marker with no position (`Snapshot`, `Untracked`, `Unproven`) is not provably elsewhere.
+                _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
+            };
+            if elsewhere
+                && !marker_identical::<S>(marker, ambient.value, &ambient.frame)
+                && !null_bool_identical(&marker.value, ambient.value)
+            {
+                let truthy = !matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false));
+                markers.push((Rc::as_ptr(marker), truthy));
             }
         }
         false
@@ -51884,9 +51987,32 @@ fn drive_fold_source_with<S: EvalSemantics>(
     } else {
         Vec::new()
     };
+    // #4588: a `$x` that is provably not the register -- bound to a node elsewhere, and not equal
+    // to it by kind -- raises at the pattern's first step whatever the source is, a `reduce` that
+    // backtracks included, so it is refused for either fold, in any fold body (outside every body
+    // all markers are read, #4320). Not under a `try`/`?`, which catches the path error (`reduce
+    // (try ($x as {b:$b} | .)) as $y (.; .)` is answered).
+    let foreign_pairs = if S::TAG == EvalTag::Jq
+        && ambient.trackable
+        && !matches!(ambient.value, OwnedValue::Null)
+        && fold_body::depth() != 0
+        && try_free()
+    {
+        foreign_register_markers::<S>(source, ambient)
+    } else {
+        Vec::new()
+    };
+    let foreign_markers: Vec<*const Tracked> = foreign_pairs.iter().map(|(m, _)| *m).collect();
+    // What a `select` on a marker passes on: the accumulator's own for one equal to it, and a
+    // foreign marker's own value when that is truthy.
+    let truthy_markers: Vec<*const Tracked> = unplaced_markers
+        .iter()
+        .copied()
+        .chain(foreign_pairs.iter().filter(|(_, t)| *t).map(|(m, _)| *m))
+        .collect();
     let pruned = prunable.then(|| {
         prune_caught_destructures(
-            &collapse_marker_pipes(source, &unplaced_markers, select_passes),
+            &collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, select_passes),
             ambient.value,
             &unplaced_markers,
         )
@@ -51901,7 +52027,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 && select_passes
                 && pruned.is_none()
                 && source_destructures_register(
-                    &collapse_marker_pipes(source, &unplaced_markers, true),
+                    &collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, true),
                     true,
                 )));
     // #4505: inside another fold's body `.` is not known to be the register, but a `$x` marker
@@ -51915,7 +52041,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // `INDEX` step passes for a `$x` that is the register) and leaves the register where it was,
     // which the by-value drive answers as jq does. In a moved body the step raises on the marker
     // instead (`raise_reaches_fold` leaves out a source with a `try`/`?`).
-    let marker_destructures_unplaced_register = refusal_eligible
+    let equal_verdict = refusal_eligible
         && raise_reaches_fold
         && !unplaced_markers.is_empty()
         // A `reduce` anywhere in the source backtracks what it destructures, so the source is
@@ -51930,8 +52056,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
                             && matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                                 if unplaced_markers.contains(&Rc::as_ptr(m))))
                 });
-            let collapsed = (pruned.is_none() && headed)
-                .then(|| collapse_marker_pipes(source, &unplaced_markers, select_passes));
+            let collapsed = (pruned.is_none() && headed).then(|| {
+                collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, select_passes)
+            });
             source_destructures_register_with(
                 collapsed.as_ref().or(pruned.as_ref()).unwrap_or(source),
                 true,
@@ -51939,6 +52066,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 false,
             )
         };
+    // The foreign markers recognise the destructure of the marker's own value (`$x as P`,
+    // `$x | . as P`). A `select` stage in front hands on the `.` it met, so dropping it also
+    // exposes a destructure of `.`, which a `reduce` source backtracks and a `foreach` one does not.
+    let foreign_verdict = !foreign_markers.is_empty() && {
+        let plain = collapse_marker_pipes(source, &foreign_markers, &[], false);
+        source_destructures_register_with(&plain, true, foreign_markers.clone(), false)
+            || (foreach_source && select_passes && {
+                let selected =
+                    collapse_marker_pipes(source, &foreign_markers, &truthy_markers, true);
+                source_destructures_register_with(&selected, true, foreign_markers, false)
+            })
+    };
+    let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
     let has_navigation = any_subexpr(source, &mut |e| {

@@ -63080,6 +63080,217 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
     Ok(())
 }
 
+/// #4588: a `$x` bound to a node that is not jq's register (`.a as $x`, `null` included) and
+/// destructured by a fold source inside another fold's body runs a tracked `INDEX` step on it, which
+/// raises whether the source is a `foreach` or a `reduce` that backtracks it; the by-value drive
+/// answered and `del`/`=`/`|=` wrote through the answer. The controls keep answering: a `try`
+/// swallows the path error, a `$x` that is the element of an enclosing `reduce` source is the register,
+/// and the destructure of an element marker is untouched. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_destructure_of_a_marker_that_is_not_the_register_in_a_fold_body_4588() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x | . as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach ($x | . as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (($x as [$a] | .), 1) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x) | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (select($x) | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x as {b:$b} | .) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; reduce ($x as {b:$b} | .) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x | length) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce ($i as {b:$b} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce ($x as {b:$b} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce ($i as {b:$b} | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        // A `null`/`false` marker passes nothing through a `select` or an `if`, so the destructure
+        // behind one may never run.
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x then $x as {b:$b} | . else . end) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x) | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        // A stage that may pass nothing ahead of the destructure keeps it from running: jq answers.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select(false) | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (limit(0; $x as {b:$b} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ((.a|select(.zz)) as $z | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (empty | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an

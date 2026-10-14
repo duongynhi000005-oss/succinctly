@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x forty-seven x four x thirteen.
+document, six x three x forty-seven x seven x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -99,7 +99,18 @@ CONTEXTS = [
     ("del", "del(. as $x | {O})"),
     ("update", "(. as $x | {O}) |= 9"),
     ("assign", "(. as $x | {O}) = 9"),
+    # `$x` bound to a node that is not the register (#4588): a navigation, `null` included.
+    ("path-nav", "path(.a as $x | {O})"),
+    ("del-nav", "del(.a as $x | {O})"),
+    ("update-nav", "(.a as $x | {O}) |= 9"),
 ]
+# The ACCEPT_WRONG rows of these contexts still left (#4588): the body of a `reduce` whose source
+# moved the register, where the register is on an element and a marker may be that very node, and a
+# destructure of `.` behind a `select($x|not)`/`select($x)` that the markers do not decide. They count
+# against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
+RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
+# ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
+RESIDUAL_NAV_MAX = 147
 DOCS = [
     "null",
     "true",
@@ -196,16 +207,28 @@ def main():
     def known(r):
         return (r[1], None) in KNOWN_ACCEPT_WRONG or (r[1], r[3]) in KNOWN_ACCEPT_WRONG
 
-    fresh = [r for r in results if r[5] == "ACCEPT_WRONG" and not known(r)]
+    residual_nav = [
+        r for r in results if r[5] == "ACCEPT_WRONG" and r[0].split("/")[3] in RESIDUAL_CONTEXTS
+    ]
+    fresh = [
+        r
+        for r in results
+        if r[5] == "ACCEPT_WRONG"
+        and not known(r)
+        and r[0].split("/")[3] not in RESIDUAL_CONTEXTS
+    ]
     residual = [r for r in results if r[5] == "ACCEPT_WRONG" and known(r)]
     lost = [r for r in results if args.base and r[7] == "MATCH" and r[5] != "MATCH"]
     hung = [r for r in results if r[5] == "TIMEOUT"]
-    print(f"ACCEPT_WRONG outside the documented residual: {len(fresh)}; documented residual: {len(residual)}")
+    print(
+        f"ACCEPT_WRONG outside the documented residual: {len(fresh)}; documented residual: "
+        f"{len(residual)}; of a non-register `$x` (#4588): {len(residual_nav)}"
+    )
     print(f"lost matches against --base: {len(lost)}; candidate timeouts: {len(hung)}")
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
-    return 1 if fresh or lost or hung else 0
+    return 1 if fresh or lost or hung or len(residual_nav) > RESIDUAL_NAV_MAX else 0
 
 
 sys.exit(main())
