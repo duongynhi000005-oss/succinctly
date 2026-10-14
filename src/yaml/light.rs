@@ -5058,7 +5058,10 @@ enum FieldsInner<'a, W> {
         /// one-hop view, which folds a `<<: [a, b]` sequence in reverse and
         /// lets two sources' own `<<` keys collapse into one literal `"<<"`
         /// entry, discarding one source's chain.
-        first_key: Option<YamlCursor<'a, W>>,
+        ///
+        /// `Rc`-boxed rather than inline: a bare cursor widens `YamlFields`,
+        /// which `LazySeq`'s size pin (#1973) counts.
+        first_key: Rc<Option<YamlCursor<'a, W>>>,
         index: usize,
     },
 }
@@ -5073,7 +5076,7 @@ impl<W> Clone for FieldsInner<'_, W> {
                 index,
             } => FieldsInner::Merged {
                 entries: entries.clone(),
-                first_key: *first_key,
+                first_key: first_key.clone(),
                 index: *index,
             },
         }
@@ -5109,7 +5112,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
             Some(entries) => Self {
                 inner: FieldsInner::Merged {
                     entries: Rc::new(entries),
-                    first_key: key_cursor,
+                    first_key: Rc::new(key_cursor),
                     index: 0,
                 },
             },
@@ -5168,7 +5171,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
                 let rest = Self {
                     inner: FieldsInner::Merged {
                         entries: entries.clone(),
-                        first_key: *first_key,
+                        first_key: first_key.clone(),
                         index: index + 1,
                     },
                 };
@@ -5219,7 +5222,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
         // name reads the view.
         if name != "<<" {
             if let FieldsInner::Merged { first_key, .. } = &self.inner {
-                return Self::traverse_fields(*first_key, name, depth);
+                return Self::traverse_fields(**first_key, name, depth);
             }
         }
         let mut fields = self.clone();
