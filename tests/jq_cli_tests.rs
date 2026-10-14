@@ -61886,6 +61886,98 @@ fn test_reduce_update_nested_reduce_destructuring_source_4320() -> Result<()> {
     Ok(())
 }
 
+/// #4567: a `label` around a `reduce` UPDATE hands the body's outputs on (no `break` can reach it
+/// in the shapes the vetter admits), so `label $q | (. as {a:$a} | .)` is the register's own
+/// destructure as the unlabelled body is, and `path`/`del`/`=`/`|=` answer as jq does instead of
+/// refusing. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_reduce_update_label_wrapped_destructure_4567() -> Result<()> {
+    let invalid = "Invalid path expression";
+    assert_path_rows_3289(&[
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"[path(reduce (label $o | .) as $z (.; label $q | label $p | (. as {a:$a} | .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce 1 as $z (.; label $q | (. as {a:$a} | .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // Contrasts that keep raising as jq does: a `break` out of the label empties the body (the
+        // accumulator is then `null`, not the register), the destructure goes on to navigate, or the
+        // body binds twice.
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | break $q)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | break $q)))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .a)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .) | (. as {b:$b} | .)))]",
+            "",
+            invalid,
+            5,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #4486: a `reduce` whose `UPDATE` is a `try ... catch H` with a handler that moves nothing, or an
 /// `isempty(g)` over a generator the resolver path-checks, leaves jq's register where the fold
 /// entered it (jq backtracks the register to the `try`'s entry whether the body raised or not, and the

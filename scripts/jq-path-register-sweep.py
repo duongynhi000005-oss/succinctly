@@ -2032,6 +2032,23 @@ OPERANDS = [
     "(foreach (def f($x): $x as {a:$a} | .; f(limit(1; ., 1))) as $k (.; .; .))",
     "(foreach (def f: limit(1; ., 1); f as {a:$a} | .) as $k (.; .; .))",
     "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)))",
+    # (#4567) a `label` around a `reduce` UPDATE that destructures the register hands the body's
+    # outputs on, so it is vetted as the body is. The contrasts: a `label` around a destructure that
+    # goes on to navigate, two labels, a `label` around a nested fold, a `break` in the body, a
+    # `label` around a comma, and a `foreach`.
+    "(reduce (label $o | .) as $z (.; label $q | label $p | (. as {a:$a} | .)))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .a)))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | ., break $q)))",
+    "(reduce (label $o | .) as $z (.; label $q | ((. as {a:$a} | .), .)))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | break $q)))",
+    "(reduce (label $o | .) as $z (.; label $q | reduce (. as {a:$a} | .) as $j (.; .)))",
+    "(reduce (label $o | .) as $z (.; label $q | foreach (. as {a:$a} | .) as $j (.; .; .)))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .) | (. as {b:$b} | .)))",
+    "(reduce 1 as $z (.; label $q | (. as {a:$a} | .)))",
+    "(reduce .[]? as $z (.; label $q | (. as {a:$a} | .)))",
+    "(reduce (label $o | .) as {a:$z} (.; label $q | (. as {a:$a} | .)))",
+    "(foreach (label $o | .) as $z (.; label $q | (. as {a:$a} | .); .))",
+    "(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .)) | .a)",
     "(reduce (label $o | .) as $z (.; . as {a:$a} | .))",
     "(foreach (label $o | .) as $z (.; . as {a:$a} | .; .))",
     # (#4514) a source whose FIRST output is the register and whose later outputs need not be: jq
