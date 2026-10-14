@@ -71888,6 +71888,29 @@ fn test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternativ
             "",
             0,
         ),
+        // A source that does not move the register keeps the entry comparison: a literal state is off it
+        // (#4550), and a full slice of the root is the same node (a different path, an equal register).
+        (
+            "[1]",
+            r"path(foreach (1,2) as $k (0; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach (1,2) as $k ([]; try (. as [$a] ?// $a | $a); $k))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[0:] as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "[{\"start\":0,\"end\":null},0]\n",
+            "",
+            0,
+        ),
         // Controls: a source that yields nothing, and a `null` INIT `.` that is `jv_identical` to the
         // `null` the source moved the register onto (#4354), are not refused.
         (
