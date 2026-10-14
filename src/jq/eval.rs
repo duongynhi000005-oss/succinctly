@@ -52209,6 +52209,50 @@ fn drop_caught_handlers(source: &Expr) -> Expr {
     }
 }
 
+/// #4604: `source` with every `if $x then A else B end` whose condition is a bound marker replaced by the
+/// branch its value takes. A marker's value is fixed where it was bound, so one branch of the `if`
+/// can never run, and a destructure in the other (`if $x then . else $x as {b:$b} | . end` with a
+/// truthy `$x`) is not one the source performs. The analyses of [`drive_fold_source_with`] read the
+/// text, which cannot tell, so they read the branch that runs.
+fn marker_condition_truth(cond: &Expr) -> Option<bool> {
+    let truthy =
+        |marker: &Tracked| !matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false));
+    match unwrap_paren(cond) {
+        Expr::TrackedVar(marker) => Some(truthy(marker)),
+        Expr::Pipe(stages) => match stages.as_slice() {
+            [head, tail] if matches!(unwrap_paren(tail), Expr::Not) => match unwrap_paren(head) {
+                Expr::TrackedVar(marker) => Some(!truthy(marker)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn resolve_marker_ifs(source: &Expr) -> Expr {
+    if let Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = source
+    {
+        if let Some(truthy) = marker_condition_truth(cond) {
+            let taken = if truthy { then_branch } else { else_branch };
+            // Only a taken branch that destructures changes what the analyses decide; a bare `.`
+            // would hand the source to the routes a literal `.` source takes, which refuse a fold
+            // body jq answers.
+            if any_subexpr(
+                taken,
+                &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+            ) {
+                return resolve_marker_ifs(taken);
+            }
+        }
+    }
+    map_subexprs(source, &mut |child| resolve_marker_ifs(child))
+}
+
 fn drive_fold_source_with<S: EvalSemantics>(
     source: &Expr,
     foreach_source: bool,
@@ -52216,6 +52260,17 @@ fn drive_fold_source_with<S: EvalSemantics>(
     relocate_base: Option<&Rc<PathPrefix>>,
     step: &mut dyn FnMut(FoldSourceValue) -> Demand,
 ) -> Flow {
+    let marker_ifs_resolved;
+    let source = if S::TAG == EvalTag::Jq
+        && any_subexpr(
+            source,
+            &mut |e| matches!(e, Expr::If { cond, .. } if marker_condition_truth(cond).is_some()),
+        ) {
+        marker_ifs_resolved = resolve_marker_ifs(source);
+        &marker_ifs_resolved
+    } else {
+        source
+    };
     // #2159: see [`is_fold_source_navigation`] for what counts. #3726: so does a
     // construct jq refuses outright in path position ([`live_path_refusal`]) --
     // it spells no `INDEX` of its own, but its jq-defined body iterates a value

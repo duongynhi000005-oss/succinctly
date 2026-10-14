@@ -132608,6 +132608,69 @@ fn test_nested_fold_source_destructuring_a_mixed_body_call_raises_4600() -> Resu
     Ok(())
 }
 
+/// #4604: an `if` whose condition is a bound marker (`$x`, `$x|not`) runs one branch, fixed by the
+/// marker's value, so a destructure of `$x` in the branch that runs raises in a fold body (`$x` is not
+/// the register) and one in the other branch never runs. The analyses read the source's text, which
+/// cannot tell, and left any `if` to the by-value route, which answered the first (`del`, `=` and `|=`
+/// wrote through it). The source is now read with the taken branch. Every row captured from jq 1.7.1;
+/// stdout and the exit status are pinned.
+#[test]
+fn test_fold_source_if_on_a_marker_reads_the_taken_branch_4604() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x then $x as {a:$a} | . else . end) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (if $x then $x as {a:$a} | . else . end) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(.a as $x | reduce .[]? as $i (.; reduce (if $x then $x as {a:$a} | . else . end) as $y (.; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x|not then . else $x as {a:$a} | . end) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x then . else $x as {a:$a} | . end) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x then $x as {a:$a} | . else . end) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (if $x|not then $x as {a:$a} | . else . end) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4489: a `foreach` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
 /// (`1 | foreach ...`, a literal or a computed `.`), states the register it entered with when the
 /// element took no walk step. jq's chain tries the array/object pattern first; its `INDEX` step on a

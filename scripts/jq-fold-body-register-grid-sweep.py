@@ -60,6 +60,10 @@ SOURCES = [
     ("x-iter", "$x | .[]?"),
     ("first-xpat", "first($x as {a:$a} | .)"),
     ("if-xpat", "if $x then $x as {a:$a} | . else . end"),
+    # (#4604) the marker's value picks the branch: only the taken one can destructure
+    ("if-x-else-xpat", "if $x then . else $x as {a:$a} | . end"),
+    ("if-notx-xpat", "if $x|not then . else $x as {a:$a} | . end"),
+    ("if-notx-then-xpat", "if $x|not then $x as {a:$a} | . else . end"),
     ("x-then-dotpat", "$x | . as {a:$a} | ."),
     ("dotpat", ". as {a:$a} | ."),
     ("sel-x-only", "select($x)"),
@@ -156,7 +160,7 @@ CONTEXTS = [
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 63
+RESIDUAL_NAV_MAX = 51
 DOCS = [
     "null",
     "true",
