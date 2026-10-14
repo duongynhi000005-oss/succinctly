@@ -52278,7 +52278,6 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // alternative is read by value ([`RegisterSpine::chain_names`]). Pinned by
         // `test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_4522`.
         || (S::TAG == EvalTag::Jq
-            && !foreach_source
             && source_destructures_fresh(
                 source,
                 // #4581: where INIT moved the register off the document, the register's own value.

@@ -2315,7 +2315,13 @@ is the revert that established what the other one costs.
    not run: `if $x then . else $x as {b:$b} | . end` is answered), and a `null`/`false` one not behind a `select`; the body of a
    `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). Still accepted: that moved body
    ([#4604](https://github.com/rust-works/succinctly/issues/4604)), a literal bound expression (`null as $n`,
-   `{a:1} as $n`: no marker, [#4603](https://github.com/rust-works/succinctly/issues/4603)), and the same shapes on a
+   `null as $n` bound to a variable: no marker, [#4603](https://github.com/rust-works/succinctly/issues/4603)). A
+   freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
+   and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
+   `source_destructures_fresh` as a `reduce` source does (pinned by
+   `test_foreach_source_destructuring_a_fresh_variable_raises_4616`); a `null` literal bound to a variable, in the body
+   of another fold, is still accepted, because the register's own null-ness is not known there
+   (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
    jq's register to).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression

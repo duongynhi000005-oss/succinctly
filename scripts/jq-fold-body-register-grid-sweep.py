@@ -103,6 +103,12 @@ SOURCES = [
     ("try-empty-catch", "try ($x as {} | .) catch ."),
     ("sel-x-opt-pat", "select($x) | (. as {a:$a} | .)?"),
     ("try-arr-catch", "try ($x as [$a] | .) catch ."),
+    # (#4616) a fresh value, or a `null`/boolean literal the register is not, bound to a variable and
+    # destructured: the pattern's step runs on a node that is not the register
+    ("fresh-var", "{a:1} as $n | $n as {b:$b} | ."),
+    ("fresh-var-arr", "[1] as $n | $n as [$b] | ."),
+    ("lit-null-var", "null as $n | $n as {b:$b} | ."),
+    ("lit-true-var", "true as $n | $n as {b:$b} | ."),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
@@ -145,10 +151,14 @@ DOCS = [
     '[{"a":1}]',
 ]
 
-# The ACCEPT_WRONG rows left: none. (A `try ... catch` or `?` around a single destructure was listed
+# The ACCEPT_WRONG rows left: the `null`-literal variable below. (A `try ... catch` or `?` around a single destructure was listed
 # here until #4575, a comma beside the destructure on a `null` document until #4576, and a
 # `try ... catch` around a `?//` chain of destructures until #4585.)
-KNOWN_ACCEPT_WRONG = set()
+KNOWN_ACCEPT_WRONG = {
+    # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
+    # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
+    ("lit-null-var", None),
+}
 
 
 def run(prefix, prog, doc, timeout=10):
