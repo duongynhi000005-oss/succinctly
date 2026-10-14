@@ -129384,6 +129384,37 @@ fn test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565
             "",
             5,
         ),
+        // The `def` outside the `foreach`: the source meets an installed call.
+        (
+            r"{}",
+            r"del(try (def f: (., 1); foreach (f as {a:$a} | .) as $k (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"def f: (., 1); def g: f; del(try foreach (g as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"def f: limit(2; ., 1); path(foreach (f as {a:$a} | .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"{}",
+            r"def f: (., 1); del(try (-(foreach (f as {a:$a} | .) as $k (.; .; .))))",
+            "{}\n",
+            0,
+        ),
+        (
+            r"null",
+            r"def f: (., 1); path(foreach (f as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            5,
+        ),
     ];
     for &(input, filter, stdout, exit) in rows {
         let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
