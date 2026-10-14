@@ -57169,8 +57169,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // identity -- not `active_at_register`, which a source that moves the step
                         // register off the root also reads false for an INIT `.` that IS jq's
                         // register on the first step (#4354).
-                        let state_off_register = S::TAG == EvalTag::Jq
-                            && fold_body::depth() == 0
+                        let outermost_fold = S::TAG == EvalTag::Jq && fold_body::depth() == 0;
+                        let state_off_register = outermost_fold
                             && !(state_at_register
                                 || reg.identical::<S>(&state, &state_snapshot, true));
                         // #4130: an emission of this step is at the entry register when the
@@ -57353,6 +57353,23 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 let _acc_is_register = (alt_bind_extract_on_register
                                     && extract_at_register)
                                     .then(fold_body::acc_is_register);
+                                // #4595: #4550's mark for EXTRACT. The state UPDATE stored is the
+                                // node `.` is here, and when the walk places it at neither the
+                                // register nor an equal one (a computed container, not INIT `.`
+                                // or a `$r` bound to the register) a pattern step on it fails
+                                // `path_intact` whatever the register is. Never together with the
+                                // mark above, and not on a step the live `null`/boolean register
+                                // took over.
+                                let _acc_off_register = (outermost_fold
+                                    && !live_stepped
+                                    && _acc_is_register.is_none()
+                                    && !(extract_at_register
+                                        || extract_reg.identical::<S>(
+                                            &update_branch.value,
+                                            &extract_snapshot,
+                                            true,
+                                        )))
+                                .then(fold_body::acc_off_register);
                                 let _foreach_body = fold_body::foreach_body();
                                 match extract_reg.resolve_sink::<S>(
                                     ext_expr,

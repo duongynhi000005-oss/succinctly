@@ -2333,6 +2333,16 @@ CONTEXTS = [
     ("foreach-extract-literal-path", "path(foreach (1,2) as $k (.; .; {X}))"),
     ("foreach-extract-literal-del", "del(foreach (1,2) as $k (.; .; {X}))"),
     ("foreach-extract-literal-assign", "(foreach (1,2) as $k (.; .; {X})) = 9"),
+    # (#4595) #4550's container INIT, with the `try` in EXTRACT instead of UPDATE: the state UPDATE stored
+    # is a computed container, which `path_intact` refuses at a pattern's first step whatever the register
+    # is, so `?//` retries it. INIT `.` and a `$r` bound to the register are on it, and retrying there
+    # accepts what jq answers.
+    ("foreach-extract-try-path-arr", "path(foreach .a? as $k ([]; .; try ({X})))"),
+    ("foreach-extract-try-del-obj", "del(foreach .a? as $k ({}; .; try ({X})))"),
+    ("foreach-extract-try-assign-arr", "(foreach .a? as $k ([1]; .; try ({X}))) = 9"),
+    ("foreach-extract-try-path-arr2", "path(foreach (1,2) as $k ([]; .; try ({X})))"),
+    ("foreach-extract-try-path-init-dot", "path(foreach .a? as $k (.; .; try ({X})))"),
+    ("foreach-extract-try-path-r", "path(. as $r | foreach .a? as $k ([]; $r; try ({X})))"),
 ]
 
 # Long chains are the O(N^3) row: a timing axis, not a correctness one.

@@ -771,9 +771,16 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   register (`fold_body::acc_off_register`; INIT `.` is the register on the first step and is not marked)
   (`path(reduce .a? as $k ([]; try (. as [$a] ?// $a | $a)))` on `null` raises, it was `[]`). Pinned by
   `test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_4550`.
-  **Still divergent** (the same shape, not covered): a `foreach` EXTRACT that is the `try` (`path(foreach .a? as $k ([]; .;
-  try (. as [$a] ?// $a | $a)))` on `null` answers where jq raises), and a source that navigates the register with INIT `.`
-  (`path(foreach .[] as $k (.; try (. as [$a] ?// $a | $a); .))` on `[[1]]` answers where jq raises).
+  **Since [#4595](https://github.com/rust-works/succinctly/issues/4595)** a `foreach` whose EXTRACT is that `try` retries too
+  (`path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))` on `null` raises, it answered nothing): EXTRACT's `.` is
+  the state UPDATE stored, and the same mark is set around EXTRACT when that state sits at neither the register nor an
+  equal one (a `$r` bound to the register, INIT `.` and a `null` state are on it and are not marked). Pinned by
+  `test_foreach_extract_try_over_an_alternative_bind_of_a_container_state_retries_4595`.
+  **Still divergent** (the same shape, not covered): a source that navigates the register with INIT `.`
+  (`path(foreach .[] as $k (.; try (. as [$a] ?// $a | $a); .))` on `[[1]]` answers where jq raises), and an EXTRACT `try`
+  whose operand wraps the bind in `isempty(...) or ...` (`path(foreach (1,2) as $k ([]; .; try (isempty(. as [$q] ?// $z |
+  if $q then true else empty end) or .b?)))` on `[]` answers where jq raises,
+  [#4608](https://github.com/rust-works/succinctly/issues/4608)).
 
   **Since [#4497](https://github.com/rust-works/succinctly/issues/4497)** a `foreach` source that is a
   `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative prints once in `path()` (jq's `first` is a
