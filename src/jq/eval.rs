@@ -49975,8 +49975,7 @@ fn prune_caught_destructures(
         Expr::Try { expr, .. } | Expr::Optional(expr) => expr,
         _ => return mapped,
     };
-    let mut single = false;
-    if let Expr::AsPattern {
+    let single = if let Expr::AsPattern {
         expr: bound,
         patterns,
         ..
@@ -49990,8 +49989,10 @@ fn prune_caught_destructures(
         if is_register && patterns.iter().all(|p| pattern_step_type_errors(p, value)) {
             return Expr::Builtin(Builtin::Empty);
         }
-        single = patterns.len() == 1;
-    }
+        patterns.len() == 1
+    } else {
+        false
+    };
     // A handler runs only after a raise, so the spine reads the body alone. Not for a `?//` chain:
     // jq retries the next alternative on an error past the pattern, and answers where the first
     // matched (`try ($x as {a:$a} ?// [$a] | .) catch .` on `{"a":true}`), which the by-value

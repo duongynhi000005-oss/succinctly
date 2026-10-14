@@ -62611,7 +62611,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
             "[]\n[]\n",
             0,
@@ -62623,7 +62623,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
             "",
             5,
@@ -62635,7 +62635,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
             "[]\n[]\n",
             0,
@@ -62647,7 +62647,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
             "",
             0,
@@ -62659,7 +62659,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (($x as [$a] | .)?) as $y (.; .; .); .))",
             "",
             5,
@@ -62671,7 +62671,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
             "",
             5,
@@ -62689,7 +62689,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as $v | .) catch .) as $y (.; .; .); .))",
             "[]\n[]\n",
             0,
@@ -62701,7 +62701,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             3,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {} | .) catch .) as $y (.; .; .); .))",
             "",
             3,
@@ -62713,7 +62713,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
             "null\n",
             0,
@@ -62725,7 +62725,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
             "",
             5,
@@ -62737,7 +62737,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"del(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
             "null\n",
             0,
@@ -62749,7 +62749,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"del(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
             "",
             5,
@@ -62761,7 +62761,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
             "9\n",
             0,
@@ -62773,7 +62773,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .)) |= 9",
             "",
             5,
@@ -62785,7 +62785,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
             "9\n",
             0,
@@ -62797,7 +62797,7 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .)) |= 9",
             "",
             5,
@@ -62815,13 +62815,13 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             0,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | reduce .[]? as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .)))",
             "",
             5,
         ),
         (
-            r#"[true]"#,
+            r"[true]",
             r"path(. as $x | reduce .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .)))",
             "[]\n",
             0,
