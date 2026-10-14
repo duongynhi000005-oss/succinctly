@@ -2313,8 +2313,10 @@ is the revert that established what the other one costs.
    ([#4588](https://github.com/rust-works/succinctly/issues/4588): `foreign_register_markers`, for a trackable non-`null`
    accumulator in any fold body, not under a `try`/`?`, not in a source with an `if`, `and`/`or` or `//` (one branch may
    not run: `if $x then . else $x as {b:$b} | . end` is answered), and a `null`/`false` one not behind a `select`; the body of a
-   `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). Still accepted: that moved body
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604)), a literal bound expression (`null as $n`,
+   `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). A `select($x)` in front of a destructure of `.` passes the register on by `$x`'s own truthiness whatever node it is bound to
+   (since [#4604](https://github.com/rust-works/succinctly/issues/4604) any truthy marker is read, not only one equal to the
+   accumulator; pinned by `test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604`; the refusal is the resolver's guess, so an enclosing `?`/`try` around the whole fold does not catch it where jq's own error is caught, as for the plain `. as [$a]` form). Still accepted: that moved body
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `if $x`, `select($x|not)` on a `null` document), a literal bound expression (`null as $n`,
    `null as $n` bound to a variable: no marker, [#4603](https://github.com/rust-works/succinctly/issues/4603)). A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
