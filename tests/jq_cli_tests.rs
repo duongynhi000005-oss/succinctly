@@ -61943,6 +61943,23 @@ fn test_reduce_update_label_wrapped_destructure_4567() -> Result<()> {
             "",
             0,
         ),
+        // Contrasts that keep raising as jq does: a `break` out of the label empties the body (the
+        // accumulator is then `null`, not the register), the destructure goes on to navigate, or the
+        // body binds twice.
+        (
+            r#"{"a":true}"#,
+            r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | break $q)))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | break $q)))",
+            "",
+            invalid,
+            5,
+        ),
         (
             r#"{"a":true}"#,
             r"[path(reduce (label $o | .) as $z (.; label $q | (. as {a:$a} | .a)))]",
