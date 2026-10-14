@@ -62826,6 +62826,44 @@ fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575(
             "[]\n",
             0,
         ),
+        // A bare `$v` alternative, or a destructure of something other than the register, is
+        // no type error the refusal reads: the source is left to the by-value route.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (1 as [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (1 as [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
