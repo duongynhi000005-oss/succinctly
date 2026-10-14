@@ -49953,13 +49953,16 @@ fn pattern_step_type_errors(pattern: &Pattern, value: &OwnedValue) -> bool {
 
 /// `source` with every `try`/`?` whose operand is a destructure of the register that raises a type
 /// error on `value` replaced by `empty`, and the handler of every `try` over a single destructure
-/// dropped (#4575). The error is
-/// caught: the source emits nothing, the pattern never moved jq's register, and the fold answers
-/// (`try ($x as {a:$a} | .) catch .` on `[true]`). A destructure that succeeds is left as it is,
-/// and the spine reads it as the register's own. The operand must be the destructure itself, with
-/// the register (`.` or a listed marker, [`collapse_marker_pipes`]) as its bound expression, so a
-/// `.` under a navigation is not mistaken for it. Only for [`drive_fold_source_with`]'s loud
-/// refusal, which reads the copy and runs nothing on it.
+/// dropped (#4575). The error is caught: the source emits nothing, the pattern never moved jq's
+/// register, and the fold answers (`try ($x as {a:$a} | .) catch .` on `[true]`). A destructure
+/// that succeeds is left as it is, and the spine reads it as the register's own. The operand must
+/// be the destructure itself, with the register (`.` or a listed marker,
+/// [`collapse_marker_pipes`]) as its bound expression. The rewrite is context-free, but the spine
+/// stops at the first stage that navigates, so a `try` after `.x |` is never read and what it
+/// became does not matter; where the spine does read one, `.` is the accumulator `value` types.
+/// A computed key (`{(k): $a}`) needs no special case: its value is a string or an error, and a
+/// key that emits nothing leaves the source as empty as the type error does. Only for
+/// [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it.
 fn prune_caught_destructures(
     source: &Expr,
     value: &OwnedValue,
