@@ -71781,6 +71781,178 @@ fn test_foreach_extract_try_over_an_alternative_bind_of_a_container_state_retrie
     ])
 }
 
+/// #4610: a `foreach` whose source navigates the register onto an element, with INIT `.`. The root the
+/// state starts as is no node of the register there (only a `null` or boolean state is still
+/// `jv_identical` to it, by kind), so jq's `path_intact` refuses a pattern step on it and `?//` retries
+/// onto the bare alternative. The step compared the state with the *entry* register, which the root is,
+/// so a `try` swallowed the refusal: the UPDATE's output vanished (`$k` EXTRACT answered nothing where jq
+/// answers `[0]`) and the state emission was accepted where jq raises. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternative_bind_4610(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[null]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [null]",
+            5,
+        ),
+        (
+            "[true]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[]? as $k (.; try (. as {(.):$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[0]
+",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[0]
+",
+            "",
+            0,
+        ),
+        (
+            "[null]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[0]
+",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[\"a\"]
+",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"del(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[]
+",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); $k)) = 9",
+            "[9]
+",
+            "",
+            0,
+        ),
+        // A source that does not move the register keeps the entry comparison: a literal state is off it
+        // (#4550), and a full slice of the root is the same node (a different path, an equal register).
+        (
+            "[1]",
+            r"path(foreach (1,2) as $k (0; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach (1,2) as $k ([]; try (. as [$a] ?// $a | $a); $k))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[0:] as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "[{\"start\":0,\"end\":null},0]\n",
+            "",
+            0,
+        ),
+        // Controls: a source that yields nothing, and a `null` INIT `.` that is `jv_identical` to the
+        // `null` the source moved the register onto (#4354), are not refused.
+        (
+            "[]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "[\"a\",0]
+",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .a? as $k (.; try (. as [$a] ?// $a | $a); $k))",
+            "[\"a\"]
+",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to
