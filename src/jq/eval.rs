@@ -52082,11 +52082,25 @@ fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
         && source_destructures_register(&drop_array_wrappers(source), true)
 }
 
-/// `source` with every `[E]` replaced by `E` ([`array_wrapped_destructure_of_register`]).
+/// `source` with every `[E]` whose `E` is a plain bind chain replaced by `E`
+/// ([`array_wrapped_destructure_of_register`]). Not an `E` with control flow around the bind
+/// (`select(false) | ...`, `limit(0; ...)`, an `if`, `first(...)`): the destructure may sit on a branch
+/// that never runs, which jq answers and the syntactic walk would refuse.
 fn drop_array_wrappers(source: &Expr) -> Expr {
     match source {
-        Expr::Array(inner) => drop_array_wrappers(inner),
+        Expr::Array(inner) if is_plain_bind_chain(inner) => drop_array_wrappers(inner),
         other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
+    }
+}
+
+/// `E` is a destructuring `as` bind (or a pipe of `.` and such binds) whose body is another such bind,
+/// `.` or a variable: every stage runs once, on every output of the stage before it.
+fn is_plain_bind_chain(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Literal(_) => true,
+        Expr::AsPattern { body, .. } | Expr::As { body, .. } => is_plain_bind_chain(body),
+        Expr::Pipe(stages) => stages.iter().all(is_plain_bind_chain),
+        _ => false,
     }
 }
 

@@ -113,6 +113,11 @@ SOURCES = [
     ("fresh-var-wrapped", "{a:1} as $n | [$n as {b:$b} | .]"),
     ("fresh-lit-wrapped", "[{a:1} as {b:$b} | .]"),
     ("dotpat-wrapped", "[. as {b:$b} | .]"),
+    # ...but not on a branch that never runs (#4632): jq answers these
+    ("wrapped-sel-false", "[select(false) | . as {b:$b} | .]"),
+    ("wrapped-limit-0", "[limit(0; . as {b:$b} | .)]"),
+    ("wrapped-if-false", "[if false then . as {b:$b} | . else 1 end]"),
+    ("wrapped-first", "[first(1, (. as {b:$b} | .))]"),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),

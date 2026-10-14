@@ -131538,6 +131538,31 @@ fn test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632() -> Re
             "[]\n",
             0,
         ),
+        // The destructure on a branch that never runs is answered by jq, and stays so.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([select(false) | . as {b:$b} | .]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | reduce .[]? as $i (.; foreach ([limit(0; . as {b:$b} | .)]) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([if false then . as {b:$b} | . else 1 end]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([first(1, (. as {b:$b} | .))]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
         (
             r#"{"a":true}"#,
             r"path(. as $x | reduce .[]? as $i (.; foreach ([1] as $y | .) as $y (.; .; .)))",
