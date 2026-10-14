@@ -50558,6 +50558,17 @@ impl<'e> RegisterSpine<'e> {
         register
     }
 
+    /// Whether `stage` is a comma with a freshly built item (#4582): `({a:1}, .) | . as {a:$a} | .`.
+    /// A source is generated whole, so the fresh item reaches the stage after it whatever order the
+    /// items come in, and its tracked `INDEX` step raises on it. Only a comma: an `if` or `//` takes
+    /// one branch at run time, so a fresh branch of it does not say the destructure meets it.
+    fn comma_has_fresh_item(&mut self, stage: &'e Expr) -> bool {
+        match unwrap_paren(stage) {
+            Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, true)),
+            _ => false,
+        }
+    }
+
     /// Whether `e`, the bound expression of a destructuring bind, has a freshly built output
     /// ([`yields_only_fresh_values`]): some output of a comma (`every` false), or every output
     /// of one (`every` true), and a call with no arguments, which returns what its body does,
@@ -51153,7 +51164,7 @@ impl<'e> RegisterSpine<'e> {
                             self.dot_fresh = entry;
                             return Reach::Destructures;
                         }
-                        _ if self.binds_fresh(stage, true) => {
+                        _ if self.binds_fresh(stage, true) || self.comma_has_fresh_item(stage) => {
                             self.dot_fresh = true;
                             reach = Reach::Opaque;
                         }
@@ -51490,7 +51501,7 @@ fn routes_destructuring(patterns: &[Pattern]) -> bool {
 }
 
 /// Whether every output of `e` is a freshly built value -- a number or string
-/// literal, an array or object construction, a builtin that always builds its
+/// literal, an array or object construction, `$__loc__` (#4582), a builtin that always builds its
 /// result, or a comma/paren/pipe of them -- and so can never be jq's path register
 /// (#3489, #3745). Deliberately an allow-list: anything it does not name (`.`, a
 /// call, an arithmetic that may return its input) may preserve the register and is
@@ -51511,6 +51522,8 @@ fn yields_only_fresh_values(e: &Expr) -> bool {
     match e {
         Expr::Literal(Literal::Null | Literal::Bool(_)) => false,
         Expr::Literal(_) | Expr::Array(_) | Expr::Object(_) => true,
+        // #4582: `$__loc__` is the object `{file, line}` the evaluator builds.
+        Expr::Loc { .. } => true,
         // #3745: a builtin whose every output is a container it builds itself --
         // jq defines each over a fresh `[]`/`{}` (`reduce`/`[... | f]`), so its
         // result is never `jv_identical` to the register (an empty one is a fresh

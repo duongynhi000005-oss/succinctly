@@ -2438,6 +2438,13 @@ is the revert that established what the other one costs.
    spine's call budget (`SPINE_CALL_BUDGET`), where the walk stops reading bodies. Pinned by
    `test_foreach_source_bound_to_a_call_building_a_fresh_value_refuses_4452`.
 
+   A top-level `reduce` source whose pipe stage is a bare comma with a fresh item (`({a:1}, .) | . as {a:$a} | .`, in either
+   order) or `$__loc__` raises as jq does since [#4582](https://github.com/rust-works/succinctly/issues/4582): the source is
+   generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Still
+   accepted ([#4597](https://github.com/rust-works/succinctly/issues/4597)): the comma behind `isempty`/`any`/`first`/`limit`,
+   a `reduce` stage between it and the destructure, and the source of a fold nested in another fold's body. Pinned by
+   `test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582`.
+
    A destructuring-only `?//` chain behind a pipe of `.` (`(.|.) as {a:$a} ?// [$a] | .`) as a `foreach` source inside a
    `reduce` UPDATE raises as jq does since [#4484](https://github.com/rust-works/succinctly/issues/4484), where
    [#4424](https://github.com/rust-works/succinctly/issues/4424)'s first part left it to the by-value drive:

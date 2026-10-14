@@ -62129,6 +62129,115 @@ fn test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_457
     Ok(())
 }
 
+/// #4582: a top-level `reduce` source that is a comma fresh on only *some* items (`({a:1}, .)`) and
+/// then destructures `.`: the source is generated whole, so the fresh item reaches the destructure
+/// and its tracked `INDEX` step raises, wherever the register is. The walk asked only about a stage
+/// fresh on every output. `$__loc__` is the object the evaluator builds, so it is fresh too. A
+/// `first`/`limit(1; ..)` that stops before the fresh item is generated still answers. Every row is a
+/// live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582() -> Result<()> {
+    let invalid = "Invalid path expression";
+    assert_path_rows_3289(&[
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.; .)) = 9",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce (({a:1}, .) | . as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce ((., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (keys | $__loc__ | . as {file:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce ($__loc__ | . as {file:$a} | .) as $k (.; .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first((., {a:1}) | . as {a:$a} | .)) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(1; (., {a:1}) | . as {a:$a} | .)) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce ((., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (($__loc__, .) | . as {file:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        // An `if` takes one branch at run time, so a fresh branch is not a fresh item: here the
+        // `else` runs and the register is destructured, which jq answers.
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (if .b then {a:1} else . end | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // An array pattern raises on the fresh item as well.
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (({a:1}, .) | . as [$a] | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+    ])?;
+    Ok(())
+}
+
 /// #4486: a `reduce` whose `UPDATE` is a `try ... catch H` with a handler that moves nothing, or an
 /// `isempty(g)` over a generator the resolver path-checks, leaves jq's register where the fold
 /// entered it (jq backtracks the register to the `try`'s entry whether the body raised or not, and the
