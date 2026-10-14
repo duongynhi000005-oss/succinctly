@@ -2364,6 +2364,14 @@ CONTEXTS = [
     ("foreach-update-try-assign-nav-init-dot", "(foreach .[]? as $k (.; try ({X}); $k)) = 9"),
     ("foreach-extract-try-path-nav-init-dot", "path(foreach .[]? as $k (.; .; try ({X})))"),
     ("foreach-update-try-var-nav-key-init-dot", "path(foreach .a? as $k (.; try ({X}); $k))"),
+    # (#4611) a source that navigates the register onto the element, an UPDATE that is the operand
+    # itself (no `try`), and an EXTRACT `$k` that IS that register: a builtin-call UPDATE
+    # (`isempty(g)`, `any(g; c)`) left the register where it entered, so `$k` names a path.
+    ("foreach-update-var-nav-path", "path(foreach .[]? as $k (0; {X}; $k))"),
+    ("foreach-update-var-nav-init-dot", "path(foreach .[]? as $k (.; {X}; $k))"),
+    ("foreach-update-var-nav-del", "del(foreach .[]? as $k (0; {X}; $k))"),
+    ("foreach-update-var-nav-assign", "(foreach .[]? as $k (0; {X}; $k)) = 9"),
+    ("foreach-update-var-nav-key-path", "path(foreach .a? as $k (0; {X}; $k))"),
 ]
 
 # Long chains are the O(N^3) row: a timing axis, not a correctness one.
@@ -2396,12 +2404,13 @@ def shapes_for(operand, stage_only=False):
         yield f"{c} or {operand}"
 
 
-def build_rows(operands=None, stage_only=False):
+def build_rows(operands=None, stage_only=False, contexts=None):
     """The grid and the chain rows, separately: (label, input, program).
 
     The chain rows are the timing axis and are never sampled away. `operands`
     restricts the grid to a subset of OPERANDS (the `--operand` flag): a fast
-    targeted run while iterating, never the number a gate is judged on.
+    targeted run while iterating, never the number a gate is judged on. `contexts` likewise
+    restricts the grid to the named CONTEXTS (the `--context` flag).
     """
     ctx = dict(CONTEXTS)
     rows = []
@@ -2409,6 +2418,8 @@ def build_rows(operands=None, stage_only=False):
     for operand in OPERANDS if operands is None else operands:
         for shape in shapes_for(operand, stage_only):
             for cname, template in CONTEXTS:
+                if contexts and cname not in contexts:
+                    continue
                 # An operand that uses `$x` or `$k` *free* only means something where the
                 # context binds it; elsewhere jq and the build both fail to compile, a
                 # trivial MATCH that carries no signal (3.4% of the grid, #3653; `$k` since
@@ -2649,6 +2660,14 @@ def main():
         help="restrict the grid to this operand (exact text from --list-axes); repeatable",
     )
     ap.add_argument(
+        "--context",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="restrict the grid to this context (its name in CONTEXTS); repeatable. The chain "
+        "rows are unaffected",
+    )
+    ap.add_argument(
         "--stage-only",
         action="store_true",
         help="only the operand as a bare pipe stage (and negated), about 1/15 of the "
@@ -2661,7 +2680,11 @@ def main():
     unknown = [o for o in args.operand if o not in OPERANDS]
     if unknown:
         ap.error(f"--operand {unknown[0]!r} is not an operand; see --list-axes")
-    grid, chains = build_rows(args.operand or None, args.stage_only)
+    known_contexts = {name for name, _ in CONTEXTS}
+    unknown = [c for c in args.context if c not in known_contexts]
+    if unknown:
+        ap.error(f"--context {unknown[0]!r} is not a context; see CONTEXTS")
+    grid, chains = build_rows(args.operand or None, args.stage_only, args.context or None)
     if args.list_axes:
         print(f"operands={len(OPERANDS)} companions={len(COMPANIONS)} inputs={len(INPUTS)} "
               f"contexts={len(CONTEXTS)}")
