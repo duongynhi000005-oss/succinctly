@@ -2600,6 +2600,11 @@ is the revert that established what the other one costs.
    same way (`bounded_comma_leaves`), so `del(try (-(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))))` still
    answers. A pipe of `.` stages around such a body (`(., 1) | .`) reads as the body. Any other wrapper (`(., 1) | (. | .)`, a leaf that may yield several outputs) is routed and refused outright, as the
    written-out `limit(2; ., 1) as {a:$a}` is. Pinned by `test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565`.
+   Since [#4600](https://github.com/rust-works/succinctly/issues/4600) a `def f: ., {a:1}` mixed body is routed per leaf inside
+   another fold's body too (`RegisterSpine::body_binds_fresh` no longer stops at the top level): `path(reduce 1 as $i (.; reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))`
+   raises on the fresh leaf as in jq (pinned by `test_nested_fold_source_destructuring_a_mixed_body_call_raises_4600`). Still refused where
+   jq answers: the value-mode operand form (`del(try (reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))))`, also
+   `[reduce ...] | .[0]`), whose register leaf the resolver places as one value and refuses as a guess.
 
    A `reduce` source that destructures the register twice in a pipe is refused since
    [#4583](https://github.com/rust-works/succinctly/issues/4583): jq raises at the second destructure, since the first one's

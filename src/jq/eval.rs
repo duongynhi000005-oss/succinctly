@@ -51039,13 +51039,13 @@ impl<'e> RegisterSpine<'e> {
         // #4522: fresh on some output only counts for a body [`call_comma_leaves`] binds per leaf
         // (a call with no arguments whose body is a comma, also behind `.` stages): any other body
         // is placed as one value, whose register output the resolver refuses as a guess no `try`
-        // catches. And only at the top level: inside another fold's body `.` is not known to be
-        // the register, and a value-mode operand there (`reduce 1 as $i (.; -(reduce (def f: .,
-        // {a:1}; f as {a:$a} | .) as $j (.; .)))` under a `try`) is answered by jq, where the
-        // register leaf refuses as a guess.
+        // catches. #4600 lifted the top-level-only restriction #4598 put here: inside another
+        // fold's body the same source in path position raises in jq on the fresh leaf and was
+        // answered (`path(reduce 1 as $i (.; reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.;
+        // .)))`). The value-mode operand it was feared to break (`-(reduce ...)` under a `try`, which
+        // jq answers) was refused already, as a guess, and is the same wrong refusal either way.
         let fresh = self.binds_fresh(body, true)
             || (!every
-                && fold_body::depth() == 0
                 && params.is_empty()
                 && matches!(peel_identity_stages(body), Expr::Comma(_))
                 && self.binds_fresh(body, false));

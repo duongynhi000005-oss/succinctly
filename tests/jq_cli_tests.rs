@@ -131638,6 +131638,64 @@ fn test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604() -> 
     Ok(())
 }
 
+/// #4600: a `reduce`/`foreach` source that destructures a call whose `def` hands the register on next to
+/// a fresh value (`def f: ., {a:1}; f as {a:$a} | .`), inside another fold's body and in path position,
+/// raises in jq on the fresh leaf (`{a:1}` is not the register). #4598 routed the mixed body at the top
+/// level only, so the nested form was driven by value and answered (`[[]]`), and `del`, `=` and `|=`
+/// wrote through it. The top-level-only restriction is lifted. The value-mode operand form (`-(...)`,
+/// `[...]|.[0]` under a `try`), which jq answers, was refused before and still is (limitations.md).
+/// Every row captured from jq 1.7.1; stdout and the exit status are pinned.
+#[test]
+fn test_nested_fold_source_destructuring_a_mixed_body_call_raises_4600() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"[path(reduce 1 as $i (.; reduce (def f: ., {"a":1}; f as {a:$a} | .) as $j (.; .)))]"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"del(reduce 1 as $i (.; reduce (def f: ., {"a":1}; f as {a:$a} | .) as $j (.; .)))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"(reduce 1 as $i (.; reduce (def f: ., {"a":1}; f as {a:$a} | .) as $j (.; .))) = 9"#,
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r#"path(reduce 1 as $k (.; reduce (def f: ., {"a":1}; f as {a:$a} | .) as $k (.; .)))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"path(reduce 1 as $i (.; foreach (def f: ., {"a":1}; f as {a:$a} | .) as $j (.; .; .)))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"[path(reduce (def f: ., {"a":1}; f as {a:$a} | .) as $j (.; .))]"#,
+            "",
+            5,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4489: a `foreach` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
 /// (`1 | foreach ...`, a literal or a computed `.`), states the register it entered with when the
 /// element took no walk step. jq's chain tries the array/object pattern first; its `INDEX` step on a
