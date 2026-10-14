@@ -20451,32 +20451,71 @@ mod meta_assign_798 {
         assert_eq!(out, "a: 1\n");
     }
 
-    /// Known gap, not specific to #798: [`resolve_meta_assign_writes`]
-    /// resolves each non-identity preceding stage in total isolation
-    /// (`evaluate_input_quiet`, a fresh re-index-and-evaluate with no
-    /// access to the surrounding pipe's scope) -- the exact same hole
-    /// `.a | .b = 5` already falls into for comments on any write-family
-    /// operator (`is_alias_sensitive_assign`'s `is_shape_preserving` admits
-    /// only a fixed operator list, not arbitrary navigation), and that a
-    /// user-defined function call falls into doubly, since `f` alone is
-    /// unresolvable outside the `def` that introduced it. Both cases here
-    /// exit 0 with the write silently dropped rather than raising the
-    /// "top-level pipe stage" refusal #798's triage otherwise prefers
-    /// (`docs/compliance/yq/limitations.md`'s #798 entry) -- pinning the
-    /// current (non-ideal, but intentional-for-PR1) output so a future fix
-    /// updates this test deliberately instead of silently. `def` itself is
-    /// succinctly's own accepted (if undocumented) surface here; real yq's
-    /// lexer rejects it outright, so there is no oracle for the second
-    /// case.
+    /// #2679: [`resolve_meta_assign_writes`] resolves each non-identity preceding stage in total
+    /// isolation (`evaluate_input_quiet`, a fresh re-index-and-evaluate with no access to the
+    /// surrounding pipe's scope), and `is_alias_sensitive_assign`'s `is_shape_preserving` admits
+    /// only a fixed operator list, not arbitrary navigation. A write behind a navigation stage,
+    /// or behind a stage that calls a user-defined function (`f` alone is unresolvable outside
+    /// the `def` that introduced it), used to exit 0 with the write silently dropped; both are
+    /// refused out loud now, the way #798's triage prefers. Real yq applies the first; it has no
+    /// `def` (its lexer rejects it), so the second has no oracle.
     #[test]
-    fn preceding_stage_outside_the_admitted_shapes_silently_drops_the_write() -> Result<()> {
-        let (out, code) = run_yq_stdin(".a | .b line_comment = \"hi\"", "a:\n  b: 1\n", &[])?;
-        assert_eq!(code, 0);
-        assert_eq!(out, "b: 1\n");
+    fn metadata_write_behind_navigation_or_def_is_refused_not_dropped_2679() -> Result<()> {
+        // Real yq prints `b: 1 # hi` for the first; the write needs the navigated
+        // subtree's own presentation, so it is refused out loud.
+        for filter in [
+            ".a | .b line_comment = \"hi\"",
+            ".a | .b style = \"double\"",
+            ".a | .b anchor = \"x\"",
+            ".a | .b | .c line_comment = \"hi\"",
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
+            assert_eq!(code, 1, "{filter}: {err}");
+            assert_eq!(out, "", "{filter}");
+            assert!(err.contains("#2679"), "{filter}: {err}");
+        }
 
-        let (out, code) = run_yq_stdin("def f: .; f | .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        // A `def` that a stage ahead of the write reads through (succinctly's own surface;
+        // real yq's lexer rejects `def`).
+        let (out, err, code) =
+            run_yq_stdin_with_stderr("def f: .; f | .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(out, "");
+        assert!(err.contains("#2679"), "{err}");
+
+        // The same refusals through an `as` binding, and through a `def` call that navigates.
+        for filter in [
+            ".a | .b as $v | .b line_comment = \"z\"",
+            "def f: .a; f | .b line_comment = \"z\"",
+        ] {
+            let (out, err, code) = run_yq_stdin_with_stderr(filter, "a:\n  b: 1\n", &[])?;
+            assert_eq!(code, 1, "{filter}: {err}");
+            assert_eq!(out, "", "{filter}");
+            assert!(err.contains("#2679"), "{filter}: {err}");
+        }
+
+        // Unchanged: the same write as the first stage, a `def` nothing calls, a
+        // write a later stage replaces, and JSON output (no comments to lose).
+        let (out, code) = run_yq_stdin(".a.b line_comment = \"hi\"", "a:\n  b: 1\n", &[])?;
         assert_eq!(code, 0);
-        assert_eq!(out, "a: 1\n");
+        assert_eq!(out, "a:\n  b: 1 # hi\n");
+        let (out, code) = run_yq_stdin("def f: .; .a line_comment = \"hi\"", "a: 1\n", &[])?;
+        assert_eq!(code, 0);
+        assert_eq!(out, "a: 1 # hi\n");
+        let (out, code) = run_yq_stdin(
+            "def f: .; .d = 5 | .c line_comment = \"hi\"",
+            "a: 1\nc: 2\n",
+            &[],
+        )?;
+        assert_eq!(code, 0);
+        assert_eq!(out, "a: 1\nc: 2 # hi\nd: 5\n");
+        let (out, code) = run_yq_stdin(
+            ".a | .b line_comment = \"hi\"",
+            "a:\n  b: 1\n",
+            &["-o", "json", "-I0"],
+        )?;
+        assert_eq!(code, 0);
+        assert_eq!(out.trim(), r#"{"b":1}"#);
         Ok(())
     }
 
@@ -57701,10 +57740,10 @@ fn test_yq_sort_keys_builtin_2855() -> Result<()> {
 /// `.a`, matching real yq's `z: 2\ny: [3, {q: 1, p: 2}]`) -- but *not* the
 /// flow style on `y`, since `.a` (a bare navigation stage before the write)
 /// isn't in `is_shape_preserving`'s fixed operator list. That's the
-/// pre-existing, already-tracked #2679 gap ("a preceding stage outside the
-/// shapes `is_alias_sensitive_assign` admits silently drops the write"/
-/// "navigation after the write drops the presentation") applying here for
-/// the first time to a *value*, not just comments -- confirmed this isn't
+/// pre-existing, already-tracked gap ("navigation after the write drops the
+/// presentation", and #2679's refusal of a metadata write behind a
+/// navigation stage) applying here for the first time to a *value*, not
+/// just comments -- confirmed this isn't
 /// new or sort_keys-specific: `.a | (.z = 3)` already loses the identical
 /// `.y` flow style on plain `main`, unrelated to this issue. Documented
 /// beside the other #2679 rows in `docs/compliance/yq/limitations.md`.
