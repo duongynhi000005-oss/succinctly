@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x fifty-three x seven x thirteen.
+document, six x three x fifty-six x seven x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -92,6 +92,11 @@ SOURCES = [
     ("try-chain-catch-3", "try ($x as {a:$a} ?// [$a] ?// $b | .) catch ."),
     ("try-chain-catch-3-arr", "try ($x as {a:$a} ?// {b:$a} ?// [$a] | .) catch ."),
     ("try-chain-catch-dot", "try (. as {a:$a} ?// [$a] | .) catch ."),
+    # a last alternative of several entries that matches is answered, and a body that navigates is
+    # not the register's emission
+    ("try-chain-catch-multi", "try ($x as {a:$a} ?// [$a,$b] | .) catch ."),
+    ("try-chain-catch-multi-obj", "try ($x as {a:$a,b:$c} ?// {a:$a,b:$c} | .) catch ."),
+    ("try-chain-catch-nav", "try ($x as {a:$a} ?// [$a] | .a) catch ."),
     ("try-chain", "try ($x as {a:$a} ?// [$a] | .)"),
     ("opt-chain", "($x as {a:$a} ?// [$a] | .)?"),
     ("try-var-catch", "try ($x as $v | .) catch ."),

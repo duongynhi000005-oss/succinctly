@@ -2278,8 +2278,9 @@ is the revert that established what the other one costs.
    a matched alternative moves the register, the code after the chain raises and `?//` retries the next one, and the last
    has none to retry onto, so a last alternative that type-errors lands in the `try` (answered) while one that matches
    leaves the raise uncaught (`foreach (try ($x as {a:$a} ?// [$a] | .) catch .)` raises on `[true]` and is answered on
-   `{"a":true}`; `caught_chain_raises`). A chain with a nested pattern, and a `try`/`?` with no handler, are read as
-   before. On a `null` accumulator a `$x` marker
+   `{"a":true}`; `caught_chain_raises`). A chain with a nested pattern, a last alternative of several entries that matches (jq answers
+   it: `{a:$a} ?// [$a,$b]` on `[1,2]`), a body that is not `.`/a variable/a literal (`.a` can raise inside the `try`,
+   `empty` emits nothing), and a `try`/`?` with no handler, are read as before. On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any

@@ -62779,7 +62779,8 @@ fn test_fold_source_moving_the_register_on_null_still_answers_4505() -> Result<(
 /// last has none to retry onto. A last alternative that type-errors lands in the `try` and the
 /// chain is answered, whichever alternative matched before it; one that matches leaves the raise
 /// uncaught, so `del`/`=`/`|=` write nothing. A bare `$v` alternative moves nothing and ends the
-/// chain answered. The loud refusal read the chain as the by-value route's (the first alternative
+/// chain answered, a last alternative of several entries that matches is answered, and so is a body
+/// that navigates or is `empty` (it is not the register that the enclosing fold meets). The loud refusal read the chain as the by-value route's (the first alternative
 /// matched), which deleted the document where jq raises. Every row is a live jq 1.7.1 capture.
 #[test]
 fn test_caught_chain_of_register_destructures_ends_on_its_last_alternative_4585() -> Result<()> {
@@ -62896,6 +62897,78 @@ fn test_caught_chain_of_register_destructures_ends_on_its_last_alternative_4585(
         (
             r"[true]",
             r"del(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[1,2]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a,$b] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[1,2]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a,$b] | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":1,"b":2}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a,b:$c} ?// {a:$a,b:$c} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1,"b":2}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a,b:$c} ?// {a:$a,b:$c} | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .a) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .a) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "[true]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | $a) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | $a) catch .) as $y (.; .; .); .))",
             "",
             5,
         ),
