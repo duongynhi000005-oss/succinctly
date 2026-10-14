@@ -62773,6 +62773,144 @@ fn test_fold_source_moving_the_register_on_null_still_answers_4505() -> Result<(
     Ok(())
 }
 
+/// #4585: a `try ... catch` around a `?//` chain of destructures of the register in a fold source
+/// inside another fold's body ends on the chain's *last* alternative. A matched alternative moves
+/// jq's register, so the code after the chain raises and `?//` retries the next alternative; the
+/// last has none to retry onto. A last alternative that type-errors lands in the `try` and the
+/// chain is answered, whichever alternative matched before it; one that matches leaves the raise
+/// uncaught, so `del`/`=`/`|=` write nothing. A bare `$v` alternative moves nothing and ends the
+/// chain answered. The loud refusal read the chain as the by-value route's (the first alternative
+/// matched), which deleted the document where jq raises. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_caught_chain_of_register_destructures_ends_on_its_last_alternative_4585() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {b:$a} ?// {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {b:$a} ?// {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// {b:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// {b:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4575: a `try`/`?` around a fold source's destructure of the register inside another fold's
 /// body catches the pattern's *type error* (`{a:$a}` on an array): nothing moved jq's register,
 /// the source is empty and jq answers. A pattern that succeeds moves the register and the

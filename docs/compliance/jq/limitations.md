@@ -2273,10 +2273,13 @@ is the revert that established what the other one costs.
    A `try`/`?` around the destructure catches its *type error* (`{a:$a}` on an array), where nothing moved the register
    and jq answers, and not a success, which moves it ([#4575](https://github.com/rust-works/succinctly/issues/4575)): the
    refusal reads the accumulator's type, replacing a single destructure of the register that raises by `empty` and
-   dropping its handler (`prune_caught_destructures`). Still accepted
-   ([#4585](https://github.com/rust-works/succinctly/issues/4585)): a `try ... catch` around a `?//` chain of
-   destructures (`foreach (try ($x as {a:$a} ?// [$a] | .) catch .)` on `[true]`: jq answers where the first alternative
-   matched and raises where a later one did, which the by-value route does not tell apart). On a `null` accumulator a `$x` marker
+   dropping its handler (`prune_caught_destructures`). A `try ... catch` around a `?//` chain of
+   flat destructures ends on the chain's last alternative ([#4585](https://github.com/rust-works/succinctly/issues/4585)):
+   a matched alternative moves the register, the code after the chain raises and `?//` retries the next one, and the last
+   has none to retry onto, so a last alternative that type-errors lands in the `try` (answered) while one that matches
+   leaves the raise uncaught (`foreach (try ($x as {a:$a} ?// [$a] | .) catch .)` raises on `[true]` and is answered on
+   `{"a":true}`; `caught_chain_raises`). A chain with a nested pattern, and a `try`/`?` with no handler, are read as
+   before. On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
