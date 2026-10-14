@@ -50108,21 +50108,24 @@ fn foreign_register_markers<S: EvalSemantics>(
     {
         return markers;
     }
-    // A `null`/`false` marker passes nothing through a `select`, an `if` or an `and`/`or`/`//`, so the
-    // destructure behind one may never run: such a marker is read only in a source with none.
-    let conditional = any_subexpr(source, &mut |e| {
+    // An `if`, `and`/`or` or `//` runs one branch, so a destructure in the other may never run
+    // (`if $x then . else $x as {b:$b} | . end` with a truthy `$x` is answered): such a source is
+    // left to the by-value route. A `select` passes a truthy marker on and nothing for a
+    // `null`/`false` one, which is then not read.
+    if any_subexpr(source, &mut |e| {
         matches!(
             e,
-            Expr::If { .. }
-                | Expr::And(..)
-                | Expr::Or(..)
-                | Expr::Alternative(..)
-                | Expr::Builtin(Builtin::Select(_))
+            Expr::If { .. } | Expr::And(..) | Expr::Or(..) | Expr::Alternative(..)
         )
+    }) {
+        return markers;
+    }
+    let selects = any_subexpr(source, &mut |e| {
+        matches!(e, Expr::Builtin(Builtin::Select(_)))
     });
     any_subexpr(source, &mut |e| {
         if let Expr::TrackedVar(marker) = e {
-            if conditional && matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false)) {
+            if selects && matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false)) {
                 return false;
             }
             let elsewhere = match &marker.origin {
