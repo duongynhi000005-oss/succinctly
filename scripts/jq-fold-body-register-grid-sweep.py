@@ -178,10 +178,12 @@ DOCS = [
 # `try ... catch` around a `?//` chain of destructures until #4585.)
 KNOWN_ACCEPT_WRONG = {
     # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
-    # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
+    # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register.
+    # Keyed on the source alone: the rows span every context and document, so a regression of this
+    # source elsewhere is not told apart from the residual.
     ("lit-null-var", None),
     # a comma beside a literal `null` destructure, on a `null` document, under `|=`/`=` (#4603)
-    ("lit-null-comma", None),
+    ("lit-null-comma", "null"),
 }
 
 

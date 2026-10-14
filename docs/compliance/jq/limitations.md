@@ -2339,14 +2339,17 @@ is the revert that established what the other one costs.
    of another fold, is still accepted, because the register's own null-ness is not known there
    (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
-   jq's register to). A `null`/boolean *literal* bound by a destructure (`null as {b:$b} | .`, also `null as $x` outside the
-   fold) has no marker, and jq's `jv_identical` makes it the register only when the register holds the same one, so it is
+   jq's register to). A `null`/boolean *literal* bound by a destructure in a fold source (`null as {b:$b} | .`, or a `$x`
+   bound to one outside the fold) has no marker, and jq's `jv_identical` makes it the register only when the register holds the same one, so it is
    routed to the resolver for the kinds the register is known not to be (`NotRegister::at_fold`, [#4603](https://github.com/rust-works/succinctly/issues/4603)):
    the fold's accumulator at the top level and in a body where it is the register, a document that is not `null` after an INIT that
    navigated, and an element a `reduce` source moved onto that is not `null`. A `null` register, a `null` element and an INIT
    that navigated onto a `null` keep the by-value answer, which is jq's. Still accepted: a variable bound to such a literal inside a
    `foreach` source (`foreach (null as $n | $n as {a:$a} | .) ...`, [#4616](https://github.com/rust-works/succinctly/issues/4616); a `reduce` source reads it), and a
-   comma beside the destructure on a `null` document under `=`/`|=`. Refused where jq answers silently
+   comma beside the destructure on a `null` document under `=`/`|=`, a `null` literal destructure in a fold nested in a fold whose
+   source is untracked (`reduce (.a? // 1) as $i (.; reduce (null as {b:$b} | .) as $z (.; .))`: the ambient does not describe jq's
+   register there), and a boolean literal after an INIT that navigated or in a moved `reduce` body, which still raises, with the
+   type error's message (`Cannot index boolean ...`) instead of the path error's. Refused where jq answers silently
    ([#4617](https://github.com/rust-works/succinctly/issues/4617)): a `?`/`try` around the literal destructure (`foreach ((null as {b:$b} | .)?)`,
    which `main` answered by value with a different wrong output).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
