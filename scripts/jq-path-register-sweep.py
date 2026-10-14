@@ -2105,6 +2105,14 @@ OPERANDS = [
     "(. as $x | foreach (limit(2; $x, 1) as {a:$a} | .) as $k (.; .; .))",
     "(reduce (limit(2; ., 1) as {a:$a} | .) as $k (.; .))",
     "(foreach (def f: limit(2; ., 1); f as {a:$a} | .) as $k (.; .; .))",
+    # (#4565) a call with no arguments whose body is such a source: a comma body is placed per leaf
+    # (also behind a call to a call), the others are routed and refused.
+    "(foreach (def f: (., 1); f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: (., {a:1}); def g: f; g as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: first((., 1)); f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: (., 1) | .; f as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (def f: (1, .); f as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (def f: (., 1); f as {a:$a} | .) as $k (.; .))",
     # The wrappers that hand the first output on: `nth(0; ..)`, a pipe with `.`, `try`, and the contrasts
     # that do not (`nth(1; ..)`, `limit(0; ..)`).
     "(foreach (nth(0; ., 1) as {a:$a} | $a) as $k (.; .; .))",
