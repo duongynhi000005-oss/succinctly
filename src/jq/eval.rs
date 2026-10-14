@@ -53460,8 +53460,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
 
             // #4550: or, in the step of an outermost fold whose accumulator the walk places off the
             // register ([`fold_body::acc_off_register_here`]: a computed container, not INIT `.`),
-            // and no register lost, so `bound` is not the one that was (#4610: a register in hand that
-            // equals it by value is not its node either, a source having moved it). jq's
+            // with no register in hand and none lost, so `bound` is not the one that was. jq's
             // `path_intact` refuses a pattern step on such an accumulator whatever the register is,
             // and the error handed back below is catchable as jq's own ([`guess_refusal_of`]), so it
             // must retry as jq's own too: it did not, and a `try` swallowed what `?//` should have
@@ -53474,7 +53473,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                     || (S::TAG == EvalTag::Jq
                         && (refused_could_succeed.get() == Some(false)
                             || pattern_walk_fails_by_value::<S>(pattern, bound)
-                            || (fold_body::acc_off_register_here()
+                            || (register.is_none()
+                                && fold_body::acc_off_register_here()
                                 && !could_be_lost_register(
                                     &frame.register_loss,
                                     bound_is_frozen,
