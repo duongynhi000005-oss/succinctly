@@ -2507,6 +2507,20 @@ is the revert that established what the other one costs.
    answers. A pipe of `.` stages around such a body (`(., 1) | .`) reads as the body. Any other wrapper (`(., 1) | (. | .)`, a leaf that may yield several outputs) is routed and refused outright, as the
    written-out `limit(2; ., 1) as {a:$a}` is. Pinned by `test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565`.
 
+   A `reduce` source that destructures the register twice in a pipe is refused since
+   [#4583](https://github.com/rust-works/succinctly/issues/4583): jq raises at the second destructure, since the first one's
+   `INDEX` steps moved the register onto the member it matched, and the walk handed `.` on after a destructure, so
+   `path(reduce (. as {a:$a} | . as {a:$b} | .) as $k (.; .))` on `{"a":false,"b":null}` (also through a closure-taking `def`
+   called twice, `def g(x): x as {a:$a} | .; g(.) | g(.)`, a no-argument `def` and a parenthesised stage) was driven by value, and
+   `del`/`=`/`|=` over it deleted or replaced the document. The `fresh_only` walk (`RegisterSpine::moved`) now reads a single
+   destructuring pattern that did not raise as leaving `.` off the register for the body and the stages after it, on a register
+   that is not `null` (the matched member is `null` again there, which the register is identical to, and jq answers), a
+   pipe nested in a pipe leaves it moved for the stages after it, a comma moves it when any branch did (all of them run, and the first output
+   raises downstream), and an `if` only when every branch did. A `?//` chain is not read as moving it, and neither is an `if` that
+   destructures in one branch only (`if . then (. as {a:$a} | .) else . end | . as {a:$b} | .`: still accepted when the `then`
+   branch runs). A `foreach` source with a closure-taking `def` called twice is still accepted (the register walk does not read a
+   closure argument). Pinned by `test_reduce_source_destructuring_the_register_twice_raises_4583`.
+
    | Filter                                                   | jq                          | Why succinctly still refuses                                                                                                                                                                                              |
    | -------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
    | `.a as $y \| path(.a \| $y)`                             | `["a"]`                     | value-mode binding — `eval_as` never resolves its source in path position; the *positional* half of #3037 (its root-of-invocation half is closed)                                                                                                          |

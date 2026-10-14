@@ -130172,6 +130172,169 @@ fn test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565
     Ok(())
 }
 
+/// #4583: a `reduce` source that destructures the register twice in a pipe raises in jq at the
+/// second destructure: the first one's `INDEX` steps moved the register onto the member it matched,
+/// so `.` is no longer the register (`. as {a:$a} | . as {a:$b} | .`, also through a closure-taking
+/// `def` called twice, a no-argument `def`, a parenthesised stage and an `if`). The register walk
+/// handed `.` on after a destructure, so the source was driven by value and `del`/`=`/`|=` wrote
+/// through. The register is the document here; on `null` the matched member is `null` again, which
+/// the register is identical to, and jq answers. A single destructure, a comma of two (each branch
+/// starts from the register) and a destructure of a fresh value after one are unchanged. Every row
+/// captured from jq 1.7.1; stdout and the exit status are pinned.
+#[test]
+fn test_reduce_source_destructuring_the_register_twice_raises_4583() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.) | g(.) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g: . as {a:$a} | .; g | g) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (. as {a:$a} | . as {a:$b} | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce ((. as {a:$a} | .) | (. as {a:$b} | .)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (. as {a:$a} | (. as {a:$b} | .)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.) | g({a:1}) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce (def g(x): x as {a:$a} | .; g(.) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce (. as {a:$a} | . as {a:$b} | .) as $k (.; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce (. as {a:$a} | . as {a:$b} | .) as $k (.; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce (. as [$a] | . as [$b] | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.)) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (. as {a:$a} | .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.), g(.)) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce ((. as {a:$a} | .), .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce (def g(x): x as {a:$a} | .; g(.) | g(.)) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce (. as {a:$a} | . as {a:$b} | .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+        // A pipe nested in a pipe, and a comma, leave the register moved for the stages after them.
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .) | .) | . as {a:$b} | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .) | .) | (. as {a:$b} | .)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (((. as {a:$a} | .), .) | . as {a:$b} | .) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(reduce (def g(x): x as {a:$a} | .; (g(.), g(.)) | g(.)) as $k (.; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (((. as {a:$a} | .), .) | . as {a:$b} | .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+        let (out, err, code) = run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input} (-n): stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #3859: the write side of the rows above, and the state a `?//` retry resumes
 /// from. When a write raises, jq's `reduce` has handed its state slot back as
 /// `null` (`DUPN`), so the retried alternative's paths are written onto `null`:
