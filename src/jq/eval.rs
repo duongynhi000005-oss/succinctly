@@ -49827,7 +49827,11 @@ fn source_destructures_fresh(source: &Expr, non_null_register: bool) -> bool {
 /// too. In the one body [`fold_body::acc_is_register`] marked, those [`marker_identical`]
 /// certifies against `ambient`, the same test the resolver applies to a marker in path
 /// position, so a `$x` that is a *different* node (`reduce .[] as $it (.; reduce ($it as {a:$a}
-/// | .) ...)`, which jq answers) is not. Nowhere else: `.` is not known to be the register.
+/// | .) ...)`, which jq answers) is not. Nowhere else, except on a `null` ambient (#4576): every
+/// `null` is `jv_identical` to a `null` register by kind, so `.` is read as the register there
+/// (`RegisterSpine::null_register`) and a `null` marker that certifies is read the same way. A
+/// `null` that is not the register, bound by a navigation or a literal, carries no marker and
+/// stays by value (#4588).
 /// Empty unless the source destructures something, so the certification's O(document)
 /// comparison is not paid by a source that cannot ask.
 fn fold_source_register_markers<S: EvalSemantics>(

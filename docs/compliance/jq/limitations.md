@@ -2225,7 +2225,10 @@ is the revert that established what the other one costs.
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
    fold body, not only the one `acc_is_register` marked; pinned by
-   `test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_4576`).
+   `test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_4576`). Still wrong
+   ([#4588](https://github.com/rust-works/succinctly/issues/4588)): a `null` that is not the register, bound by a navigation
+   or a literal (`.a as $x` on `{"a":null}`, `null as $n`), carries no register marker and is driven by value: the `del` form
+   deletes the document where jq raises, and the `path()` form on a `null` document prints the root where jq prints the moved path.
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
