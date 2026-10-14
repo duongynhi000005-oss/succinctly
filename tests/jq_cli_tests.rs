@@ -62593,6 +62593,313 @@ fn test_fold_source_moving_the_register_on_null_still_answers_4505() -> Result<(
     Ok(())
 }
 
+/// #4575: a `try`/`?` around a fold source's destructure of the register inside another fold's
+/// body catches the pattern's *type error* (`{a:$a}` on an array): nothing moved jq's register,
+/// the source is empty and jq answers. A pattern that succeeds moves the register and the
+/// enclosing fold's emission raises, so `del`/`=`/`|=` write nothing. The loud refusal cannot see
+/// the value, so it answered the first and accepted the second; it now reads the value's type
+/// before refusing. A `?//` chain keeps the by-value route (jq retries the next alternative past
+/// the pattern). Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_caught_destructure_of_the_register_in_a_fold_source_reads_the_type_4575() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (($x as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (($x as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as $v | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as $v | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {} | .) catch .) as $y (.; .; .); .))",
+            "",
+            3,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {} | .) catch .) as $y (.; .; .); .))",
+            "",
+            3,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .)) |= 9",
+            "9\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] | .) catch .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .); .)) |= 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .)) |= 9",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach (1,2) as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | reduce .[]? as $i (.; foreach (select(.) | (. as [$a] | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        // A bare `$v` alternative, or a destructure of something other than the register, is
+        // no type error the refusal reads: the source is left to the by-value route.
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (1 as [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (1 as [$a] | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as [$a] ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach (1,2) as $i (.; foreach (try (. as {a:$a} ?// $b | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an
