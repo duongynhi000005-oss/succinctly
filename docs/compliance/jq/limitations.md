@@ -779,7 +779,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   **Still divergent** (the same shape, not covered): a source that navigates the register with INIT `.`
   (`path(foreach .[] as $k (.; try (. as [$a] ?// $a | $a); .))` on `[[1]]` answers where jq raises), and an EXTRACT `try`
   whose operand wraps the bind in `isempty(...) or ...` (`path(foreach (1,2) as $k ([]; .; try (isempty(. as [$q] ?// $z |
-  if $q then true else empty end) or .b?)))` on `[]` answers where jq raises).
+  if $q then true else empty end) or .b?)))` on `[]` answers where jq raises,
+  [#4608](https://github.com/rust-works/succinctly/issues/4608)).
 
   **Since [#4497](https://github.com/rust-works/succinctly/issues/4497)** a `foreach` source that is a
   `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative prints once in `path()` (jq's `first` is a
