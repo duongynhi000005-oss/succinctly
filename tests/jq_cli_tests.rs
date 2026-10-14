@@ -62284,6 +62284,27 @@ fn test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582() -> Result
             "",
             0,
         ),
+        (
+            r#"{"a":5}"#,
+            r"[path(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
     ])?;
     Ok(())
 }

@@ -2443,7 +2443,7 @@ is the revert that established what the other one costs.
    generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Behind
    `first(f)`, `limit(n; f)` (n >= 1) or `nth(0; f)` only the operand's first output is generated, so that is the one read
    ([#4597](https://github.com/rust-works/succinctly/issues/4597)): `first({a:1}, .)` raises, `first(., {a:1})` answers. Still
-   accepted: the comma behind `isempty`/`any`/`all`, `limit(2; ., {a:1}, .)` (a fresh item past the first), a `reduce` stage
+   accepted: the comma behind `isempty`/`any`/`all`, `limit(2; ., {a:1}, .)` (a fresh item past the first), `try (., {a:1})`, `(., {a:1})?` and `label $l | (., {a:1})` (every item is generated, only the first is read), a first item that is itself a comma (`first(({a:1}, .), 2)`), a `reduce` stage
    between it and the destructure, and the source of a fold nested in another fold's body. Pinned by
    `test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582`.
 

@@ -50581,13 +50581,15 @@ impl<'e> RegisterSpine<'e> {
     ///
     /// Behind `first(f)`, a `limit` with a positive count or `nth(0; f)` (#4597) only the operand's
     /// first output is generated, so it is the one that has to be fresh: `first({a:1}, .)` raises,
-    /// `first(., {a:1})` stops after the register and answers.
+    /// `first(., {a:1})` stops after the register and answers. [`first_output_operand`] also peels
+    /// `try`, `?`, `label` and a one-stage pipe, which generate every item, so for those reading just
+    /// the first item is a (sound) under-approximation: `try (., {a:1})` stays accepted.
     fn comma_has_fresh_item(&mut self, stage: &'e Expr) -> bool {
         match unwrap_paren(stage) {
             Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, true)),
             wrapper => {
                 let first = first_output_operand(wrapper);
-                if core::ptr::eq(first, wrapper) {
+                if core::ptr::eq(first, unwrap_bind_source(wrapper)) {
                     return false;
                 }
                 match unwrap_paren(first) {
