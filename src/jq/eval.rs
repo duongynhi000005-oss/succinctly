@@ -52072,6 +52072,24 @@ fn caught_destructure_in_unrouted_body(
         && source_destructures_register(&drop_caught_handlers(source), true)
 }
 
+/// #4632: in the body of a `reduce` whose source moved jq's register onto an element, a destructure of
+/// `.` inside `[ ... ]` (`[. as {b:$b} | .]`) raises as it does outside the brackets: `.` is not the
+/// register there. The register walk reads `[E]` as opaque (a destructure of the register inside the
+/// brackets is answered everywhere else), so the source was driven by value. Read with the brackets
+/// dropped, for a moved body only.
+fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
+        && source_destructures_register(&drop_array_wrappers(source), true)
+}
+
+/// `source` with every `[E]` replaced by `E` ([`array_wrapped_destructure_of_register`]).
+fn drop_array_wrappers(source: &Expr) -> Expr {
+    match source {
+        Expr::Array(inner) => drop_array_wrappers(inner),
+        other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
+    }
+}
+
 /// `source` with every `try BODY catch H` replaced by `BODY` ([`caught_destructure_in_unrouted_body`]).
 fn drop_caught_handlers(source: &Expr) -> Expr {
     match source {
@@ -52188,6 +52206,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let destructures_unplaced_register = unplaced_body
         && (source_destructures_register(pruned.as_ref().unwrap_or(source), true)
             || caught_destructure_in_unrouted_body(source, foreach_source, ambient)
+            || (in_moved_body && array_wrapped_destructure_of_register(source))
             || (raise_reaches_fold
                 && select_passes
                 && pruned.is_none()

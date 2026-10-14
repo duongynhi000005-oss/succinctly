@@ -162,9 +162,6 @@ KNOWN_ACCEPT_WRONG = {
     # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
     # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
     ("lit-null-var", None),
-    # (#4632) a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source
-    # moved the register: `.` is on the element there, the by-value drive answers
-    ("dotpat-wrapped", None),
 }
 
 
