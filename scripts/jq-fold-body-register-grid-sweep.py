@@ -126,6 +126,19 @@ SOURCES = [
     # the outer fold's own loop variable is another value, not the register
     ("i-idx", "$i | .[0]"),
     ("i-nava", "$i | .a?"),
+    # a literal `null`/boolean bound by a destructure (#4603): jq's `jv_identical` makes it the register
+    # only when the register holds the same one, otherwise the pattern's step raises
+    ("lit-null-pat", "null as {a:$a} | ."),
+    ("lit-null-arr", "null as [$a] | ."),
+    ("lit-true-pat", "true as {a:$a} | ."),
+    ("lit-false-arr", "false as [$a] | ."),
+    ("lit-null-var", "null as $n | $n as {a:$a} | ."),
+    ("try-lit-null", "try (null as {a:$a} | .)"),
+    ("try-lit-null-catch", "try (null as {a:$a} | .) catch ."),
+    ("opt-lit-null", "(null as {a:$a} | .)?"),
+    ("sel-lit-null", "select(1) | null as {a:$a} | ."),
+    ("lit-null-chain", "null as {a:$a} ?// [$a] | ."),
+    ("lit-null-comma", "(null as {a:$a} | .), 1"),
 ]
 CONTEXTS = [
     ("path", "path(. as $x | {O})"),
@@ -167,6 +180,8 @@ KNOWN_ACCEPT_WRONG = {
     # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
     # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register
     ("lit-null-var", None),
+    # a comma beside a literal `null` destructure, on a `null` document, under `|=`/`=` (#4603)
+    ("lit-null-comma", None),
 }
 
 

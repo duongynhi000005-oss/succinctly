@@ -2315,7 +2315,7 @@ is the revert that established what the other one costs.
    fold body, not only the one `acc_is_register` marked; pinned by
    `test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_4576`). Still wrong
    ([#4588](https://github.com/rust-works/succinctly/issues/4588)): a `null` that is not the register, bound by a navigation
-   or a literal (`.a as $x` on `{"a":null}`, `null as $n`), carries no register marker and is driven by value: the `del` form
+   (`.a as $x` on `{"a":null}`), carries no register marker and is driven by value: the `del` form
    deletes the document where jq raises, and the `path()` form on a `null` document prints the root where jq prints the moved path.
    A `$x` that is *not* the register -- bound to a node elsewhere (`.a as $x`, `null` included), not equal to it by kind
    -- raises at the pattern's first step whatever the source is, a `reduce` that backtracks included
@@ -2339,7 +2339,16 @@ is the revert that established what the other one costs.
    of another fold, is still accepted, because the register's own null-ness is not known there
    (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
-   jq's register to).
+   jq's register to). A `null`/boolean *literal* bound by a destructure (`null as {b:$b} | .`, also `null as $x` outside the
+   fold) has no marker, and jq's `jv_identical` makes it the register only when the register holds the same one, so it is
+   routed to the resolver for the kinds the register is known not to be (`NotRegister::at_fold`, [#4603](https://github.com/rust-works/succinctly/issues/4603)):
+   the fold's accumulator at the top level and in a body where it is the register, a document that is not `null` after an INIT that
+   navigated, and an element a `reduce` source moved onto that is not `null`. A `null` register, a `null` element and an INIT
+   that navigated onto a `null` keep the by-value answer, which is jq's. Still accepted: a variable bound to such a literal inside a
+   `foreach` source (`foreach (null as $n | $n as {a:$a} | .) ...`, [#4616](https://github.com/rust-works/succinctly/issues/4616); a `reduce` source reads it), and a
+   comma beside the destructure on a `null` document under `=`/`|=`. Refused where jq answers silently
+   ([#4617](https://github.com/rust-works/succinctly/issues/4617)): a `?`/`try` around the literal destructure (`foreach ((null as {b:$b} | .)?)`,
+   which `main` answered by value with a different wrong output).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
