@@ -136100,5 +136100,63 @@ fn test_reduce_source_destructuring_a_fresh_value_pipe_param_alt_residual_4566()
             "",
             0,
         ),
+        // A fresh value reached through an argument that is itself a call, a `//`, an `if` or a bind.
+        (
+            DOC,
+            r"[path(reduce (def f($x): $x; f(f({a:1})) as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (({a:1} // 1) as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce ({a:1} | (. // 1) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce ({a:1} | if . then . else 1 end | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def g(x): x | . as {a:$a} | .; g(. as $d | {a:1})) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        // A `?//` chain on a `null` register: the first alternative's destructure of `null` does not raise, so nothing is retried.
+        (
+            r#"{"a":null}"#,
+            r"[path(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.a; .))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))]",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":1}"#,
+            5,
+        ),
     ])
 }

@@ -49704,6 +49704,7 @@ fn source_destructures_register_with(
         through_reduce,
         fresh_only: false,
         null_register,
+        non_null_register: false,
         vars: Vec::new(),
         defs: Vec::new(),
         memo: Vec::new(),
@@ -49726,13 +49727,15 @@ fn source_destructures_register_with(
 /// what [`RegisterSpine::binds_fresh`] reads as fresh (#4522 widened it to a `?//` chain of
 /// destructuring patterns, a `(def f: ..; f)` bound expression, a variable bound to a fresh value
 /// and a closure argument), and #4566 to a fresh `.` (a fresh stage earlier in a pipe), a call with
-/// arguments, a `//` operand and a later bare `?//` alternative. A call whose `def` hands the
-/// register on next to a fresh value is not reached.
-fn source_destructures_fresh(source: &Expr) -> bool {
+/// arguments and a `//` operand, and, where `non_null_register` (jq's register is the document, and
+/// it is not `null`), a later bare `?//` alternative. A call whose `def` hands the register on next
+/// to a fresh value is not reached.
+fn source_destructures_fresh(source: &Expr, non_null_register: bool) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
         fresh_only: true,
         null_register: false,
+        non_null_register,
         vars: Vec::new(),
         defs: Vec::new(),
         memo: Vec::new(),
@@ -50059,6 +50062,11 @@ struct RegisterSpine<'e> {
     /// inside an outer `path()` jq reports `[]` where the resolver reports `["a"]` in the
     /// refusal's text (both raise).
     null_register: bool,
+    /// For a `fresh_only` walk, whether jq's register is known to be the document and not `null`
+    /// (#4566): the first alternative of a `?//` chain then raises on the register's destructure
+    /// of a variable it leaves `null`, and the retry binds the later bare alternative. On a `null`
+    /// register that destructure succeeds, nothing raises and nothing is retried.
+    non_null_register: bool,
     /// The variables bound so far on the spine, innermost last, each with whether it may hold
     /// the register (#4278: `. as $x | $x as {a:$a}` destructures the register as `. as
     /// {a:$a}` does). A later binding of the same name shadows an earlier one. In a `fresh_only`
@@ -50342,6 +50350,35 @@ impl<'e> RegisterSpine<'e> {
             Expr::Var(name) if self.fresh_only => self.holds_register(name),
             // #4566: `.` itself, after a stage that made it a fresh value.
             Expr::Identity if self.fresh_only => self.dot_fresh,
+            // #4566: an `if` or a `//` yields one of its branches' outputs (a `//` also its left
+            // operand's truthy ones, so a fresh left operand is the same question).
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } if self.fresh_only => {
+                if every {
+                    self.binds_fresh(then_branch, true) && self.binds_fresh(else_branch, true)
+                } else {
+                    self.binds_fresh(then_branch, false) || self.binds_fresh(else_branch, false)
+                }
+            }
+            Expr::Alternative(left, right) if self.fresh_only => {
+                if every {
+                    self.binds_fresh(left, true) && self.binds_fresh(right, true)
+                } else {
+                    self.binds_fresh(left, false) || self.binds_fresh(right, false)
+                }
+            }
+            // #4566: a plain bind runs its body where it stands.
+            Expr::As { expr, var, body } if self.fresh_only => {
+                let held = self.binds_fresh(expr, true);
+                let depth = self.vars.len();
+                self.vars.push((var.as_str(), held));
+                let fresh = self.binds_fresh(body, every);
+                self.vars.truncate(depth);
+                fresh
+            }
             Expr::Comma(items) if every => items.iter().all(|item| self.binds_fresh(item, true)),
             Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, false)),
             // #4566: a call with arguments too, read as [`read_body_with`](Self::read_body_with)
@@ -50446,8 +50483,8 @@ impl<'e> RegisterSpine<'e> {
         if self.binding.contains(&key) || self.calls == 0 || params.len() != args.len() {
             return false;
         }
-        self.calls -= 1;
-        self.binding.push(key);
+        // Read in the caller's scope, before this body's key is on `binding`: an argument that
+        // calls the same definition (`f(f({a:1}))`) is a different call.
         let holds: Vec<bool> = if self.fresh_only {
             params
                 .iter()
@@ -50457,7 +50494,12 @@ impl<'e> RegisterSpine<'e> {
         } else {
             Vec::new()
         };
-        let caller = (!params.is_empty()).then(|| {
+        if self.calls == 0 {
+            return false;
+        }
+        self.calls -= 1;
+        self.binding.push(key);
+        let caller = params.iter().any(|param| !param.is_dollar()).then(|| {
             Rc::new(CallerScope {
                 defs: self.defs.clone(),
                 vars: self.vars.clone(),
@@ -50531,13 +50573,17 @@ impl<'e> RegisterSpine<'e> {
         // `reduce (1)` marks, where placing it refused the rows jq answers. The memo of a
         // walk is per [`RegisterSpine`] and so per fold, and the depth is fixed for the walk.
         // #4566: in the `fresh_only` walk (top level only) the later alternative holds the fresh
-        // value on the retry, as the register walk reads it outside every fold body.
+        // value on the retry, as the register walk reads it outside every fold body -- but only
+        // where the register is not `null` ([`non_null_register`](Self::non_null_register)).
         let later_holds_register = register
-            && (self.fresh_only
-                || fold_body::depth() == 0
-                || (self.through_reduce
-                    && (fold_body::source_moved_onto_non_null_here()
-                        || fold_body::foreach_body_here())));
+            && if self.fresh_only {
+                self.non_null_register
+            } else {
+                fold_body::depth() == 0
+                    || (self.through_reduce
+                        && (fold_body::source_moved_onto_non_null_here()
+                            || fold_body::foreach_body_here()))
+            };
         let mut names: Vec<(&'e str, bool)> = Vec::new();
         let mut first_bare = true;
         let mut bind =
@@ -51502,7 +51548,10 @@ fn drive_fold_source_with<S: EvalSemantics>(
         || (S::TAG == EvalTag::Jq
             && !foreach_source
             && fold_body::depth() == 0
-            && source_destructures_fresh(source))
+            && source_destructures_fresh(
+                source,
+                ambient.trackable && !matches!(ambient.value, OwnedValue::Null),
+            ))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
         // output that *is* the register binds as the register-derived element
