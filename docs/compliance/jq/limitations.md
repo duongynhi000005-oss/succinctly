@@ -2514,10 +2514,11 @@ is the revert that established what the other one costs.
    register, and the `foreach` route asked only for a destructure of the register itself, so the by-value drive answered
    the root (`del` returned `null`, `=`/`|=` wrote). A `reduce` source already asked `source_destructures_fresh`; a
    `foreach` source asks it too. Over the grid's six `fresh-*` sources (9,828 rows, `main` against the change)
-   `ACCEPT_WRONG` goes from 1,241 to 36 and `DIFF` from 92 to 0 with no match lost. Still accepted: a `try ... catch .` over
-   such a destructure whose caught message an `fe-y` EXTRACT then reads as the register (24 rows, identical on `main`),
-   and a `null` or boolean literal bound to the variable (`null as $n | $n as {b:$b} | .`), which may be the register
-   itself ([#4603](https://github.com/rust-works/succinctly/issues/4603)). Pinned by
+   `ACCEPT_WRONG` goes from 1,241 to 36 and `DIFF` from 92 to 0 with no match lost. Still accepted ([#4640](https://github.com/rust-works/succinctly/issues/4640), identical on `main`): the
+   destructure inside a collecting `[...]` (`foreach ({a:1} as $n | [$n as {b:$q} | .])`, `reduce` alike), a `null` or
+   boolean literal bound to the variable (`null as $n | $n as {b:$b} | .`; [#4603](https://github.com/rust-works/succinctly/issues/4603)
+   routes the literal destructure itself), and a `try ... catch .` over the destructure whose caught message an `fe-y` EXTRACT
+   reads on a `null` or `true` document (36 grid rows, the `fresh-var-try-catch` entries of `KNOWN_ACCEPT_WRONG`). Pinned by
    `test_foreach_source_destructuring_a_fresh_value_bound_to_a_variable_4616`.
 
    A top-level `reduce` source whose pipe stage is a bare comma with a fresh item (`({a:1}, .) | . as {a:$a} | .`, in either

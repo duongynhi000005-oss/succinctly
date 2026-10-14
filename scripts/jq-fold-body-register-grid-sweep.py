@@ -153,9 +153,10 @@ DOCS = [
 # `try ... catch` around a `?//` chain of destructures until #4585.)
 KNOWN_ACCEPT_WRONG = {
     # a `try ... catch .` over a fresh-variable destructure, whose caught message an `fe-y` EXTRACT
-    # then reads as the register: jq raises, and so does the build on a document that has the key
-    # (#4616 follow-up); `main` accepted these rows too.
-    ("fresh-var-try-catch", None),
+    # then reads as the register: jq raises, and so does the build on a document that has the key,
+    # but not on `null` or `true` (#4616 follow-up); `main` accepted these rows too.
+    ("fresh-var-try-catch", "null"),
+    ("fresh-var-try-catch", "true"),
 }
 
 
