@@ -5049,14 +5049,6 @@ enum MergeWriter<'a, W> {
     Merge(YamlCursor<'a, W>),
 }
 
-impl<W> Clone for MergeWriter<'_, W> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<W> Copy for MergeWriter<'_, W> {}
-
 /// Immutable "list" of YAML mapping fields.
 ///
 /// The common case (`Direct`) walks the mapping's direct BP children lazily,
@@ -5213,7 +5205,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
     /// decoded string key is ever matched here, so they change nothing, #3467.)
     ///
     /// A name absent from this level falls back to recursing into any merge
-    /// source's own nested `<<` (#1318) — see `merge_fallback`'s doc comment.
+    /// source's own nested `<<` (#1318) — see `traverse_writers`'s doc comment.
     pub fn find(&self, name: &str) -> Option<YamlValue<'a, W>> {
         self.find_at_depth(name, 0)
     }
@@ -5229,7 +5221,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
     /// (needed for `line`/`column`) doesn't require re-navigating.
     ///
     /// A name absent from this level falls back to recursing into any merge
-    /// source's own nested `<<` (#1318) — see `merge_fallback`'s doc comment.
+    /// source's own nested `<<` (#1318) — see `traverse_writers`'s doc comment.
     pub fn find_cursor(&self, name: &str) -> Option<YamlCursor<'a, W>> {
         self.find_cursor_at_depth(name, 0)
     }
@@ -5357,9 +5349,9 @@ type MergedFields<'a, W> = (
 ///   inside a source is copied as an ordinary key, not expanded recursively.
 ///   This merged *view* (what `keys`/`has`/`to_entries`/`.[]`/`-o json` see)
 ///   is not recursed for the merged-in mapping's own merge key — but name
-///   *traversal* is: `YamlFields::find`/`find_cursor` falls back to
-///   recursing into it when a name isn't found here (`merge_fallback`,
-///   #1318).
+///   *traversal* is: `YamlFields::find`/`find_cursor` fold over the
+///   mapping's own fields and recurse into every source's `<<`, last write
+///   wins (`traverse_writers`, #1318, #2478).
 /// - An invalid merge value (null, scalar, an alias that doesn't resolve to
 ///   a mapping, or a non-mapping sequence element) contributes nothing
 ///   rather than erroring, matching yq's silent-skip behavior.
