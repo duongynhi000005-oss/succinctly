@@ -137284,6 +137284,224 @@ fn test_reduce_source_destructuring_a_fresh_value_residual_shapes_4522() -> Resu
     ])
 }
 
+/// #4522 (the last two shapes): a `reduce` source that destructures a fresh value raises where jq
+/// raises (and `del`, `=` and `|=` no longer delete or replace the document) when the call's
+/// `def` hands the register on next to a fresh value (`def f: ., {a:1}`: the register output is
+/// jq's own, a `reduce` backtracks it, and the second output's step raises), and when the
+/// `reduce` is inside another fold's body. The contrasts jq answers stay answered: a `try` around
+/// the mixed body (jq catches the raise), the value-mode negated operand, a body that is the
+/// register on every output, and a chain with a bare alternative to retry onto. Every row
+/// captured from jq 1.7.1 with `-c`. A mixed body *inside* another fold's body is not routed
+/// by the fresh walk (its register leaf refuses as a guess where jq answers a value-mode operand,
+/// which the per-leaf split of #4565 already does on `main` for `-(...)` and `[...] | .[0]`), so
+/// it is not pinned here.
+#[test]
+// The filters hold `{a:1}`, which clippy reads as a format argument.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_4522() -> Result<()> {
+    const DOC: &str = r#"{"a":false,"b":null}"#;
+    const NEAR_A: &str = r#"Invalid path expression near attempt to access element "a" of {"a":1}"#;
+    const NEAR_A_DOC: &str =
+        r#"Invalid path expression near attempt to access element "a" of {"a":false,"b":null}"#;
+    const NEAR_A_ONE: &str = r#"Invalid path expression near attempt to access element "a" of 1"#;
+    assert_path_rows_both_routes_3749(&[
+        // The mixed body: the register first, the fresh value first, and a scalar beside it.
+        (
+            DOC,
+            r"[path(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: {a:1}, .; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: ., 1; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A_ONE,
+            5,
+        ),
+        // The raise is jq's own: a `try` catches it, and a negated `try` operand answers.
+        (
+            DOC,
+            r#"try path(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+        // INIT is a path expression: the register output raises there instead.
+        (
+            DOC,
+            r"[path(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.a; .))]",
+            "",
+            NEAR_A_DOC,
+            5,
+        ),
+        // Controls: the register on every output, and a chain with a bare alternative.
+        (
+            DOC,
+            r"[path(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce (def f: ., {a:1}; f as {a:$a} ?// $a | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // A `reduce` inside another fold's body, in its UPDATE and in a `foreach`'s UPDATE and
+        // EXTRACT.
+        (
+            DOC,
+            r"[path(reduce 1 as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (1,2) as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"(reduce (1,2) as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .))) |= 9",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(reduce 1 as $i (.; reduce (def f: {a:1}; f as $x | $x as {a:$a} | .) as $j (.; .)))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(foreach 1 as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .); .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"[path(foreach 1 as $i (.; .; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        // The nested contrasts: the `try` around it, the value-mode negated operand, a chain
+        // with a bare alternative, and a body that is the register.
+        (
+            DOC,
+            r#"try path(reduce 1 as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .))) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce 1 as $k (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce 1 as $i (.; reduce (def f: {a:1}; f as {a:$a} ?// $a | .) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            DOC,
+            r"[path(reduce 1 as $i (.; reduce (def f: .; f as {a:$a} | .) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        // A nested chain with a bare alternative is left to the by-value drive: which alternative
+        // it lands on depends on where the enclosing source left jq's register (a `null` element
+        // makes the retried `null` destructure succeed, and jq answers).
+        (
+            r"[null]",
+            r"del(reduce .[]? as $k (.; (reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r"del(reduce .[]? as $k (.; (reduce (def f: {a:1}; f as $x ?// $y | $x as {a:$a} | .) as $j (.; .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(reduce .[1+1] as $k (.; (reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        // A body that is a comma only behind a `.` stage is read the same way.
+        (
+            DOC,
+            r"[path(reduce (def f: (., {a:1}) | .; f as {a:$a} | .) as $k (.; .))]",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(reduce (def f: (., {a:1}) | .; f as {a:$a} | .) as $k (.; .))",
+            "",
+            NEAR_A,
+            5,
+        ),
+        (
+            DOC,
+            r"del(try (-(reduce (def f: (., {a:1}) | .; f as {a:$a} | .) as $k (.; .))))",
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4566 (the residual of #4522): a `reduce` source that destructures a fresh value is routed
 /// through the resolver for the shapes #4522 left to the by-value drive, which answered where jq
 /// raises (and `del`, `=` and `|=` deleted or replaced the document): a fresh value piped into a
