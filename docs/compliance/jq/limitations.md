@@ -780,7 +780,9 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   an element retries a `try` over a `?//` bind of INIT `.` too (`path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))`
   on `[1]` raises, it answered nothing; with `$k` as EXTRACT it is `[0]`, it was nothing): the root the state starts as is no
   node of the element the register moved onto, so the step compares the state with the *step* register once a source or
-  walk moved it (only a `null`/boolean state is still identical to it, by kind). Pinned by
+  walk moved it (only a `null`/boolean state is still identical to it, by kind). Not applied when the UPDATE is itself a
+  builtin call (`isempty(g)`, `any(g; c)`), whose EXTRACT reads a lost register
+  ([#4611](https://github.com/rust-works/succinctly/issues/4611)). Pinned by
   `test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternative_bind_4610`.
   **Still divergent** (the same shape, not covered): an EXTRACT `try`
   whose operand wraps the bind in `isempty(...) or ...` (`path(foreach (1,2) as $k ([]; .; try (isempty(. as [$q] ?// $z |
