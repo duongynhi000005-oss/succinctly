@@ -62109,6 +62109,15 @@ fn test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_457
             "Cannot index number with string",
             5,
         ),
+        // A `null` loop variable of an enclosing `reduce` is another node, not the register: its
+        // destructure stays by value and the path is the root, as jq prints.
+        (
+            r"null",
+            r"path(reduce (null,null) as $it (.; foreach ($it as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":1}"#,
             r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
