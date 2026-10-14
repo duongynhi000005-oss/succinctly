@@ -50068,6 +50068,58 @@ fn pattern_step_type_errors(pattern: &Pattern, value: &OwnedValue) -> bool {
     }
 }
 
+/// Whether `body`, run after a destructure, always emits and never raises: `.`, a variable, a
+/// literal or a comma of them. A body that navigates (`.a`) can raise inside the `try`, and one that
+/// is `empty` emits nothing, so what the enclosing fold meets after the chain is not the move.
+fn emits_the_register_on(body: &Expr) -> bool {
+    match unwrap_paren(body) {
+        Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Literal(_) => true,
+        Expr::Comma(items) => items.iter().all(emits_the_register_on),
+        _ => false,
+    }
+}
+
+/// How a `?//` chain of destructures of the register ends under a `try ... catch` (#4585): `Some(true)`
+/// when it raises, `Some(false)` when it is answered, `None` when this cannot tell. The register is
+/// moved by a matched alternative, so the code after the chain raises, which `?//` catches and
+/// retries onto the next alternative, as it does for a pattern's own type error; the last
+/// alternative has none to retry onto. A last alternative that type-errors lands in the `try`, and
+/// the chain answers (`try ($x as {a:$a} ?// [$a] | .) catch .` on `{"a":true}`, whichever
+/// alternative matched before it); one that matches and moves the register leaves the raise
+/// uncaught (the same chain on `[true]`, or `{b:$a} ?// {a:$a}` on `{"a":true}`). An alternative
+/// that matches without moving it (a bare `$v`) ends the chain there, answered. `None` for a single
+/// pattern, for a nested one (whose inner steps type-error where only the first step is read) and
+/// for a last alternative of several entries that matches.
+fn caught_chain_raises(patterns: &[Pattern], value: &OwnedValue) -> Option<bool> {
+    let flat = |pattern: &Pattern| match pattern {
+        Pattern::Var(_) => true,
+        Pattern::Object(entries) => entries
+            .iter()
+            .all(|entry| matches!(entry.pattern, Pattern::Var(_)) && entry.bind.is_none()),
+        Pattern::Array(items) => items.iter().all(|item| matches!(item, Pattern::Var(_))),
+    };
+    if patterns.len() < 2 || !patterns.iter().all(flat) {
+        return None;
+    }
+    let (last, earlier) = patterns.split_last()?;
+    if earlier.iter().any(|p| matches!(p, Pattern::Var(_))) {
+        // The first bare `$v` matches whatever the value, and moves nothing for the rest to retry.
+        return Some(false);
+    }
+    // A last alternative of two or more entries that matches is answered (`{a:$a} ?// [$a,$b]` on
+    // `[1,2]`): jq does not leave its register moved by the second index step, which this does not
+    // model, so the by-value drive keeps it.
+    let entries = match last {
+        Pattern::Var(_) => return Some(false),
+        Pattern::Object(entries) => entries.len(),
+        Pattern::Array(items) => items.len(),
+    };
+    if pattern_step_type_errors(last, value) {
+        return Some(false);
+    }
+    (entries == 1).then_some(true)
+}
+
 /// `source` with every `try`/`?` whose operand is a destructure of the register that raises a type
 /// error on `value` replaced by `empty`, and the handler of every `try` over a single destructure
 /// dropped (#4575). The error is caught: the source emits nothing, the pattern never moved jq's
@@ -50095,7 +50147,7 @@ fn prune_caught_destructures(
     let single = if let Expr::AsPattern {
         expr: bound,
         patterns,
-        ..
+        body,
     } = unwrap_paren(operand)
     {
         let is_register = match unwrap_paren(bound) {
@@ -50106,14 +50158,23 @@ fn prune_caught_destructures(
         if is_register && patterns.iter().all(|p| pattern_step_type_errors(p, value)) {
             return Expr::Builtin(Builtin::Empty);
         }
-        patterns.len() == 1
+        // #4585: a `?//` chain under a `try ... catch` ends on its last alternative
+        // ([`caught_chain_raises`]). Without a handler the source emits nothing where the first
+        // alternative matched, and the by-value drive still answers that alternative's result.
+        let handled = matches!(&mapped, Expr::Try { catch: Some(_), .. });
+        let ends = handled && emits_the_register_on(body);
+        match caught_chain_raises(patterns, value).filter(|_| is_register && ends) {
+            Some(false) => return Expr::Builtin(Builtin::Empty),
+            Some(true) => true,
+            None => patterns.len() == 1,
+        }
     } else {
         false
     };
-    // A handler runs only after a raise, so the spine reads the body alone. Not for a `?//` chain:
-    // jq retries the next alternative on an error past the pattern, and answers where the first
-    // matched (`try ($x as {a:$a} ?// [$a] | .) catch .` on `{"a":true}`), which the by-value
-    // drive does and a refusal would not.
+    // A handler runs only after a raise, so the spine reads the body alone. Not for a `?//` chain
+    // whose end [`caught_chain_raises`] cannot tell: jq retries the next alternative on an error
+    // past the pattern, and answers where the first matched (`try ($x as {a:$a} ?// [$a] | .)
+    // catch .` on `{"a":true}`), which the by-value drive does and a refusal would not.
     match mapped {
         Expr::Try {
             expr,

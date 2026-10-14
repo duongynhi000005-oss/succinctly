@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x forty-seven x seven x thirteen.
+document, six x three x fifty-six x seven x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -84,6 +84,19 @@ SOURCES = [
     # a `try`/`?` catches the pattern's type error (nothing moved the register) but not a success;
     # a `?//` chain retries the next alternative past the pattern
     ("try-chain-catch", "try ($x as {a:$a} ?// [$a] | .) catch ."),
+    # the chain ends on its last alternative (#4585): it type-errors into the handler, or matches and
+    # moves the register, or is a bare `$v` that moves nothing
+    ("try-chain-catch-rev", "try ($x as [$a] ?// {a:$a} | .) catch ."),
+    ("try-chain-catch-miss", "try ($x as {b:$a} ?// {a:$a} | .) catch ."),
+    ("try-chain-catch-var", "try ($x as {a:$a} ?// $b | .) catch ."),
+    ("try-chain-catch-3", "try ($x as {a:$a} ?// [$a] ?// $b | .) catch ."),
+    ("try-chain-catch-3-arr", "try ($x as {a:$a} ?// {b:$a} ?// [$a] | .) catch ."),
+    ("try-chain-catch-dot", "try (. as {a:$a} ?// [$a] | .) catch ."),
+    # a last alternative of several entries that matches is answered, and a body that navigates is
+    # not the register's emission
+    ("try-chain-catch-multi", "try ($x as {a:$a} ?// [$a,$b] | .) catch ."),
+    ("try-chain-catch-multi-obj", "try ($x as {a:$a,b:$c} ?// {a:$a,b:$c} | .) catch ."),
+    ("try-chain-catch-nav", "try ($x as {a:$a} ?// [$a] | .a) catch ."),
     ("try-chain", "try ($x as {a:$a} ?// [$a] | .)"),
     ("opt-chain", "($x as {a:$a} ?// [$a] | .)?"),
     ("try-var-catch", "try ($x as $v | .) catch ."),
@@ -127,14 +140,10 @@ DOCS = [
     '[{"a":1}]',
 ]
 
-# The ACCEPT_WRONG rows left: a `try ... catch` around a `?//` chain of destructures (jq answers where
-# the first alternative matched and raises where a later one did, which the by-value route does not
-# tell apart, #4585). Recorded in docs/compliance/jq/limitations.md. (A `try ... catch` or `?` around
-# a single destructure was listed here until #4575, and a comma beside the destructure on a `null`
-# document until #4576.)
-KNOWN_ACCEPT_WRONG = {
-    ("try-chain-catch", None),
-}
+# The ACCEPT_WRONG rows left: none. (A `try ... catch` or `?` around a single destructure was listed
+# here until #4575, a comma beside the destructure on a `null` document until #4576, and a
+# `try ... catch` around a `?//` chain of destructures until #4585.)
+KNOWN_ACCEPT_WRONG = set()
 
 
 def run(prefix, prog, doc, timeout=10):
