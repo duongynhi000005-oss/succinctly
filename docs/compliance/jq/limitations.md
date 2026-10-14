@@ -2440,9 +2440,11 @@ is the revert that established what the other one costs.
 
    A top-level `reduce` source whose pipe stage is a bare comma with a fresh item (`({a:1}, .) | . as {a:$a} | .`, in either
    order) or `$__loc__` raises as jq does since [#4582](https://github.com/rust-works/succinctly/issues/4582): the source is
-   generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Still
-   accepted ([#4597](https://github.com/rust-works/succinctly/issues/4597)): the comma behind `isempty`/`any`/`first`/`limit`,
-   a `reduce` stage between it and the destructure, and the source of a fold nested in another fold's body. Pinned by
+   generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Behind
+   `first(f)`, `limit(n; f)` (n >= 1) or `nth(0; f)` only the operand's first output is generated, so that is the one read
+   ([#4597](https://github.com/rust-works/succinctly/issues/4597)): `first({a:1}, .)` raises, `first(., {a:1})` answers. Still
+   accepted: the comma behind `isempty`/`any`/`all`, `limit(2; ., {a:1}, .)` (a fresh item past the first), a `reduce` stage
+   between it and the destructure, and the source of a fold nested in another fold's body. Pinned by
    `test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582`.
 
    A destructuring-only `?//` chain behind a pipe of `.` (`(.|.) as {a:$a} ?// [$a] | .`) as a `foreach` source inside a
