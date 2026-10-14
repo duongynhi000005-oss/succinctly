@@ -2315,7 +2315,7 @@ is the revert that established what the other one costs.
    fold body, not only the one `acc_is_register` marked; pinned by
    `test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_4576`). Still wrong
    ([#4588](https://github.com/rust-works/succinctly/issues/4588)): a `null` that is not the register, bound by a navigation
-   or a literal (`.a as $x` on `{"a":null}`, `null as $n`), carries no register marker and is driven by value: the `del` form
+   (`.a as $x` on `{"a":null}`), carries no register marker and is driven by value: the `del` form
    deletes the document where jq raises, and the `path()` form on a `null` document prints the root where jq prints the moved path.
    A `$x` that is *not* the register -- bound to a node elsewhere (`.a as $x`, `null` included), not equal to it by kind
    -- raises at the pattern's first step whatever the source is, a `reduce` that backtracks included
@@ -2325,8 +2325,7 @@ is the revert that established what the other one costs.
    `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). A `select($x)` in front of a destructure of `.` passes the register on by `$x`'s own truthiness whatever node it is bound to
    (since [#4604](https://github.com/rust-works/succinctly/issues/4604) any truthy marker is read, not only one equal to the
    accumulator; pinned by `test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604`; the refusal is the resolver's guess, so an enclosing `?`/`try` around the whole fold does not catch it where jq's own error is caught, as for the plain `. as [$a]` form). Still accepted: that moved body
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `if $x`, `select($x|not)` on a `null` document), a literal bound expression (`null as $n`,
-   `null as $n` bound to a variable: no marker, [#4603](https://github.com/rust-works/succinctly/issues/4603)). A
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `if $x`, `select($x|not)` on a `null` document)). A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by
@@ -2335,11 +2334,22 @@ is the revert that established what the other one costs.
    `Expr::Array`, #4630; pinned by `test_fold_source_destructuring_a_fresh_value_inside_an_array_raises_4630`); a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source moved the register raises too
    ([#4632](https://github.com/rust-works/succinctly/issues/4632): `array_wrapped_destructure_of_register`; pinned by
    `test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632`), but a `$x` marker destructured there is the
-   #4604 family; a `null` literal bound to a variable, in the body
-   of another fold, is still accepted, because the register's own null-ness is not known there
-   (`NotRegister::at_fold`; `lit-null-var` in the grid). The same shapes on a
+   #4604 family. The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
-   jq's register to).
+   jq's register to). A `null`/boolean *literal* bound by a destructure in a fold source (`null as {b:$b} | .`, or a `$x`
+   bound to one outside the fold) has no marker, and jq's `jv_identical` makes it the register only when the register holds the same one, so it is
+   routed to the resolver for the kinds the register is known not to be (`NotRegister::at_fold`, [#4603](https://github.com/rust-works/succinctly/issues/4603)):
+   the fold's accumulator at the top level and in a body where it is the register, a document that is not `null` after an INIT that
+   navigated, and an element a `reduce` source moved onto that is not `null`. A `null` register, a `null` element and an INIT
+   that navigated onto a `null` keep the by-value answer, which is jq's. A variable bound to such a literal
+   (`null as $n | $n as {a:$a} | .`) is read the same way, by a `foreach` source through `source_destructures_fresh`
+   ([#4616](https://github.com/rust-works/succinctly/issues/4616)) and a `reduce` source alike. Still accepted: a
+   comma beside the destructure on a `null` document under `=`/`|=`, a `null` literal destructure in a fold nested in a fold whose
+   source is untracked (`reduce (.a? // 1) as $i (.; reduce (null as {b:$b} | .) as $z (.; .))`: the ambient does not describe jq's
+   register there), and a boolean literal after an INIT that navigated or in a moved `reduce` body, which still raises, with the
+   type error's message (`Cannot index boolean ...`) instead of the path error's. Refused where jq answers silently
+   ([#4617](https://github.com/rust-works/succinctly/issues/4617)): a `?`/`try` around the literal destructure (`foreach ((null as {b:$b} | .)?)`,
+   which `main` answered by value with a different wrong output).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which

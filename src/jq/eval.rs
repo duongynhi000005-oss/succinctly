@@ -49914,6 +49914,7 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
+        known: NotRegister::default(),
         moved: false,
     };
     walk.reach(source) == Reach::Destructures
@@ -49937,6 +49938,7 @@ fn source_destructures_fresh(
     source: &Expr,
     non_null_register: bool,
     dot_off_register: bool,
+    known: NotRegister,
 ) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
@@ -49952,6 +49954,7 @@ fn source_destructures_fresh(
         held: Vec::new(),
         markers: Vec::new(),
         dot_fresh: dot_off_register,
+        known,
         moved: false,
     };
     walk.reach(source) == Reach::Destructures
@@ -50588,6 +50591,9 @@ struct RegisterSpine<'e> {
     /// fresh stage earlier in the pipe (`{a:1} | . as {a:$a}`, `$x | ..`, `keys | ..`) made it so.
     /// Always `false` for an ordinary walk.
     dot_fresh: bool,
+    /// For a `fresh_only` walk, the `null`/boolean literals the register is known not to be
+    /// (#4603): a destructure of one of them is a destructure of a fresh value.
+    known: NotRegister,
     /// In a `fresh_only` walk, whether a destructure that did not raise ran since the pipe stage
     /// began (#4583): its `INDEX` steps moved jq's register onto the matched member, so `.` is
     /// not the register for what follows. Read and cleared by the pipe arm. Always `false` for an
@@ -50993,9 +50999,9 @@ impl<'e> RegisterSpine<'e> {
                 {
                     self.binds_fresh(last, every)
                 }
-                _ => yields_only_fresh_values(e),
+                _ => yields_only_fresh_values(e, self.known),
             },
-            other => yields_only_fresh_values(other),
+            other => yields_only_fresh_values(other, self.known),
         }
     }
 
@@ -51812,17 +51818,17 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
 /// accept for a wrong refusal (`path(reduce (select(true) as [$x] | $x) as $k
 /// (.; .))` is `[]` in jq and was refused). A bare `$var` bind performs no step
 /// and stays by value too.
-fn is_fold_source_destructuring(e: &Expr) -> bool {
+fn is_fold_source_destructuring(e: &Expr, known: NotRegister) -> bool {
     match e {
         Expr::AsPattern { expr, patterns, .. } => {
-            routes_fresh_destructuring(patterns) && yields_only_fresh_values(expr)
+            routes_fresh_destructuring(patterns) && yields_only_fresh_values(expr, known)
         }
         Expr::Reduce {
             input, patterns, ..
         }
         | Expr::Foreach {
             input, patterns, ..
-        } => routes_destructuring(patterns) && yields_only_fresh_values(input),
+        } => routes_destructuring(patterns) && yields_only_fresh_values(input, known),
         _ => false,
     }
 }
@@ -51890,6 +51896,48 @@ fn first_output_operand(e: &Expr) -> &Expr {
     e
 }
 
+/// The `null`/boolean literals jq's register is known not to be where a fold's source runs
+/// (#4603). A literal carries no node identity, and `jv_identical` treats it as the register's own
+/// whenever the register holds the same one, so [`yields_only_fresh_values`] reads it as fresh only
+/// for a kind the register is known not to be: `null as {a:$a}` raises when the register is a
+/// document that is not `null`.
+#[derive(Clone, Copy, Default)]
+struct NotRegister {
+    null: bool,
+    true_: bool,
+    false_: bool,
+}
+
+impl NotRegister {
+    /// The kinds the register at a fold is not, from the `ambient` it runs in. In the body of a
+    /// `reduce` whose source moved the register it is on an element, which is not `null` only when
+    /// the move says so ([`fold_body::source_moved_onto_non_null_here`]) and may be any boolean.
+    /// Jq mode only. Where INIT moved the register off the document (`trackable` false), only a
+    /// register that is known not to be `null` says anything.
+    fn at_fold<S: EvalSemantics>(ambient: &FoldSourceAmbient<'_>) -> Self {
+        if S::TAG != EvalTag::Jq {
+            return Self::default();
+        }
+        if fold_body::source_moved_here() {
+            return Self {
+                null: fold_body::source_moved_onto_non_null_here(),
+                ..Self::default()
+            };
+        }
+        if !ambient.trackable {
+            return Self {
+                null: ambient.register_non_null,
+                ..Self::default()
+            };
+        }
+        Self {
+            null: !matches!(ambient.value, OwnedValue::Null),
+            true_: !matches!(ambient.value, OwnedValue::Bool(true)),
+            false_: !matches!(ambient.value, OwnedValue::Bool(false)),
+        }
+    }
+}
+
 /// Whether every output of `e` is a freshly built value -- a number or string
 /// literal, an array or object construction, `$__loc__` (#4582), a builtin that always builds its
 /// result, or a comma/paren/pipe of them -- and so can never be jq's path register
@@ -51897,9 +51945,9 @@ fn first_output_operand(e: &Expr) -> &Expr {
 /// call, an arithmetic that may return its input) may preserve the register and is
 /// not claimed fresh.
 ///
-/// `null` and the booleans are **not** fresh: jq's `jv_identical` treats any
-/// `null` (or `true`/`false`) as the register's own value when the register
-/// holds the same one, so `null as [$a]` does not raise there. The resolver
+/// `null` and the booleans are **not** fresh, except for a kind `known` says the register is not
+/// (#4603): jq's `jv_identical` treats any `null` (or `true`/`false`) as the register's own value
+/// when the register holds the same one, so `null as [$a]` does not raise there. The resolver
 /// applies that rule only while the register is still at the fold's input, so
 /// once INIT has navigated (`reduce (null as [$a] | $a) as $k (.[0]; .)` on
 /// `[null]`) a routed `null` source is refused where jq answers.
@@ -51908,9 +51956,11 @@ fn first_output_operand(e: &Expr) -> &Expr {
 /// came before it (`keys | .`). The builtin list is pinned by
 /// `scripts/jq-fold-fresh-source-sweep.py`, which compares every entry (and the
 /// register-preserving sources that must stay off the list) against jq.
-fn yields_only_fresh_values(e: &Expr) -> bool {
+fn yields_only_fresh_values(e: &Expr, known: NotRegister) -> bool {
     match e {
-        Expr::Literal(Literal::Null | Literal::Bool(_)) => false,
+        Expr::Literal(Literal::Null) => known.null,
+        Expr::Literal(Literal::Bool(true)) => known.true_,
+        Expr::Literal(Literal::Bool(false)) => known.false_,
         Expr::Literal(_) | Expr::Array(_) | Expr::Object(_) => true,
         // #4582: `$__loc__` is the object `{file, line}` the evaluator builds.
         Expr::Loc { .. } => true,
@@ -51941,15 +51991,22 @@ fn yields_only_fresh_values(e: &Expr) -> bool {
             | Builtin::UniqueBy(_)
             | Builtin::Transpose,
         ) => true,
-        Expr::Paren(inner) => yields_only_fresh_values(inner),
-        Expr::Comma(items) => !items.is_empty() && items.iter().all(yields_only_fresh_values),
+        Expr::Paren(inner) => yields_only_fresh_values(inner, known),
+        Expr::Comma(items) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| yields_only_fresh_values(item, known))
+        }
         Expr::Pipe(stages) => {
             // a trailing `.` forwards what came before it
             let end = stages
                 .iter()
                 .rposition(|stage| !matches!(unwrap_paren(stage), Expr::Identity))
                 .map_or(0, |i| i + 1);
-            stages[..end].last().is_some_and(yields_only_fresh_values)
+            stages[..end]
+                .last()
+                .is_some_and(|stage| yields_only_fresh_values(stage, known))
         }
         _ => false,
     }
@@ -52320,11 +52377,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
+    // #4603: the `null`/boolean literals the register is not, which a destructure of raises.
+    let not_register = NotRegister::at_fold::<S>(ambient);
     let has_navigation = any_subexpr(source, &mut |e| {
         is_fold_source_navigation(e)
             || (S::TAG == EvalTag::Jq
                 && (live_path_refusal(e).is_some()
-                    || is_fold_source_destructuring(e)
+                    || is_fold_source_destructuring(e, not_register)
                     || is_fold_with_destructured_register_source(e, &register_markers)
                     || matches!(
                         e,
@@ -52373,6 +52432,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 fold_body::depth() == 0
                     && !ambient.trackable
                     && !matches!(ambient.value, OwnedValue::Null | OwnedValue::Bool(_)),
+                not_register,
             ))
         // #3795: a source that can hand the register back by pointer through
         // control flow (`(., 1) | .`) is placed by the resolver too, so the
@@ -53633,7 +53693,9 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
     // last alternative never retries, so a single pattern skips the walk.
-    let fresh_head = patterns.len() > 1 && S::TAG == EvalTag::Jq && yields_only_fresh_values(head);
+    let fresh_head = patterns.len() > 1
+        && S::TAG == EvalTag::Jq
+        && yields_only_fresh_values(head, NotRegister::default());
     // #3781: a head this arm cannot place -- not a bare `.`/marker it recognises, not
     // provably fresh (#3489) -- may still be jq's register itself (`select(true)`,
     // `first(.)`, `(.|.)`, `limit(1; .)` pass `.` through with its path). jq then
