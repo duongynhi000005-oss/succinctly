@@ -71445,7 +71445,8 @@ fn test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_455
 /// `path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))` on `null` answered nothing at exit 0.
 /// Every jq side captured from jq 1.7.1.
 #[test]
-fn test_foreach_extract_try_over_an_alternative_bind_of_a_container_state_retries_4595() -> Result<()> {
+fn test_foreach_extract_try_over_an_alternative_bind_of_a_container_state_retries_4595(
+) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             "null",
