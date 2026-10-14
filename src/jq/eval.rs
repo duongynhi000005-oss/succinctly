@@ -49837,7 +49837,9 @@ fn fold_source_register_markers<S: EvalSemantics>(
     let mut markers = Vec::new();
     if S::TAG != EvalTag::Jq
         || !ambient.trackable
-        || !(fold_body::depth() == 0 || fold_body::acc_is_register_here())
+        || !(fold_body::depth() == 0
+            || fold_body::acc_is_register_here()
+            || matches!(ambient.value, OwnedValue::Null))
     {
         return markers;
     }
