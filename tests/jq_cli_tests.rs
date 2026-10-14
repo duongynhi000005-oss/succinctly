@@ -70829,6 +70829,44 @@ fn test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_455
             "Invalid path expression with result {\"a\":1}",
             5,
         ),
+        // A source of two elements: step 2 starts from step 1's output. INIT `.` raises on the
+        // element, `1`, which the register moved onto.
+        (
+            "null",
+            r"path(reduce (1,2) as $k ([]; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach (1,2) as $k ([]; try (. as [$a] ?// $a | $a); $k))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            "[1]",
+            r"path(reduce (1,2) as $k (.; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        // EXTRACT is not marked: its `.` is UPDATE's output, which may be jq's register.
+        (
+            "null",
+            r"path(. as $r | foreach .a? as $k ([]; $r; try (. as [$a] ?// $a | $a)))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(. as $r | foreach .a? as $k ([]; $r; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
     ])
 }
 

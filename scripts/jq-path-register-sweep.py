@@ -2236,6 +2236,12 @@ CONTEXTS = [
     ("foreach-update-try-dot-arr", "path(foreach .a? as $k ([]; try ({X}); .))"),
     ("foreach-update-try-del-obj", "del(foreach .a? as $k ({}; try ({X}); .))"),
     ("foreach-update-try-assign-arr", "(foreach .a? as $k ([1]; try ({X}); .)) = 9"),
+    # ...a two-element source (step 2 starts from step 1's output) and INIT `.`, which IS the register
+    # on the first step, so a retry there accepts what jq answers.
+    ("foreach-update-try-var-arr2", "path(foreach (1,2) as $k ([]; try ({X}); $k))"),
+    ("foreach-update-try-var-init-dot", "path(foreach .a? as $k (.; try ({X}); $k))"),
+    ("reduce-update-try-path-arr2", "path(reduce (1,2) as $k ([]; try ({X})))"),
+    ("reduce-update-try-path-init-dot", "path(reduce .a? as $k (.; try ({X})))"),
     ("reduce-update-try-path-arr", "path(reduce .a? as $k ([]; try ({X})))"),
     ("reduce-update-try-del-obj", "del(reduce .a? as $k ({}; try ({X})))"),
     ("reduce-update-try-path", "path(reduce .a? as $k (0; try ({X})))"),

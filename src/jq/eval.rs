@@ -53067,7 +53067,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             // would repeat its effects) but the walk itself saw: jq raises that whatever its register
             // is, and `?//` retries it (#3998, as the folds' [`settle_fold_alternative`] reads it).
             let refused_could_succeed: core::cell::Cell<Option<bool>> = core::cell::Cell::new(None);
-            //
+
             // #4550: or, in the step of an outermost fold whose accumulator the walk places off the
             // register ([`fold_body::acc_off_register_here`]: a computed container, not INIT `.`),
             // with no register in hand and none lost, so `bound` is not the one that was. jq's
@@ -56237,10 +56237,13 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // #4550: the converse -- an accumulator the walk does not place at the
                         // register (a computed container, not INIT `.`) is off it, so a pattern
                         // step on it is refused by `path_intact` whatever the register is.
+                        // Never together with the mark above: a step the walk moved
+                        // (`update_at_register` through `walked`) can read as both.
                         let _acc_off_register = (S::TAG == EvalTag::Jq
                             && fold_body::depth() == 0
                             && !acc_at_register
-                            && live_step_reg.is_none())
+                            && live_step_reg.is_none()
+                            && _acc_is_register.is_none())
                         .then(fold_body::acc_off_register);
                         // #4484: a navigating `reduce` source leaves jq's register on the element for
                         // the whole step, where a pattern step on the accumulator raises.
@@ -56992,8 +56995,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             (alt_bind_update_on_register && active_at_register && !live_stepped)
                                 .then(fold_body::acc_is_register);
                         // #4550: see `resolve_reduce`'s `_acc_off_register`.
+                        // UPDATE only: EXTRACT resolves one body deeper, so it never reads this mark.
+                        // Never together with the mark above.
                         let _acc_off_register =
-                            (state_off_register && !live_stepped).then(fold_body::acc_off_register);
+                            (state_off_register && !live_stepped && _acc_is_register.is_none())
+                                .then(fold_body::acc_off_register);
                         let _foreach_body = fold_body::foreach_body();
                         let flow = active_reg.resolve_sink::<S>(
                             &bound_update,
