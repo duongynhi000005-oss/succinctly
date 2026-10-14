@@ -826,8 +826,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`(isempty(1), isempty(2))`, `(isempty(1), 5)`) and for an operand that is a `first`/`limit` of something that leaves the
   register (`isempty(first(1))`, `any(first(1); .)`). Pinned by
   `test_foreach_navigating_source_with_a_comma_or_wrapped_verdict_update_keeps_the_register_4623`.
-  **Still refused where jq answers** (the safe direction; the operands are not ones
-  `cannot_move_register`/`neutral_leaves_register` admit): `isempty(path(.[]?))`, `isempty(empty | .a)`,
+  **Still refused where jq answers** (the operands are not ones
+  `neutral_leaves_register` admits; a refusal under an enclosing `?`/`try` is swallowed, so `[path(foreach .[]? as $k (0; isempty(path(.[]?)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`): `isempty(path(.[]?))`, `isempty(empty | .a)`,
   `isempty(1) and isempty(2)`, `all(1; first(.))`, a `select` as `cond` and a verdict piped into a builtin outside the neutral list
   (`isempty(1) | tostring`), and a `def` wrapper (`def f: isempty(empty); f`)
   ([#4641](https://github.com/rust-works/succinctly/issues/4641)).

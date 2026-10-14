@@ -49643,18 +49643,20 @@ impl FoldRegister {
     }
 }
 
-/// Whether `update` is a verdict builtin over operands that cannot move jq's register
-/// (#4611): `isempty(g)`, `any(g; c)` or `all(g; c)`, alone or as a stage of a pipe whose other
-/// stages leave the register too (`1 | isempty(.)`, `(isempty(1) | not) | .`). The bare and
-/// one-argument spellings iterate their input, which moves it, so they are not admitted, and an
-/// all-neutral pipe is [`neutral_leaves_register`]'s, not this one's.
+/// Whether `update` is a verdict builtin over operands that leave jq's register where they began
+/// (#4611, #4623): `isempty(g)`, `any(g; c)` or `all(g; c)`, alone, as a stage of a pipe whose other
+/// stages leave the register too (`1 | isempty(.)`, `(isempty(1) | not) | .`), or among the items
+/// of a comma (`(isempty(1), isempty(2))`: jq forks it, so each item runs from the register the
+/// comma entered with). An operand is run and backtracked, so [`neutral_leaves_register`] reads it,
+/// through `first`/`limit` and the shapes that fork. The bare and one-argument spellings iterate
+/// their input, which moves it, so they are not admitted, and an all-neutral pipe or comma is
+/// [`neutral_leaves_register`]'s, not this one's.
 fn verdict_builtin_leaves_register(update: &Expr) -> bool {
-    // An operand is run and backtracked, so it only has to leave the register where it began:
-    // [`neutral_leaves_register`] reads it through `first`/`limit` and the shapes that fork.
-    fn operand(e: &Expr) -> bool {
-        cannot_move_register(e) || neutral_leaves_register(e)
-    }
     /// `Some(has_verdict)` when `expr` leaves the register, `None` when it may move it.
+    ///
+    /// Pipe and comma share the fold below, which is only right because every item must leave
+    /// the register on its own: the pipe threads it from stage to stage and the comma restores it
+    /// for each item, and an item that set it for the next would have to be refused here.
     fn leaves(expr: &Expr) -> Option<bool> {
         let fold = |stages: &[Expr]| {
             stages.iter().try_fold(false, |seen, stage| {
@@ -49662,12 +49664,10 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             })
         };
         match unwrap_paren(expr) {
-            Expr::Builtin(Builtin::IsEmpty(gen)) => operand(gen).then_some(true),
+            Expr::Builtin(Builtin::IsEmpty(gen)) => neutral_leaves_register(gen).then_some(true),
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
-                (operand(gen) && operand(cond)).then_some(true)
+                (neutral_leaves_register(gen) && neutral_leaves_register(cond)).then_some(true)
             }
-            // A pipe feeds each stage the register the one before left; a comma forks, so each
-            // item runs from the register the comma entered with.
             Expr::Pipe(stages) => fold(stages),
             Expr::Comma(items) => fold(items),
             other => neutral_leaves_register(other).then_some(false),
