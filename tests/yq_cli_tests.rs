@@ -9836,6 +9836,54 @@ fn test_yaml_merge_key_own_field_beats_nested_fallback_1318() -> Result<()> {
     Ok(())
 }
 
+/// #2478: a name lookup through a `<<` sequence is a textual-order fold with
+/// the *last* writer winning, nested `<<` included - so `<<: [*a, *b, *c]`
+/// answers `c`'s value, not `a`'s (the earlier-listed-wins rule belongs to the
+/// collapsed view `-o json '.z'` prints, asserted unchanged below). Every row
+/// was captured from yq v4.53.3 (default flags) before being pinned.
+#[test]
+fn test_yaml_merge_key_traversal_is_last_writer_wins_2478() -> Result<()> {
+    let input = "base: &base {x: 5, deep: base}\n\
+        a: &a {x: 1, p: a}\n\
+        b: &b {<<: *base, q: b}\n\
+        c: &c {x: 3, p: c, r: c}\n\
+        seq: {<<: [*a, *c]}\n\
+        rev: {<<: [*c, *a]}\n\
+        nested: {<<: [*a, *b]}\n\
+        nested_rev: {<<: [*b, *a]}\n\
+        own_first: {x: 7, <<: [*a, *b]}\n\
+        own_last: {<<: [*a, *b], x: 7}\n\
+        two_fields: {<<: *a, <<: *c}\n\
+        inline: {<<: [*a, {x: 8}, *c]}\n";
+    let rows = [
+        (".seq.x", "3"),
+        (".seq.p", "\"c\""),
+        (".rev.x", "1"),
+        (".rev.p", "\"a\""),
+        (".nested.x", "5"),
+        (".nested.deep", "\"base\""),
+        (".nested_rev.x", "1"),
+        (".own_first.x", "5"),
+        (".own_last.x", "7"),
+        (".two_fields.x", "3"),
+        (".inline.x", "3"),
+        (".seq[\"x\"]", "3"),
+        (".seq | .x", "3"),
+        ("[.seq] | .[0].x", "3"),
+    ];
+    for (filter, expected) in rows {
+        let (output, exit_code) = run_yq_stdin(filter, input, &["-o", "json", "-I0"])?;
+        assert_eq!(exit_code, 0, "{filter}");
+        assert_eq!(output.trim(), expected, "{filter}");
+    }
+
+    // Unchanged: the collapsed view still lets the earlier-listed source win.
+    let (output, exit_code) = run_yq_stdin(".seq", input, &["-o", "json", "-I0"])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output.trim(), r#"{"x":1,"p":"a","r":"c"}"#);
+    Ok(())
+}
+
 #[test]
 fn test_yaml_mapping_anchor_preserved_on_query_result_712() -> Result<()> {
     // A query result whose OWN cursor carries the anchor (not a nested
