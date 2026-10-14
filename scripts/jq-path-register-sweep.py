@@ -2343,6 +2343,15 @@ CONTEXTS = [
     ("foreach-extract-try-path-arr2", "path(foreach (1,2) as $k ([]; .; try ({X})))"),
     ("foreach-extract-try-path-init-dot", "path(foreach .a? as $k (.; .; try ({X})))"),
     ("foreach-extract-try-path-r", "path(. as $r | foreach .a? as $k ([]; $r; try ({X})))"),
+    # (#4610) a source that navigates the register onto the element, with INIT `.`: the root is no node of
+    # the register there (only a `null`/boolean state is still identical to it by kind), so a pattern step on
+    # the state is refused by `path_intact` and `?//` retries it.
+    ("foreach-update-try-var-nav-init-dot", "path(foreach .[]? as $k (.; try ({X}); $k))"),
+    ("foreach-update-try-dot-nav-init-dot", "path(foreach .[]? as $k (.; try ({X}); .))"),
+    ("foreach-update-try-del-nav-init-dot", "del(foreach .[]? as $k (.; try ({X}); $k))"),
+    ("foreach-update-try-assign-nav-init-dot", "(foreach .[]? as $k (.; try ({X}); $k)) = 9"),
+    ("foreach-extract-try-path-nav-init-dot", "path(foreach .[]? as $k (.; .; try ({X})))"),
+    ("foreach-update-try-var-nav-key-init-dot", "path(foreach .a? as $k (.; try ({X}); $k))"),
 ]
 
 # Long chains are the O(N^3) row: a timing axis, not a correctness one.
