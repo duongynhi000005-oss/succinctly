@@ -825,6 +825,20 @@ OPERANDS = [
     "(reduce (keys | $__loc__ | . as {file:$a} | .) as $k (.; .))",
     "(reduce ($__loc__ | . as {file:$a} ?// $a | .) as $k (.; .))",
     "(foreach (({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
+    # (#4597) the same comma behind `first`/`limit`/`nth(0; ..)`, which generate only the operand's first
+    # output: raises when that is the fresh item, answers when it is the register. `limit(2; ..)` past a
+    # register first item is a residual (a wrong accept), listed as a contrast.
+    "(reduce (first({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first({a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(1; {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(1; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(2; ., {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (nth(0; {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))",
+    "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
+    "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
     "(reduce (def f: .|tostring; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))",
     # (#4522) a call whose `def` hands the register on next to a fresh value, and a fresh

@@ -62133,8 +62133,8 @@ fn test_nested_foreach_source_destructuring_a_null_marker_moves_the_register_457
 /// then destructures `.`: the source is generated whole, so the fresh item reaches the destructure
 /// and its tracked `INDEX` step raises, wherever the register is. The walk asked only about a stage
 /// fresh on every output. `$__loc__` is the object the evaluator builds, so it is fresh too. A
-/// `first`/`limit(1; ..)` that stops before the fresh item is generated still answers. Every row is a
-/// live jq 1.7.1 capture.
+/// `first`/`limit(1; ..)`/`nth(0; ..)` generates only the operand's first output (#4597): it raises when that is
+/// the fresh item, and answers when it is the register. Every row is a live jq 1.7.1 capture.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582() -> Result<()> {
@@ -62230,6 +62230,77 @@ fn test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582() -> Result
         (
             r#"{"a":5}"#,
             r"[path(reduce (({a:1}, .) | . as [$a] | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}, .) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce (first({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(1; {a:1}, .) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (nth(0; {a:1}, .) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        // `first(., {a:1})` stops after the register and answers.
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first(., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(1; ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))]",
+            "",
+            invalid,
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))]",
             "",
             invalid,
             5,

@@ -50498,37 +50498,7 @@ impl<'e> RegisterSpine<'e> {
     /// note on `def f: ., {a:1}` (a register leaf beside a fresh one) pins that a routed call
     /// refuses a negated operand jq answers.
     fn first_output_is_register(&mut self, e: &'e Expr) -> bool {
-        // The wrappers whose first output is their operand's first: `try`, `?`, `first`, a
-        // `limit` with a positive literal count, `nth(0; ..)`, a `label`, and a pipe of one stage
-        // that is not `.` (`(., 1) | .`, `. | (., 1)`).
-        let mut e = unwrap_bind_source(e);
-        loop {
-            let inner = match e {
-                Expr::Optional(inner)
-                | Expr::Try {
-                    expr: inner,
-                    catch: None,
-                }
-                | Expr::FirstExpr(inner)
-                | Expr::Builtin(Builtin::FirstStream(inner))
-                | Expr::Label { body: inner, .. } => inner,
-                Expr::Limit { n, expr: inner } if limit_takes_some(n) => inner,
-                Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner))
-                    if limit_literal_count(n) == Some(0.0) =>
-                {
-                    inner
-                }
-                Expr::Pipe(stages) => {
-                    let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
-                    match (rest.next(), rest.next()) {
-                        (Some(only), None) => only,
-                        _ => break,
-                    }
-                }
-                _ => break,
-            };
-            e = unwrap_bind_source(inner);
-        }
+        let e = first_output_operand(e);
         match e {
             Expr::Comma(items) => items
                 .first()
@@ -50610,10 +50580,27 @@ impl<'e> RegisterSpine<'e> {
     /// A source is generated whole, so the fresh item reaches the stage after it whatever order the
     /// items come in, and its tracked `INDEX` step raises on it. Only a comma: an `if` or `//` takes
     /// one branch at run time, so a fresh branch of it does not say the destructure meets it.
+    ///
+    /// Behind `first(f)`, a `limit` with a positive count or `nth(0; f)` (#4597) only the operand's
+    /// first output is generated, so it is the one that has to be fresh: `first({a:1}, .)` raises,
+    /// `first(., {a:1})` stops after the register and answers. [`first_output_operand`] also peels
+    /// `try`, `?`, `label` and a one-stage pipe, which generate every item, so for those reading just
+    /// the first item is a (sound) under-approximation: `try (., {a:1})` stays accepted.
     fn comma_has_fresh_item(&mut self, stage: &'e Expr) -> bool {
         match unwrap_paren(stage) {
             Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, true)),
-            _ => false,
+            wrapper => {
+                let first = first_output_operand(wrapper);
+                if core::ptr::eq(first, unwrap_bind_source(wrapper)) {
+                    return false;
+                }
+                match unwrap_paren(first) {
+                    Expr::Comma(items) => items
+                        .first()
+                        .is_some_and(|item| self.binds_fresh(item, true)),
+                    other => self.binds_fresh(other, true),
+                }
+            }
         }
     }
 
@@ -51604,6 +51591,42 @@ fn routes_fresh_destructuring(patterns: &[Pattern]) -> bool {
 /// still accepted by value where jq raises in every alternative.
 fn routes_destructuring(patterns: &[Pattern]) -> bool {
     matches!(patterns, [pattern] if !matches!(pattern, Pattern::Var(_)))
+}
+
+/// The operand whose first output is `e`'s first output (#4514, #4582): peels the wrappers that
+/// hand their operand's first output on -- `try`, `?`, `first`, a `limit` with a positive literal
+/// count, `nth(0; ..)`, a `label`, and a pipe of one stage that is not `.` (`(., 1) | .`,
+/// `. | (., 1)`). `e` itself when it is none of them.
+fn first_output_operand(e: &Expr) -> &Expr {
+    let mut e = unwrap_bind_source(e);
+    loop {
+        let inner = match e {
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            }
+            | Expr::FirstExpr(inner)
+            | Expr::Builtin(Builtin::FirstStream(inner))
+            | Expr::Label { body: inner, .. } => inner,
+            Expr::Limit { n, expr: inner } if limit_takes_some(n) => inner,
+            Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner))
+                if limit_literal_count(n) == Some(0.0) =>
+            {
+                inner
+            }
+            Expr::Pipe(stages) => {
+                let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+                match (rest.next(), rest.next()) {
+                    (Some(only), None) => only,
+                    _ => break,
+                }
+            }
+            _ => break,
+        };
+        e = unwrap_bind_source(inner);
+    }
+    e
 }
 
 /// Whether every output of `e` is a freshly built value -- a number or string
