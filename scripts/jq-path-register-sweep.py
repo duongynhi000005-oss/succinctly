@@ -269,6 +269,17 @@ OPERANDS = [
     "all(unique_by(.))",
     "isempty(any(1; .[]?))",
     "isempty(all(1; .a?))",
+    # (#4623) a verdict UPDATE of a `foreach` that navigates its source: a comma of verdicts and an
+    # operand wrapped in `first`/`limit`, which leave jq's register where they began.
+    "(isempty(1), isempty(2))",
+    "(isempty(1), 5)",
+    "(isempty(1), isempty(.a?))",
+    "isempty(first(1))",
+    "isempty(limit(1; 1, 2))",
+    "any(first(1); .)",
+    "all(1; first(.))",
+    "isempty(first(.a?))",
+    "isempty(path(.[]?))",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
