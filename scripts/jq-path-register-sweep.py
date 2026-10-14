@@ -724,9 +724,9 @@ OPERANDS = [
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .))",
     # (#4494) a top-level `reduce` source that destructures a call whose `def` builds its result
     # raises at the pattern's step whatever the register is. The contrasts are a bare alternative to
-    # retry onto (`?//  $a`), the register itself (`def f: .`) and the value-mode spelling. The last
-    # four rows are not reached yet (#4522) and are wrong accepts: a bound expression that holds the
-    # `def`, a fresh value piped into a destructure of `.`, a parameterised call, and a `//` operand.
+    # retry onto (`?//  $a`), the register itself (`def f: .`) and the value-mode spelling. The
+    # `{a:1} | . as {a:$a}`, parameterised-call and `//` rows are not reached yet (#4522) and are
+    # wrong accepts.
     "(reduce (def f: {a:1}; f as {a:$a} ?// $a | .) as $k (.; .))",
     "(reduce ((def f: {a:1}; f) as {a:$a} | .) as $k (.; .))",
     "(reduce (def g: {a:1}; def f: g; f as {a:$a} | .) as $k (.; .))",
@@ -738,6 +738,28 @@ OPERANDS = [
     "(reduce ({a:1} | . as {a:$a} | .) as $k (.; .))",
     "(reduce (def f(x): {a:1}; f(.) as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: {a:1}; (f as {a:$a} | .) // .) as $k (.; .))",
+    # (#4522) the residual shapes: a `?//` chain of destructuring patterns, a path-expression INIT
+    # (the source raises whatever INIT is), a fresh value reached through a variable or a closure
+    # argument, a nested fold, and the contrasts a fresh destructure must not disturb (a chain with
+    # a bare alternative, a variable bound to the register).
+    "(reduce (def f: {a:1}; f as [$a] ?// {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; f as [$a] ?// $a | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.a; .))",
+    "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.[]?; .))",
+    "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (tostring; .))",
+    "(reduce (def f: {a:1}; f as $x | $x as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; . as $x | $x as {a:$a} | .) as $k (.; .))",
+    "(reduce (def g(x): x; g(def f: {a:1}; f as {a:$a} | .)) as $k (.; .))",
+    "(reduce (def g(x): x as {a:$a} | .; g({a:1})) as $k (.; .))",
+    "(reduce (def g($x): $x as {a:$a} | .; g({a:1})) as $k (.; .))",
+    "(reduce (def g(x): x as {a:$a} | .; g(.)) as $k (.; .))",
+    "(reduce (def g(x): x as {a:$a} | .; g(.), g({a:1})) as $k (.; .))",
+    "(reduce (def g(x): x as {a:$a} | .; g({a:1}), g(.)) as $k (.; .))",
+    "(reduce (def g(x): x as {a:$a} | .; g(.), g(.)) as $k (.; .))",
+    "(reduce (def f: {a:1}; def g(x): x; g(f) as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: {a:1}; f as $x ?// $y | $y as {a:$a} | .) as $k (.; .))",
+    "(reduce 1 as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))",
+    "(reduce (1,2) as $i (.; reduce (def f: {a:1}; f as {a:$a} | .) as $j (.; .)))",
     "(reduce (def f: ., {a:1}; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: .|tostring; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))",

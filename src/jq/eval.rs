@@ -49717,8 +49717,11 @@ fn source_destructures_register_with(
 /// of being driven by value (`reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; .)` is an error in
 /// jq and printed the root here). A destructure of the register itself is not asked about: a
 /// `reduce` backtracks its source, jq answers, and the resolver refuses it. It answers only for
-/// what [`RegisterSpine::binds_fresh`] reads as fresh, so a fresh value piped into a destructure of
-/// `.`, a parameterised call, and the other shapes listed in #4522 are not reached.
+/// what [`RegisterSpine::binds_fresh`] reads as fresh (#4522 widened it to a `?//` chain of
+/// destructuring patterns, a `(def f: ..; f)` bound expression, a variable bound to a fresh value
+/// and a closure argument), so a call whose `def` hands the register on next to a fresh value, a
+/// fresh value piped into a destructure of `.`, a parameterised call and a `//` operand are not
+/// reached.
 fn source_destructures_fresh(source: &Expr) -> bool {
     let mut walk = RegisterSpine {
         through_reduce: true,
@@ -50006,6 +50009,7 @@ enum Reach {
 /// are installed), with how many variables were bound around it. A call reads `BODY` with
 /// those variables and the definitions up to and including this one (its index in
 /// [`RegisterSpine::defs`]), as jq binds it lexically (#4278).
+#[derive(Clone)]
 struct SpineDef<'e> {
     name: &'e str,
     /// The number of parameters: `def f: ..` and `def f($x): ..` are different definitions (#4424).
@@ -50016,6 +50020,16 @@ struct SpineDef<'e> {
     body: Option<&'e Expr>,
     params: &'e [Param],
     vars: usize,
+    /// For a closure parameter in a `fresh_only` walk, its argument and the scope of the call that
+    /// passed it (#4522): a call to the parameter reads the argument there, not in the callee's.
+    closure: Option<(&'e Expr, Rc<CallerScope<'e>>)>,
+}
+
+/// The spine variables and definitions in scope where a call passed its closure arguments, shared
+/// by all of them ([`SpineDef::closure`]).
+struct CallerScope<'e> {
+    defs: Vec<SpineDef<'e>>,
+    vars: Vec<(&'e str, bool)>,
 }
 
 /// The state of one [`source_destructures_register`] walk down a fold source's spine.
@@ -50040,7 +50054,8 @@ struct RegisterSpine<'e> {
     null_register: bool,
     /// The variables bound so far on the spine, innermost last, each with whether it may hold
     /// the register (#4278: `. as $x | $x as {a:$a}` destructures the register as `. as
-    /// {a:$a}` does). A later binding of the same name shadows an earlier one.
+    /// {a:$a}` does). A later binding of the same name shadows an earlier one. In a `fresh_only`
+    /// walk the flag is whether it holds a *fresh value* instead (#4522, [`binds_held`](Self::binds_held)).
     vars: Vec<(&'e str, bool)>,
     /// The no-argument definitions in scope on the spine, innermost last.
     defs: Vec<SpineDef<'e>>,
@@ -50066,6 +50081,41 @@ struct RegisterSpine<'e> {
 }
 
 impl<'e> RegisterSpine<'e> {
+    /// `read` of a closure parameter's argument, in the scope of the call that passed it (#4522).
+    fn in_closure_scope<R>(
+        &mut self,
+        (arg, scope): &(&'e Expr, Rc<CallerScope<'e>>),
+        read: impl FnOnce(&mut Self, &'e Expr) -> R,
+    ) -> R {
+        let defs = core::mem::replace(&mut self.defs, scope.defs.clone());
+        let vars = core::mem::replace(&mut self.vars, scope.vars.clone());
+        let result = read(self, arg);
+        self.defs = defs;
+        self.vars = vars;
+        result
+    }
+
+    /// Whether a bind of `e` binds a variable the walk tracks: the register for an ordinary walk,
+    /// a fresh value for the `fresh_only` one (#4522), whose flags in [`vars`](Self::vars) read so.
+    fn binds_held(&mut self, e: &'e Expr) -> bool {
+        if self.fresh_only {
+            self.binds_fresh(e, true)
+        } else {
+            self.binds_register(e)
+        }
+    }
+
+    /// [`binds_held`](Self::binds_held), or for an ordinary walk
+    /// [`binds_register_first`](Self::binds_register_first): the question the routing decisions ask
+    /// (#4514, #4522).
+    fn binds_held_first(&mut self, e: &'e Expr) -> bool {
+        if self.fresh_only {
+            self.binds_fresh(e, true)
+        } else {
+            self.binds_register_first(e)
+        }
+    }
+
     /// Whether `$name` is bound on the spine to what may be the register itself.
     fn holds_register(&self, name: &str) -> bool {
         self.vars
@@ -50276,6 +50326,9 @@ impl<'e> RegisterSpine<'e> {
     fn binds_fresh(&mut self, e: &'e Expr, every: bool) -> bool {
         let e = unwrap_bind_source(e);
         match e {
+            // #4522: a variable the `fresh_only` walk bound to a fresh value (`f as $x | $x as
+            // {a:$a}`), whose flag in [`vars`](Self::vars) reads as fresh, not as the register.
+            Expr::Var(name) if self.fresh_only => self.holds_register(name),
             Expr::Comma(items) if every => items.iter().all(|item| self.binds_fresh(item, true)),
             Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, false)),
             Expr::FuncCall { name, args, .. } if args.is_empty() => {
@@ -50286,7 +50339,14 @@ impl<'e> RegisterSpine<'e> {
                 {
                     Some(at) => {
                         let SpineDef { body, vars, .. } = self.defs[at];
-                        body.is_some_and(|body| self.body_binds_fresh(body, vars, at + 1))
+                        match (body, self.defs[at].closure.clone()) {
+                            (Some(body), _) => self.body_binds_fresh(body, vars, at + 1),
+                            (None, Some(closure)) => self
+                                .in_closure_scope(&closure, |walk, arg| {
+                                    walk.binds_fresh(arg, every)
+                                }),
+                            (None, None) => false,
+                        }
                     }
                     None => false,
                 }
@@ -50294,6 +50354,27 @@ impl<'e> RegisterSpine<'e> {
             Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
                 let body: &'e Expr = &def.body;
                 self.body_binds_fresh(body, 0, 0)
+            }
+            // `(def f: ..; f) as {a:$a}`: the definition is in scope for the call that follows it.
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                ..
+            } => {
+                let depth = self.defs.len();
+                self.defs.push(SpineDef {
+                    name,
+                    arity: params.len(),
+                    body: Some(body),
+                    params,
+                    vars: self.vars.len(),
+                    closure: None,
+                });
+                let fresh = self.binds_fresh(then, every);
+                self.defs.truncate(depth);
+                fresh
             }
             // A pipe ends in what its last stage that is not `.` yields (`def g: f | .`), so a call
             // there is read through its body; any other last stage is [`yields_only_fresh_values`]'s.
@@ -50353,10 +50434,10 @@ impl<'e> RegisterSpine<'e> {
     fn chain_names(&mut self, expr: &'e Expr, patterns: &'e [Pattern]) -> Vec<(&'e str, bool)> {
         // A wrapped marker is the register for a single pattern only (#4320): a `?//` chain keeps
         // the retry rules of #3279/#3781, which a placed head would change.
-        let register = (self.binds_register(expr)
+        let register = (self.binds_held(expr)
             && (patterns.len() == 1 || wrapped_marker(expr).is_none()))
             // #4514: for a single pattern, the register on the source's first output is enough.
-            || (patterns.len() == 1 && self.first_output_is_register(expr));
+            || (!self.fresh_only && patterns.len() == 1 && self.first_output_is_register(expr));
         // #4320: a later bare alternative binds the register only after the body raised on
         // the earlier one. At the top level the walk is then the register's (`. as $x ?//
         // $y | $y as {a:$a}` raises in jq on every document but `null`); inside another fold's
@@ -50370,6 +50451,7 @@ impl<'e> RegisterSpine<'e> {
         // `reduce (1)` marks, where placing it refused the rows jq answers. The memo of a
         // walk is per [`RegisterSpine`] and so per fold, and the depth is fixed for the walk.
         let later_holds_register = register
+            && !self.fresh_only
             && (fold_body::depth() == 0
                 || (self.through_reduce && fold_body::source_moved_onto_non_null_here()));
         let mut names: Vec<(&'e str, bool)> = Vec::new();
@@ -50425,7 +50507,7 @@ impl<'e> RegisterSpine<'e> {
             params
                 .iter()
                 .zip(args)
-                .map(|(param, arg)| param.is_dollar() && self.binds_register_first(arg))
+                .map(|(param, arg)| param.is_dollar() && self.binds_held_first(arg))
                 .collect()
         } else {
             Vec::new()
@@ -50435,7 +50517,12 @@ impl<'e> RegisterSpine<'e> {
         // a call that binds one, and every body read inside it (a nested `def g` sees the
         // parameter), is read afresh, with a recursive call taken to hand the register on as the
         // memo's placeholder does. Bodies read outside such a call are memoized as before.
-        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held);
+        // #4522: and a call whose closure arguments the `fresh_only` walk reads, which differ per call
+        // (`g(.)` and `g({a:1})` share one body).
+        let reads_closures = self.fresh_only
+            && params.len() == args.len()
+            && params.iter().any(|param| !param.is_dollar());
+        let held_scope = !self.held.is_empty() || holds.iter().any(|held| *held) || reads_closures;
         if held_scope {
             if self.held.contains(&key) {
                 return Reach::HandsOn;
@@ -50453,16 +50540,29 @@ impl<'e> RegisterSpine<'e> {
         } else {
             self.memo.push((key, Reach::HandsOn));
         }
+        let caller = reads_closures.then(|| {
+            Rc::new(CallerScope {
+                defs: self.defs.clone(),
+                vars: self.vars.clone(),
+            })
+        });
         let vars_tail = self.vars.split_off(vars.min(self.vars.len()));
         let defs_tail = self.defs.split_off(defs.min(self.defs.len()));
         let (vars_base, defs_base) = (self.vars.len(), self.defs.len());
         for (i, param) in params.iter().enumerate() {
+            // #4522: a closure parameter of a `fresh_only` walk reads its argument in the caller's
+            // scope, which is this one before the callee's definitions replaced it.
+            let closure = caller
+                .as_ref()
+                .filter(|_| !param.is_dollar())
+                .map(|scope| (&args[i], Rc::clone(scope)));
             self.defs.push(SpineDef {
                 name: param.name(),
                 arity: 0,
                 body: None,
                 params: &[],
                 vars: 0,
+                closure,
             });
             if param.is_dollar() {
                 self.vars
@@ -50541,7 +50641,7 @@ impl<'e> RegisterSpine<'e> {
         match unwrap_bind_source(e) {
             Expr::Identity => Reach::HandsOn,
             // #4278: a variable the spine bound to the register hands it on as `.` does.
-            Expr::Var(name) if self.holds_register(name) => Reach::HandsOn,
+            Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
             // #4187: a plain bind (`. as $x | BODY`, or a `?//` chain of bare `$var`s) does
             // not move the register -- its source runs as a subexpression -- so its body
             // meets the register where the bind did, and a destructure there is the source's
@@ -50556,7 +50656,7 @@ impl<'e> RegisterSpine<'e> {
             Expr::As { expr, var, body } => {
                 // #4514: a variable bound to a source that is the register on its first output
                 // holds it for the walk, which only decides what the resolver is asked.
-                let register = self.binds_register_first(expr);
+                let register = self.binds_held_first(expr);
                 self.with_vars(&[(var.as_str(), register)], body)
             }
             Expr::AsPattern {
@@ -50624,7 +50724,8 @@ impl<'e> RegisterSpine<'e> {
                 // #4494: the `fresh_only` walk asks only this question, so it takes the clause the
                 // `through_reduce` walk skips and none of the register clauses below.
                 if (self.fresh_only || !self.through_reduce)
-                    && routes_destructuring(patterns)
+                    && (routes_destructuring(patterns)
+                        || (self.fresh_only && patterns_all_destructuring_chain(patterns)))
                     && self.binds_fresh(expr, false)
                 {
                     return Reach::Destructures;
@@ -50700,6 +50801,7 @@ impl<'e> RegisterSpine<'e> {
                     body: Some(body),
                     params,
                     vars: self.vars.len(),
+                    closure: None,
                 });
                 let reach = self.reach(then);
                 self.defs.truncate(depth);
@@ -50722,9 +50824,12 @@ impl<'e> RegisterSpine<'e> {
                         let SpineDef {
                             body, vars, params, ..
                         } = self.defs[at];
-                        match body {
-                            Some(body) => self.read_body_with(body, vars, at + 1, params, args),
-                            None => Reach::Opaque,
+                        match (body, self.defs[at].closure.clone()) {
+                            (Some(body), _) => {
+                                self.read_body_with(body, vars, at + 1, params, args)
+                            }
+                            (None, Some(closure)) => self.in_closure_scope(&closure, Self::reach),
+                            (None, None) => Reach::Opaque,
                         }
                     }
                     None => Reach::Opaque,
@@ -51262,10 +51367,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // result, a fresh value beside the register in a comma) at the top level, where `.` is the
         // register: the pattern's step raises on it whatever the register is. Inside another
         // fold's body it is a value-mode subexpression in some contexts jq answers (see
-        // [`RegisterSpine::reach_node`]'s #4452 comment), so the top level only.
+        // [`RegisterSpine::reach_node`]'s #4452 comment), so the top level only. Not gated on
+        // `ambient.trackable` (#4522): the step raises on a fresh value whatever the register is,
+        // so a path-expression INIT that moved it (`reduce SRC as $k (.a; .)`) changes nothing.
         || (S::TAG == EvalTag::Jq
             && !foreach_source
-            && ambient.trackable
             && fold_body::depth() == 0
             && source_destructures_fresh(source))
         // #3795: a source that can hand the register back by pointer through
