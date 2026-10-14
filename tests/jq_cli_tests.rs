@@ -63254,6 +63254,25 @@ fn test_destructure_of_a_marker_that_is_not_the_register_in_a_fold_body_4588() -
             "",
             0,
         ),
+        // A stage that may pass nothing ahead of the destructure keeps it from running: jq answers.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select(false) | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (limit(0; $x as {b:$b} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ((.a|select(.zz)) as $z | $x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;

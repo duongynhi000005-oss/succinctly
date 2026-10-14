@@ -50031,14 +50031,12 @@ fn prune_caught_destructures(
         ..
     } = unwrap_paren(operand)
     {
-        // The value the pattern indexes: the accumulator for `.`, the marker's own for a `$x`
-        // (which is the accumulator's too, unless it is a marker that is not the register).
-        let bound_value = match unwrap_paren(bound) {
-            Expr::Identity => Some(value),
-            Expr::TrackedVar(m) if markers.contains(&Rc::as_ptr(m)) => Some(&m.value),
-            _ => None,
+        let is_register = match unwrap_paren(bound) {
+            Expr::Identity => true,
+            Expr::TrackedVar(m) => markers.contains(&Rc::as_ptr(m)),
+            _ => false,
         };
-        if bound_value.is_some_and(|v| patterns.iter().all(|p| pattern_step_type_errors(p, v))) {
+        if is_register && patterns.iter().all(|p| pattern_step_type_errors(p, value)) {
             return Expr::Builtin(Builtin::Empty);
         }
         patterns.len() == 1
@@ -50085,6 +50083,34 @@ fn unplaced_register_markers<S: EvalSemantics>(
     markers
 }
 
+/// Whether no stage of `source` can end it before a destructure runs: a `select` or `limit` that
+/// may pass nothing (`select(false)`, `limit(0; ..)`), a bind whose source may be empty
+/// (`(.a | select(.zz)) as $y | $x as P`), `empty`, a nested `foreach` or a `label` all skip the
+/// destructure behind them, and jq answers (#4588 review). The refusal of a marker that is not the
+/// register is read from the source's text, so it reads only a source that cannot do that.
+fn source_always_reaches_destructure(source: &Expr) -> bool {
+    !any_subexpr(source, &mut |e| match e {
+        Expr::Builtin(Builtin::Select(cond)) => {
+            !matches!(
+                unwrap_paren(cond),
+                Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
+            ) || matches!(
+                unwrap_paren(cond),
+                Expr::Literal(Literal::Null | Literal::Bool(false))
+            )
+        }
+        Expr::Limit { n, .. } => !matches!(unwrap_paren(n), Expr::Literal(lit)
+            if literal_to_owned(lit).as_f64().is_some_and(|n| n >= 1.0)),
+        Expr::As { .. } | Expr::Foreach { .. } | Expr::Label { .. } => true,
+        Expr::Builtin(Builtin::Empty | Builtin::NthStream(..)) | Expr::NthExpr { .. } => true,
+        Expr::AsPattern { expr, .. } => !matches!(
+            unwrap_paren(expr),
+            Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
+        ),
+        _ => false,
+    })
+}
+
 /// The `$x` markers in a fold `source` inside another fold's body that are provably *not* the
 /// register (#4588): bound to a node at another position than the one the fold's register stands
 /// on (`.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) ...)`), and not `jv_identical`
@@ -50123,6 +50149,9 @@ fn foreign_register_markers<S: EvalSemantics>(
     let selects = any_subexpr(source, &mut |e| {
         matches!(e, Expr::Builtin(Builtin::Select(_)))
     });
+    if !source_always_reaches_destructure(source) {
+        return markers;
+    }
     any_subexpr(source, &mut |e| {
         if let Expr::TrackedVar(marker) = e {
             if selects && matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false)) {

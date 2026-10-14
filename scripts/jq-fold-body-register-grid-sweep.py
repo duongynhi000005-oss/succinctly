@@ -109,6 +109,8 @@ CONTEXTS = [
 # destructure of `.` behind a `select($x|not)`/`select($x)` that the markers do not decide. They count
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
+# ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
+RESIDUAL_NAV_MAX = 147
 DOCS = [
     "null",
     "true",
@@ -226,7 +228,7 @@ def main():
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
-    return 1 if fresh or lost or hung else 0
+    return 1 if fresh or lost or hung or len(residual_nav) > RESIDUAL_NAV_MAX else 0
 
 
 sys.exit(main())
