@@ -29598,6 +29598,93 @@ fn test_yq_comma_lhs_mixed_noop_and_real_write_reports_rhs_error_1233() -> Resul
     Ok(())
 }
 
+/// #1412: real yq resolves an assignment's left side before its right side and never
+/// evaluates the right side when every resolved target is a scalar-target no-op, or when
+/// there is no target at all. Each row is `(input, filter)`; all answer the document
+/// unchanged under yq v4.53.3 even though the right side would raise.
+#[test]
+fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<()> {
+    let rows = [
+        // A comma whose every branch is a scalar-target no-op.
+        ("5\n", "(.a, .b) = error(\"boom\")", "5"),
+        ("5\n", "(.a, .b) += error(\"boom\")", "5"),
+        ("5\n", "(.a, (.b, .c)) -= error(\"boom\")", "5"),
+        ("5\n", "(.a, .b.c) *= error(\"boom\")", "5"),
+        // A computed key, which is resolved first and then classified the same way.
+        ("5\n", "\"a\" as $k | .[$k] = error(\"boom\")", "5"),
+        (
+            "a: 5\n",
+            "\"x\" as $k | .a[$k] += error(\"boom\")",
+            r#"{"a":5}"#,
+        ),
+        ("5\n", "(\"a\" as $k | .[$k]) = error(\"boom\")", "5"),
+        // No target at all.
+        ("a: 1\n", "select(false) = error(\"boom\")", r#"{"a":1}"#),
+        ("a: 1\n", "select(. == 2) += error(\"boom\")", r#"{"a":1}"#),
+        (
+            "a: 1\n",
+            "(select(false), select(false)) -= error(\"boom\")",
+            r#"{"a":1}"#,
+        ),
+    ];
+    for (input, filter, expected) in rows {
+        let (out, err, code) = run_yq_stdin_with_stderr(filter, input, &["-o", "json", "-I0"])?;
+        assert_eq!(code, 0, "{filter}: {err}");
+        assert_eq!(out.trim(), expected, "{filter}");
+    }
+
+    // Unchanged: one branch that really writes still evaluates the right side.
+    let (_out, err, code) = run_yq_stdin_with_stderr(
+        "(.a, .b) = error(\"boom\")",
+        "a: 1\n",
+        &["-o", "json", "-I0"],
+    )?;
+    assert_ne!(code, 0);
+    assert!(err.contains("boom"), "err={err}");
+
+    // Unchanged: a left side yq does not track as a path still runs the right side.
+    for filter in [
+        "[.a] = error(\"boom\")",
+        "1 = error(\"boom\")",
+        "(.a | length) += error(\"boom\")",
+        "(.a, 1) = error(\"boom\")",
+    ] {
+        let (_out, err, code) = run_yq_stdin_with_stderr(filter, "5\n", &["-o", "json", "-I0"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(err.contains("boom"), "{filter}: {err}");
+    }
+
+    // Unchanged: a filter after a step yq creates still evaluates the right
+    // side here (yq answers `{"b":null}`, which this does not reproduce).
+    let (_out, err, code) = run_yq_stdin_with_stderr(
+        "(.b | select(.)) = error(\"boom\")",
+        "{}\n",
+        &["-o", "json", "-I0"],
+    )?;
+    assert_ne!(code, 0);
+    assert!(err.contains("boom"), "err={err}");
+
+    // Unchanged: a failing computed key still outranks the right side.
+    let (_out, err, code) = run_yq_stdin_with_stderr(
+        ".[error(\"p\")] = error(\"r\")",
+        "a: 1\n",
+        &["-o", "json", "-I0"],
+    )?;
+    assert_ne!(code, 0);
+    assert!(err.contains("Error: p"), "err={err}");
+
+    // jq mode has no such rule: its right side runs first.
+    for filter in [
+        "(.a, .b) = error(\"boom\")",
+        "select(false) = error(\"boom\")",
+    ] {
+        let (_out, err, code) = run_jq_stdin_with_stderr(filter, "5", &["-c"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(err.contains("boom"), "{filter}: {err}");
+    }
+    Ok(())
+}
+
 /// #1764: an untracked (computed, non-navigable) `Expr::Comma` branch is
 /// real yq's own silent no-op for `=`/`|=`, not an error -- confirmed
 /// position-independent against yq v4.53.3: untracked first, middle, or
@@ -35643,7 +35730,7 @@ fn test_yq_terminal_iterate_with_nothing_to_write_skips_rhs_1921() -> Result<()>
 }
 
 /// #1857: the same autovivify-skips-RHS fix applies to every yq-mode
-/// assignment operator that routes through `yq_assign_skip_rhs`
+/// assignment operator that routes through `yq_resolve_assign_targets`
 /// (`eval_compound_assign`/`eval_alternative_assign`), not just plain `=`.
 #[test]
 fn test_yq_nonterminal_iterate_null_target_skips_rhs_compound_operators_1857() -> Result<()> {

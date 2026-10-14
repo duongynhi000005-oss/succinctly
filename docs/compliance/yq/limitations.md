@@ -2223,33 +2223,6 @@ $ echo 'null' | succinctly yq 'del(.[("k0","k1")])'   # null, unchanged
 returns the root unchanged. Tracked, along with the field-key-on-scalar-root shapes
 above, as [#2106](https://github.com/rust-works/succinctly/issues/2106).
 
-### Comma-grouped scalar-target assignment no-op
-
-[#1233](https://github.com/rust-works/succinctly/issues/1233) taught `=`/`+=`/`-=`/`*=`/`//=`
-that real yq's field/index/iterate scalar-target no-op ([#1181](https://github.com/rust-works/succinctly/issues/1181))
-discards the RHS entirely rather than merely skipping the write — but only for a *static*
-`path_expr` (no computed key, and no `Comma`). A comma-grouped LHS where every branch is
-itself a scalar-target no-op is real yq's identical behaviour, live-verified, that
-succinctly does not yet replicate:
-
-```bash
-$ echo 5 | yq            -o=json '(.a, .b) = error("boom")'   # 5, RHS never runs
-$ echo 5 | succinctly yq -o=json '(.a, .b) = error("boom")'   # Error: boom
-```
-
-Deliberately not covered by #1233's own fix: resolving a `Comma`-containing path *before*
-the RHS (which the fix needs to do, to decide whether to skip it) is real evaluation for
-that shape, unlike a bare static path (a pure, non-evaluating AST clone) — and moving real
-evaluation ahead of the RHS risks reordering two independently-observable things. That risk
-is not hypothetical: real jq's own `.[error(P)] = error(R)` reports `R` (RHS evaluated
-first) while real yq's identical query reports `P` (path first) — succinctly currently
-matches jq's ordering in both modes, a second, related divergence from real yq neither
-tracked before now. Both filed together as
-[#1412](https://github.com/rust-works/succinctly/issues/1412), which also notes a real fix
-for the ordering divergence would likely resolve the comma-LHS gap as a side effect (a full
-path-before-RHS reorder no longer needs the static-only safety gate #1233's own narrower
-fix relies on).
-
 ### Dynamic-key and comma-grouped scalar-target assignment: the *write itself* fails
 
 [#1232](https://github.com/rust-works/succinctly/issues/1232) widened #1181's scalar-target
@@ -3109,13 +3082,17 @@ matching yq).
 Two consequences worth naming:
 
 - yq mode now resolves a **dynamic** left side before the right side too, which is real
-  yq's own order (`.[error("p")] = error("r")` reports `"p"`, where jq reports `"r"` —
-  the open half of [#1412](https://github.com/rust-works/succinctly/issues/1412)). Where
-  succinctly's left-side walk raises and real yq's does not, that error now surfaces
-  instead of the right side's: `(.a.x, .b.x) = error("boom")` on `a: 5\nb: {}` reports
-  `Cannot index number with string "x"`, where yq reports `boom`. The underlying gap is
-  pre-existing — a plain `(.a.x, .b.x) = 9` raises identically before and after — and is
-  #1412's comma-LHS half, not a new one.
+  yq's own order (`.[error("p")] = error("r")` reports `"p"`, where jq reports `"r"`), and
+  a left side whose every resolved target is a scalar-target no-op, or that resolves to no
+  target at all, never evaluates the right side ([#1412](https://github.com/rust-works/succinctly/issues/1412)).
+  One shape stays open: a left side that **navigates and then filters** still evaluates the
+  right side, because yq creates the steps it walked before a `select` drops them
+  (`(.b | select(.)) = error("boom")` on `{}` is `{"b":null}`, where succinctly raises
+  `boom`) and the unchanged document would not show that. The same gate also covers
+  filters over steps that already exist (`(.a[] | select(. > 5)) = error("boom")` on
+  `a: [1, 2]` is `{"a":[1,2]}` in yq and raises `boom` here), where nothing would have been
+  created; telling the two apart needs the created-step walk, not a syntactic check
+  ([#4593](https://github.com/rust-works/succinctly/issues/4593)).
 - A right side that reads the assignment's **own target** still diverges, because
   succinctly has no node identity (the same limitation the anchor/alias section above
   records). Real yq's right-side candidates are pointers into the document, so writing
