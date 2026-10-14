@@ -71419,7 +71419,8 @@ fn test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_455
             "Invalid path expression with result 1",
             5,
         ),
-        // EXTRACT is not marked: its `.` is UPDATE's output, which may be jq's register.
+        // EXTRACT is marked only where its `.` is off the register (#4595): it is UPDATE's output,
+        // which may be jq's register.
         (
             "null",
             r"path(. as $r | foreach .a? as $k ([]; $r; try (. as [$a] ?// $a | $a)))",
@@ -71432,6 +71433,137 @@ fn test_fold_try_over_an_alternative_bind_of_a_container_accumulator_retries_455
             r"path(. as $r | foreach .a? as $k ([]; $r; try (. as [$a] ?// $a | $a)))",
             "",
             "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+    ])
+}
+
+/// #4595: #4550's retry for a `foreach` whose EXTRACT is the `try`. EXTRACT's `.` is the state UPDATE
+/// stored, which is a computed container when INIT is one and UPDATE keeps it, and jq's `path_intact`
+/// refuses a pattern step on that whatever the register is, so `?//` retries onto the bare alternative
+/// and raises at the emission. The mark was read in UPDATE only, so the `try` swallowed the refusal and
+/// `path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))` on `null` answered nothing at exit 0.
+/// Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_extract_try_over_an_alternative_bind_of_a_container_state_retries_4595() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([1]; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; .; try (. as {a:$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ({}; .; try (. as {(.|tostring):$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; .; try (. as {(.):$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        // The write side raises too, where the swallowed refusal wrote.
+        (
+            "null",
+            r"del(foreach .a? as $k ({}; .; try (. as {a:$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            "null",
+            r"(foreach .a? as $k ([1]; .; try (. as [$a] ?// $a | $a))) = 9",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        // A source of two elements, an input that is not null, and a piped result.
+        (
+            "null",
+            r"path(foreach (1,2) as $k ([]; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)) | .)",
+            "",
+            "Invalid path expression with result []",
+            5,
+        ),
+        // No source element to step on: nothing is emitted, so nothing raises.
+        (
+            "[1]",
+            r"path(foreach .a? as $k ([]; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "",
+            0,
+        ),
+        // Controls. INIT `.` IS jq's register on the first step, so the first alternative passes
+        // `path_intact` and nothing retries; a `$r` bound to the register is on it too; a `null` state
+        // is an equal register wherever it came from (#4131).
+        (
+            "null",
+            r"path(foreach .a? as $k (.; .; try (. as [$a] ?// $a | $a)))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .a? as $k (.; .; try (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            "null",
+            r"path(. as $r | foreach .a? as $k ([]; $r; try (. as [$a] ?// $a | $a)))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(foreach .a? as $k (null; .; try (. as [$a] ?// $a | $a)))",
+            "[\"a\",0]\n",
+            "",
+            0,
+        ),
+        // Without the `try` the refusal was already jq's.
+        (
+            "null",
+            r"path(foreach .a? as $k ([]; .; (. as [$a] ?// $a | $a)))",
+            "",
+            "Invalid path expression with result []",
             5,
         ),
     ])
