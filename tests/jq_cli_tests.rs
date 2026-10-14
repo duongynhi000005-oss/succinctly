@@ -131429,6 +131429,69 @@ fn test_fold_source_destructuring_the_environment_raises_4630() -> Result<()> {
     Ok(())
 }
 
+/// #4630: a destructure of a fresh value inside `[ ... ]`, in a `reduce`/`foreach` source
+/// (`{"a":1} as $n | [$n as {b:$b} | .]`), raises in jq as it does outside the brackets; the
+/// fresh-only spine walk read `[E]` as opaque, so the source was driven by value and answered, and
+/// `del`, `=` and `|=` wrote through it. A destructure of the register inside the brackets is answered
+/// by jq and stays so, as does a bare rebind. Every row captured from jq 1.7.1; stdout and the exit
+/// status are pinned.
+#[test]
+fn test_fold_source_destructuring_a_fresh_value_inside_an_array_raises_4630() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":1}"#,
+            r#"path(foreach ({"a":1} as $n | [$n as {b:$b} | .]) as $y (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"del(foreach ({"a":1} as $n | [$n as {b:$b} | .]) as $y (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"(foreach ([{"a":1} | . as {b:$b} | .]|.[]) as $y (.; .; .)) |= 9"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(reduce ({"a":1} as $n | [$n as {b:$b} | .]) as $y (.; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(foreach (1,2) as $i (.; foreach ({"a":1} as $n | [$n as {b:$b} | .]) as $y (.; .; .); .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ([. as {b:$b} | .]) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(foreach ({"a":1} as $n | [$n as $m | .]) as $y (.; .; .))"#,
+            "[]\n",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4489: a `foreach` whose SOURCE is a destructuring `?//` chain, entered on an untracked value
 /// (`1 | foreach ...`, a literal or a computed `.`), states the register it entered with when the
 /// element took no walk step. jq's chain tries the array/object pattern first; its `INDEX` step on a

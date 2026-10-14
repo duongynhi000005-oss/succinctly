@@ -51643,6 +51643,10 @@ impl<'e> RegisterSpine<'e> {
             // `limit(n; E)`) meets the register where `E` does, and a `label` runs its body in
             // the same scope, so the destructure behind it is the source's own.
             Expr::Label { body, .. } => self.reach(body),
+            // #4630: `[E]` collects E's outputs, and a destructure of a fresh value inside it raises
+            // as it does outside. Only the fresh-only walk: a destructure of the register inside `[E]`
+            // is answered (`[. as {b:$b} | .]`), which the register walk must keep reading as opaque.
+            Expr::Array(inner) if self.fresh_only => self.reach(inner),
             other => {
                 // #4483: the chain directly under `first`/`limit(..)` (jq's `first` is a
                 // `label`/`break`, which the chain's `?//` catches as a body error, so by value
