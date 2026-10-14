@@ -50163,7 +50163,8 @@ fn foreign_register_markers<S: EvalSemantics>(
                         && ambient.frame.at.is_some()
                         && !ambient.frame.names(*invocation, path)
                 }
-                _ => false,
+                // A marker with no position (`Snapshot`, `Untracked`, `Unproven`) is not provably elsewhere.
+                _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
             };
             if elsewhere
                 && !marker_identical::<S>(marker, ambient.value, &ambient.frame)
