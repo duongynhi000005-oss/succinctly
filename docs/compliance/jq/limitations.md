@@ -2211,10 +2211,14 @@ is the revert that established what the other one costs.
    whose own source navigates (`reduce .[]? as $it (.; ...)`) jq's register is on the element, so neither `.` nor an
    outer `$x` is it and a navigation or destructure of either raises there for a `reduce` source too (the
    by-value drive answered): the nested source is resolved with no position to certify a marker against, and
-   `update_navigates_within` reads a nested source past the stages that hand their input on. Still accepted: a
-   `try ... catch` around the destructure (`foreach (try ($x as {a:$a} | .) catch .)`; a refusal there would cost the
-   rows where the pattern's type error is what the `try` catches, which jq answers), and the same shapes on a `null`
-   accumulator, which the resolver's `null` clause owns. Outside a fold body, a bound expression
+   `update_navigates_within` reads a nested source past the stages that hand their input on (`.`, an outer `$x`, `select(f)`).
+   A `select(f)` stage is looked through only when `f` is the accumulator's own truthiness (`.`, the `$x`, a literal) and the
+   accumulator is truthy: `select(empty)` or `select($x|not)` pass nothing, and the destructure behind them never runs.
+   Still accepted ([#4575](https://github.com/rust-works/succinctly/issues/4575)): a `try ... catch` around the destructure
+   (`foreach (try ($x as {a:$a} | .) catch .)`), or a `select(.) | (. as [$a] | .)?`; a refusal there would cost the rows
+   where the pattern's type error is what the `try` catches, which jq answers. And ([#4576](https://github.com/rust-works/succinctly/issues/4576))
+   the same shapes on a `null` accumulator, which the resolver's `null` clause owns (it prints `[]` where jq prints the moved
+   path). `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
