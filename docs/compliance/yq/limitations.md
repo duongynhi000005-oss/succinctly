@@ -3085,6 +3085,14 @@ Two consequences worth naming:
   yq's own order (`.[error("p")] = error("r")` reports `"p"`, where jq reports `"r"`), and
   a left side whose every resolved target is a scalar-target no-op, or that resolves to no
   target at all, never evaluates the right side ([#1412](https://github.com/rust-works/succinctly/issues/1412)).
+  One shape stays open: a left side that **navigates and then filters** still evaluates the
+  right side, because yq creates the steps it walked before a `select` drops them
+  (`(.b | select(.)) = error("boom")` on `{}` is `{"b":null}`, where succinctly raises
+  `boom`) and the unchanged document would not show that. The same gate also covers
+  filters over steps that already exist (`(.a[] | select(. > 5)) = error("boom")` on
+  `a: [1, 2]` is `{"a":[1,2]}` in yq and raises `boom` here), where nothing would have been
+  created; telling the two apart needs the created-step walk, not a syntactic check
+  ([#4593](https://github.com/rust-works/succinctly/issues/4593)).
 - A right side that reads the assignment's **own target** still diverges, because
   succinctly has no node identity (the same limitation the anchor/alias section above
   records). Real yq's right-side candidates are pointers into the document, so writing

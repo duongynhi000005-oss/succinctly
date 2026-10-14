@@ -29670,7 +29670,7 @@ fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<
         &["-o", "json", "-I0"],
     )?;
     assert_ne!(code, 0);
-    assert!(err.contains('p') && !err.contains("r\n"), "err={err}");
+    assert!(err.contains("Error: p"), "err={err}");
 
     // jq mode has no such rule: its right side runs first.
     for filter in [
@@ -35729,7 +35729,7 @@ fn test_yq_terminal_iterate_with_nothing_to_write_skips_rhs_1921() -> Result<()>
 }
 
 /// #1857: the same autovivify-skips-RHS fix applies to every yq-mode
-/// assignment operator that routes through `yq_assign_skip_rhs`
+/// assignment operator that routes through `yq_resolve_assign_targets`
 /// (`eval_compound_assign`/`eval_alternative_assign`), not just plain `=`.
 #[test]
 fn test_yq_nonterminal_iterate_null_target_skips_rhs_compound_operators_1857() -> Result<()> {
