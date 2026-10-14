@@ -71953,6 +71953,103 @@ fn test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternativ
     ])
 }
 
+/// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
+/// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
+/// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the
+/// fold's entry and answers `[]`; a `foreach` emits from inside the loop and raises at the emission. The
+/// walk read INIT `.` as still on the register (true only while the source does not navigate, #4354), so
+/// `foreach` answered where jq raises and `reduce` raised where jq answers. Every jq side captured from
+/// jq 1.7.1.
+#[test]
+fn test_fold_alt_bind_of_init_dot_behind_a_navigating_source_retries_4596() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[[1]]",
+            r"path(reduce .[]? as $k (.; try (. as [$a] ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(reduce .[0]? as $k (.; . as [$a] ?// $a | $a))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(reduce .[]? as $k (.; try ((. as [$a] ?// $a | $a))?))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(reduce .a? as $k (.; try (. as {a:$a} ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(reduce .[]? as $k (.; try (. as {a:$a} ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1,2]",
+            r"path(reduce .[]? as $k (.; try (. as [$a] ?// $a | $a)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[0]? as $k (.; (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "[[1]]",
+            r"path(foreach .[]? as $k (.; try ((. as [$a] ?// $a | $a))?; .))",
+            "",
+            "Invalid path expression with result [[1]]",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(foreach .[]? as $k (.; try (. as {a:$a} ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            "[1,2]",
+            r"path(foreach .[]? as $k (.; . as [$a] ?// $a | $a; .))",
+            "",
+            "Invalid path expression with result [1,2]",
+            5,
+        ),
+        (
+            "[[1],[2]]",
+            r"path(foreach .[]? as $k (.; try (. as [$a] ?// $a | $a); .))",
+            "",
+            "Invalid path expression with result [[1],[2]]",
+            5,
+        ),
+    ])
+}
+
 /// #4354: a fold whose UPDATE is `isempty(g)` with a `?//` bind in its operand keeps the register
 /// on the body's frame, because the arm states its answers and its identity element itself. `fans_out` read the `?//` as a sibling that sees the register differently and withheld
 /// it, so the identity (`true` once `g` ran to its end after a swallowed answer) had no register to

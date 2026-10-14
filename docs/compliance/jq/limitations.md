@@ -808,7 +808,15 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   builtin call (`isempty(g)`, `any(g; c)`), whose EXTRACT reads a lost register
   ([#4611](https://github.com/rust-works/succinctly/issues/4611)). Pinned by
   `test_foreach_navigating_source_with_init_dot_retries_a_try_over_an_alternative_bind_4610`.
-  **Still divergent** (the same shape, not covered): an EXTRACT `try`
+  **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
+  (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
+  the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare
+  alternative (`reduce` answers `[]`, `foreach` raises at the emission). Pinned by
+  `test_fold_alt_bind_of_init_dot_behind_a_navigating_source_retries_4596`.
+  **Still divergent** (the same shape, not covered): a `foreach` over INIT `.` and a navigating source whose EXTRACT reads the
+  loop variable after a retry (`path(foreach .[]? as $k (.; . as [$q] ?// $z | .; $k))` on `[[1],[1]]` raises where jq prints
+  `[0]`, `[1]`), a source that yields `null` elements (`path(reduce .[]? as $k (.; try (. as [$a] ?// $a | $a)))` on
+  `[null,[1]]` raises where jq prints `[]`; the gate is a non-`null` element, as #4507's), and an EXTRACT `try`
   whose operand wraps the bind in `isempty(...) or ...` (`path(foreach (1,2) as $k ([]; .; try (isempty(. as [$q] ?// $z |
   if $q then true else empty end) or .b?)))` on `[]` answers where jq raises,
   [#4608](https://github.com/rust-works/succinctly/issues/4608)).
