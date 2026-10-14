@@ -132,7 +132,7 @@ SOURCES = [
     ("lit-null-arr", "null as [$a] | ."),
     ("lit-true-pat", "true as {a:$a} | ."),
     ("lit-false-arr", "false as [$a] | ."),
-    ("lit-null-var", "null as $n | $n as {a:$a} | ."),
+    ("lit-null-var-a", "null as $n | $n as {a:$a} | ."),
     ("try-lit-null", "try (null as {a:$a} | .)"),
     ("try-lit-null-catch", "try (null as {a:$a} | .) catch ."),
     ("opt-lit-null", "(null as {a:$a} | .)?"),
@@ -177,11 +177,6 @@ DOCS = [
 # here until #4575, a comma beside the destructure on a `null` document until #4576, and a
 # `try ... catch` around a `?//` chain of destructures until #4585.)
 KNOWN_ACCEPT_WRONG = {
-    # (#4616) a `null` literal bound to a variable and destructured, in the body of another fold: the
-    # register's own null-ness is not known there (`NotRegister::at_fold`), so it may be the register.
-    # Keyed on the source alone: the rows span every context and document, so a regression of this
-    # source elsewhere is not told apart from the residual.
-    ("lit-null-var", None),
     # a comma beside a literal `null` destructure, on a `null` document, under `|=`/`=` (#4603)
     ("lit-null-comma", "null"),
 }
