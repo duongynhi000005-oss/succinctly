@@ -134,6 +134,16 @@ SOURCES = [
     ("wrapped-alt-true", "[true // (. as {b:$b} | .)]"),
     ("wrapped-alt-notfalse", "[(false|not) // (. as {b:$b} | .)]"),
     ("wrapped-catch-ok", "[try 1 catch (. as {b:$b} | .)]"),
+    # chained and nested: the part that runs can itself be an alternative or a handler
+    ("wrapped-alt-chain", "[false // false // (. as {b:$b} | .)]"),
+    ("wrapped-alt-nested", "[false // (null // (. as {b:$b} | .))]"),
+    ("wrapped-catch-alt", "[try error catch (false // (. as {b:$b} | .))]"),
+    ("wrapped-catch-catch", "[try error catch (try error catch (. as {b:$b} | .))]"),
+    ("wrapped-catch-id-error", "[try (. | error) catch (. as {b:$b} | .)]"),
+    # ...a body that raises nothing (an earlier stage emits nothing) never runs its handler
+    ("wrapped-catch-select-false", "[try (select(false) | error) catch (. as {b:$b} | .)]"),
+    ("wrapped-catch-empty", "[try (empty | error) catch (. as {b:$b} | .)]"),
+    ("wrapped-alt-true-nested", "[false // (true // (. as {b:$b} | .))]"),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),

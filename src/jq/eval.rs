@@ -52197,14 +52197,31 @@ fn drop_array_wrappers(source: &Expr) -> Expr {
 fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
     match unwrap_paren(e) {
         _ if is_plain_bind_chain(e) => Some(e),
-        Expr::Alternative(left, right) if never_truthy(left) && is_plain_bind_chain(right) => {
-            Some(right)
-        }
+        Expr::Alternative(left, right) if never_truthy(left) => run_branch_of_bind_chain(right),
         Expr::Try {
             expr: body,
             catch: Some(handler),
-        } if body_always_raises(body) && is_plain_bind_chain(handler) => Some(handler),
+        } if certainly_raises(body) => run_branch_of_bind_chain(handler),
         _ => None,
+    }
+}
+
+/// Whether `e` raises whenever it runs: `error`, `error(literal)`, or those after stages that each
+/// emit exactly once (`.`, a literal). Not [`body_always_raises`], which also admits an `error` that
+/// an earlier stage emitting nothing never reaches (`select(false) | error`): a handler behind that
+/// one never runs, and jq answers (#4635).
+fn certainly_raises(e: &Expr) -> bool {
+    let emits_once = |e: &Expr| matches!(unwrap_paren(e), Expr::Identity | Expr::Literal(_));
+    let raises = |e: &Expr| match unwrap_paren(e) {
+        Expr::Error(None) => true,
+        Expr::Error(Some(message)) => matches!(unwrap_paren(message), Expr::Literal(_)),
+        _ => false,
+    };
+    match unwrap_paren(e) {
+        Expr::Pipe(stages) => stages
+            .split_last()
+            .is_some_and(|(last, earlier)| earlier.iter().all(emits_once) && raises(last)),
+        other => raises(other),
     }
 }
 
@@ -52214,6 +52231,8 @@ fn never_truthy(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Literal(Literal::Null | Literal::Bool(false)) => true,
         Expr::Builtin(Builtin::Empty) => true,
+        // `A // B` yields B's outputs when A has no truthy one, so it has none either.
+        Expr::Alternative(left, right) => never_truthy(left) && never_truthy(right),
         Expr::Pipe(stages) => match stages.split_first() {
             Some((head, rest)) if !rest.is_empty() => {
                 let truthy = match unwrap_paren(head) {

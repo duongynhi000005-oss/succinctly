@@ -132601,6 +132601,54 @@ fn test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in
             "[]\n",
             0,
         ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([false // false // (. as {b:$b}|.)]) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([false // (null // (. as {b:$b}|.))]) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([try error catch (false // (. as {b:$b}|.))]) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([try error catch (try error catch (. as {b:$b}|.))]) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([try (. | error) catch (. as {b:$b}|.)]) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([try (select(false) | error) catch (. as {b:$b}|.)]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([try (empty | error) catch (. as {b:$b}|.)]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ([false // (true // (. as {b:$b}|.))]) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
     ];
     for (doc, filter, stdout, code) in rows {
         let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;

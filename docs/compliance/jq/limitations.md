@@ -2340,7 +2340,7 @@ is the revert that established what the other one costs.
    ([#4632](https://github.com/rust-works/succinctly/issues/4632): `array_wrapped_destructure_of_register`; pinned by
    `test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632`), and so does one behind the right operand of a
    `//` whose left is a constant that yields nothing truthy (`[false // (. as {b:$b} | .)]`, `[(false|not|not) // ...]`) or the
-   handler of a `try` whose body can only raise (`[try error catch (. as {b:$b} | .)]`) inside the brackets
+   handler of a `try` whose body certainly raises (`[try error catch (. as {b:$b} | .)]`; not `select(false) | error`, which never raises) inside the brackets
    ([#4635](https://github.com/rust-works/succinctly/issues/4635): `run_branch_of_bind_chain`; pinned by
    `test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in_an_array_raises_4635`; the same two shapes
    *without* the brackets are still accepted,
