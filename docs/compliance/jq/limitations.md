@@ -2338,7 +2338,13 @@ is the revert that established what the other one costs.
    `test_fold_source_destructuring_the_environment_raises_4630`), and so is a destructure of a fresh value wrapped in `[ ... ]` (`RegisterSpine`'s `fresh_only` walk reads
    `Expr::Array`, #4630; pinned by `test_fold_source_destructuring_a_fresh_value_inside_an_array_raises_4630`); a destructure of `.` inside `[ ... ]` in the body of a `reduce` whose source moved the register raises too
    ([#4632](https://github.com/rust-works/succinctly/issues/4632): `array_wrapped_destructure_of_register`; pinned by
-   `test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632`), but a `$x` marker destructured there is the
+   `test_reduce_body_source_destructuring_dot_inside_an_array_raises_4632`), and so does one behind the right operand of a
+   `//` whose left is a constant that yields nothing truthy (`[false // (. as {b:$b} | .)]`, `[(false|not|not) // ...]`) or the
+   handler of a `try` whose body certainly raises (`[try error catch (. as {b:$b} | .)]`; not `select(false) | error`, which never raises) inside the brackets
+   ([#4635](https://github.com/rust-works/succinctly/issues/4635): `run_branch_of_bind_chain`; pinned by
+   `test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in_an_array_raises_4635`; the same two shapes
+   *without* the brackets are still accepted,
+   [#4644](https://github.com/rust-works/succinctly/issues/4644)), but a `$x` marker destructured there is the
    #4604 family. The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
    jq's register to). A `null`/boolean *literal* bound by a destructure in a fold source (`null as {b:$b} | .`, or a `$x`
