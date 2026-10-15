@@ -50292,9 +50292,7 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
-        taken_first_is_dot: !any_subexpr(source, &mut |e| {
-            matches!(e, Expr::Try { .. } | Expr::Optional(_))
-        }),
+        taken_first_is_dot: !catches_a_destructure(source),
         fresh_cut_free: true,
         known: NotRegister::default(),
         moved: false,
@@ -51328,7 +51326,7 @@ fn limit_takes_some(n: &Expr) -> bool {
 /// generated (`first(., {a:1})` is `.`). [`first_output_is_register`](RegisterSpine) reads the same
 /// shape for a bind source.
 fn takes_only_an_identity_leaf(e: &Expr) -> bool {
-    let takes_first = |inner: &Expr| is_comma(inner) && comma_first_leaf_is_identity(inner);
+    let takes_first = |inner: &Expr| is_comma(inner) && comma_first_leaf_is_dot(inner);
     match unwrap_bind_source(e) {
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => takes_first(inner),
         Expr::Limit { n, expr: inner } => limit_takes_one(n) && takes_first(inner),
@@ -51337,6 +51335,52 @@ fn takes_only_an_identity_leaf(e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// [`comma_first_leaf_is_identity`], also through a first leaf that is itself a wrapper of that kind
+/// (#4674): `first(first(., {a:1}), 2)` takes `first(., {a:1})`'s only output, which is `.`.
+fn comma_first_leaf_is_dot(e: &Expr) -> bool {
+    match unwrap_bind_source(e) {
+        Expr::Comma(items) => items.first().is_some_and(|first| {
+            is_identity_stage(first)
+                || takes_only_an_identity_leaf(first)
+                || comma_first_leaf_is_dot(first)
+        }),
+        _ => false,
+    }
+}
+
+/// `e` without the `try` (no handler) and `?` around it: they add nothing to a wrapper that cannot
+/// raise (`try first(., X)` is `first(., X)`, #4674).
+fn peel_try_wrappers(e: &Expr) -> &Expr {
+    match unwrap_bind_source(e) {
+        Expr::Try {
+            expr: inner,
+            catch: None,
+        }
+        | Expr::Optional(inner) => peel_try_wrappers(inner),
+        other => other,
+    }
+}
+
+/// Whether some `try` or `?` of `source` encloses a construct that may destructure `.` (a pattern
+/// bind, a fold, a call whose body is not read): the raise of a destructure under it is caught, which
+/// the refusal a register walk reads into is not (#4667). A `try`/`?` around a wrapper alone, ahead of
+/// the destructure (`try first(., X) | . as {a:$a} | .`), catches nothing (#4674).
+fn catches_a_destructure(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| match e {
+        Expr::Try { .. } | Expr::Optional(_) => any_subexpr(e, &mut |inner| {
+            matches!(
+                inner,
+                Expr::AsPattern { .. }
+                    | Expr::Reduce { .. }
+                    | Expr::Foreach { .. }
+                    | Expr::FuncCall { .. }
+                    | Expr::DefCall { .. }
+            )
+        }),
+        _ => false,
+    })
 }
 
 /// Whether `e` is a comma whose first output is `.`: its first leaf, through nested commas
@@ -52757,7 +52801,7 @@ impl<'e> RegisterSpine<'e> {
                 // #4667: `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` emit their comma's first leaf
                 // and stop, so `X` is never generated and the stage hands the register on as `.` does
                 // (peeling the wrapper alone would leave the whole comma, read as opaque). Only for a
-                // register walk over a source with no `try`/`?` ([`taken_first_is_dot`]), and in the
+                // register walk over a source whose `try`/`?` catch no destructure ([`taken_first_is_dot`]), and in the
                 // `through_reduce` walk only in the body of a `reduce` whose source moved the register,
                 // where the destructure of `.` certainly raises: elsewhere the loud refusal it would
                 // reach is a guess, and these sources are answered today (#4600: `del(try (reduce 1 as
@@ -52766,7 +52810,7 @@ impl<'e> RegisterSpine<'e> {
                 // [`taken_first_is_dot`]: Self::taken_first_is_dot
                 if self.taken_first_is_dot
                     && (!self.through_reduce || fold_body::source_moved_here())
-                    && takes_only_an_identity_leaf(other)
+                    && takes_only_an_identity_leaf(peel_try_wrappers(other))
                 {
                     return Reach::HandsOn;
                 }
@@ -53428,9 +53472,9 @@ fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
     match unwrap_paren(source) {
         Expr::Pipe(stages) => {
             // #4667: `first(., X)` and its `limit(1; ..)`/`nth(0; ..)` spellings are `.`.
-            let first = stages
-                .iter()
-                .find(|stage| !is_identity_stage(stage) && !takes_only_an_identity_leaf(stage))?;
+            let first = stages.iter().find(|stage| {
+                !is_identity_stage(stage) && !takes_only_an_identity_leaf(peel_try_wrappers(stage))
+            })?;
             leading_destructure_of_dot_element(first)
         }
         Expr::AsPattern { expr, patterns, .. }
