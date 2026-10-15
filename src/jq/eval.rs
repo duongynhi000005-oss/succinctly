@@ -30857,6 +30857,128 @@ fn yq_assign_path_survives_empty(path_expr: &Expr) -> bool {
     !has_select(path_expr) || navigates_nowhere(path_expr)
 }
 
+/// What [`yq_filtered_target_creation`] found.
+enum FilteredCreation {
+    /// The walk created nothing: the document stands as it is.
+    Unchanged,
+    /// The document with the steps the walk created.
+    Created(OwnedValue),
+}
+
+/// The document after yq has walked the navigation of `path_expr` -- `NAV | select(..)`, with a
+/// pure-navigation `NAV` of fields, indexes and iterations and only `select`s after it -- creating the
+/// steps that were missing (#4593): [`FilteredCreation::Unchanged`] where it created nothing (the caller's
+/// `pristine` is the answer), [`FilteredCreation::Created`] where it did. `None` keeps the caller's route: any other shape, an alias
+/// table in play (the write redirects through aliases first, [`alias_identity::redirect_paths`]), an
+/// iteration over a missing, `null` or scalar step (yq turns a missing step into `[]`, which the creation
+/// walk does not reproduce), or a failed walk.
+fn yq_filtered_target_creation<S: EvalSemantics>(
+    path_expr: &Expr,
+    pristine: &OwnedValue,
+) -> Option<FilteredCreation> {
+    // Where a walk of one navigation stage stands on one value.
+    enum Slot<'v> {
+        // A node the document holds.
+        Found(&'v OwnedValue),
+        // A step yq creates while walking.
+        Missing,
+        // Under a scalar: yq creates nothing there.
+        Dead,
+    }
+    // The stages of a pipe, flattened through the nested pipes and parentheses the parser builds
+    // for a postfix chain (`.a[]` is a pipe inside the pipe).
+    fn flatten<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::Paren(inner) => flatten(inner, out),
+            Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),
+            other => out.push(other),
+        }
+    }
+    if alias_identity::active() {
+        return None;
+    }
+    let mut stages = Vec::new();
+    flatten(path_expr, &mut stages);
+    let split = stages
+        .iter()
+        .position(|stage| matches!(**stage, Expr::Builtin(Builtin::Select(_))))?;
+    let (nav, filters) = stages.split_at(split);
+    if nav.is_empty()
+        || !filters
+            .iter()
+            .all(|stage| matches!(**stage, Expr::Builtin(Builtin::Select(_))))
+    {
+        return None;
+    }
+    let mut current = vec![Slot::Found(pristine)];
+    let mut creates = false;
+    for stage in nav {
+        let mut next = Vec::new();
+        for slot in &current {
+            match (&**stage, slot) {
+                (Expr::Identity, Slot::Found(v)) => next.push(Slot::Found(v)),
+                (Expr::Field(name), Slot::Found(OwnedValue::Object(map))) => {
+                    match map.get(name.as_str()) {
+                        Some(child) => next.push(Slot::Found(child)),
+                        None => next.push(Slot::Missing),
+                    }
+                }
+                (Expr::Index { idx, key: None }, Slot::Found(OwnedValue::Array(items))) => {
+                    match usize::try_from(*idx).ok().and_then(|at| items.get(at)) {
+                        Some(child) => next.push(Slot::Found(child)),
+                        None => next.push(Slot::Missing),
+                    }
+                }
+                (Expr::Field(_) | Expr::Index { key: None, .. }, Slot::Found(OwnedValue::Null)) => {
+                    next.push(Slot::Missing);
+                }
+                // A scalar of any kind (a number keeps its source text in a `NumberLiteral`).
+                (Expr::Field(_) | Expr::Index { key: None, .. }, Slot::Dead) => {
+                    next.push(Slot::Dead);
+                }
+                (Expr::Field(_) | Expr::Index { key: None, .. }, Slot::Found(v))
+                    if !matches!(
+                        v,
+                        OwnedValue::Null | OwnedValue::Array(_) | OwnedValue::Object(_)
+                    ) =>
+                {
+                    next.push(Slot::Dead);
+                }
+                (Expr::Field(_) | Expr::Index { key: None, .. }, Slot::Missing) => {
+                    next.push(Slot::Missing);
+                }
+                (Expr::Iterate, Slot::Found(OwnedValue::Array(items))) => {
+                    next.extend(items.iter().map(Slot::Found));
+                }
+                (Expr::Iterate, Slot::Found(OwnedValue::Object(map))) => {
+                    next.extend(map.values().map(Slot::Found));
+                }
+                _ => return None,
+            }
+        }
+        creates |= next.iter().any(|slot| matches!(slot, Slot::Missing));
+        current = next;
+    }
+    if !creates {
+        return Some(FilteredCreation::Unchanged);
+    }
+    let prefix = match nav {
+        [only] => (*only).clone(),
+        many => Expr::pipe(many.iter().map(|stage| (*stage).clone()).collect()),
+    };
+    let mut doc = pristine.clone();
+    update_path::<S>(
+        &mut doc,
+        &prefix,
+        &Expr::Identity,
+        false,
+        ScalarNoop::On,
+        None,
+    )
+    .ok()?;
+    Some(FilteredCreation::Created(doc))
+}
+
 /// What [`yq_assign_noop_check`] found, plus (code review, #1233) the
 /// `pristine`/`paths` pair its own resolution already computed when the
 /// assignment turns out *not* to be a no-op, so the write does not redo an
@@ -30929,11 +31051,19 @@ fn yq_assign_noop_check<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // dropped a step yq had already created (see
     // [`yq_assign_path_survives_empty`]).
     if paths.is_empty() {
-        return Ok(if yq_assign_path_survives_empty(path_expr) {
-            YqAssignNoopCheck::Skip(pristine)
-        } else {
-            YqAssignNoopCheck::Continue { pristine, paths }
-        });
+        if yq_assign_path_survives_empty(path_expr) {
+            return Ok(YqAssignNoopCheck::Skip(pristine));
+        }
+        // #4593: a path that navigates and then filters (`(.a[] | select(. > 5)) = v`) matched
+        // nothing, so yq never reads the right side; it still created the steps it walked, which
+        // the same creation walk the write uses reproduces.
+        if let Some(created) = yq_filtered_target_creation::<S>(path_expr, &pristine) {
+            return Ok(YqAssignNoopCheck::Skip(match created {
+                FilteredCreation::Unchanged => pristine,
+                FilteredCreation::Created(doc) => doc,
+            }));
+        }
+        return Ok(YqAssignNoopCheck::Continue { pristine, paths });
     }
     if outcomes.iter().all(PathAssignOutcome::is_total_noop) {
         return Ok(YqAssignNoopCheck::Skip(pristine));

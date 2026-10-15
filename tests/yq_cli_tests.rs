@@ -29730,15 +29730,15 @@ fn test_yq_assign_never_evaluates_rhs_for_noop_or_zero_targets_1412() -> Result<
         assert!(err.contains("boom"), "{filter}: {err}");
     }
 
-    // Unchanged: a filter after a step yq creates still evaluates the right
-    // side here (yq answers `{"b":null}`, which this does not reproduce).
-    let (_out, err, code) = run_yq_stdin_with_stderr(
+    // #4593: a filter after a step yq creates answers the document with that step
+    // created (`{"b":null}`) and never reads the right side.
+    let (out, err, code) = run_yq_stdin_with_stderr(
         "(.b | select(.)) = error(\"boom\")",
         "{}\n",
         &["-o", "json", "-I0"],
     )?;
-    assert_ne!(code, 0);
-    assert!(err.contains("boom"), "err={err}");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), r#"{"b":null}"#);
 
     // Unchanged: a failing computed key still outranks the right side.
     let (_out, err, code) = run_yq_stdin_with_stderr(
@@ -66697,6 +66697,85 @@ fn test_map_over_an_empty_container_keeps_its_position_3450() -> Result<()> {
             (code, stdout.as_str()),
             (0, expected),
             "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
+/// matches nothing never reads the right side in yq: the document comes back with only the steps yq
+/// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and
+/// its error (`error("boom")`) surfaced. Compound and `|=` forms, a filter that matches (the right
+/// side still runs), and steps that already exist or are created are all pinned. Every row captured
+/// from yq v4.53.3 (Homebrew).
+#[test]
+fn test_filtered_assignment_target_that_matches_nothing_skips_the_right_side_4593() -> Result<()> {
+    let doc = "a: [1, 2]\nm: {k: 1}\nn: null\ne: []\ns: x\n";
+    let rows: &[(&str, i32, &str)] = &[
+        ("(.a[] | select(. > 5)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a | select(false)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.m.k | select(false)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[0] | select(. > 5)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.m[] | select(. > 5)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.e[] | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.n | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.zz | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\",\"zz\":null}\n"),
+        ("(.m.zz | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1,\"zz\":null},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.s | select(false)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.s.q | select(false)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[5] | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2,null,null,null,null],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[] | .x | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.m | .[] | select(. > 5)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[] | select(. > 5)) |= error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[] | select(. > 5)) += error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[] | select(. > 1)) = 9", 0, "{\"a\":[1,9],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[] | select(. > 1)) = error(\"boom\")", 1, ""),
+        ("(.zz | select(.)) = 5", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\",\"zz\":null}\n"),
+        ("(.m | select(.k == 1)) = {\"k\": 2}", 0, "{\"a\":[1,2],\"m\":{\"k\":2},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a | select(.[0] == 9)) = error(\"x\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.q.r.s | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\",\"q\":{\"r\":{\"s\":null}}}\n"),
+        ("(.a[] | select(. > 5) | select(.)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a[-1] | select(. > 5)) = error(\"boom\")", 0, "{\"a\":[1,2],\"m\":{\"k\":1},\"n\":null,\"e\":[],\"s\":\"x\"}\n"),
+        ("(.a, .m | select(false)) = error(\"boom\")", 1, ""),
+    ];
+    for &(filter, code, expected) in rows {
+        let (stdout, stderr, got) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (got, stdout.as_str()),
+            (code, expected),
+            "`{filter}`: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4593: the same answer in YAML output keeps the document's comments and style, and the steps yq
+/// created while walking appear in it.
+#[test]
+fn test_filtered_assignment_target_that_matches_nothing_keeps_yaml_output_4593() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+            "(.zz | select(.)) = error(\"boom\")",
+            "a: [1, 2] # keep\nm: {k: 1}\nzz: null\n",
+        ),
+        (
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+            "(.a[] | select(. > 5)) = error(\"boom\")",
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+        ),
+        (
+            "# head\na: &x [1]\nb: [2] # c\n",
+            "(.q.r | select(.)) = 1",
+            "# head\na: &x [1]\nb: [2] # c\nq:\n  r: null\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}`: {stderr:?}"
         );
     }
     Ok(())

@@ -3085,14 +3085,16 @@ Two consequences worth naming:
   yq's own order (`.[error("p")] = error("r")` reports `"p"`, where jq reports `"r"`), and
   a left side whose every resolved target is a scalar-target no-op, or that resolves to no
   target at all, never evaluates the right side ([#1412](https://github.com/rust-works/succinctly/issues/1412)).
-  One shape stays open: a left side that **navigates and then filters** still evaluates the
-  right side, because yq creates the steps it walked before a `select` drops them
-  (`(.b | select(.)) = error("boom")` on `{}` is `{"b":null}`, where succinctly raises
-  `boom`) and the unchanged document would not show that. The same gate also covers
-  filters over steps that already exist (`(.a[] | select(. > 5)) = error("boom")` on
-  `a: [1, 2]` is `{"a":[1,2]}` in yq and raises `boom` here), where nothing would have been
-  created; telling the two apart needs the created-step walk, not a syntactic check
-  ([#4593](https://github.com/rust-works/succinctly/issues/4593)).
+  A left side that **navigates and then filters** and matches nothing answers the document after the steps yq created
+  while walking, without reading the right side ([#4593](https://github.com/rust-works/succinctly/issues/4593):
+  `yq_filtered_target_creation` runs the same creation walk as the write; `(.b | select(.)) = error("boom")` on `{}` is
+  `{"b":null}`, and `(.a[] | select(. > 5)) = error("boom")` on `a: [1, 2]` is `{"a":[1,2]}`; pinned by
+  `test_filtered_assignment_target_that_matches_nothing_skips_the_right_side_4593`). Still evaluating the right side: a
+  left side that is not a plain navigation followed by `select`s (`.m | to_entries | select(false)`), and an iteration
+  over a missing or `null` key (`(.zz[] | select(.)) = v`, where yq turns the key into `[]`).
+  Also unchanged: `|=` (`(.zz | select(.)) |= 5` on `{}` is `{}` here and `{"zz":null}` in yq, as the walked steps are not created
+  by the update route), and a path that walks through an alias (`(.b.p | select(.)) = 1` on `b: *x` creates `p` on the anchor's
+  node in yq; the shortcut declines while an alias table is installed, so the previous route runs).
 - A right side that reads the assignment's **own target** still diverges, because
   succinctly has no node identity (the same limitation the anchor/alias section above
   records). Real yq's right-side candidates are pointers into the document, so writing
