@@ -65039,60 +65039,6 @@ fn test_caught_bind_foreach_source_in_a_navigating_foreach_body_extracting_the_e
             "[true]\n",
             0,
         ),
-        (
-            r"[[1],[2]]",
-            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
-            "[0]\n[1]\n",
-            0,
-        ),
-        (
-            r#"{"a":[1]}"#,
-            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
-            "[\"a\"]\n",
-            0,
-        ),
-        (
-            r"[true]",
-            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i)))",
-            "[0]\n",
-            0,
-        ),
-        (
-            r"[[1],[2]]",
-            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
-            "[]\n",
-            0,
-        ),
-        (
-            r#"{"a":[1]}"#,
-            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
-            "{}\n",
-            0,
-        ),
-        (
-            r"[true]",
-            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i)))",
-            "[]\n",
-            0,
-        ),
-        (
-            r"[[1],[2]]",
-            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i))) |= 9",
-            "[9,9]\n",
-            0,
-        ),
-        (
-            r#"{"a":[1]}"#,
-            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i))) |= 9",
-            "{\"a\":9}\n",
-            0,
-        ),
-        (
-            r"[true]",
-            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i))) |= 9",
-            "[9]\n",
-            0,
-        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;

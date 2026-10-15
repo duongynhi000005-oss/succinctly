@@ -47321,14 +47321,14 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
 }
 
 /// Whether a `foreach` SOURCE is `try CHAIN catch H` (#4627): `H` cannot move the register and
-/// `CHAIN` moves it at most through the tracked `INDEX` steps of destructuring binds over
-/// expressions that cannot navigate. The steps move the register only on an emission that took
+/// `CHAIN` moves it at most through the tracked `INDEX` steps of destructuring binds of `.`. The steps move the register only on an emission that took
 /// them, which [`resolve_foreach`] reads per emission; a raised bind restores the register to the
 /// `try`'s entry and `H` emits from there.
 fn source_is_caught_destructure(expr: &Expr) -> bool {
     fn chain(e: &Expr) -> bool {
         match unwrap_paren(e) {
-            Expr::AsPattern { expr, body, .. } => cannot_move_register(expr) && chain(body),
+            // `.` only: a `$x` may be the register itself, whose bind then succeeds and walks.
+            Expr::AsPattern { expr, body, .. } => is_identity_stage(expr) && chain(body),
             Expr::Pipe(stages) => stages.iter().all(chain),
             other => cannot_move_register(other),
         }

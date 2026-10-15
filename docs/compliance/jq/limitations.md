@@ -2337,13 +2337,13 @@ is the revert that established what the other one costs.
    ([#4626](https://github.com/rust-works/succinctly/issues/4626): `foreign_in_off_body` lets
    `foreign_register_markers_with` certify a non-empty container marker against the register's position when the
    accumulator is provably off the register; pinned by
-   `test_foreach_source_outer_marker_empty_body_destructure_in_navigating_fold_raises_4626`). Both answer as jq does when
+   `test_foreach_source_outer_marker_empty_body_destructure_in_navigating_fold_raises_4626`). The `.` form answers as jq does when
    the outer `EXTRACT` is `$i`, the loop element, which the caught handler's emission leaves on jq's register
-   ([#4627](https://github.com/rust-works/succinctly/issues/4627): a `foreach` whose source is `try CHAIN catch H` with a
-   handler that cannot move the register states the register at its entry, `source_is_caught_destructure`; pinned by
-   `test_caught_bind_foreach_source_in_a_navigating_foreach_body_extracting_the_element_4627`). The same shape under a
-   `reduce` outer (`path(reduce .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .)))`) is still
-   refused where jq answers `[]`. On a `null` accumulator a `$x` marker
+   ([#4627](https://github.com/rust-works/succinctly/issues/4627): a `foreach` whose source is `try (. as P | ...) catch H` with a
+   handler that cannot move the register leaves the register at its entry, `source_is_caught_destructure`; pinned by
+   `test_caught_bind_foreach_source_in_a_navigating_foreach_body_extracting_the_element_4627`). The `$x` form is still
+   refused where jq answers (a `$x` may be the register itself, whose bind then succeeds and walks), and so is the same shape under a
+   `reduce` outer (`path(reduce .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .)))`, jq `[]`). On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
