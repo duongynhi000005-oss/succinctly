@@ -64800,6 +64800,311 @@ fn test_moved_body_foreach_source_destructure_refusal_is_caught_by_an_enclosing_
     Ok(())
 }
 
+/// #4627: a `foreach` source `try (. as [$a] | ...) catch H` in the UPDATE of a `foreach` whose source
+/// navigates (`.[]?`), the outer EXTRACT being the loop element `$i`. The bind raises on the accumulator
+/// (`.` is not the register there), jq restores the register to where the `try` entered and `H` emits
+/// from there, so the inner fold's emission leaves the register on the element and `$i` is it: jq names
+/// the element's path. The fold read the emission as having lost the register and refused `$i`
+/// (`Invalid path expression with result [1]`, exit 5). Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_caught_bind_foreach_source_in_a_navigating_foreach_body_extracting_the_element_4627(
+) -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .); $i))",
+            "[0]\n[1]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .); $i))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .); $i)) |= 9",
+            "[9,9]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; $y); $i))",
+            "[0]\n[1]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; $y); $i))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; $y); $i)) |= 9",
+            "[9,9]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; $y); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; $y); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; $y); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; $y); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .a? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; .); $i))",
+            "[0]\n[1]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; .); $i))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; .); $i)) |= 9",
+            "[9,9]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; $y); $i))",
+            "[0]\n[1]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; $y); $i))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"(foreach .[]? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; $y); $i)) |= 9",
+            "[9,9]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .a? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .a? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; $y); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; .); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; $y); $i))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; $y); $i))",
+            "{}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .[]? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; $y); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .); $i))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; $y); $i))",
+            "",
+            0,
+        ),
+        (
+            r"[[]]",
+            r"path(foreach .a? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i))",
+            "",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del(foreach .a? as $i (.; foreach (try (. as [$a] | .) catch .) as $y (.; .; $y); $i))",
+            "[[1],[2]]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(foreach .a? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; .); $i))",
+            "[true]\n",
+            0,
+        ),
+        (
+            r"[[]]",
+            r"del(foreach .a? as $i (.; foreach (try (. as {a:$a} | empty) catch .) as $y (.; .; $y); $i))",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; .); $i)) |= 9",
+            "[[1],[2]]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(foreach .a? as $i (.; foreach (try (. as [$a] | empty) catch (empty, 1)) as $y (.; .; $y); $i)) |= 9",
+            "[true]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
+            "[0]\n[1]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i)))",
+            "[0]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i)))",
+            "{}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i))) |= 9",
+            "[9,9]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); $i))) |= 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"((. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .); $i))) |= 9",
+            "[9]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an

@@ -47320,6 +47320,28 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
     }
 }
 
+/// Whether a `foreach` SOURCE is `try CHAIN catch H` (#4627): `H` cannot move the register and
+/// `CHAIN` moves it at most through the tracked `INDEX` steps of destructuring binds over
+/// expressions that cannot navigate. The steps move the register only on an emission that took
+/// them, which [`resolve_foreach`] reads per emission; a raised bind restores the register to the
+/// `try`'s entry and `H` emits from there.
+fn source_is_caught_destructure(expr: &Expr) -> bool {
+    fn chain(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::AsPattern { expr, body, .. } => cannot_move_register(expr) && chain(body),
+            Expr::Pipe(stages) => stages.iter().all(chain),
+            other => cannot_move_register(other),
+        }
+    }
+    match unwrap_paren(expr) {
+        Expr::Try {
+            expr: body,
+            catch: Some(handler),
+        } => cannot_move_register(handler) && chain(body),
+        _ => false,
+    }
+}
+
 /// [`reduce_cannot_move_register`]'s `foreach` twin: EXTRACT runs in the same
 /// extent, so it has to be unable to navigate too.
 fn foreach_cannot_move_register(
@@ -49605,6 +49627,18 @@ impl FoldRegister {
             // before it did (a recursion's seed, a caught body's handler): the
             // register is where UPDATE entered, which is `self`.
             || matches!(branch.register, BranchRegister::AtEntry)
+            // #4627: ...or a nested `foreach` whose source is a caught bind ([`source_is_caught_destructure`])
+            // and whose other parts cannot move it: where the bind raises, jq restores the register to
+            // where the `try` entered and the handler emits from there, so the register is where UPDATE
+            // entered. An element that took a walk step moved it; the fold's own register is not
+            // that element's, which only a body whose accumulator is the register can have (`null`/boolean).
+            || (S::TAG == EvalTag::Jq
+                && fold_body::depth() != 0
+                && matches!(unwrap_paren(update_expr), Expr::Foreach { input, init, update, extract, .. }
+                    if source_is_caught_destructure(input)
+                        && cannot_move_register(init)
+                        && cannot_move_register(update)
+                        && extract.as_deref().map_or(true, cannot_move_register)))
         {
             Self {
                 path: Rc::clone(&self.path),
