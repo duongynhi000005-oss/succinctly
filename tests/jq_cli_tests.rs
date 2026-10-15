@@ -133805,6 +133805,194 @@ fn test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_r
     Ok(())
 }
 
+/// #4665: a `reduce`/`foreach` source whose destructure meets a freshly built item that a *call*
+/// hands to it raises in jq (the pattern's tracked `INDEX` step on a node the register is not). Two
+/// shapes were accepted: a closure-taking `def` handed a comma with a fresh item (`f(., {a:1}) as P`),
+/// and a call, or a `(def ..; call)` group, as the pipe stage ahead of `. as P`, whose body hands
+/// the register on next to a fresh value. Every row captured from jq 1.7.1 on `{"a":5}`; the
+/// controls (an argument that is all the register, a `first(f)` that stops before the fresh item,
+/// a `$`-style parameter) pin what stays answered.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_fold_source_destructuring_a_fresh_item_handed_through_a_call_raises_4665() -> Result<()> {
+    let rows: &[(&str, &str, i32)] = &[
+        (
+            r"[path(reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"del(reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .))",
+            "",
+            5,
+        ),
+        (
+            r"(reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[path(foreach (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce ((def f: ., {a:1}; f) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def g: ., {a:1}; def f: g; f | . as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce 1 as $i (.; reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce 1 as $i (.; reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(foreach 1 as $i (.; foreach (def f: ., {a:1}; f | . as {a:$a} | .) as $j (.; .; .); .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; f({a:1}, .) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x;y): x; f(., {a:1}; 1) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f($x): $x; f({a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x | .; f(., {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r".a |= (reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $j (.; .))",
+            "",
+            5,
+        ),
+        (
+            r"del(try (-(reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $j (.; .))))",
+            "{\"a\":5}\n",
+            0,
+        ),
+        (
+            r"try (-(reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            0,
+        ),
+        (
+            r"[path(reduce (def f(x): x; f(., .) as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f: .; f | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; first(f) | . as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def g: .; def f: g; f | . as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def g(y): y; def f(x): x; f(g(., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; f((., {a:1}) | .) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x | .; f(., {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; (f(., {a:1}) | .) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f($y; x): x; f(1; (., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x; $y): x; f((., {a:1}); 1) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f($y; x): x; f(1; .) as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f(x; $y): $y; f(.; {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; limit(1; f) | . as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; limit(2; f) | . as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f: {a:1}, .; limit(1; f) | . as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; limit(1; f(., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+    ];
+    for &(filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(r#"{"a":5}"#))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}`: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4616: a `foreach` source that binds a freshly built value to a variable and destructures the
 /// variable is a destructure of a node the register is not on, so the pattern's tracked `INDEX` step
 /// raises in jq. It was driven by value and answered, and `del`, `=` and `|=` wrote through the answer;
