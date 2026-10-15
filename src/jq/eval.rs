@@ -50161,7 +50161,8 @@ impl FoldRegister {
 /// stages leave the register too (`1 | isempty(.)`, `(isempty(1) | not) | .`), or among the items
 /// of a comma (`(isempty(1), isempty(2))`: jq forks it, so each item runs from the register the
 /// comma entered with). An operand is run and backtracked, so [`neutral_leaves_register`] reads it,
-/// through `first`/`limit` and the shapes that fork. The bare and one-argument spellings iterate
+/// through `first`/`limit` and the shapes that fork, and a `reduce` whose source and UPDATEs it
+/// backtracks ([`verdict_operand_leaves_register`], #4661). The bare and one-argument spellings iterate
 /// their input, which moves it, so they are not admitted, and an all-neutral pipe or comma is
 /// [`neutral_leaves_register`]'s, not this one's.
 fn verdict_builtin_leaves_register(update: &Expr) -> bool {
@@ -50228,6 +50229,9 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
 /// - a pipe that cannot emit past a leading `empty` (`empty | .a`): nothing it holds after the
 ///   `empty` runs, and what is before it must leave the register itself (an earlier stage that
 ///   navigates a computed value raises in jq where this evaluates by value);
+/// - a `reduce` that [`reduce_leaves_register_in_place`] admits (#4661): the source, the pattern's
+///   steps and every UPDATE are backtracked, so each output it emits is at the entry register
+///   whatever those navigate, and only an INIT that moves it is refused;
 /// - a pipe or comma of those.
 fn verdict_operand_leaves_register(operand: &Expr) -> bool {
     if neutral_leaves_register(operand) {
@@ -50236,8 +50240,9 @@ fn verdict_operand_leaves_register(operand: &Expr) -> bool {
     match peel_register_transparent(operand) {
         Expr::Builtin(Builtin::Path(_)) => true,
         // #4661: a `reduce` backtracks its source, its pattern's steps and every UPDATE, so only
-        // INIT's navigation survives it ([`reduce_leaves_register_in_place`]), and it emits once
-        // that backtracking is done: its single output is stated at the register it entered with.
+        // INIT's navigation survives it ([`reduce_leaves_register_in_place`]), and it emits only
+        // once that backtracking is done: each output (an INIT that forks gives several, `empty`
+        // none) is at the register it entered with.
         Expr::Reduce {
             input,
             init,

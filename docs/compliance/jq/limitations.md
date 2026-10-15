@@ -866,8 +866,12 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   reached), a non-`null` accumulator or register (`[path(foreach .[]? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]` on
   `[1]` is `[[0]]`; the fold never emits, so the `true` is at the entry), and a fold as the generator of `any`/`all`. An enclosing
   fold reads the register a verdict's answer states (`isempty`, `any` and `all` count as producers of that statement, as a `catch`
-  handler does). Pinned by `test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_register_follows_jq_4661`. **Still
-  refused where jq answers**: a nested fold that
+  handler does). Pinned by `test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_register_follows_jq_4661`. The
+  `foreach` half is gated: the EXTRACT must leave the register where UPDATE put it (`cannot_move_register`) and be a single
+  computed output. **Still refused where jq answers** (unchanged by it, identical on `main`): an EXTRACT that forks (`... try .a; ($i, 5))`, `...; (try error("x") catch 5))`),
+  `isempty(recurse)` / `any(recurse; .)` and `isempty(. as $q ?// $z | .)` as the UPDATE, and a verdict over a fold inside a second
+  fold's UPDATE or a `foreach`'s loop body (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`);
+  a nested fold that
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
   the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly
