@@ -981,6 +981,11 @@ OPERANDS = [
     "(foreach (limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .; .))",
     # (#4667) a stage after the destructure that catches or reshapes the raise: a `try`/`?` around it
     # answers in jq, and `//`, `if` and `select` after `first(., X)` do not.
+    # (#4676) a `try`/`?` around the wrapper alone leaves the destructure outside the catch.
+    "(reduce (try first(., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(., {a:1})? | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try limit(1; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try nth(0; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (first(., {a:1}) | try (. as {a:$a} | .)) as $k (.; .))",
     "(reduce (first(., {a:1}) | (. as {a:$a} | .)?) as $k (.; .))",
     "(reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $k (.; .))",

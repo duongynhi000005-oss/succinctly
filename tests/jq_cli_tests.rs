@@ -142416,6 +142416,136 @@ fn test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_452
     ])
 }
 
+/// #4676: #4667's `first(., X)` read in a moved `reduce` body's source, where a `try` or `?` wraps the
+/// wrapper alone (`try first(., X) | . as {a:$a} | .`) and leaves the destructure outside the catch, so
+/// jq raises as it does without the `try`. The read was withheld for any `try`/`?` in the source, so
+/// `del` deleted the document and `=`/`|=` replaced it. A `try`/`?` whose body holds the destructure
+/// catches its raise and the source is answered, as in jq. Every row captured from jq 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_try_around_first_of_register_comma_alone_raises_in_a_moved_body_4676(
+) -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (first(., {a:1})? | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1})? | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try limit(1; ., {a:1}) | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try limit(1; ., {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try nth(0; ., {a:1}) | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try nth(0; ., {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try first(., {a:1}) | . as {a:$a} | $a) as $j (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try first(., {a:1}) | . as {a:$a} | $a) as $j (.; .)))]",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce ((first(., {a:1}) | . as {a:$a} | .)?) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce ((first(., {a:1}) | . as {a:$a} | .)?) as $j (.; .)))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (try first(., {a:1}) | (. as {a:$a} | .)?) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try first(., {a:1}) | (. as {a:$a} | .)?) as $j (.; .)))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce ((try first(., {a:1})) | try (. as {a:$a} | .)) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce ((try first(., {a:1})) | try (. as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, stdout, code) in rows {
+        let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (out.as_str(), status),
+            (*stdout, *code),
+            "`{filter}` on {doc}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4667: `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` generate only their comma's first leaf, so
 /// as a `reduce` source in the body of a `reduce` whose source moved the register, `first(., {a:1}) | . as
 /// {a:$a} | .` destructures `.`, which is not the register there, and raises -- the fresh item is never

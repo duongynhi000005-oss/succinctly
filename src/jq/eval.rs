@@ -50292,9 +50292,7 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
-        taken_first_is_dot: !any_subexpr(source, &mut |e| {
-            matches!(e, Expr::Try { .. } | Expr::Optional(_))
-        }),
+        taken_first_is_dot: !try_covers_destructure(source),
         fresh_cut_free: true,
         known: NotRegister::default(),
         moved: false,
@@ -51321,6 +51319,27 @@ fn limit_takes_one(n: &Expr) -> bool {
 /// positive literal, `limit(2; ..)` as well as the `limit(1; ..)` [`limit_takes_one`] reads.
 fn limit_takes_some(n: &Expr) -> bool {
     limit_literal_count(n).is_some_and(|n| n > 0.0)
+}
+
+/// `e` without the handler-less `try`/`?` layers around it (#4676): they add no movement of their own,
+/// so `try first(., X)` hands on what `first(., X)` does.
+fn strip_try_wrappers(e: &Expr) -> &Expr {
+    match unwrap_bind_source(e) {
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => strip_try_wrappers(expr),
+        other => other,
+    }
+}
+
+/// Whether a `try` or `?` in `source` has a destructure inside its body (#4676): only such a one can
+/// catch the destructure's raise. One around a wrapper alone (`try first(., X) | . as {a:$a} | .`)
+/// leaves the destructure outside the catch.
+fn try_covers_destructure(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| match e {
+        Expr::Try { expr, .. } | Expr::Optional(expr) => {
+            any_subexpr(expr, &mut |inner| matches!(inner, Expr::AsPattern { .. }))
+        }
+        _ => false,
+    })
 }
 
 /// Whether `e` is `first(C)`, `limit(1; C)` or `nth(0; C)` over a comma `C` whose first leaf is
@@ -52766,7 +52785,7 @@ impl<'e> RegisterSpine<'e> {
                 // [`taken_first_is_dot`]: Self::taken_first_is_dot
                 if self.taken_first_is_dot
                     && (!self.through_reduce || fold_body::source_moved_here())
-                    && takes_only_an_identity_leaf(other)
+                    && takes_only_an_identity_leaf(strip_try_wrappers(other))
                 {
                     return Reach::HandsOn;
                 }
