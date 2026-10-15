@@ -53198,11 +53198,20 @@ fn caught_destructure_in_unrouted_body(
 /// brackets is answered everywhere else), so the source was driven by value. Read with the brackets
 /// dropped, for a moved body only.
 fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
-    any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
-        && source_destructures_register(&drop_array_wrappers(source), true)
+    // #4644: the same two run branches without the brackets: a `//` right operand behind a constant
+    // falsy left, and the handler of a `try` whose body only raises.
+    any_subexpr(source, &mut |e| match e {
+        Expr::Array(_) => true,
+        Expr::Alternative(left, _) => never_truthy(left),
+        Expr::Try {
+            expr,
+            catch: Some(_),
+        } => certainly_raises(expr),
+        _ => false,
+    }) && source_destructures_register(&drop_array_wrappers(source), true)
 }
 
-/// `source` with every `[E]` whose `E` is a plain bind chain replaced by `E`
+/// `source` with every `[E]` (and, #4644, every bare `//` or `try ... catch` run branch) whose `E` is a plain bind chain replaced by `E`
 /// ([`array_wrapped_destructure_of_register`]). Not an `E` with control flow around the bind
 /// (`select(false) | ...`, `limit(0; ...)`, an `if`, `first(...)`): the destructure may sit on a branch
 /// that never runs, which jq answers and the syntactic walk would refuse.
@@ -53212,6 +53221,13 @@ fn drop_array_wrappers(source: &Expr) -> Expr {
             Some(chain) => drop_array_wrappers(chain),
             None => map_subexprs(source, &mut |child| drop_array_wrappers(child)),
         },
+        // #4644: a bare run branch, as the bracketed one above (`E` with no `[ ... ]` around it).
+        Expr::Alternative(..) | Expr::Try { catch: Some(_), .. } => {
+            match run_branch_of_bind_chain(source) {
+                Some(chain) => drop_array_wrappers(chain),
+                None => map_subexprs(source, &mut |child| drop_array_wrappers(child)),
+            }
+        }
         other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
     }
 }
