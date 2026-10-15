@@ -2388,7 +2388,9 @@ is the revert that established what the other one costs.
    ([#4655](https://github.com/rust-works/succinctly/issues/4655): `always_emits`; pinned by
    `test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_raises_4655`). Still accepted: a
    `[ ... ]`-wrapped one in the body of a `reduce` whose source moved the register
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604)) and one behind a `limit(1; ...) |` stage. On a `null` accumulator a `$x` marker
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)), one behind a `limit(1; ...) |` stage, and a bind whose
+   source is a call or a navigation that happens to emit (`.[]? as $q | ...`: it may emit nothing, so the destructure
+   is read as possibly skipped). A source's own raise (`[.a.b] as $q | ...`) is reported as the pattern's error here. On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any

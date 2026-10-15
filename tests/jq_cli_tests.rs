@@ -133726,6 +133726,72 @@ fn test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_r
             "",
             0,
         ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([select(false)] as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([.[]|select(.a)] as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($i as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((1|.) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([1] as [$q] | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ({(empty):1} as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ({a:(empty)} as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((empty,empty) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (limit(0;1) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((1|empty) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((.[0]|.a?) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
     ];
     for &(input, filter, stdout, exit) in rows {
         let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
