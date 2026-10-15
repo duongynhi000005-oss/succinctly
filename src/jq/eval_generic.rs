@@ -33809,7 +33809,7 @@ enum OwnedIdentityRule {
     /// The output starts a detached tree: `keys`, `with_entries`, `{...}`,
     /// a literal.
     Detaches,
-    /// `map`: a non-empty container input yields a detached tree (where `[.[] | f]`
+    /// `map`: a container input with members yields a detached tree (where `[.[] | f]`
     /// keeps -- yq's own inconsistency, reproduced), but a scalar, `null` or an
     /// empty container (#3450) passes through with its position (`.a | map(. + 1) | key` on `a: 5`
     /// is `"a"`; on `a: [1, 2]` it is nothing).

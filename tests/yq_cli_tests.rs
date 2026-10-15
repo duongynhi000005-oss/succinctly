@@ -66648,6 +66648,48 @@ fn test_map_over_an_empty_container_keeps_its_position_3450() -> Result<()> {
             &["-o=json", "-I=0"],
             "[\"a\",\"b\"]\n",
         ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            "(.a | map(.) | key), 1",
+            &["-o=json", "-I=0"],
+            "\"a\"\n1\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            "[.a | map(.) | path]",
+            &["-o=json", "-I=0"],
+            "[[\"a\"]]\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            ".b | map(.) | parent | keys",
+            &["-o=json", "-I=0"],
+            "[\"a\",\"b\",\"c\"]\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            ".[] | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n\"b\"\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            "(.a, .b, .c) | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n\"b\"\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            ".a | map(.) | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "a: []\nb: {}\nc: [1]\n",
+            ".a | (map(.)) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
     ];
     for &(doc, filter, args, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;

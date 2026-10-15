@@ -3847,6 +3847,9 @@ fixed on its own terms (#2375); the second is still open:
   An *empty* container is the exception, as a scalar is: yq keeps its position through `map(.)` (`a: []` with
   `.a | map(.) | path` is `["a"]`, `key` is `"a"`, `parent` is the document), so the rule detaches only a container with members
   ([#3450](https://github.com/rust-works/succinctly/issues/3450); pinned in `test_map_over_an_empty_container_keeps_its_position_3450`).
+  Still different ([#4690](https://github.com/rust-works/succinctly/issues/4690), as before #3450): an *alias* of a non-empty
+  container keeps its position here where yq detaches (the alias node has no members of its own at the cursor), and a mapping
+  whose only content is a `<<` entry detaches here where yq reads its merged members (`a: {<<: {}}` keeps the position).
 - **`first(.a[])` on a genuinely-resolved scalar still raises** (`resolve_iterate_sink`,
   shared by `resolve_node`'s own `Expr::Iterate` arm and `first`/`limit`'s fast path) —
   this function is also reached by `resolve_del_path_branches`'s comma-fanout fallback for a
