@@ -52668,21 +52668,23 @@ fn wrapped_bare_chain(e: &Expr, budget: u8) -> Option<&Expr> {
         Expr::Comma(items) => items.iter().all(literal),
         other => literal(other),
     };
+    // #4537: `first((CHAIN), 1)` takes the chain's first output, as `first(CHAIN)` does.
+    // #4663: so does `limit(n; (CHAIN), X)`.
+    fn leading_leaf(inner: &Expr) -> &Expr {
+        match unwrap_bind_source(inner) {
+            Expr::Comma(items) => items
+                .first()
+                .filter(|leaf| matches!(unwrap_bind_source(leaf), Expr::AsPattern { .. }))
+                .unwrap_or(inner),
+            _ => inner,
+        }
+    }
     let operand = match unwrap_bind_source(e) {
-        Expr::Limit { n, expr } if literals(n) => expr,
+        Expr::Limit { n, expr } if literals(n) => leading_leaf(expr),
         Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) if literals(n) => {
             expr
         }
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-            // #4537: `first((CHAIN), 1)` takes the chain's first output, as `first(CHAIN)` does.
-            match unwrap_bind_source(inner) {
-                Expr::Comma(items) => items
-                    .first()
-                    .filter(|leaf| matches!(unwrap_bind_source(leaf), Expr::AsPattern { .. }))
-                    .unwrap_or(inner),
-                _ => inner,
-            }
-        }
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => leading_leaf(inner),
         _ => return None,
     };
     bare_chain_source(operand, budget)
