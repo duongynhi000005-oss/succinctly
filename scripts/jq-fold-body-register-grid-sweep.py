@@ -113,6 +113,11 @@ SOURCES = [
     ("fresh-var-arr", "[1] as $n | $n as [$b] | ."),
     ("lit-null-var", "null as $n | $n as {b:$b} | ."),
     ("lit-true-var", "true as $n | $n as {b:$b} | ."),
+    # (#4640) a `try`/`?` around that destructure: the raise is caught, and an `fe-y` EXTRACT reads the caught message
+    ("fresh-var-try-catch", "try ({a:1} as $n | $n as {b:$b} | .) catch ."),
+    ("fresh-var-try", "try ({a:1} as $n | $n as {b:$b} | .)"),
+    ("fresh-var-opt", "({a:1} as $n | $n as {b:$b} | .)?"),
+    ("lit-null-var-try-catch", "try (null as $n | $n as {b:$b} | .) catch ."),
     # (#4630) the destructure inside `[ ... ]`: a fresh value raises there too, the register's own does not
     ("fresh-var-wrapped", "{a:1} as $n | [$n as {b:$b} | .]"),
     ("fresh-lit-wrapped", "[{a:1} as {b:$b} | .]"),
