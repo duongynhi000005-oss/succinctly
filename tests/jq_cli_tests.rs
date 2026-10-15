@@ -142353,6 +142353,27 @@ fn test_reduce_source_fresh_comma_behind_counted_wrappers_and_repeating_stages_4
         ),
         (
             r#"{"a":5}"#,
+            r"[path(reduce (limit(3; nth(0; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; limit(0; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(2; limit(5; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
             r"[path(reduce (limit(2; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
             "[[]]\n",
             "",

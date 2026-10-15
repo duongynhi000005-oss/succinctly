@@ -50384,7 +50384,8 @@ enum Scan {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
     /// The pipe stage ahead of `. as PATTERN`: `try`, `?`, `label`, a `limit` and an `nth(k; ..)` and a
-    /// pipe of one stage are read through. A call is not. (`first(f)` and `nth(0; f)` read only the
+    /// pipe of one stage, or of one stage followed by stages that only repeat their input (`., .`), are
+    /// read through. A call is not. (`first(f)` and `nth(0; f)` read only the
     /// first output: a fresh one never meets the register item before it, and a register one answers.)
     Head,
     /// The expression a pattern binds (`GEN as PATTERN`): the zero-argument call to a `def` in scope is
@@ -50410,8 +50411,8 @@ fn certain_fresh_scan<'e>(
         return Scan::Stop;
     }
     let head = position == Position::Head;
-    // The operand of a wrapper that takes at most `take` outputs, scanned with that budget. How many it
-    // yielded is not known, so a bounded outer budget stops counting after it.
+    // The operand of a wrapper that takes at most `take` outputs, scanned with that budget. A bounded outer
+    // budget shrinks by the outputs the operand's scan used of it (all of it where they were not counted).
     let capped = |defs: &mut Vec<(&'e str, &'e Expr)>,
                   inner: &'e Expr,
                   take: usize,
@@ -50452,6 +50453,8 @@ fn certain_fresh_scan<'e>(
         {
             certain_fresh_scan(inner, defs, budget, position, hops)
         }
+        // #4666: `limit(0; f)` yields nothing and does not run `f`.
+        Expr::Limit { n, .. } if head && limit_literal_count(n) == Some(0.0) => Scan::Continue,
         Expr::Limit { n, expr: inner } if head && limit_takes_some(n) => {
             let take = limit_literal_count(n).map_or(1, |count| count.ceil() as usize);
             capped(defs, inner, take, budget)
@@ -50475,15 +50478,12 @@ fn certain_fresh_scan<'e>(
             }
         }
         Expr::Pipe(stages) if head => {
-            let rest: Vec<&Expr> = stages
-                .iter()
-                .filter(|stage| !is_identity_stage(stage))
-                .collect();
-            match rest.as_slice() {
-                [only] => certain_fresh_scan(only, defs, budget, position, hops),
+            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+            match (rest.next(), rest.next()) {
+                (Some(only), None) => certain_fresh_scan(only, defs, budget, position, hops),
                 // #4666: stages after the first that only repeat their input, as the route reads them.
-                [first, repeats @ ..]
-                    if budget.is_none() && repeats.iter().all(|stage| repeats_input(stage)) =>
+                (Some(first), Some(second))
+                    if budget.is_none() && repeats_input(second) && rest.all(repeats_input) =>
                 {
                     certain_fresh_scan(first, defs, budget, position, hops)
                 }
@@ -51787,6 +51787,8 @@ impl<'e> RegisterSpine<'e> {
             // A `label` generates every item until a `break` ends it, which a wrapper's scan reads as the
             // end of what is generated (`cut_aware`).
             Expr::Label { body: inner, .. } => self.fresh_among_leading(inner, budget, true),
+            // #4666: `limit(0; f)` yields nothing and does not run `f`.
+            Expr::Limit { n, .. } if limit_literal_count(n) == Some(0.0) => false,
             Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
                 let take = limit_literal_count(n).map_or(1, |count| count.ceil() as usize);
                 capped(self, inner, take, budget)
@@ -51794,35 +51796,38 @@ impl<'e> RegisterSpine<'e> {
             Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
                 // `nth(k; f)` emits only the output at index `k`: fresh when that one is, read for a
                 // comma of single-output items, whose indices are known.
-                let fresh = match limit_literal_count(n) {
+                match limit_literal_count(n) {
+                    // #4666: `nth(0; f)` is `first(f)`, counted as `first` is.
                     Some(0.0) => capped(self, inner, 1, budget),
                     Some(k) if k >= 1.0 && k.fract() == 0.0 => {
-                        match single_output_leaves(peel_identity_stages(inner))
+                        let fresh = match single_output_leaves(peel_identity_stages(inner))
                             .and_then(|leaves| leaves.get(k as usize).copied())
                         {
                             Some(leaf) => self.binds_fresh(leaf, true),
                             None => false,
+                        };
+                        if budget.is_some() {
+                            *budget = Some(0);
                         }
+                        fresh
                     }
-                    _ => false,
-                };
-                if budget.is_some() {
-                    *budget = Some(0);
+                    _ => {
+                        if budget.is_some() {
+                            *budget = Some(0);
+                        }
+                        false
+                    }
                 }
-                fresh
             }
             Expr::Pipe(stages) => {
-                let rest: Vec<&Expr> = stages
-                    .iter()
-                    .filter(|stage| !is_identity_stage(stage))
-                    .collect();
-                match rest.as_slice() {
-                    [only] => self.fresh_among_leading(only, budget, true),
+                let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+                match (rest.next(), rest.next()) {
+                    (Some(only), None) => self.fresh_among_leading(only, budget, true),
                     // #4666: stages after the first that only repeat their input (`., .`) hand every
                     // output of the first on, so the fresh item is still generated and the plain ones
                     // ahead of it stay plain. Not under a budget: the repeats are not counted.
-                    [head, repeats @ ..]
-                        if budget.is_none() && repeats.iter().all(|stage| repeats_input(stage)) =>
+                    (Some(head), Some(second))
+                        if budget.is_none() && repeats_input(second) && rest.all(repeats_input) =>
                     {
                         self.fresh_among_leading(head, budget, true)
                     }
@@ -87463,6 +87468,11 @@ mod tests {
                 "limit(2; limit(1; ., .), ., {a:1}) | . as {a:$a} | .",
                 false,
             ),
+            // The outer budget is what caps the wrapper here (two taken, not five).
+            ("limit(2; limit(5; ., .), {a:1}) | . as {a:$a} | .", false),
+            ("limit(3; limit(5; ., .), {a:1}) | . as {a:$a} | .", true),
+            // `limit(0; f)` yields nothing.
+            ("limit(3; limit(0; ., .), {a:1}) | . as {a:$a} | .", true),
             // #4666: stages after the first that only repeat their input hand every output on.
             ("((., {a:1}) | ., .) | . as {a:$a} | .", true),
             ("((., {a:1}) | ., ., .) | . as {a:$a} | .", true),
