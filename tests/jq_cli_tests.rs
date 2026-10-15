@@ -141462,6 +141462,103 @@ fn test_first_limit_nth_chain_in_path_mode_stops_nothing_and_emits_per_count_453
     )])
 }
 
+/// #4662: a `reduce` UPDATE of `limit(n; CHAIN)` for a count above one, or a comma of literals,
+/// answers as `first(CHAIN)` does (#4537). The chain's alternatives all hand `.` back, so the
+/// accumulator stays the register's node; a count of one reached it only through the bounded sink's
+/// stop forcing the `?//` retry, and a larger count never stops there. A body that is not `.`, an
+/// `nth` past the first alternative's lone output and a zero count stay refused, as in jq. Every
+/// jq side captured from jq 1.7.1.
+#[test]
+fn test_reduce_update_limit_of_a_chain_hands_the_accumulator_on_4662() -> Result<()> {
+    let doc: &'static str = r#"{"a":true}"#;
+    let chain = ". as {a:$a} ?// $a | .";
+    for (program, expected, message, exit) in [
+        (
+            "path(reduce (1,2) as $i (.; limit(1; CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(3; CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(1,2; CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; limit(2; CHAIN))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "del(reduce (1,2) as $i (.; limit(2; CHAIN)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; try (CHAIN))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; (CHAIN)?)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; . as $x | CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; first(try (CHAIN))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; . as {a:$a} ?// $a | $a)))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; nth(1; CHAIN)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(0; CHAIN)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+    ] {
+        // The rows hold `&'static str`, so the formatted program is leaked (a test, a few bytes).
+        let program: &'static str = Box::leak(program.replace("CHAIN", chain).into_boxed_str());
+        assert_path_rows_both_routes_3749(&[(doc, program, expected, message, exit)])?;
+    }
+    Ok(())
+}
+
 /// #4494 (the top-level `reduce` source): a `reduce` source that destructures a call whose `def`
 /// builds its result (`def f: {a:1}; f as {a:$a} | .`) raises at the pattern's tracked `INDEX` step
 /// in jq whatever the register is, as the `foreach` source does since #4452. The by-value drive

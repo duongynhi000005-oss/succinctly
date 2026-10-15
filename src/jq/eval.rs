@@ -36713,6 +36713,46 @@ fn update_is_alt_bind(update: &Expr) -> bool {
         || take_wrapped_bare_chain(update).is_some()
 }
 
+/// Whether a `reduce` UPDATE is a `?//` chain over `.` whose body hands `.` back, under a `first` or
+/// `limit` (#4662): every alternative emits the node it was given, so the accumulator stays the
+/// register's node however the chain's walk emits. `limit(2; CHAIN)` emits the destructured
+/// alternative's `.` once and never reaches the retry the bounded sink's stop forces for a count of
+/// one, so the untracked branch is the only one the step sees. Not `nth`, whose index past the first
+/// alternative's lone output emits nothing in jq.
+fn update_is_input_chain_under_bound(update: &Expr) -> bool {
+    // `bounded` is whether a `first`/`limit` has been read on the way down; the wrappers
+    // [`wrapped_bare_chain`] reads through (`try`, `?`, a `$x` bind) are read here too, so the two
+    // agree on which UPDATEs are chains.
+    fn chain_hands_input_on(e: &Expr, bounded: bool, budget: u8) -> bool {
+        let Some(budget) = budget.checked_sub(1) else {
+            return false;
+        };
+        match unwrap_bind_source(e) {
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                chain_hands_input_on(inner, true, budget)
+            }
+            Expr::Limit { expr, .. } => chain_hands_input_on(expr, true, budget),
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+                chain_hands_input_on(expr, bounded, budget)
+            }
+            Expr::As { body, .. } => chain_hands_input_on(body, bounded, budget),
+            Expr::AsPattern {
+                expr,
+                patterns,
+                body,
+            } => {
+                bounded
+                    && patterns.len() > 1
+                    && matches!(unwrap_paren(expr), Expr::Identity)
+                    && update_returns_its_input(body)
+            }
+            _ => false,
+        }
+    }
+    take_wrapped_bare_chain(update).is_some()
+        && chain_hands_input_on(update, false, WRAPPED_CHAIN_DEPTH)
+}
+
 /// Whether every output of a `reduce` UPDATE is the accumulator's own node, whatever
 /// the UPDATE's register moves along the way (#3953).
 ///
@@ -57744,6 +57784,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #4440: an UPDATE that is a `?//` bind of `.` runs its alternatives with `.` on the accumulator,
     // which is on the register at the first step as for the UPDATEs above.
     let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
+    // #4662: such a chain under a `first`/`limit` whose alternatives all hand `.` back.
+    let alt_chain_keeps_accumulator =
+        alt_bind_update_on_register && update_is_input_chain_under_bound(update);
     // #4484: an outermost `reduce` whose source navigates leaves jq's register on the element.
     let source_moves_register =
         S::TAG == EvalTag::Jq && fold_body::depth() == 0 && !cannot_move_register(input);
@@ -58129,7 +58172,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 let input_at_register = acc_at_register;
                                 (acc_at_register, acc_snapshot) =
                                     reg.fold_branch_provenance::<S>(last.as_ref(), frame, slice_ok);
-                                if keeps_accumulator && last.is_some() {
+                                if (keeps_accumulator || alt_chain_keeps_accumulator)
+                                    && last.is_some()
+                                {
                                     acc_at_register = acc_at_register || input_at_register;
                                 }
                                 acc = last.map(|b| b.value.into_owned());
