@@ -263,6 +263,8 @@ def main():
     )
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
+    if args.wrapped and not args.base:
+        ap.error("--wrapped is judged against --base: pass a reference build")
 
     rows = []
     contexts = WRAPPED_CONTEXTS if args.wrapped else CONTEXTS
