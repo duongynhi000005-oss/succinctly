@@ -47495,6 +47495,13 @@ fn def_call_body_cannot_move_register(body: &Expr) -> bool {
 /// [`def_call_body_cannot_move_register`]'s budget around any question put to a `def` body.
 #[cfg(feature = "std")]
 fn within_def_call_budget(question: impl FnOnce() -> bool) -> bool {
+    within_def_call_budget_with(|| question().then_some(())).is_some()
+}
+
+/// [`within_def_call_budget`] for a question with a three-way answer (#4641): `None` is past the
+/// budget as well as the question's own "cannot say".
+#[cfg(feature = "std")]
+fn within_def_call_budget_with<T>(question: impl FnOnce() -> Option<T>) -> Option<T> {
     use std::cell::Cell;
     thread_local! {
         /// Bodies looked into by the outermost question still being answered.
@@ -47506,7 +47513,7 @@ fn within_def_call_budget(question: impl FnOnce() -> bool) -> bool {
         USED.with(|u| u.set(0));
     }
     if USED.with(Cell::get) >= DEF_CALL_SHAPE_BUDGET {
-        return false;
+        return None;
     }
     USED.with(|u| u.set(u.get() + 1));
     NESTED.with(|n| n.set(n.get() + 1));
@@ -47532,6 +47539,12 @@ fn def_call_body_cannot_move_register(_body: &Expr) -> bool {
 #[cfg(not(feature = "std"))]
 fn within_def_call_budget(_question: impl FnOnce() -> bool) -> bool {
     false
+}
+
+/// See the `std` half.
+#[cfg(not(feature = "std"))]
+fn within_def_call_budget_with<T>(_question: impl FnOnce() -> Option<T>) -> Option<T> {
+    None
 }
 
 /// Whether evaluating `expr` as one pipe stage provably leaves jq's path
@@ -49761,15 +49774,11 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             // #4641: a zero-arity `def` called as the whole of its scope (`def f: isempty(g); f`)
             // is its body, which the resolver resolves in place against the call's own input and
             // frame, as in [`def_call_keeps_register`]. Bound (a `DefCall`) it is read through the
-            // shared budget; unbound (the `FuncDef` the fold's UPDATE is written as) only when
-            // `then` is the one call to it, so no other body is looked into.
+            // shared budget (not recognised without `std`, like every budgeted read, #3790);
+            // unbound (the `FuncDef` the fold's UPDATE is written as) only when `then` is the
+            // one call to it, so no other body is looked into and nothing needs a budget.
             Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
-                let mut verdict = None;
-                within_def_call_budget(|| {
-                    verdict = leaves(&def.body);
-                    verdict.is_some()
-                });
-                verdict
+                within_def_call_budget_with(|| leaves(&def.body))
             }
             Expr::FuncDef {
                 name,
@@ -145801,6 +145810,39 @@ mod touched_edge_cases_2999 {
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");
         }
+        // #4499: ...but one that reads a frozen `$var` marker still counts. The parser spells
+        // a bound variable `Expr::Var`, so the marker is spliced in as a bind would.
+        let marker = Expr::TrackedVar(Rc::new(Tracked {
+            value: OwnedValue::Null,
+            origin: Origin::Untracked,
+            node: None,
+        }));
+        let Expr::Builtin(Builtin::IsEmpty(operand)) =
+            parse("isempty(foreach (1,2) as $i (1; try .a; .))").unwrap()
+        else {
+            panic!("expected isempty");
+        };
+        let Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update,
+            extract,
+        } = *operand
+        else {
+            panic!("expected a foreach");
+        };
+        let reads_marker = Expr::Builtin(Builtin::IsEmpty(Box::new(Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update: Box::new(Expr::Pipe(vec![marker, *update].into())),
+            extract,
+        })));
+        assert!(
+            fans_out(&reads_marker),
+            "an isempty over a fold that reads a frozen variable counts"
+        );
     }
 }
 

@@ -838,11 +838,15 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`(isempty(1), isempty(.a?))`, `isempty(1) and isempty(first(.a?))`), where jq emits the leading verdict at the entry register before
   the navigating one runs or raises; the whole UPDATE is judged at once, so the leading emission is refused too (a refusal under
   `?`/`try` is swallowed: `[path(foreach .[]? as $k (0; (isempty(1), isempty(.a?)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`).
-  **Since [#4499](https://github.com/rust-works/succinctly/issues/4499)** an `isempty` whose operand is a `foreach`/`reduce` is one flow, not
-  siblings, so its inner fold follows a live `null` register like one outside `isempty`
+  **Since [#4499](https://github.com/rust-works/succinctly/issues/4499)** an `isempty` whose operand is a `foreach` is one flow, not
+  siblings, so a caught `try .a` step of the inner fold against a live `null` accumulator is no longer dropped
   (`path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))` on `null` is `["a","a"]`, it raised `... with result null`;
   with `.` as EXTRACT the error names `result false`, it said `result true`). Pinned by
-  `test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499`. **Still refused where jq answers**: a nested fold that
+  `test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499`. **Still refused where jq answers** (unchanged by
+  it): the other `isempty(FOLD)` shapes -- an inner `reduce` (`isempty(reduce (1,2) as $i (1; try .a))`), an inner EXTRACT that
+  reads the loop variable (`... try .a; $i)`), a non-`null` accumulator or register (`[path(foreach .[]? as $k (0;
+  isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`), and a fold as the `cond` of
+  `any`/`all` -- and a nested fold that
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
   the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly.

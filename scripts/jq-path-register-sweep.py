@@ -301,6 +301,10 @@ OPERANDS = [
     "isempty(foreach (1,2) as $i (1; try .a; .))",
     "isempty(first(foreach (1,2) as $i (null; try .a; .)))",
     "isempty(reduce (1,2) as $i (1; try .a))",
+    # (#4499 review) the shapes the `isempty(FOLD)` fix leaves refused: an inner EXTRACT that reads the
+    # loop variable and a fold as the `cond` of `any`.
+    "isempty(foreach (1,2) as $i (1; try .a; $i))",
+    "any(foreach (1,2) as $i (1; try .a; .); .)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
