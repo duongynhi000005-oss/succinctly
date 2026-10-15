@@ -142081,3 +142081,470 @@ fn test_chain_source_with_later_bare_alternative_destructure_in_a_fold_body_4578
     }
     Ok(())
 }
+
+/// #4604: `select($x|not)` on a `$x` bound to `null` or `false` passes whatever it is run on, as
+/// `select(true)` does, so the destructure behind it in a fold source inside another fold's body runs
+/// and raises where the register is not the value in hand (a `reduce` source that navigated, a `foreach`
+/// whose UPDATE is not the register's). The stage was opaque to the marker reading, so `del`/`=` wrote
+/// through the by-value answer. A truthy `$x` makes it `select(false)` (nothing is destructured, jq
+/// answers), and a `try` swallows the raise; both stay controls. Every row is a live jq 1.7.1 capture
+/// (stdout and exit code; the refusal's message differs from jq's).
+#[test]
+fn test_select_not_on_a_falsy_marker_passes_the_register_on_4604() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x|not) | $x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try (select($x|not) | . as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (select($x|not) | .) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .); .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; foreach (select($x|not) | .) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x|not|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; reduce (select($x|not) | . as {a:$a} | .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[false]",
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select($x|not) | $x as {a:$a} | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (try (select($x|not) | . as {a:$a} | .)) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (select($x|not) | .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (select($x) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | . as [$a] | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; reduce (select($x|not) | $x as {a:$a} | .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; reduce (try (select($x|not) | . as {a:$a} | .)) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"del(.a as $x | reduce .a? as $i (.; foreach (select($x|not) | .) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(.a as $x | reduce .a? as $i (.; foreach (select($x|not|not) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce .a? as $i (.; reduce (select($x|not) | .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(.a as $x | reduce .a? as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | foreach .[]? as $i (.; foreach (select($x|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a as $x | foreach .[]? as $i (.; foreach (select($x|not) | .) as $y (.; .; .); .))",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | foreach .[]? as $i (.; foreach (select($x|not|not) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | foreach .[]? as $i (.; reduce (select($x|not) | . as [$a] | .) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a as $x | foreach .[]? as $i (.; reduce (select($x|not) | $x as {a:$a} | .) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | foreach .[]? as $i (.; reduce (try (select($x|not) | . as {a:$a} | .)) as $y (.; .); .))",
+            "",
+            5,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}

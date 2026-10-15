@@ -50096,6 +50096,20 @@ fn is_register_truthy_select(e: &Expr, markers: &[*const Tracked]) -> bool {
     match unwrap_paren(cond) {
         Expr::Identity | Expr::Literal(_) => true,
         Expr::TrackedVar(m) => markers.contains(&Rc::as_ptr(m)),
+        cond => negated_falsy_marker(cond),
+    }
+}
+
+/// Whether `cond` is `$x | not` for a `$x` bound to a `null` or `false` (#4604): a condition decided
+/// by the marker's own value, which passes whatever it is run on, as `select(true)` does. A truthy
+/// `$x` passes nothing (the stage is `select(false)`) and is not this.
+fn negated_falsy_marker(cond: &Expr) -> bool {
+    match cond {
+        Expr::Pipe(stages) => match stages.as_slice() {
+            [head, Expr::Not] => matches!(unwrap_paren(head), Expr::TrackedVar(m)
+                if matches!(m.value, OwnedValue::Null | OwnedValue::Bool(false))),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -50328,13 +50342,14 @@ fn unplaced_register_markers<S: EvalSemantics>(
 fn source_always_reaches_destructure(source: &Expr) -> bool {
     !any_subexpr(source, &mut |e| match e {
         Expr::Builtin(Builtin::Select(cond)) => {
-            !matches!(
+            (!matches!(
                 unwrap_paren(cond),
                 Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
-            ) || matches!(
-                unwrap_paren(cond),
-                Expr::Literal(Literal::Null | Literal::Bool(false))
-            )
+            ) && !negated_falsy_marker(unwrap_paren(cond)))
+                || matches!(
+                    unwrap_paren(cond),
+                    Expr::Literal(Literal::Null | Literal::Bool(false))
+                )
         }
         Expr::Limit { n, .. } => !matches!(unwrap_paren(n), Expr::Literal(lit)
             if literal_to_owned(lit).as_f64().is_some_and(|n| n >= 1.0)),

@@ -2313,7 +2313,10 @@ is the revert that established what the other one costs.
    by-value drive answered): the nested source is resolved with no position to certify a marker against, and
    `update_navigates_within` reads a nested source past the stages that hand their input on (`.`, an outer `$x`, `select(f)`).
    A `select(f)` stage is looked through only when `f` is the accumulator's own truthiness (`.`, the `$x`, a literal) and the
-   accumulator is truthy: `select(empty)` or `select($x|not)` pass nothing, and the destructure behind them never runs.
+   accumulator is truthy: `select(empty)` passes nothing, and the destructure behind it never runs. `select($x|not)` is decided by
+   the marker's own value (`negated_falsy_marker`, [#4604](https://github.com/rust-works/succinctly/issues/4604)): a `$x` bound to `null`/`false` passes
+   the accumulator on as `select(true)` does, so the destructure behind it is read, and a truthy one passes nothing (pinned by
+   `test_select_not_on_a_falsy_marker_passes_the_register_on_4604`).
    A `try`/`?` around the destructure catches its *type error* (`{a:$a}` on an array), where nothing moved the register
    and jq answers, and not a success, which moves it ([#4575](https://github.com/rust-works/succinctly/issues/4575)): the
    refusal reads the accumulator's type, replacing a single destructure of the register that raises by `empty` and

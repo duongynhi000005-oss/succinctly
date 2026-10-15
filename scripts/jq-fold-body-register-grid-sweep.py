@@ -196,11 +196,11 @@ WRAPPED_CONTEXTS = [
 ]
 # The ACCEPT_WRONG rows of these contexts still left (#4588): the body of a `reduce` whose source
 # moved the register, where the register is on an element and a marker may be that very node, and a
-# destructure of `.` behind a `select($x|not)`/`select($x)` that the markers do not decide. They count
+# destructure of `.` behind a `select(f)` whose condition the markers do not decide (a `select($x|not)` on a falsy `$x` is decided since #4604). They count
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 51
+RESIDUAL_NAV_MAX = 36
 DOCS = [
     "null",
     "true",
