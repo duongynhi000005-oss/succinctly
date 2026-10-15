@@ -143314,6 +143314,34 @@ fn test_two_alternative_chain_foreach_in_a_carrying_reduce_in_a_moved_fold_body_
     assert_path_rows_both_routes_3749(&[
         (
             r"[true]",
+            r"(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))))) = 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as [$a] ?// {a:$a} | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [true]",
+            5,
+        ),
+        (
+            r"[true]",
             r"del(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
             "",
             "Invalid path expression near attempt to access element 0 of [true]",

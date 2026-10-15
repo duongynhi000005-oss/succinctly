@@ -58113,6 +58113,11 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && patterns_all_bare(patterns)
         && cannot_move_register(input)
         && cannot_move_register(init);
+    // #4651: a `reduce` that carries `.` through (its source cannot move the register and its INIT is `.`)
+    // runs its UPDATE on the accumulator its enclosing body handed it.
+    let carries_dot = S::TAG == EvalTag::Jq
+        && cannot_move_register(input)
+        && matches!(unwrap_paren(init), Expr::Identity);
     let try_update_on_register =
         first_step_on_register && matches!(unwrap_paren(update), Expr::Try { .. });
     // #4484: an UPDATE that is itself a `foreach` runs its INIT and SOURCE with `.` on the
@@ -58475,18 +58480,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // #4651: ...and a nested `reduce` that carries `.` through (its source cannot move
                         // the register and its INIT is `.`) runs on that accumulator, which the register
                         // is still not at.
-                        let _source_moved_inherited = (S::TAG == EvalTag::Jq
-                            && fold_body::depth() > 0
-                            && cannot_move_register(input)
-                            && matches!(unwrap_paren(init), Expr::Identity))
-                        .then(fold_body::source_moved_inherited);
+                        let _source_moved_inherited = (carries_dot && fold_body::depth() > 0)
+                            .then(fold_body::source_moved_inherited);
                         // #4651: ...and in a `foreach` UPDATE it is the same body for the walk's chain rule
                         // ([`RegisterSpine::reach_node`]'s `foreach_body_here` clause).
-                        let _loop_inherited = (S::TAG == EvalTag::Jq
-                            && fold_body::foreach_body_moved_here()
-                            && cannot_move_register(input)
-                            && matches!(unwrap_paren(init), Expr::Identity))
-                        .then(fold_body::foreach_body_moved_inherited);
+                        let _loop_inherited = (carries_dot && fold_body::foreach_body_moved_here())
+                            .then(fold_body::foreach_body_moved_inherited);
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
