@@ -50236,6 +50236,9 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
+        taken_first_is_dot: !any_subexpr(source, &mut |e| {
+            matches!(e, Expr::Try { .. } | Expr::Optional(_))
+        }),
         fresh_cut_free: true,
         known: NotRegister::default(),
         moved: false,
@@ -50528,6 +50531,7 @@ fn source_destructures_fresh(
         held: Vec::new(),
         markers: Vec::new(),
         dot_fresh: dot_off_register,
+        taken_first_is_dot: false,
         fresh_cut_free: true,
         known,
         moved: false,
@@ -51202,7 +51206,7 @@ fn takes_only_an_identity_leaf(e: &Expr) -> bool {
     match unwrap_bind_source(e) {
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => takes_first(inner),
         Expr::Limit { n, expr: inner } => limit_takes_one(n) && takes_first(inner),
-        Expr::Builtin(Builtin::NthStream(n, inner)) => {
+        Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
             limit_literal_count(n) == Some(0.0) && takes_first(inner)
         }
         _ => false,
@@ -51342,6 +51346,10 @@ struct RegisterSpine<'e> {
     /// fresh stage earlier in the pipe (`{a:1} | . as {a:$a}`, `$x | ..`, `keys | ..`) made it so.
     /// Always `false` for an ordinary walk.
     dot_fresh: bool,
+    /// Whether `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` are read as handing the register
+    /// on (#4667): a register walk over a source with no `try`/`?`. A `try` around the destructure
+    /// that follows catches the raise jq makes, which the loud refusal this reads into cannot.
+    taken_first_is_dot: bool,
     /// In a `fresh_only` walk, whether the stage that made `.` fresh ([`dot_fresh`](Self::dot_fresh))
     /// generates its fresh item before anything can cut its generation short (`error`, `break`, `halt`,
     /// #4597): a consumer the walk newly reads (`isempty`/`any`/`all`) is claimed only then, since
@@ -52603,12 +52611,16 @@ impl<'e> RegisterSpine<'e> {
                 }
                 // #4667: `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` emit their comma's first leaf
                 // and stop, so `X` is never generated and the stage hands the register on as `.` does
-                // (peeling the wrapper alone would leave the whole comma, read as opaque). Not in the
-                // `through_reduce` walk outside the body of a `reduce` whose source moved the register
-                // (where the destructure of `.` certainly raises): the loud refusal it would reach there
-                // is a guess, and these sources are answered today (`del(try (reduce 1 as $i (.; -(reduce (first(., {a:1}) |
-                // . as {a:$a} | .) as $j (.; .)))))`, #4600).
-                if (!self.through_reduce || fold_body::source_moved_here())
+                // (peeling the wrapper alone would leave the whole comma, read as opaque). Only for a
+                // register walk over a source with no `try`/`?` ([`taken_first_is_dot`]), and in the
+                // `through_reduce` walk only in the body of a `reduce` whose source moved the register,
+                // where the destructure of `.` certainly raises: elsewhere the loud refusal it would
+                // reach is a guess, and these sources are answered today (#4600: `del(try (reduce 1 as
+                // $i (.; -(reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))))`).
+                //
+                // [`taken_first_is_dot`]: Self::taken_first_is_dot
+                if self.taken_first_is_dot
+                    && (!self.through_reduce || fold_body::source_moved_here())
                     && takes_only_an_identity_leaf(other)
                 {
                     return Reach::HandsOn;

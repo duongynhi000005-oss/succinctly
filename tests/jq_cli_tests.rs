@@ -141965,8 +141965,8 @@ fn test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_452
 /// as a `reduce` source in the body of a `reduce` whose source moved the register, `first(., {a:1}) | . as
 /// {a:$a} | .` destructures `.`, which is not the register there, and raises -- the fresh item is never
 /// generated. It used to be answered (`del` deleted the document). `first({a:1}, .)` raises on the fresh
-/// item instead, and outside a moved body the destructure of the register succeeds. Every row is a live
-/// jq 1.7.1 capture.
+/// item instead, and outside a moved body the destructure of the register succeeds. A `try`/`?` around
+/// the destructure catches the raise, so those sources are answered. Every row is a live jq 1.7.1 capture.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667() -> Result<()> {
@@ -142020,6 +142020,27 @@ fn test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667() -> R
             "",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
             5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | try (. as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | (. as {a:$a} | .)?) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
         ),
         (
             r#"{"a":5}"#,

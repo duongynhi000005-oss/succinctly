@@ -948,6 +948,15 @@ OPERANDS = [
     "(reduce (first(., {a:1}, 3) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (first(., {a:1}) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))",
+    # (#4667) a stage after the destructure that catches or reshapes the raise: a `try`/`?` around it
+    # answers in jq, and `//`, `if` and `select` after `first(., X)` do not.
+    "(reduce (first(., {a:1}) | try (. as {a:$a} | .)) as $k (.; .))",
+    "(reduce (first(., {a:1}) | (. as {a:$a} | .)?) as $k (.; .))",
+    "(reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $k (.; .))",
+    "(reduce (first(., {a:1}) | (. as {a:$a} | .) // 3) as $k (.; .))",
+    "(reduce (first(., {a:1}) | if true then (. as {a:$a} | .) else . end) as $k (.; .))",
+    "(reduce (first(., {a:1}) | select(true) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((first(., {a:1}) | . as {a:$a} | .), 1) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
     "(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
