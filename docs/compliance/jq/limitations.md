@@ -2793,9 +2793,13 @@ is the revert that established what the other one costs.
    register item's seed handed on to the fold as it is where `.` is the register (`fold_body::fresh_source_here`), and raises
    jq's own error on the fresh item. Still refused (a guess, exit 5 where jq answers under a `try`): a `foreach` source, whose
    consumer can stop before the fresh item is generated; a source with an `error`/`break` item before the fresh one, an `if`, a
-   `try` or a `?//` chain around the destructure. A fresh item handed to a closure-taking `def` (`def f(x): x; f(., {a:1}) as
-   {a:$a} | .`) is accepted at every depth, as before (jq raises). Pinned by
+   `try` or a `?//` chain around the destructure. Pinned by
    `test_reduce_source_certain_fresh_destructure_in_a_fold_body_value_mode_4600`.
+   A fresh item handed through a *call* raises since [#4665](https://github.com/rust-works/succinctly/issues/4665):
+   a closure-taking `def` that only calls its parameter, handed a comma (`def f(x): x; f(., {a:1}) as {a:$a} | .`,
+   read per leaf by `call_comma_leaves`), and a call whose body hands the register on next to a fresh value as the pipe
+   stage ahead of `. as P` (`def f: ., {a:1}; f | . as {a:$a} | .`, `fresh_among_leading`), including a call to a call.
+   Pinned by `test_fold_source_destructuring_a_fresh_item_handed_through_a_call_raises_4665`.
 
    A `reduce` source that destructures the register twice in a pipe is refused since
    [#4583](https://github.com/rust-works/succinctly/issues/4583): jq raises at the second destructure, since the first one's
