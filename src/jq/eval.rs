@@ -43139,13 +43139,22 @@ fn carry_comma_sibling_register<'a>(
     if let Some(register) = entry {
         if !branch.trackable
             && matches!(branch.register, BranchRegister::None)
-            && neutral_leaves_register(operand)
+            && sibling_leaves_register(operand)
         {
             branch.register = BranchRegister::Unmoved(Cow::Owned(register.clone()));
         }
         return branch;
     }
-    carry_register_when(branch, frame, || neutral_leaves_register(operand))
+    carry_register_when(branch, frame, || sibling_leaves_register(operand))
+}
+
+/// Whether a comma sibling leaves jq's register where the comma entered it: a neutral one, or
+/// (#4660) a verdict builtin over operands that do ([`verdict_builtin_leaves_register`]). jq runs
+/// each sibling from the comma's register and emits the leading one's output before a later,
+/// navigating sibling runs or raises, so the leading verdict's statement must not wait on its
+/// siblings.
+fn sibling_leaves_register(operand: &Expr) -> bool {
+    neutral_leaves_register(operand) || verdict_builtin_leaves_register(operand)
 }
 
 /// The shared body of the two: state `frame`'s register on a by-value `branch` that says
@@ -46392,7 +46401,9 @@ fn register_after_parts<'a>(
     } else {
         match register {
             BranchRegister::Unmoved(register) => BranchRegister::Unmoved(register),
-            _ if cannot_move_register(expr) => {
+            // #4660: a verdict builtin over operands that leave the register hands its boolean on
+            // at the register it entered with ([`verdict_builtin_leaves_register`]).
+            _ if cannot_move_register(expr) || verdict_builtin_leaves_register(expr) => {
                 frame.register().map_or(BranchRegister::None, |reg| {
                     BranchRegister::Unmoved(Cow::Owned(reg.clone()))
                 })
@@ -48547,8 +48558,10 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
             // builtin, #3960: `now`, `input_line_number`) counts, and an opaque sibling (a pipe
             // with a `.` in it) keeps the whole comma opaque: `(.|length)` and `(2|.+1)` still
             // skip the write (#3959).
+            // #4660: and a verdict builtin over operands that leave it alone is such a sibling
+            // ([`sibling_leaves_register`]).
             if shape == EntryMarkers::None
-                && items.iter().any(neutral_leaves_register)
+                && items.iter().any(sibling_leaves_register)
             {
                 EntryMarkers::Forwarded
             } else {
@@ -48629,6 +48642,12 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         // and each branch states its own register, so it reads the same (#4527: an array key's
         // step was refused where jq's succeeds, which made a bind look like it had not matched).
         Expr::AsPattern { .. } => EntryMarkers::None,
+        // #4660: an `and`/`or` whose left operand is a verdict that leaves the register emits its
+        // short-circuit value at the register it entered with (`register_after`), whatever the
+        // right operand does: the right side states its own register for the outputs it makes.
+        Expr::And(left, _) | Expr::Or(left, _) if verdict_builtin_leaves_register(left) => {
+            EntryMarkers::Forwarded
+        }
         other if hosts_stating_producer(other) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
     }
@@ -48839,6 +48858,16 @@ fn sibling_sees_register_uniformly(expr: &Expr) -> bool {
         // Unless it reads a frozen `$var` (#3984): a marker in it can re-establish against the
         // register the comma would now carry, which is what #3145 withheld it for.
         Expr::Foreach { .. } | Expr::Reduce { .. } => !mentions_marker(expr),
+        // #4660: a verdict builtin hands its boolean on at the register it entered with and
+        // resolves its operands live (they raise where jq raises), so a comma of them sees the
+        // register the same way on every side. `isempty` as [`fans_out_with`] reads it; `any`/`all`
+        // only when neither operand can move it.
+        Expr::Builtin(Builtin::IsEmpty(operand)) => {
+            !fans_out_with(operand, false) && !mentions_marker(operand)
+        }
+        Expr::Builtin(Builtin::AnyCond(..) | Builtin::AllCond(..)) => {
+            verdict_builtin_leaves_register(expr)
+        }
         other => cannot_move_register(other) || is_navigation_node(other),
     }
 }
