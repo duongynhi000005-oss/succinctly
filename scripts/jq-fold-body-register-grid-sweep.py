@@ -149,6 +149,12 @@ SOURCES = [
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
     ("try-dotpat-empty-catch-empty", "try (. as [$a] | empty) catch empty"),
     ("try-dotpat-empty", "try (. as [$a] | empty)"),
+    # (#4626) the same with an outer `$x` as the destructured value: off the register the step raises
+    ("xpat-arr-empty", "$x as [$a] | empty"),
+    ("xpat-arr-empty-5", "$x as [$a] | empty | 5"),
+    ("try-xpat-arr-empty-catch", "try ($x as [$a] | empty) catch ."),
+    ("try-xpat-arr-empty-catch-empty", "try ($x as [$a] | empty) catch empty"),
+    ("try-xpat-arr-empty", "try ($x as [$a] | empty)"),
     # the outer fold's own loop variable is another value, not the register
     ("i-idx", "$i | .[0]"),
     ("i-nava", "$i | .a?"),

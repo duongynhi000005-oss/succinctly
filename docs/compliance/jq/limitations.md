@@ -2318,11 +2318,14 @@ is the revert that established what the other one costs.
    resolver cannot place (an enclosing source navigated), raises when `H` emits
    ([#4621](https://github.com/rust-works/succinctly/issues/4621): `caught_destructure_in_unrouted_body` reads the body
    with the handler's `try` dropped; pinned by
-   `test_foreach_source_caught_empty_body_destructure_in_navigating_fold_raises_4621`). Still accepted
-   ([#4626](https://github.com/rust-works/succinctly/issues/4626)): the same with an outer `$x` and an array pattern
-   (`foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch .) as $y (.; .; .); .)` on `[true]`; a marker is not
-   certified against an accumulator the resolver cannot place), and refused where jq answers when the outer `EXTRACT` is
-   `$i` ([#4627](https://github.com/rust-works/succinctly/issues/4627)). On a `null` accumulator a `$x` marker
+   `test_foreach_source_caught_empty_body_destructure_in_navigating_fold_raises_4621`). The same with an outer `$x` as the
+   destructured value raises too, bare or under a `try` whose handler emits
+   ([#4626](https://github.com/rust-works/succinctly/issues/4626): `foreign_in_off_body` lets
+   `foreign_register_markers_with` certify a non-empty container marker against the register's position when the
+   accumulator is provably off the register; pinned by
+   `test_foreach_source_outer_marker_empty_body_destructure_in_navigating_fold_raises_4626`). Both are refused where jq
+   answers when the outer `EXTRACT` is `$i` ([#4627](https://github.com/rust-works/succinctly/issues/4627); the `$x` form
+   printed nothing before #4626, also wrong). On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any
