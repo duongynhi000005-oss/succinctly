@@ -53721,10 +53721,13 @@ fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
             })?;
             leading_destructure_of_dot_element(first)
         }
+        // #4651: a chain of destructuring alternatives raises on the last one's first step, jq's
+        // retry having run out of alternatives; its `.` source may be written `(.|.)`.
         Expr::AsPattern { expr, patterns, .. }
-            if is_identity_stage(expr) && patterns.len() == 1 =>
+            if is_identity_pipe(expr)
+                && (patterns.len() == 1 || patterns_all_destructuring_chain(patterns)) =>
         {
-            match &patterns[0] {
+            match patterns.last()? {
                 Pattern::Array(_) => Some(OwnedValue::Int(0)),
                 Pattern::Object(entries) => match entries.first().map(|entry| &entry.key) {
                     Some(ObjectKey::Literal(key)) => Some(OwnedValue::from(key.as_str())),
@@ -58240,6 +58243,11 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && patterns_all_bare(patterns)
         && cannot_move_register(input)
         && cannot_move_register(init);
+    // #4651: a `reduce` that carries `.` through (its source cannot move the register and its INIT is `.`)
+    // runs its UPDATE on the accumulator its enclosing body handed it.
+    let carries_dot = S::TAG == EvalTag::Jq
+        && cannot_move_register(input)
+        && matches!(unwrap_paren(init), Expr::Identity);
     let try_update_on_register =
         first_step_on_register && matches!(unwrap_paren(update), Expr::Try { .. });
     // #4484: an UPDATE that is itself a `foreach` runs its INIT and SOURCE with `.` on the
@@ -58599,6 +58607,15 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                     .then_some(matches!(elem.value, OwnedValue::Null)),
                             )
                         });
+                        // #4651: ...and a nested `reduce` that carries `.` through (its source cannot move
+                        // the register and its INIT is `.`) runs on that accumulator, which the register
+                        // is still not at.
+                        let _source_moved_inherited = (carries_dot && fold_body::depth() > 0)
+                            .then(fold_body::source_moved_inherited);
+                        // #4651: ...and in a `foreach` UPDATE it is the same body for the walk's chain rule
+                        // ([`RegisterSpine::reach_node`]'s `foreach_body_here` clause).
+                        let _loop_inherited = (carries_dot && fold_body::foreach_body_moved_here())
+                            .then(fold_body::foreach_body_moved_inherited);
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -59415,7 +59432,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _acc_off_register =
                             (state_off_register && !live_stepped && _acc_is_register.is_none())
                                 .then(fold_body::acc_off_register);
-                        let _foreach_body = fold_body::foreach_body();
+                        let _foreach_body = if input_cannot_move {
+                            fold_body::foreach_body()
+                        } else {
+                            fold_body::foreach_body_moved()
+                        };
                         let flow = active_reg.resolve_sink::<S>(
                             &bound_update,
                             entry_state,
@@ -65149,6 +65170,15 @@ fn del_target_is_bound_variable_only(target: &Expr) -> bool {
     }
 }
 
+/// `.`, `(.)` or a pipe of them (`(.|.)`).
+fn is_identity_pipe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Pipe(stages) => stages.iter().all(is_identity_pipe),
+        Expr::Paren(inner) => is_identity_pipe(inner),
+        other => is_identity_stage(other),
+    }
+}
+
 /// `.` or `(.)`.
 fn is_identity_stage(expr: &Expr) -> bool {
     match expr {
@@ -68245,6 +68275,22 @@ mod fold_body {
         MovedGuard(previous)
     }
 
+    /// Marks the body about to be entered as moved too when the body being resolved is (#4651): a
+    /// nested fold whose source cannot move the register and whose INIT is `.` runs its UPDATE on
+    /// the accumulator the moved body handed it, which the register is still not at.
+    pub(crate) fn source_moved_inherited() -> MovedGuard {
+        let previous = MOVED.with(Cell::get);
+        if previous.depth == depth() && depth() > 0 {
+            MOVED.with(|a| {
+                a.set(Moved {
+                    depth: depth() + 1,
+                    onto_null: previous.onto_null,
+                });
+            });
+        }
+        MovedGuard(previous)
+    }
+
     impl Drop for MovedGuard {
         fn drop(&mut self) {
             MOVED.with(|a| a.set(self.0));
@@ -68270,8 +68316,27 @@ mod fold_body {
     /// result back as the state and the register is restored on exit.
     pub(crate) fn foreach_body() -> LoopGuard {
         let previous = LOOP_DEPTH.with(Cell::get);
-        LOOP_DEPTH.with(|l| l.set(depth() + 1));
+        LOOP_DEPTH.with(|l| l.set((depth() + 1) << 1));
         LoopGuard(previous)
+    }
+
+    /// [`foreach_body`] for a `foreach` whose source navigated (#4651): jq's register is on the
+    /// element, so `.` in UPDATE (the state) is a node it is not at. Bit 0 of the mark.
+    pub(crate) fn foreach_body_moved() -> LoopGuard {
+        let previous = LOOP_DEPTH.with(Cell::get);
+        LOOP_DEPTH.with(|l| l.set(((depth() + 1) << 1) | 1));
+        LoopGuard(previous)
+    }
+
+    /// Marks the body about to be entered as a moved `foreach` body too when the body being resolved
+    /// is one (#4651): a nested `reduce` whose source cannot move the register and whose INIT is `.`
+    /// runs its UPDATE on the state the loop handed it.
+    pub(crate) fn foreach_body_moved_inherited() -> LoopGuard {
+        if foreach_body_moved_here() {
+            foreach_body_moved()
+        } else {
+            LoopGuard(LOOP_DEPTH.with(Cell::get))
+        }
     }
 
     impl Drop for LoopGuard {
@@ -68282,7 +68347,12 @@ mod fold_body {
 
     /// Whether the body being resolved is the one [`foreach_body`] marked.
     pub(crate) fn foreach_body_here() -> bool {
-        depth() > 0 && LOOP_DEPTH.with(Cell::get) == depth()
+        depth() > 0 && LOOP_DEPTH.with(Cell::get) >> 1 == depth()
+    }
+
+    /// Whether the body being resolved is a [`foreach_body_moved`] one.
+    pub(crate) fn foreach_body_moved_here() -> bool {
+        foreach_body_here() && LOOP_DEPTH.with(Cell::get) & 1 == 1
     }
 
     /// Every mark of the body being resolved, for [`restore`].
@@ -68379,6 +68449,10 @@ mod fold_body {
         MovedGuard
     }
 
+    pub(crate) fn source_moved_inherited() -> MovedGuard {
+        MovedGuard
+    }
+
     pub(crate) fn source_moved_here() -> bool {
         false
     }
@@ -68391,6 +68465,18 @@ mod fold_body {
 
     pub(crate) fn foreach_body() -> LoopGuard {
         LoopGuard
+    }
+
+    pub(crate) fn foreach_body_moved() -> LoopGuard {
+        LoopGuard
+    }
+
+    pub(crate) fn foreach_body_moved_inherited() -> LoopGuard {
+        LoopGuard
+    }
+
+    pub(crate) fn foreach_body_moved_here() -> bool {
+        false
     }
 
     pub(crate) struct FreshGuard;
