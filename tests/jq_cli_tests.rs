@@ -74201,6 +74201,28 @@ fn test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_o
             "",
             0,
         ),
+        (
+            r"[1]",
+            r"def f: isempty(empty); path(foreach .[]? as $k (0; f; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: isempty(1); def g: f; path(foreach .[]? as $k (0; g; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; select(.) | first(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+
     ])
 }
 

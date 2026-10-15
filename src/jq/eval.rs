@@ -145772,7 +145772,7 @@ mod touched_edge_cases_2999 {
             ("try (($w | .a), f)", true),
             // #4492: a fold is one flow, not siblings, wherever the walk meets it above a pipe;
             // what it nests is its own to judge. A comma that has a fold as a sibling still
-            // counts, and so does a fold inside an `isempty` operand.
+            // counts, and so does a fold that reads a frozen `$var`.
             ("foreach (1,2) as $i (1; try .a; .)", false),
             ("reduce (1,2) as $i (1; try .a)", false),
             ("-(foreach (1,2) as $i (1; try .a; .))", false),
@@ -145787,7 +145787,14 @@ mod touched_edge_cases_2999 {
             ("(foreach (1,2) as $i (1; try .a; .), now)", false),
             ("(foreach (1,2) as $i (1; try .a; .), f)", true),
             ("(foreach (1,2) as $i (1; try .a; .), min)", true),
-            ("isempty(foreach (1,2) as $i (1; .a; .))", true),
+            // #4499: ...and so is a fold inside an `isempty` operand, which the exemption for the
+            // operand's own fan-out (a `?//` bind, #4354) does not change; a call beside it
+            // still counts.
+            ("isempty(foreach (1,2) as $i (1; .a; .))", false),
+            ("isempty(foreach (1,2) as $i (1; try .a; .))", false),
+            ("isempty(reduce (1,2) as $i (1; try .a))", false),
+            ("isempty(first(foreach (1,2) as $i (null; try .a; .)))", false),
+            ("isempty((foreach (1,2) as $i (1; try .a; .), f))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");
         }
