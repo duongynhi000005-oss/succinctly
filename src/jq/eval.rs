@@ -52786,6 +52786,22 @@ impl<'e> RegisterSpine<'e> {
             Expr::Alternative(left, right) if self.fresh_only => {
                 self.reach_any([&**left, &**right], false)
             }
+            // #4674: the left of a `//` always runs, so a destructure of `.` it begins with is the
+            // source's own, as it is outside the `//`. Only in the `through_reduce` walk of a moved
+            // body's source, where the destructure of `.` certainly raises, and not under a `try`/`?` that
+            // holds a destructure ([`taken_first_is_dot`](Self::taken_first_is_dot): the catch answers):
+            // elsewhere the right operand may answer where the left raises, and the refusal would
+            // lose that answer.
+            Expr::Alternative(left, _)
+                if self.taken_first_is_dot
+                    && self.through_reduce
+                    && fold_body::source_moved_here() =>
+            {
+                match self.reach(left) {
+                    Reach::Destructures => Reach::Destructures,
+                    _ => Reach::Opaque,
+                }
+            }
             // #3940: a stage that only hands the register on (`.`, `(.|.)`, `(., .)`) moves
             // nothing, so the stage after it is the one that meets the register. #4278: so does
             // any stage [`reach`](Self::reach) reads as handing it on (a plain bind, an `if`, a
