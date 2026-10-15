@@ -899,8 +899,9 @@ OPERANDS = [
     "(reduce ($__loc__ | . as {file:$a} ?// $a | .) as $k (.; .))",
     "(foreach (({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
     # (#4597) the same comma behind `first`/`limit`/`nth(0; ..)`, which generate only the operand's first
-    # output: raises when that is the fresh item, answers when it is the register. `limit(2; ..)` past a
-    # register first item is a residual (a wrong accept), listed as a contrast.
+    # output: raises when that is the fresh item, answers when it is the register. A `limit(n; ..)` reads
+    # its first n outputs (the fresh item is among them or it is not), `try`/`?` every one, `nth(k; ..)`
+    # the one at index k; see the second block below.
     "(reduce (first({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (first(., {a:1}) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (first({a:1}) | . as {a:$a} | .) as $k (.; .))",
@@ -912,6 +913,71 @@ OPERANDS = [
     "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
     "(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
+    # (#4597, second part) the same fresh comma behind a wrapper that generates every item (`try`, `?`),
+    # a `limit(n)` or a nested comma whose leading outputs hold it, `nth(k; ..)`, a `reduce` stage that
+    # hands `.` on, and `isempty`/`any`/`all` around the destructure. The contrasts are a wrapper that stops
+    # before the fresh item (`limit(2; ., ., {a:1})`, `first((., {a:1}), 2)`, `nth(1; {a:1}, .)`), an item that
+    # cuts the generation first (`error`, `break`), and a `reduce` stage that does not return its input.
+    "(reduce (try (., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((., {a:1})? | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(2; ., ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(3; ., ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(2; {a:1}, ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(({a:1}, .), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first((., {a:1}), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (nth(1; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (nth(1; {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((., {a:1}) | reduce . as $x (.; .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (({a:1}, .) | reduce .[]? as $x (.; .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (({a:1}, .) | reduce . as $x (.; .+1) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((., {a:1}) | isempty(. as {a:$a} | .)) as $k (.; .))",
+    "(reduce (({a:1}, .) | any(. as {a:$a} | .; .)) as $k (.; .))",
+    "(reduce (({a:1}, .) | all(. as {a:$a} | .; .)) as $k (.; .))",
+    "(reduce ((., error(\"x\"), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try (., error(\"x\"), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (label $f | (., break $f, {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    # (#4600) the same sources inside another fold's body, under a value-mode operand (`-(..)`, `[..] | .[0]`)
+    # that a `try` makes visible: jq raises its own catchable path error at the fresh item. The contrasts are a
+    # source whose raise is not certain (an `if`, a `try` inside the source, an `error` item, a `?//` chain, a
+    # `null` item), a `foreach` source (a consumer can stop before the fresh item), and an UPDATE that
+    # navigates, raises or counts.
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (({a:1}, .) as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; [reduce ((., {a:1}) as {a:$a} | .) as $j (.; .)] | .[0]))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} | .) as $j (.; .a))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} | .) as $j (.; error(\"u\")))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} | .) as $j (0; . + 1))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as [$a] | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} | $a) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) as {a:$a} ?// $a | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., null) as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., error(\"x\"), {a:1}) as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (if . then ((., {a:1}) as {a:$a} | .) else . end) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (try ((., {a:1}) as {a:$a} | .)) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(foreach ((., {a:1}) as {a:$a} | .) as $j (.; .; .))))",
+    "(reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .a))))",
+    "(reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (0; . + 1))))",
+    # (#4600) the wrappers and predicates of the second #4597 block as the nested source's generator: a fresh
+    # item certainly among the outputs raises jq's catchable error, which the resolver now models (the
+    # `certain_fresh_destructure` claim), and one that is not (`first(., {a:1})`, `limit(2; ., ., {a:1})`)
+    # answers. The contrasts are an `error`/`break` ahead of the fresh item inside a wrapper or behind
+    # `isempty`/`any`/`all`, which hides it (jq answers, and so does the build).
+    "(reduce 1 as $i (.; -(reduce (try (., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (label $f | (., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (limit(2; ., {a:1}, .) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (limit(2; ., ., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (limit(2; (., {a:1}) | .) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (first({a:1}, .) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (nth(1; ., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (nth(1; {a:1}, .) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (((., {a:1}) | .) | . as {a:$a} | .) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) | isempty(. as {a:$a} | .)) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce (({a:1}, .) | any(. as {a:$a} | .; .)) as $j (.; .))))",
+    "(reduce 1 as $i (.; -(reduce ((., {a:1}) | all(. as [$a] | .; .)) as $j (.; .))))",
+    "(reduce 1 as $i (.; reduce (try (., error(\"x\"), {a:1}) | isempty(. as {a:$a} | .)) as $k (.; .)))",
+    "(reduce 1 as $i (.; reduce (label $f | (., break $f, {a:1}) | any(. as {a:$a} | .; .)) as $k (.; .)))",
     "(reduce (def f: .|tostring; f as {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., .; f as {a:$a} | .) as $k (.; .))",
     # (#4522) a call whose `def` hands the register on next to a fresh value, and a fresh

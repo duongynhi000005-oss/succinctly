@@ -2639,10 +2639,21 @@ is the revert that established what the other one costs.
    order) or `$__loc__` raises as jq does since [#4582](https://github.com/rust-works/succinctly/issues/4582): the source is
    generated whole, so the fresh item reaches the destructure. Only a comma: an `if` or `//` takes one branch at run time. Behind
    `first(f)`, `limit(n; f)` (n >= 1) or `nth(0; f)` only the operand's first output is generated, so that is the one read
-   ([#4597](https://github.com/rust-works/succinctly/issues/4597)): `first({a:1}, .)` raises, `first(., {a:1})` answers. Still
-   accepted: the comma behind `isempty`/`any`/`all`, `limit(2; ., {a:1}, .)` (a fresh item past the first), `try (., {a:1})`, `(., {a:1})?` and `label $l | (., {a:1})` (every item is generated, only the first is read), a first item that is itself a comma (`first(({a:1}, .), 2)`), a `reduce` stage
-   between it and the destructure, and the source of a fold nested in another fold's body. Pinned by
-   `test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582`.
+   ([#4597](https://github.com/rust-works/succinctly/issues/4597)): `first({a:1}, .)` raises, `first(., {a:1})` answers. The rest of
+   #4597 reads the wrappers as they generate (`RegisterSpine::fresh_among_leading`): `try`/`?` every item, `first`/`limit(n; ..)`
+   the first n outputs (`limit(2; ., {a:1}, .)` raises, `limit(2; ., ., {a:1})` answers), `nth(k; ..)` the output at index k,
+   and a nested comma counting its items. Inside a wrapper an `error` or `break` ahead of the fresh item hides it (the items behind
+   it are not generated), so `try (., error("x"), {a:1}) | . as {a:$a} | .` answers, as it did before. The bare comma stage keeps
+   asking what it *can* generate, as #4582 did (routing a source the resolver models exactly costs a refusal at worst, where the
+   by-value drive can accept what jq refuses), so `(., error("x"), {a:1}) | . as {a:$a} | .` is routed, but an
+   `isempty`/`any`/`all` consumer behind a stage whose cut precedes the fresh item is not read. A `reduce` stage that starts from `.` and keeps its accumulator hands `.` on, and
+   `isempty(g)`/`any(g; c)`/`all(g; c)` run their generator where they stand, so `({a:1}, .) | isempty(. as {a:$a} | .)` raises.
+   A `label` is read like a `try`, and an item that fans out stops the count (withholding a route, never adding
+   one). Inside another fold's body such a source raises as in jq but with the
+   resolver's refusal wording (`Invalid path expression with result ...`, not jq's `near attempt to access element`), and under
+   a `try` it stays refused where jq answers, unless it is the certain shape [#4600](https://github.com/rust-works/succinctly/issues/4600)
+   routes (below). Pinned by `test_reduce_source_destructuring_a_partly_fresh_comma_or_loc_4582` and
+   `test_reduce_source_fresh_comma_behind_wrappers_stages_and_predicates_4597`.
 
    A destructuring-only `?//` chain behind a pipe of `.` (`(.|.) as {a:$a} ?// [$a] | .`) as a `foreach` source inside a
    `reduce` UPDATE raises as jq does since [#4484](https://github.com/rust-works/succinctly/issues/4484), where
@@ -2707,9 +2718,20 @@ is the revert that established what the other one costs.
    written-out `limit(2; ., 1) as {a:$a}` is. Pinned by `test_foreach_source_bound_to_a_call_with_a_register_first_output_refuses_4565`.
    Since [#4600](https://github.com/rust-works/succinctly/issues/4600) a `def f: ., {a:1}` mixed body is routed per leaf inside
    another fold's body too (`RegisterSpine::body_binds_fresh` no longer stops at the top level): `path(reduce 1 as $i (.; reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))`
-   raises on the fresh leaf as in jq (pinned by `test_nested_fold_source_destructuring_a_mixed_body_call_raises_4600`). Still refused where
-   jq answers: the value-mode operand form (`del(try (reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))))`, also
-   `[reduce ...] | .[0]`), whose register leaf the resolver places as one value and refuses as a guess.
+   raises on the fresh leaf as in jq (pinned by `test_nested_fold_source_destructuring_a_mixed_body_call_raises_4600`).
+   The value-mode operand form (`del(try (reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))))`, also
+   `[reduce ...] | .[0]`) answers as jq does too: it is not that the resolver mistakes a value-mode operand for path position
+   (jq itself raises `near attempt to access element "a" of {"a":1}` there without the `try`), but that the loud refusal for a
+   source that destructures `.` in a fold body whose accumulator is not known to be the register
+   (`drive_fold_source_with`) is a guess no `try` catches, where jq's raise on the fresh item is certain and catchable.
+   `certain_fresh_destructure` names the narrow shape where the raise cannot be avoided (`[defs;] COMMA as PATTERN | body` or
+   `COMMA | . as PATTERN | body`, a comma of plain items with a fresh one, a `reduce` source): the resolver is asked, with the
+   register item's seed handed on to the fold as it is where `.` is the register (`fold_body::fresh_source_here`), and raises
+   jq's own error on the fresh item. Still refused (a guess, exit 5 where jq answers under a `try`): a `foreach` source, whose
+   consumer can stop before the fresh item is generated; a source with an `error`/`break` item before the fresh one, an `if`, a
+   `try` or a `?//` chain around the destructure. A fresh item handed to a closure-taking `def` (`def f(x): x; f(., {a:1}) as
+   {a:$a} | .`) is accepted at every depth, as before (jq raises). Pinned by
+   `test_reduce_source_certain_fresh_destructure_in_a_fold_body_value_mode_4600`.
 
    A `reduce` source that destructures the register twice in a pipe is refused since
    [#4583](https://github.com/rust-works/succinctly/issues/4583): jq raises at the second destructure, since the first one's

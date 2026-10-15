@@ -39889,6 +39889,55 @@ fn peel_identity_stages(expr: &Expr) -> &Expr {
     }
 }
 
+/// Whether `e` can end the generation of the comma it is an item of before its later items run
+/// (#4600): an `error`, a `break` or a `halt` anywhere in it. Read from the text, so a `try` that
+/// catches the `error` counts too, which only withholds a claim.
+fn may_cut_generation(e: &Expr) -> bool {
+    any_subexpr(e, &mut |x| {
+        matches!(
+            x,
+            Expr::Error(_)
+                | Expr::Break(_)
+                | Expr::Builtin(Builtin::Halt | Builtin::HaltError | Builtin::HaltErrorCode(_))
+        )
+    })
+}
+
+/// The items of `e` flattened through commas and parentheses, when every one yields exactly one
+/// output (`.`, a literal, a construction, a variable), so that an index into the list is an index
+/// into the outputs (#4597).
+fn single_output_leaves(e: &Expr) -> Option<Vec<&Expr>> {
+    let mut leaves = Vec::new();
+    let mut pending = vec![e];
+    while let Some(next) = pending.pop() {
+        match unwrap_bind_source(next) {
+            Expr::Comma(items) => pending.extend(items.iter().rev()),
+            leaf if yields_exactly_one_value(leaf) => leaves.push(leaf),
+            _ => return None,
+        }
+    }
+    Some(leaves)
+}
+
+/// Whether `e` yields exactly one output, as the items of a comma do when its outputs are counted
+/// ([`single_output_leaves`]): `.`, a literal, a variable, an array construction, an object
+/// construction of such values, and what [`yields_at_most_one_value`] and [`yields_at_least_one_value`]
+/// both admit.
+fn yields_exactly_one_value(e: &Expr) -> bool {
+    match unwrap_bind_source(e) {
+        Expr::Identity
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::TrackedVar(_)
+        | Expr::Loc { .. }
+        | Expr::Array(_) => true,
+        Expr::Object(entries) => entries.iter().all(|entry| {
+            matches!(entry.key, ObjectKey::Literal(_)) && yields_exactly_one_value(&entry.value)
+        }),
+        other => yields_at_most_one_value(other) && yields_at_least_one_value(other),
+    }
+}
+
 /// The leaves a `limit(N; a, b)` or `first((a, b))` takes, when every leaf is a single output
 /// (`.` or a literal) so that counting leaves is counting outputs (#4565).
 fn bounded_comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
@@ -50085,10 +50134,262 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
+        fresh_cut_free: true,
         known: NotRegister::default(),
         moved: false,
     };
     walk.reach(source) == Reach::Destructures
+}
+
+/// Whether a `reduce` source certainly raises at the pattern step of a destructure of a freshly
+/// built value (#4600), as [`source_destructures_fresh`] does not say: that walk reads an `if` or a `//` for
+/// the branch that might be fresh and a `try` that catches the raise, which only decides what the
+/// resolver is *asked*. This is the narrow shape where the raise cannot be avoided, so that nothing
+/// ahead of it in the same source can matter:
+///
+/// - `[defs;] GEN as PATTERN | body`, or `GEN | . as PATTERN | body`, or `GEN | isempty(. as PATTERN |
+///   body)` (also `any(..; ..)`/`all(..; ..)` around the bind), with a pattern that performs a step (a
+///   non-empty array or object pattern), and
+/// - a generator `GEN` -- a comma, written out (as the bound expression, or as the stage ahead of
+///   `. as PATTERN` read through `try`/`?`, `label`, a pipe of one stage and the leading outputs of `limit`
+///   and `nth(k; ..)` as [`RegisterSpine::fresh_among_leading`] reads them) or the body of a
+///   zero-argument call to a `def` in the source (as the bound expression) -- whose items before the fresh
+///   one are all plain (`.`, a literal, a construction, a variable, none holding an `error`, `break` or
+///   `halt` that could end the generation first) and one of whose outputs is freshly built
+///   ([`yields_only_fresh_values`]).
+///
+/// A `reduce` drains its source, so the fresh item is destructured whatever the register is, and jq's
+/// pattern step raises its own catchable `near attempt to access element` error on it. The register
+/// item before it is jq's to backtrack (or to raise on first, also catchably). Not a `foreach`
+/// source, whose consumer can stop before the fresh item is generated.
+fn certain_fresh_destructure(source: &Expr) -> bool {
+    certain_fresh_in(source, &mut Vec::new(), CERTAIN_FRESH_BUDGET)
+}
+
+/// How many nodes [`certain_fresh_destructure`] descends through; past it the source is not claimed.
+const CERTAIN_FRESH_BUDGET: u8 = 16;
+
+fn certain_fresh_in<'e>(e: &'e Expr, defs: &mut Vec<(&'e str, &'e Expr)>, budget: u8) -> bool {
+    let Some(budget) = budget.checked_sub(1) else {
+        return false;
+    };
+    match unwrap_bind_source(e) {
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            then,
+            ..
+        } if params.is_empty() => {
+            defs.push((name.as_str(), body));
+            let certain = certain_fresh_in(then, defs, budget);
+            defs.pop();
+            certain
+        }
+        Expr::AsPattern { expr, patterns, .. } => {
+            pattern_performs_a_step(patterns)
+                && certain_fresh_scan(expr, defs, &mut None, Position::Bound, budget) == Scan::Found
+        }
+        Expr::Pipe(stages) => {
+            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+            match (rest.next(), rest.next(), rest.next()) {
+                (Some(head), Some(consumer), None) => {
+                    destructures_dot_with_a_step(consumer)
+                        && certain_fresh_scan(head, defs, &mut None, Position::Head, budget)
+                            == Scan::Found
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether `consumer` runs a destructure of `.` that performs a step, directly (`. as {a:$a} | ..`) or
+/// as the generator of `isempty`, `any(g; c)` or `all(g; c)`, which run it where they stand.
+fn destructures_dot_with_a_step(consumer: &Expr) -> bool {
+    match unwrap_bind_source(consumer) {
+        Expr::AsPattern { expr, patterns, .. } => {
+            is_identity_stage(expr) && pattern_performs_a_step(patterns)
+        }
+        Expr::Builtin(
+            Builtin::IsEmpty(generator)
+            | Builtin::AnyCond(generator, _)
+            | Builtin::AllCond(generator, _),
+        ) => destructures_dot_with_a_step(generator),
+        _ => false,
+    }
+}
+
+/// What [`certain_fresh_scan`] found in the outputs it read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// A fresh item that is certainly generated, every item before it plain.
+    Found,
+    /// Only plain items so far, and no fresh one: the items after them are still generated.
+    Continue,
+    /// An item or wrapper whose outputs cannot be counted, or may raise or cut the generation short,
+    /// or the leading outputs are used up: nothing after this is claimed.
+    Stop,
+}
+
+/// Where [`certain_fresh_scan`] reads a generator, which decides the constructs it looks through: the
+/// same ones the route reads there, so that a source claimed certain is one the route sends to the
+/// resolver ([`RegisterSpine::comma_has_fresh_item`], [`RegisterSpine::binds_fresh`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// The pipe stage ahead of `. as PATTERN`: `try`, `?`, `label`, a `limit` and an `nth(k; ..)` and a
+    /// pipe of one stage are read through. A call is not. (`first(f)` and `nth(0; f)` read only the
+    /// first output: a fresh one never meets the register item before it, and a register one answers.)
+    Head,
+    /// The expression a pattern binds (`GEN as PATTERN`): the zero-argument call to a `def` in scope is
+    /// read through. A wrapper is not.
+    Bound,
+}
+
+/// [`RegisterSpine::fresh_among_leading`], for a claim rather than a route: the first `budget` outputs
+/// of `e` (`None` for all of them), and `Found` only when a fresh item is certainly among them -- so a
+/// `try`, `?` and `label` are read through (a plain item raises and breaks nothing), and anything that
+/// is not plain stops the scan.
+fn certain_fresh_scan<'e>(
+    e: &'e Expr,
+    defs: &mut Vec<(&'e str, &'e Expr)>,
+    budget: &mut Option<usize>,
+    position: Position,
+    hops: u8,
+) -> Scan {
+    let Some(hops) = hops.checked_sub(1) else {
+        return Scan::Stop;
+    };
+    if *budget == Some(0) {
+        return Scan::Stop;
+    }
+    let head = position == Position::Head;
+    // The operand of a wrapper that takes at most `take` outputs, scanned with that budget. How many it
+    // yielded is not known, so a bounded outer budget stops counting after it.
+    let capped = |defs: &mut Vec<(&'e str, &'e Expr)>,
+                  inner: &'e Expr,
+                  take: usize,
+                  budget: &mut Option<usize>| {
+        let mut inner_budget = Some(budget.map_or(take, |left| left.min(take)));
+        let scan = certain_fresh_scan(inner, defs, &mut inner_budget, position, hops);
+        if budget.is_some() {
+            *budget = Some(0);
+        }
+        scan
+    };
+    match unwrap_bind_source(e) {
+        Expr::Comma(items) => {
+            for item in items {
+                match certain_fresh_scan(item, defs, budget, position, hops) {
+                    Scan::Continue => {}
+                    done => return done,
+                }
+            }
+            Scan::Continue
+        }
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        }
+        | Expr::Label { body: inner, .. }
+            if head =>
+        {
+            certain_fresh_scan(inner, defs, budget, position, hops)
+        }
+        Expr::Limit { n, expr: inner } if head && limit_takes_some(n) => {
+            let take = limit_literal_count(n).map_or(1, |count| count.ceil() as usize);
+            capped(defs, inner, take, budget)
+        }
+        Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) if head => {
+            match limit_literal_count(n) {
+                Some(k) if k >= 1.0 && k.fract() == 0.0 => {
+                    let fresh = single_output_leaves(peel_identity_stages(inner))
+                        .and_then(|leaves| leaves.get(k as usize).copied())
+                        .is_some_and(|leaf| {
+                            is_plain_item(leaf)
+                                && yields_only_fresh_values(leaf, NotRegister::default())
+                        });
+                    if fresh {
+                        Scan::Found
+                    } else {
+                        Scan::Stop
+                    }
+                }
+                _ => Scan::Stop,
+            }
+        }
+        Expr::Pipe(stages) if head => {
+            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+            match (rest.next(), rest.next()) {
+                (Some(only), None) => certain_fresh_scan(only, defs, budget, position, hops),
+                _ => Scan::Stop,
+            }
+        }
+        Expr::FuncCall { name, args, .. } if !head && args.is_empty() => {
+            match defs.iter().rposition(|(def, _)| *def == name.as_str()) {
+                // The body sees the definitions written before it, not the ones after.
+                Some(at) => {
+                    let (_, body) = defs[at];
+                    let later = defs.split_off(at);
+                    let scan = certain_fresh_scan(
+                        peel_identity_stages(body),
+                        defs,
+                        budget,
+                        position,
+                        hops,
+                    );
+                    defs.extend(later);
+                    scan
+                }
+                None => Scan::Stop,
+            }
+        }
+        Expr::DefCall { def, args, .. } if !head && args.is_empty() && def.params.is_empty() => {
+            certain_fresh_scan(
+                peel_identity_stages(&def.body),
+                defs,
+                budget,
+                position,
+                hops,
+            )
+        }
+        item => {
+            if !is_plain_item(item) {
+                Scan::Stop
+            } else if yields_only_fresh_values(item, NotRegister::default()) {
+                Scan::Found
+            } else {
+                if let Some(left) = budget {
+                    *left -= 1;
+                }
+                Scan::Continue
+            }
+        }
+    }
+}
+
+/// A single array or object pattern with at least one entry: the pattern's first `INDEX` step is what
+/// raises on a value that is not jq's register (`[]` and `{}` perform none).
+fn pattern_performs_a_step(patterns: &[Pattern]) -> bool {
+    match patterns {
+        [Pattern::Array(elements)] => !elements.is_empty(),
+        [Pattern::Object(entries)] => !entries.is_empty(),
+        _ => false,
+    }
+}
+
+/// An item of a comma that yields exactly one output and cannot cut the generation short.
+fn is_plain_item(item: &Expr) -> bool {
+    (is_identity_stage(item)
+        || matches!(
+            item,
+            Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Array(_)
+        )
+        // An object yields nothing when a value or key does (`{a:empty}`).
+        || (matches!(item, Expr::Object(_)) && yields_exactly_one_value(item)))
+        && !may_cut_generation(item)
 }
 
 /// Whether a `reduce` source destructures a value the resolver proves is not jq's register -- a
@@ -50125,6 +50426,7 @@ fn source_destructures_fresh(
         held: Vec::new(),
         markers: Vec::new(),
         dot_fresh: dot_off_register,
+        fresh_cut_free: true,
         known,
         moved: false,
     };
@@ -50922,6 +51224,11 @@ struct RegisterSpine<'e> {
     /// fresh stage earlier in the pipe (`{a:1} | . as {a:$a}`, `$x | ..`, `keys | ..`) made it so.
     /// Always `false` for an ordinary walk.
     dot_fresh: bool,
+    /// In a `fresh_only` walk, whether the stage that made `.` fresh ([`dot_fresh`](Self::dot_fresh))
+    /// generates its fresh item before anything can cut its generation short (`error`, `break`, `halt`,
+    /// #4597): a consumer the walk newly reads (`isempty`/`any`/`all`) is claimed only then, since
+    /// the fresh item may never reach it otherwise. Meaningful only while `dot_fresh` is set.
+    fresh_cut_free: bool,
     /// For a `fresh_only` walk, the `null`/boolean literals the register is known not to be
     /// (#4603): a destructure of one of them is a destructure of a fresh value.
     known: NotRegister,
@@ -51170,32 +51477,124 @@ impl<'e> RegisterSpine<'e> {
         register
     }
 
-    /// Whether `stage` is a comma with a freshly built item (#4582): `({a:1}, .) | . as {a:$a} | .`.
+    /// Whether `stage` generates a freshly built item (#4582, #4597): `({a:1}, .) | . as {a:$a} | .`.
     /// A source is generated whole, so the fresh item reaches the stage after it whatever order the
     /// items come in, and its tracked `INDEX` step raises on it. Only a comma: an `if` or `//` takes
     /// one branch at run time, so a fresh branch of it does not say the destructure meets it.
     ///
-    /// Behind `first(f)`, a `limit` with a positive count or `nth(0; f)` (#4597) only the operand's
-    /// first output is generated, so it is the one that has to be fresh: `first({a:1}, .)` raises,
-    /// `first(., {a:1})` stops after the register and answers. [`first_output_operand`] also peels
-    /// `try`, `?`, `label` and a one-stage pipe, which generate every item, so for those reading just
-    /// the first item is a (sound) under-approximation: `try (., {a:1})` stays accepted.
+    /// Read through the wrappers that hand their operand's outputs on: `try`/`?` every one, and
+    /// `first(f)`, a `limit` with a positive literal count and `nth(0; f)` only the leading ones, so
+    /// the fresh item has to be among those (`first({a:1}, .)` and `limit(2; ., {a:1}, .)` raise,
+    /// `first(., {a:1})` stops after the register and answers). Where the leading outputs cannot be
+    /// counted (an item that fans out) the scan stops, which is sound: it only withholds a route.
     fn comma_has_fresh_item(&mut self, stage: &'e Expr) -> bool {
-        match unwrap_paren(stage) {
-            Expr::Comma(items) => items.iter().any(|item| self.binds_fresh(item, true)),
-            wrapper => {
-                let first = first_output_operand(wrapper);
-                if core::ptr::eq(first, unwrap_bind_source(wrapper)) {
-                    return false;
+        self.fresh_among_leading(stage, &mut None, false)
+    }
+
+    /// Whether one of the first `budget` outputs of `e` is a fresh item ([`comma_has_fresh_item`]),
+    /// `None` for all of them. `budget` is what is left for the items after `e`: it shrinks by the
+    /// outputs `e` is known to yield, and drops to nothing where they cannot be counted.
+    ///
+    /// `cut_aware` is whether an item that can cut the generation short (`error`, `break`, `halt`) ends
+    /// the scan, since the items behind it are not generated. It is `false` for the bare comma stage,
+    /// which asks what the source *can* generate as #4582 did: routing a source the resolver models
+    /// exactly costs a refusal at worst, where leaving it to the by-value drive can accept what jq
+    /// refuses (the register item before a `break` still destructures `.` in a body where it is not
+    /// the register). Inside a wrapper it is `true`: `main` read only the first item behind those, so
+    /// nothing it answered is routed that a cut hides.
+    fn fresh_among_leading(
+        &mut self,
+        e: &'e Expr,
+        budget: &mut Option<usize>,
+        cut_aware: bool,
+    ) -> bool {
+        if *budget == Some(0) {
+            return false;
+        }
+        let e = unwrap_bind_source(e);
+        // The operand of a wrapper that takes at most `take` outputs, scanned with that budget.
+        let capped = |walk: &mut Self, inner: &'e Expr, take: usize, budget: &mut Option<usize>| {
+            let mut inner_budget = Some(budget.map_or(take, |left| left.min(take)));
+            let fresh = walk.fresh_among_leading(inner, &mut inner_budget, true);
+            // How many outputs the wrapper yielded is not known, so what follows it is not counted.
+            if budget.is_some() {
+                *budget = Some(0);
+            }
+            fresh
+        };
+        match e {
+            Expr::Comma(items) => {
+                for item in items {
+                    if self.fresh_among_leading(item, budget, cut_aware) {
+                        return true;
+                    }
+                    if cut_aware && may_cut_generation(item) {
+                        *budget = Some(0);
+                    }
+                    if *budget == Some(0) {
+                        break;
+                    }
                 }
-                match unwrap_paren(first) {
-                    Expr::Comma(items) => items
-                        .first()
-                        .is_some_and(|item| self.binds_fresh(item, true)),
-                    other => self.binds_fresh(other, true),
+                false
+            }
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            } => self.fresh_among_leading(inner, budget, true),
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                capped(self, inner, 1, budget)
+            }
+            // A `label` generates every item until a `break` ends it, which a wrapper's scan reads as the
+            // end of what is generated (`cut_aware`).
+            Expr::Label { body: inner, .. } => self.fresh_among_leading(inner, budget, true),
+            Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
+                let take = limit_literal_count(n).map_or(1, |count| count.ceil() as usize);
+                capped(self, inner, take, budget)
+            }
+            Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
+                // `nth(k; f)` emits only the output at index `k`: fresh when that one is, read for a
+                // comma of single-output items, whose indices are known.
+                let fresh = match limit_literal_count(n) {
+                    Some(0.0) => capped(self, inner, 1, budget),
+                    Some(k) if k >= 1.0 && k.fract() == 0.0 => {
+                        match single_output_leaves(peel_identity_stages(inner))
+                            .and_then(|leaves| leaves.get(k as usize).copied())
+                        {
+                            Some(leaf) => self.binds_fresh(leaf, true),
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if budget.is_some() {
+                    *budget = Some(0);
+                }
+                fresh
+            }
+            Expr::Pipe(stages) => {
+                let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+                match (rest.next(), rest.next()) {
+                    (Some(only), None) => self.fresh_among_leading(only, budget, true),
+                    _ => self.leaf_is_fresh(e, budget),
                 }
             }
+            _ => self.leaf_is_fresh(e, budget),
         }
+    }
+
+    /// [`fresh_among_leading`](Self::fresh_among_leading) for an item that is no wrapper: fresh on
+    /// every output, and it takes one output off `budget` when it yields exactly one.
+    fn leaf_is_fresh(&mut self, e: &'e Expr, budget: &mut Option<usize>) -> bool {
+        let fresh = self.binds_fresh(e, true);
+        if let Some(left) = budget {
+            *left = if yields_exactly_one_value(e) {
+                *left - 1
+            } else {
+                0
+            };
+        }
+        fresh
     }
 
     /// Whether `e`, the bound expression of a destructuring bind, has a freshly built output
@@ -51844,7 +52243,7 @@ impl<'e> RegisterSpine<'e> {
             // #4566: the `fresh_only` walk also steps past a stage that yields a fresh value (`{a:1} |
             // . as {a:$a}`, `$x | ..`): the stage after it destructures that, not the register.
             Expr::Pipe(stages) if self.fresh_only => {
-                let entry = self.dot_fresh;
+                let entry = (self.dot_fresh, self.fresh_cut_free);
                 let mut reach = Reach::HandsOn;
                 let mut moved = false;
                 for stage in stages {
@@ -51857,20 +52256,29 @@ impl<'e> RegisterSpine<'e> {
                             moved |= stage_moved;
                         }
                         Reach::Destructures => {
-                            self.dot_fresh = entry;
+                            (self.dot_fresh, self.fresh_cut_free) = entry;
                             return Reach::Destructures;
                         }
-                        _ if self.binds_fresh(stage, true) || self.comma_has_fresh_item(stage) => {
+                        _ if self.binds_fresh(stage, true) => {
                             self.dot_fresh = true;
+                            self.fresh_cut_free = true;
+                            reach = Reach::Opaque;
+                        }
+                        _ if self.comma_has_fresh_item(stage) => {
+                            // The fresh item is generated before anything cuts the generation short
+                            // (read before `.` is fresh: the stage's own `.` is the register).
+                            let cut_free = self.fresh_among_leading(stage, &mut None, true);
+                            self.dot_fresh = true;
+                            self.fresh_cut_free = cut_free;
                             reach = Reach::Opaque;
                         }
                         other => {
-                            self.dot_fresh = entry;
+                            (self.dot_fresh, self.fresh_cut_free) = entry;
                             return other;
                         }
                     }
                 }
-                self.dot_fresh = entry;
+                (self.dot_fresh, self.fresh_cut_free) = entry;
                 // ...and a pipe nested in another leaves it there for the stages after it.
                 self.moved = moved;
                 reach
@@ -51993,6 +52401,20 @@ impl<'e> RegisterSpine<'e> {
                 // next stage meets the register as the source left it: where the source handed
                 // it on, this does too.
                 match fold {
+                    // #4597: a `reduce` that starts from `.` and keeps its accumulator emits `.`
+                    // once whatever its source does, and backtracks the source.
+                    Expr::Reduce {
+                        patterns,
+                        init,
+                        update,
+                        ..
+                    } if self.fresh_only
+                        && patterns_all_bare(patterns)
+                        && body_performs_no_step(init)
+                        && body_performs_no_step(update) =>
+                    {
+                        Reach::HandsOn
+                    }
                     Expr::Foreach {
                         input,
                         patterns,
@@ -52021,6 +52443,24 @@ impl<'e> RegisterSpine<'e> {
             // as it does outside. Only the fresh-only walk: a destructure of the register inside `[E]`
             // is answered (`[. as {b:$b} | .]`), which the register walk must keep reading as opaque.
             Expr::Array(inner) if self.fresh_only => self.reach(inner),
+            // #4597: `isempty(g)` and `any(g; c)`/`all(g; c)` run `g` where they stand, so a
+            // destructure of a fresh value in it raises as it does outside the wrapper. Not where the
+            // stage that made `.` fresh may cut its generation short before the fresh item
+            // ([`fresh_cut_free`](Self::fresh_cut_free)): the bare destructure is read there as it always was
+            // (a refusal at worst), a consumer newly read here is not asked to.
+            Expr::Builtin(
+                Builtin::IsEmpty(generator)
+                | Builtin::AnyCond(generator, _)
+                | Builtin::AllCond(generator, _),
+            ) if self.fresh_only => {
+                if self.dot_fresh && !self.fresh_cut_free {
+                    return Reach::Opaque;
+                }
+                match self.reach(generator) {
+                    Reach::Destructures => Reach::Destructures,
+                    _ => Reach::Opaque,
+                }
+            }
             other => {
                 // #4483: the chain directly under `first`/`limit(..)` (jq's `first` is a
                 // `label`/`break`, which the chain's `?//` catches as a body error, so by value
@@ -52921,6 +53361,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let register_markers = fold_source_register_markers::<S>(source, ambient);
     // #4603: the `null`/boolean literals the register is not, which a destructure of raises.
     let not_register = NotRegister::at_fold::<S>(ambient);
+    // #4600: inside another fold's body, a `reduce` source that also destructures a freshly built
+    // value raises at that value's pattern step whatever the register is, and the error is jq's own,
+    // catchable one. The resolver is asked, with the register item's seed handed on to the fold as it is
+    // where `.` is known to be the register ([`fold_body::fresh_source_here`]): the loud refusal below,
+    // which cannot tell the two items apart, is a guess nothing catches
+    // (`del(try (reduce 1 as $i (.; -(reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))))`).
+    let certain_fresh = S::TAG == EvalTag::Jq
+        && !foreach_source
+        && ambient.trackable
+        && !matches!(ambient.value, OwnedValue::Null)
+        && fold_body::depth() != 0
+        && certain_fresh_destructure(source);
+    let _fresh_mark = certain_fresh.then(fold_body::fresh_source);
     let has_navigation = any_subexpr(source, &mut |e| {
         is_fold_source_navigation(e)
             || (S::TAG == EvalTag::Jq
@@ -52957,11 +53410,14 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // the fold depth either (#4522): inside another fold's body the same step raises, and the
         // value-mode spelling jq answers (`del(try (-(reduce 1 as $k (.; reduce SRC as $j (.; .)))))`)
         // is answered by the resolver, for a source whose fresh leaf is the only output. A source
-        // that hands the register on next to the fresh one (`def f: ., {a:1}`) is routed at the
-        // top level only ([`RegisterSpine::body_binds_fresh`]): nested, the register leaf refuses
-        // as a guess where jq answers a value-mode operand, and a nested chain with a bare
-        // alternative is read by value ([`RegisterSpine::chain_names`]). Pinned by
-        // `test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_4522`.
+        // that hands the register on next to the fresh one (`def f: ., {a:1}`) is routed inside
+        // another fold's body too (#4600, [`RegisterSpine::body_binds_fresh`]); where the body's
+        // accumulator is not known to be the register the loud refusal below would be a guess no
+        // `try` catches, so [`certain_fresh_destructure`] sends the shapes whose raise is certain to
+        // the resolver instead. A nested chain with a bare alternative is read by value
+        // ([`RegisterSpine::chain_names`]). Pinned by
+        // `test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_4522` and
+        // `test_reduce_source_certain_fresh_destructure_in_a_fold_body_value_mode_4600`.
         || (S::TAG == EvalTag::Jq
             && source_destructures_fresh(
                 source,
@@ -53000,6 +53456,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // resolver's own `null` clause (#4007): on a `null` document the register really is
     // that `null`, and jq answers.
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
+        && !certain_fresh
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0
@@ -54537,7 +54994,9 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         // have moved it ([`fold_body::acc_is_register`]): `.` is the register
                         // there, and jq backtracks the whole UPDATE.
                         if S::TAG == EvalTag::Jq
-                            && (fold_body::depth() == 0 || fold_body::acc_is_register_here())
+                            && (fold_body::depth() == 0
+                                || fold_body::acc_is_register_here()
+                                || fold_body::fresh_source_here())
                             && !seed.trackable
                             && body_performs_no_step(&substituted)
                         {
@@ -67048,6 +67507,35 @@ mod fold_body {
         static MOVED: Cell<Moved> = const { Cell::new(Moved { depth: 0, onto_null: None }) };
         /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none.
         static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth at which a `reduce` source that certainly raises is being resolved
+        /// (#4600), 0 for none.
+        static FRESH_DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Restores the previous [`fresh_source`] mark.
+    pub(crate) struct FreshGuard(u32);
+
+    /// Marks the body being resolved now (not the next one: the source runs where it was written) as one
+    /// whose `reduce` source certainly raises at the pattern step of a freshly built value
+    /// ([`certain_fresh_destructure`], #4600). The error is jq's own and catchable, and every item before it
+    /// only backtracks, so the pattern step of the register item may hand its seed on to the fold as it does
+    /// where `.` is the register ([`fresh_source_here`]) -- the fresh item is then the one that raises,
+    /// with jq's message.
+    pub(crate) fn fresh_source() -> FreshGuard {
+        let previous = FRESH_DEPTH.with(Cell::get);
+        FRESH_DEPTH.with(|a| a.set(depth()));
+        FreshGuard(previous)
+    }
+
+    impl Drop for FreshGuard {
+        fn drop(&mut self) {
+            FRESH_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`fresh_source`] marked.
+    pub(crate) fn fresh_source_here() -> bool {
+        depth() > 0 && FRESH_DEPTH.with(Cell::get) == depth()
     }
 
     pub(crate) struct Guard;
@@ -67230,6 +67718,16 @@ mod fold_body {
 
     pub(crate) fn foreach_body() -> LoopGuard {
         LoopGuard
+    }
+
+    pub(crate) struct FreshGuard;
+
+    pub(crate) fn fresh_source() -> FreshGuard {
+        FreshGuard
+    }
+
+    pub(crate) fn fresh_source_here() -> bool {
+        false
     }
 
     pub(crate) fn foreach_body_here() -> bool {
@@ -86545,6 +87043,103 @@ mod tests {
     use super::*;
     use crate::jq::error::EvalErrorPayload;
     use crate::jq::{parse, parse_with_mode_and_extensions, ParserMode};
+
+    /// #4600: [`certain_fresh_destructure`] names only the sources whose pattern step on a freshly
+    /// built value cannot be avoided -- the ones the resolver may be asked about in a fold body whose
+    /// accumulator is not known to be the register, where it raises jq's own catchable error. Anything
+    /// that may not reach the fresh item (an `if`, a `try` around the bind, an `error` ahead of it, a
+    /// `first`/`limit` that stops before it, a pattern that performs no step, a `?//` chain, a call with
+    /// parameters) is left to the loud refusal, which is right where the destructure of the register
+    /// itself raises. Every source it names is also one the route reads as destructuring a fresh value
+    /// ([`source_destructures_fresh`]): the claim never needs a route of its own.
+    #[test]
+    // The sources hold `{a:1}`, which clippy reads as a format argument.
+    #[allow(clippy::literal_string_with_formatting_args)]
+    fn certain_fresh_destructure_names_only_the_unavoidable_raise_4600() {
+        for (source, expected) in [
+            // The shapes the issue names, and their order and spelling variants.
+            ("def f: ., {a:1}; f as {a:$a} | .", true),
+            ("def f: {a:1}, .; f as {a:$a} | .", true),
+            ("def g: (., {a:1}) | .; g as {a:$a} | .", true),
+            ("(., {a:1}) as {a:$a} | .", true),
+            ("({a:1}, .) as [$a] | .", true),
+            ("({a:1}, ., 1) as {a:$a} | $a", true),
+            ("(., {a:1}) | . as {a:$a} | .", true),
+            ("(def f: ., {a:1}; f) | . as {a:$a} | .", false),
+            ("first({a:1}, .) as {a:$a} | .", false),
+            ("try ({a:1}, .) as {a:$a} | .", false),
+            ("(., 1) as {a:$a} | .", true),
+            ("({a:1}, error(\"x\")) as {a:$a} | .", true),
+            // The wrappers #4597 reads, where the fresh item is certainly among the outputs.
+            ("try (., {a:1}) | . as {a:$a} | .", true),
+            ("(., {a:1})? | . as {a:$a} | .", true),
+            ("(label $f | (., {a:1})) | . as {a:$a} | .", true),
+            ("limit(2; ., {a:1}, .) | . as {a:$a} | .", true),
+            ("limit(3; ., ., {a:1}) | . as {a:$a} | .", true),
+            ("limit(2; (., {a:1}) | .) | . as {a:$a} | .", true),
+            ("nth(1; ., {a:1}) | . as {a:$a} | .", true),
+            ("nth(1; (., {a:1}) | .) | . as {a:$a} | .", true),
+            ("((., {a:1}) | .) | . as {a:$a} | .", true),
+            ("({a:1}, .) | isempty(. as {a:$a} | .)", true),
+            ("(., {a:1}) | any(. as {a:$a} | .; .)", true),
+            ("(., {a:1}) | all(. as [$a] | .; .)", true),
+            // A raise that may not be reached, or not be this one.
+            ("(., error(\"x\"), {a:1}) as {a:$a} | .", false),
+            ("(., {a:error(\"x\")}) as {a:$a} | .", false),
+            ("(., {a:empty}) as {a:$a} | .", false),
+            ("(., {a:1}) as {a:$a} ?// $a | .", false),
+            ("(., {a:1}) as $x | .", false),
+            ("(., .) as {a:$a} | .", false),
+            ("(., null) as {a:$a} | .", false),
+            ("if . then ((., {a:1}) as {a:$a} | .) else . end", false),
+            ("try ((., {a:1}) as {a:$a} | .)", false),
+            ("select(false) | (., {a:1}) as {a:$a} | .", false),
+            ("def f(x): x; f(., {a:1}) as {a:$a} | .", false),
+            ("def f: ., g; def g: {a:1}; f as {a:$a} | .", false),
+            ("(., {a:1}, .a) as {a:$a} | .", true),
+            ("(., .a, {a:1}) as {a:$a} | .", false),
+            ("try (., error(\"x\"), {a:1}) | . as {a:$a} | .", false),
+            ("(label $f | (., break $f, {a:1})) | . as {a:$a} | .", false),
+            ("first(., {a:1}) | . as {a:$a} | .", false),
+            // `first`/`nth(0)` read only the first output: a fresh one is no claim (it never meets the register item
+            // before it), and a register one answers.
+            ("first({a:1}, .) | . as {a:$a} | .", false),
+            ("nth(0; {a:1}, .) | . as {a:$a} | .", false),
+            // The outputs a wrapper may use up are not counted again for the items after it.
+            ("limit(2; limit(2; ., .), {a:1}) | . as {a:$a} | .", false),
+            ("limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .", false),
+            ("limit(2; ., ., {a:1}) | . as {a:$a} | .", false),
+            ("limit(0; {a:1}, .) | . as {a:$a} | .", false),
+            ("nth(1; {a:1}, .) | . as {a:$a} | .", false),
+            ("first((., {a:1}), 2) | . as {a:$a} | .", false),
+            ("(., {a:1}) | isempty(.a as {a:$a} | .)", false),
+            ("(., {a:1}) | . as {a:$a} | . as {b:$b} | .", true),
+            (".", false),
+        ] {
+            let expr = parse(source).unwrap();
+            assert_eq!(certain_fresh_destructure(&expr), expected, "{source}");
+            if expected {
+                assert!(
+                    source_destructures_fresh(&expr, true, false, NotRegister::default()),
+                    "{source}: certain, but not routed"
+                );
+            }
+        }
+        // An empty array or object pattern performs no step, so the fresh item is not destructured
+        // (the parser rejects both spellings, so the pattern is swapped in).
+        for empty in [Pattern::Array(Vec::new()), Pattern::Object(Vec::new())] {
+            let Expr::AsPattern { expr, body, .. } = parse("(., {a:1}) as [$a] | .").unwrap()
+            else {
+                panic!("not a bind");
+            };
+            let bind = Expr::AsPattern {
+                expr,
+                patterns: vec![empty],
+                body,
+            };
+            assert!(!certain_fresh_destructure(&bind));
+        }
+    }
 
     /// #4155: `may_end_in_bare_iterate` answers `false` only where the flatten
     /// yields nothing but a clone of the expression, which is what lets
