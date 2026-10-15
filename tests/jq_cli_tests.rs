@@ -141042,3 +141042,567 @@ fn test_reduce_source_destructuring_a_fresh_value_pipe_param_alt_residual_4566()
         ),
     ])
 }
+
+/// #4578: a `?//` chain of destructures of the register as a fold source inside another fold's body,
+/// whose body destructures a variable only a later bare alternative binds (`. as $x ?// $y | $y as
+/// {a:$a} | .`). Alternative one meets `$y` as the placeholder `null`, which the pattern's path-checked
+/// step rejects against a register that is not `null`; `?//` retries the next alternative, where `$y`
+/// is the value itself and the step is a type check that raises on `true` and `[true]` and passes on
+/// `{"a":1}`. The by-value drive ran alternative one, answered, and `del`/`=` wrote through it. A
+/// `null` register keeps answering (alternative one's `null` destructure succeeds). Every row is a
+/// live jq 1.7.1 capture.
+#[test]
+fn test_chain_source_with_later_bare_alternative_destructure_in_a_fold_body_4578() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"true",
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "null\n",
+            0,
+        ),
+        (
+            r"null",
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"del(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (reduce (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"(reduce 1 as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)))) = 9",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (. as {b:$b} ?// [$b] ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(foreach (1,2) as $k (.; (foreach (. as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .)); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (try (. as $x ?// $y | $y as {a:$a} | .)) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (try (. as $x ?// $y | $y as {a:$a} | .)) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (try (. as $x ?// $y | $y as {a:$a} | .)) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (. as $y ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (.a? as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y | . as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r#""s""#,
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"1",
+            r"path(reduce 1 as $k (.; (foreach (. as $x ?// $y ?// $z | $y as {a:$a} | .) as $j (.; .; .))))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach ({} as $x ?// $y | $y as {a:$a} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach ([] as $x ?// $y | $y as [$a] | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as {a:$y} ?// $x | $y as {b:$b} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as [$y] ?// $x | $y as [$b] | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as {a:$y} ?// $x ?// $y | $y as {b:$b} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce 1 as $k (.; (foreach (. as {a:$y} ?// $x ?// $y | $y as {b:$b} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce 1 as $k (.; (foreach (. as {a:$y} ?// $x ?// $y | $y as {b:$b} | .) as $j (.; .; .))))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}

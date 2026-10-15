@@ -2262,8 +2262,18 @@ is the revert that established what the other one costs.
    since `FoldRegister::relocate_one` stopped re-seating an emission that navigated below the register and states the register
    there (#4505; pinned by `test_nested_foreach_after_a_navigating_bind_source_raises_4564`). Still accepted where jq raises: the
    `try (. as {(.):$a} ?// $a | $a)` rows of [#4550](https://github.com/rust-works/succinctly/issues/4550), and a `foreach`
-   `?//` chain source in a `reduce` UPDATE whose first alternative's later step raises
-   ([#4578](https://github.com/rust-works/succinctly/issues/4578)).
+   `?//` chain source whose first alternative's later step raises, other than the shape below
+   ([#4578](https://github.com/rust-works/succinctly/issues/4578)). That shape is read: a chain `. as P1 ?// $y | $y as P | ..`
+   whose body destructures a variable only a later bare alternative binds. Alternative one meets `$y` as the placeholder
+   `null`, whose path-checked step raises against a register that is not `null`, and the retry makes it a type check on
+   the value itself, so the chain raises that type error (`Cannot index boolean with string "a"` on `true`) where the
+   by-value drive answered. Probed by `bare_alternative_destructure_probe` in a fold body whose register is known not to
+   be `null` ([`NotRegister`](https://github.com/rust-works/succinctly/issues/4603)), for a chain that is the whole source
+   with head `.`; the same chain behind a `try`, with a head that navigates, or with an earlier alternative also binding the
+   variable is untouched (pinned by `test_chain_source_with_later_bare_alternative_destructure_in_a_fold_body_4578`).
+   With a further bare alternative after that one (`. as $x ?// $y ?// $z | $y as {a:$a} | .`) jq's last retry meets `$y` as `null` and raises
+   the path error; the probe raises the type error instead (the same exit code, a different message).
+   The bare (non-`foreach`) chain in a `reduce` UPDATE is refused on `{"a":1}` where jq answers (the safe direction).
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
    {a:$a}`, whose bare alternative holds the register when it matches; a name two alternatives bind may hold it if

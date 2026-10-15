@@ -537,6 +537,11 @@ OPERANDS = [
     "(foreach (. as $x | .) as $k (.; .; .))",
     "(foreach (. as $x | . as $y | . as {a:$a} | .) as $k (.; .; .))",
     "(foreach (. as $x ?// $y | . as {a:$a} | .) as $k (.; .; .))",
+    # (#4578) the destructured variable is bound only by a later bare alternative: alternative one meets
+    # it as the placeholder `null` and raises, and the retry makes it a type check on the value itself.
+    "(foreach (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (. as $x ?// $y | $y as [$a] | .) as $k (.; .; .))",
+    "(reduce (. as $x ?// $y | $y as {a:$a} | .) as $k (.; .))",
     "(reduce (. as $x | . as {a:$a} | .) as $k (.; .))",
     "(reduce (. as $x | . as [$a] | $a) as $k (.; .))",
     "(foreach (. as $x | foreach . as {a:$a} (0; .; .)) as $k (.; .; .))",
