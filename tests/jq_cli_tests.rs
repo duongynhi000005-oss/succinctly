@@ -133325,6 +133325,48 @@ fn test_foreach_source_outer_marker_chain_empty_body_destructure_in_navigating_f
         ),
         (
             r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] ?// [$b] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as {a:$a} ?// $b ?// [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as $b ?// {a:$a} ?// [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[[1],true]",
+            r"path(.[0] as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[1,[1]]",
+            r"path(.[1] as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
             r"path(. as $x | foreach .[]? as $i (.; foreach ($x as [$a] ?// $b | empty) as $y (.; .; .); .))",
             "",
             0,

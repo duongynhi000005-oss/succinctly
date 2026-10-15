@@ -50474,14 +50474,14 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     // #4621: off the register a `?//` chain of destructuring alternatives raises as a single pattern
     // does: each alternative's step raises on a marker bound elsewhere, the next is tried, and the
     // last one's raise stands. A chain with a bare `$var` alternative runs it without a step.
-    let destructures = |patterns: &[Pattern]| {
+    let pattern_destructures = |patterns: &[Pattern]| {
         routes_destructuring(patterns) || (off_body && patterns_all_destructuring_chain(patterns))
     };
     if S::TAG != EvalTag::Jq
         || fold_body::source_moved_here()
         || !any_subexpr(
             source,
-            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if destructures(patterns)),
+            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if pattern_destructures(patterns)),
         )
     {
         return markers;
@@ -50507,10 +50507,10 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     let source = if off_body {
         // A `try` with no handler (or a `?`) swallows the raise and a handler that emits nothing
         // leaves the source empty: jq answers both.
-        let destructures = |e: &Expr| {
+        let expr_destructures = |e: &Expr| {
             any_subexpr(
                 e,
-                &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if destructures(patterns)),
+                &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if pattern_destructures(patterns)),
             )
         };
         if any_subexpr(source, &mut |e| match e {
@@ -50518,13 +50518,13 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             | Expr::Try {
                 expr: inner,
                 catch: None,
-            } => destructures(inner),
+            } => expr_destructures(inner),
             Expr::Try {
                 expr: inner,
                 catch: Some(handler),
             } => {
                 matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty))
-                    && destructures(inner)
+                    && expr_destructures(inner)
             }
             _ => false,
         }) {
@@ -52098,7 +52098,9 @@ fn routes_fresh_destructuring(patterns: &[Pattern]) -> bool {
 /// register, or a fold's own pattern chain, the resolver cannot tell that refusal
 /// from a guess once INIT has navigated (`(.[]; ...)`, `(.a; ...)`), so it would
 /// not retry and would raise where jq answers. The price is that such a chain is
-/// still accepted by value where jq raises in every alternative.
+/// still accepted by value where jq raises in every alternative, except for a `$x`
+/// bound elsewhere in a body whose accumulator is off the register
+/// ([`foreign_register_markers_with`], #4621).
 fn routes_destructuring(patterns: &[Pattern]) -> bool {
     matches!(patterns, [pattern] if !matches!(pattern, Pattern::Var(_)))
 }
