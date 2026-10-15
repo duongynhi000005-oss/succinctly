@@ -246,6 +246,9 @@ DOCS = [
 KNOWN_ACCEPT_WRONG = {
     # a comma beside a literal `null` destructure, on a `null` document, under `|=`/`=` (#4603)
     ("lit-null-comma", "null"),
+    # (#4655) a bind whose source may emit nothing is read as possibly skipping the destructure behind it
+    # (`.[]?` does not, on the element jq's loop holds), so the moved `reduce` body is answered where jq raises
+    ("bind-gen-xpat-empty", None),
 }
 
 
