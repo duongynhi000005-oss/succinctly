@@ -47326,6 +47326,15 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// wrong answer where the loss was a refusal. Conservative: a `false` only leaves the source to
 /// the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
+    let mut calls = SPINE_CALL_BUDGET;
+    moves_register_only_by_binds(expr, &mut calls)
+}
+
+/// [`source_moves_register_only_by_binds`] for one node, with what is left of the budget for bodies
+/// read through a call ([`SPINE_CALL_BUDGET`]); past it the source is not read. The recursion is
+/// bounded without a depth of its own: the parser caps how deep a source nests, a call is read at most
+/// budget times, and a call or a shared argument checks the native stack first.
+fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
     match unwrap_paren(expr) {
         // A destructuring chain that ends in a bare `$var`: when every pattern before it raises,
         // `?//` restores the path and the bare alternative leaves the register alone. A chain that
@@ -47334,13 +47343,17 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
         Expr::AsPattern { patterns, body, .. }
             if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) =>
         {
-            source_moves_register_only_by_binds(body)
+            moves_register_only_by_binds(body, calls)
         }
         Expr::As { body, .. } | Expr::Label { body, .. } => {
-            source_moves_register_only_by_binds(body)
+            moves_register_only_by_binds(body, calls)
         }
-        Expr::Pipe(stages) => stages.iter().all(source_moves_register_only_by_binds),
-        Expr::Comma(stages) => stages.iter().all(source_moves_register_only_by_binds),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| moves_register_only_by_binds(stage, calls)),
+        Expr::Comma(stages) => stages
+            .iter()
+            .all(|stage| moves_register_only_by_binds(stage, calls)),
         // Only the condition is a subexpression; the branch that runs is not. A literal condition
         // runs one branch only ([`cannot_move_register`]'s #4124).
         Expr::If {
@@ -47348,15 +47361,63 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
             then_branch,
             else_branch,
         } => match &**cond {
-            Expr::Literal(Literal::Bool(true)) => source_moves_register_only_by_binds(then_branch),
+            Expr::Literal(Literal::Bool(true)) => moves_register_only_by_binds(then_branch, calls),
             Expr::Literal(Literal::Bool(false) | Literal::Null) => {
-                source_moves_register_only_by_binds(else_branch)
+                moves_register_only_by_binds(else_branch, calls)
             }
             _ => {
-                source_moves_register_only_by_binds(then_branch)
-                    && source_moves_register_only_by_binds(else_branch)
+                moves_register_only_by_binds(then_branch, calls)
+                    && moves_register_only_by_binds(else_branch, calls)
             }
         },
+        // #4615: a call runs its body where it is, with each argument shared into the places the
+        // body names it, so what moves the register is what the bound body does
+        // (`def f(g): g; f(CHAIN)`). Read as [`update_navigates_within`] reads one, from the same
+        // cache, under a budget of its own, so a recursive body is read a bounded number of times.
+        Expr::DefCall {
+            def,
+            args,
+            frames,
+            bound,
+        } => {
+            *calls > 0 && {
+                *calls -= 1;
+                probe_def_call(def, args, *frames, bound)
+                    .is_ok_and(|body| moves_register_only_by_binds(&body, calls))
+            }
+        }
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            then,
+            bound,
+        } => {
+            *calls > 0 && {
+                *calls -= 1;
+                moves_register_only_by_binds(&bind_def(name, params, body, then, bound), calls)
+            }
+        }
+        // #4615: an argument reaches the bound body as a `Shared`, run where the body names it.
+        Expr::Shared(arg) => {
+            !native_stack_exhausted() && moves_register_only_by_binds(arg.expr(), calls)
+        }
+        // #4615: a nested `foreach` hands its source's elements on as its own state, so it moves
+        // the register as its source does when its INIT, UPDATE and EXTRACT move nothing and its
+        // loop pattern binds a bare variable (a destructuring pattern walks its own steps).
+        Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update,
+            extract,
+        } => {
+            patterns_all_bare(patterns)
+                && cannot_move_register(init)
+                && cannot_move_register(update)
+                && extract.as_deref().map_or(true, cannot_move_register)
+                && moves_register_only_by_binds(input, calls)
+        }
         // `last(f)` is a `reduce`, which backtracks `f`: the register is back where it entered.
         other if is_last_stage(other) => true,
         other => cannot_move_register(other),

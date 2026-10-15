@@ -725,6 +725,22 @@ OPERANDS = [
     "(foreach ((., 1) | (., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach ((., 1) | (., 1) | . as {a:$a} ?// [$a] | .) as $k (.; .; .))",
     "(foreach ((., 1) | (1, .) | . as {a:$a} | .) as $k (.; .; .))",
+    # (#4615) a bare-final chain as the source of a `foreach` reached through a `def` call with
+    # arguments or a nested `foreach`, on an untracked entry (the `untracked-*` contexts) where the
+    # fold's emission states the register the source's bind left. The contrasts navigate after the
+    # bind, or end the chain in a pattern, and stay refused as in jq.
+    "(foreach (def f(g): g; f((.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (def f(g): g; f(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (def f(g): g; f((.|.) as {a:$a} ?// $a | .a?)) as $k (.; .; .))",
+    "(foreach (def f(g): g; f((.|.) as {a:$a} ?// [$a] | .)) as $k (.; .; .))",
+    "(foreach (def f(g): g | g; f((.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
+    "(foreach (foreach ((.|1) as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; $j)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; .a)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .a; .)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// [$a] | .) as $j (.; .; .)) as $k (.; .; .))",
+    "(foreach (foreach ((.|.) as {a:$a} ?// $a | .) as [$j] (.; .; .)) as $k (.; .; .))",
     "(reduce ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .))",
     # (#4424) a pipe source of a chain of destructuring patterns only, outside a fold: its first
     # step is the register's whatever the pipe is, and the alternative that matches moves it. The
@@ -2347,6 +2363,13 @@ CONTEXTS = [
     ("untracked-path-object", "path(. as $x | {a:{b:1}} | ({X}) | $x)"),
     ("untracked-del-scalar", "del(. as $x | 1 | ({X}) | $x.a?)"),
     ("untracked-del-object", "del(. as $x | {a:{b:1}} | ({X}) | $x.a?)"),
+    # (#4615) the operand inside another fold's body, entered on an untracked value: `.` is the
+    # accumulator there, which the enclosing source may have moved off the register.
+    ("untracked-foreach-update", "path(. as $x | 1 | (foreach (1,2) as $j (.; ({X}); .)) | $x)"),
+    ("untracked-foreach-update-try", "path(. as $x | 1 | (foreach (1,2) as $j (.; try ({X}); .)) | $x)"),
+    ("untracked-foreach-extract", "path(. as $x | 1 | (foreach (1,2) as $j (.; .; ({X}))) | $x)"),
+    ("untracked-del-foreach-update", "del(. as $x | 1 | (foreach (1,2) as $j (.; ({X}); .)) | $x.a?)"),
+    ("untracked-reduce-update", "path(. as $x | 1 | (reduce (1,2) as $j (.; ({X}))) | $x)"),
     ("var-rebind-nav", "del(.a? as $y | try ({X}) | try ($y | .b))"),  # round 2
     ("nested", "del(.a? | ({X}))"),
     ("alt-pattern", "del(. as [$q] ?// $q | ({X}))"),  # round 2: ?// retry

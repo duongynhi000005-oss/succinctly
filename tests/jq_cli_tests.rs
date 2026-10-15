@@ -134428,20 +134428,20 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
             0,
         ),
         // Still refused where jq answers (`[]`): a `limit` source (a `?//` chain beneath one that
-        // yields several outputs emitted an extra element when it was admitted) and a nested
-        // `foreach` source. A change that admits them should move these rows to `[]`. (The `reduce`
-        // twin is answered since #4613.)
+        // yields several outputs emitted an extra element when it was admitted). A change that
+        // admits it should move this row to `[]`. (The `reduce` twin is answered since #4613.)
         (
             "[[1],[1]]",
             r"path(. as $x | 1 | (foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x)",
             "",
             5,
         ),
+        // A nested `foreach` source is answered since #4615.
         (
             "[[1],[1]]",
             r"path(. as $x | 1 | (foreach (foreach (. as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .)) | $x)",
-            "",
-            5,
+            "[]\n",
+            0,
         ),
     ];
     for &(input, filter, stdout, exit) in rows {
@@ -143863,6 +143863,115 @@ fn test_foreach_source_def_parameter_bound_to_a_literal_4485() -> Result<()> {
             r"path(foreach (def f($x): . as {a:$a} ?// $a | $x; f(2)) as $k (.; .; .))",
             "[]\n",
             0,
+        ),
+    ];
+    for &(doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want_stdout, want_code),
+            "`{filter}` on {doc}: stderr {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4615: a `foreach` whose source is a bare-final `?//` chain reached through a `def` call with
+/// arguments (a closure parameter naming the chain, or a `def` written in the source) or through a
+/// nested `foreach` is answered on an untracked entry as jq does; the gate that states the register
+/// ([`source_moves_register_only_by_binds`]) read through neither. The contrasts stay refused, as in
+/// jq: a body, UPDATE or EXTRACT that navigates, and a chain with no bare alternative. Every row
+/// captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[[1],[1]]",
+            r"def f(g): g; path(. as $x | 1 | (foreach f((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (def f(g): g; f((.|.) as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (def f: (.|.) as {a:$a} ?// $a | .; f) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; .)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"del(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | $a) as $j (.; $j; .)) as $k (.; $k; .)) | $x.a?)",
+            "[[1],[1]]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"def f(g): g; path(. as $x | 1 | (foreach f((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"def f(g): g; path(. as $x | 1 | (foreach f((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; .a)) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .a; .)) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// [$a] | .) as $j (.; .; .)) as $k (.; .; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"def f(g): g | g; path(. as $x | 1 | (foreach f((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"def a(g): g; def b(g): a(g); def c(g): b(g); path(. as $x | 1 | (foreach c((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"def f(g): if true then g else . end; path(. as $x | 1 | (foreach f((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        // Still refused where jq answers `[]`: a recursive `def` is unrolled until the gate's call
+        // budget (`SPINE_CALL_BUDGET`) is spent, and a body it cannot finish reading is not admitted.
+        // This pins that the read ends, and the refusal it ends in; a change that reads a recursion
+        // through should move this row to `[]`.
+        (
+            r"[[1],[1]]",
+            r"def f($n; g): if $n == 0 then g else f($n - 1; g) end; path(. as $x | 1 | (foreach f(3; (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "",
+            5,
         ),
     ];
     for &(doc, filter, want_stdout, want_code) in ROWS {
