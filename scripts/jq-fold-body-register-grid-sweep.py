@@ -160,6 +160,10 @@ SOURCES = [
     # (#4626) the same with an outer `$x` as the destructured value: off the register the step raises
     ("xpat-arr-empty", "$x as [$a] | empty"),
     ("xpat-arr-empty-5", "$x as [$a] | empty | 5"),
+    # (#4621) a `?//` chain of destructuring alternatives raises in the last; a bare `$var` alternative runs
+    ("xpat-chain-empty", "$x as {a:$a} ?// [$a] | empty"),
+    ("try-xpat-chain-empty-catch", "try ($x as {a:$a} ?// [$a] | empty) catch ."),
+    ("xpat-chain-var-empty", "$x as [$a] ?// $b | empty"),
     ("try-xpat-arr-empty-catch", "try ($x as [$a] | empty) catch ."),
     ("try-xpat-arr-empty-catch-empty", "try ($x as [$a] | empty) catch empty"),
     ("try-xpat-arr-empty", "try ($x as [$a] | empty)"),
