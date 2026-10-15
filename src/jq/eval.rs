@@ -36705,9 +36705,12 @@ fn is_try_scoped_component(component: &Expr) -> bool {
     matches!(component, Expr::Optional(inner) if !is_postfix_optional_primitive(inner))
 }
 
-/// Whether a fold's UPDATE is a `?//` bind (#4440): `. as [$q] ?// $z | BODY`, parenthesized or not.
+/// Whether a fold's UPDATE is a `?//` bind (#4440): `. as [$q] ?// $z | BODY`, parenthesized or not, or
+/// a `first`/`limit`/`nth` over one ([`take_wrapped_bare_chain`], #4537), which runs the chain's
+/// alternatives with `.` on the accumulator as the bare bind does.
 fn update_is_alt_bind(update: &Expr) -> bool {
     matches!(unwrap_paren(update), Expr::AsPattern { patterns, .. } if patterns.len() > 1)
+        || take_wrapped_bare_chain(update).is_some()
 }
 
 /// Whether every output of a `reduce` UPDATE is the accumulator's own node, whatever
@@ -40299,8 +40302,11 @@ fn resolve_bounded_sink<'a, S: EvalSemantics>(
         keep.at_most(n),
         &mut |branch| {
             emitted += 1;
-            if sink(branch) == Demand::Stop {
-                downstream_stopped = true;
+            // #4537: an emission the consumer refused (an untracked branch, which stops the walk)
+            // and a `?//` retry then re-emitted past is superseded by the retry's answer: the stale
+            // flag turned `first(CHAIN)` into a stopped source and dropped its comma siblings.
+            downstream_stopped = sink(branch) == Demand::Stop;
+            if downstream_stopped {
                 return Demand::Stop;
             }
             if emitted >= n {
@@ -40505,9 +40511,8 @@ fn resolve_nth_sink<'a, S: EvalSemantics>(
                     skipped += 1;
                     return Demand::Continue;
                 }
-                if sink(branch) == Demand::Stop {
-                    downstream_stopped = true;
-                }
+                // #4537: see `resolve_bounded_sink`.
+                downstream_stopped = sink(branch) == Demand::Stop;
                 Demand::Stop
             },
         );
@@ -52022,7 +52027,7 @@ impl<'e> RegisterSpine<'e> {
                 // the source emits twice) is the register's own destructure outside every fold
                 // body; inside one the routed chain refuses rows jq answers (`reduce`
                 // UPDATE/source contexts).
-                if fold_body::depth() == 0 {
+                if fold_body::depth() == 0 || fold_body::acc_is_register_here() {
                     if let Some(expr) = take_wrapped_bare_chain(other) {
                         if self.binds_register(expr) {
                             return Reach::Destructures;
@@ -52047,9 +52052,11 @@ impl<'e> RegisterSpine<'e> {
 /// operand of a `first(..)`, `limit(n; ..)` or `nth(n; ..)` with a literal `n` (#4483), read
 /// through the wrappers that hand the chain on unchanged (#4497): a `try` without a handler, a
 /// `?`, a wrapper under a wrapper (`first(first(CHAIN))`, `try nth(0; CHAIN)`) and a `$x` bind in
-/// front of the chain (its source is a subexp in jq and moves nothing). Not a `limit` whose `n`
-/// is a generator (`limit(1,2; ..)` runs the chain once per `n`): the resolver answers the chain
-/// once. Routing the `try`/`?` rows was tried in #4496 and produced wrong accepts, which was the
+/// front of the chain (its source is a subexp in jq and moves nothing). A `limit` whose `n` is a
+/// comma of literals (`limit(1,2; ..)` runs the chain once per `n`) is read too (#4537), as is an
+/// `nth` with one: the resolver's `limit`/`nth` arms take the count as their outer loop. A count
+/// that is not a literal or a comma of literals is left to the by-value drive.
+/// Routing the `try`/`?` rows was tried in #4496 and produced wrong accepts, which was the
 /// by-value drive's `with result` guess answering for a refusal; #4497 reads them and pins the
 /// row that failed (`test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497`).
 fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
@@ -52062,16 +52069,29 @@ const WRAPPED_CHAIN_DEPTH: u8 = 16;
 
 fn wrapped_bare_chain(e: &Expr, budget: u8) -> Option<&Expr> {
     let budget = budget.checked_sub(1)?;
-    if let Expr::Try { expr, catch: None } | Expr::Optional(expr) = unwrap_paren(e) {
+    if let Expr::Try { expr, catch: None } | Expr::Optional(expr) = unwrap_bind_source(e) {
         return wrapped_bare_chain(expr, budget);
     }
-    let literal = |n: &Expr| matches!(unwrap_paren(n), Expr::Literal(_));
-    let operand = match unwrap_paren(e) {
-        Expr::Limit { n, expr } if literal(n) => expr,
-        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) if literal(n) => {
+    let literal = |n: &Expr| matches!(unwrap_bind_source(n), Expr::Literal(_));
+    let literals = |n: &Expr| match unwrap_bind_source(n) {
+        Expr::Comma(items) => items.iter().all(literal),
+        other => literal(other),
+    };
+    let operand = match unwrap_bind_source(e) {
+        Expr::Limit { n, expr } if literals(n) => expr,
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) if literals(n) => {
             expr
         }
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => inner,
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            // #4537: `first((CHAIN), 1)` takes the chain's first output, as `first(CHAIN)` does.
+            match unwrap_bind_source(inner) {
+                Expr::Comma(items) => items
+                    .first()
+                    .filter(|leaf| matches!(unwrap_bind_source(leaf), Expr::AsPattern { .. }))
+                    .unwrap_or(inner),
+                _ => inner,
+            }
+        }
         _ => return None,
     };
     bare_chain_source(operand, budget)
@@ -52080,7 +52100,7 @@ fn wrapped_bare_chain(e: &Expr, budget: u8) -> Option<&Expr> {
 /// The bound expression of the `?//` chain `operand` is, or holds behind the wrappers
 /// [`take_wrapped_bare_chain`] reads.
 fn bare_chain_source(operand: &Expr, budget: u8) -> Option<&Expr> {
-    match unwrap_paren(operand) {
+    match unwrap_bind_source(operand) {
         Expr::AsPattern { expr, patterns, .. }
             if routes_destructuring_chain(patterns)
                 && !patterns_all_destructuring_chain(patterns) =>
@@ -52088,6 +52108,10 @@ fn bare_chain_source(operand: &Expr, budget: u8) -> Option<&Expr> {
             Some(expr)
         }
         Expr::As { body, .. } => bare_chain_source(body, budget.checked_sub(1)?),
+        // #4537: `first(try CHAIN)`, `first(CHAIN?)`.
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+            bare_chain_source(expr, budget.checked_sub(1)?)
+        }
         wrapped => wrapped_bare_chain(wrapped, budget),
     }
 }
@@ -57819,7 +57843,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && patterns_all_bare(patterns)
         && cannot_move_register(input)
         && cannot_move_register(init);
-    let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
+    let alt_bind_update_on_register = first_step_on_register
+        && (update_is_alt_bind(update)
+            // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there.
+            || matches!(unwrap_paren(update), Expr::Foreach { input, .. }
+                if take_wrapped_bare_chain(input).is_some()));
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register =
         first_step_on_register && extract.is_some_and(update_is_alt_bind);
