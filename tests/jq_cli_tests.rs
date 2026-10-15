@@ -133921,6 +133921,66 @@ fn test_fold_source_destructuring_a_fresh_item_handed_through_a_call_raises_4665
             "[[]]\n",
             0,
         ),
+        (
+            r"[path(reduce (def g(y): y; def f(x): x; f(g(., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; f((., {a:1}) | .) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x | .; f(., {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; (f(., {a:1}) | .) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f($y; x): x; f(1; (., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x; $y): x; f((., {a:1}); 1) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f($y; x): x; f(1; .) as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f(x; $y): $y; f(.; {a:1}) as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; limit(1; f) | . as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r"[path(reduce (def f: ., {a:1}; limit(2; f) | . as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f: {a:1}, .; limit(1; f) | . as {a:$a} | .) as $j (.; .))]",
+            "",
+            5,
+        ),
+        (
+            r"[path(reduce (def f(x): x; limit(1; f(., {a:1})) as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            0,
+        ),
     ];
     for &(filter, stdout, exit) in rows {
         let (out, err, code) = run_jq_full(&["-c", filter], Some(r#"{"a":5}"#))?;

@@ -39923,6 +39923,38 @@ fn comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
     Some(leaves)
 }
 
+/// The argument a closure-taking `def` hands on when its body only calls one of its parameters
+/// (`def f(x): x; f(., {a:1})`, also behind `.` stages), peeled of parentheses and `.` stages
+/// (#4665). `None` when the called parameter is `$`-style (the argument is bound as a value), an arity mismatch
+/// or a body that does anything else. The one test both [`call_comma_leaves`] and
+/// [`RegisterSpine::body_binds_fresh`] ask, so what the spine routes is what the resolver binds.
+fn closure_passthrough_arg<'a>(
+    body: &Expr,
+    params: &[Param],
+    args: &'a [Expr],
+) -> Option<&'a Expr> {
+    if args.is_empty() || args.len() != params.len() {
+        return None;
+    }
+    let Expr::FuncCall {
+        name,
+        args: call_args,
+        ..
+    } = peel_identity_stages(body)
+    else {
+        return None;
+    };
+    if !call_args.is_empty() {
+        return None;
+    }
+    let at = params.iter().position(|param| param.name() == name)?;
+    // A `$`-style parameter binds its argument as a value, which is not the argument's outputs.
+    if params[at].is_dollar() {
+        return None;
+    }
+    Some(peel_identity_stages(&args[at]))
+}
+
 /// [`comma_leaves`] of the body of a call with no arguments (#4565): `def f: (., 1); f as {a:$a}`
 /// binds the call's outputs as the comma does, so the register leaf is placed and a later leaf
 /// jq never reaches (the first output's step raises first) is not asked. A body that is not a
@@ -39945,26 +39977,8 @@ fn call_comma_leaves<S: EvalSemantics>(expr: &Expr) -> Option<Vec<&Expr>> {
                 current = unwrap_bind_source(body);
             }
             // #4665: `def f(x): x; f(., {a:1}) as P` hands the argument's outputs on as the comma does.
-            // Only a closure parameter the body calls and nothing else (a `$`-style one would bind
-            // the argument as a value), so the leaves are the argument's, read in the caller's scope.
-            Expr::DefCall { def, args, .. }
-                if !args.is_empty()
-                    && args.len() == def.params.len()
-                    && def.params.iter().all(|param| !param.is_dollar()) =>
-            {
-                let Expr::FuncCall {
-                    name,
-                    args: call_args,
-                    ..
-                } = peel_identity_stages(&def.body)
-                else {
-                    return None;
-                };
-                let at = def
-                    .params
-                    .iter()
-                    .position(|param| call_args.is_empty() && param.name() == name)?;
-                let arg = unwrap_bind_source(&args[at]);
+            Expr::DefCall { def, args, .. } => {
+                let arg = closure_passthrough_arg(&def.body, &def.params, args)?;
                 if let Some(leaves) = comma_leaves::<S>(arg) {
                     return Some(leaves);
                 }
@@ -50425,7 +50439,8 @@ enum Scan {
 enum Position {
     /// The pipe stage ahead of `. as PATTERN`: `try`, `?`, `label`, a `limit` and an `nth(k; ..)` and a
     /// pipe of one stage, or of one stage followed by stages that only repeat their input (`., .`), are
-    /// read through. A call is not. (`first(f)` and `nth(0; f)` read only the
+    /// read through. A call is read through by the route (#4665) but not claimed certain: its fresh
+    /// output may sit beyond the leading ones. (`first(f)` and `nth(0; f)` read only the
     /// first output: a fresh one never meets the register item before it, and a register one answers.)
     Head,
     /// The expression a pattern binds (`GEN as PATTERN`): the zero-argument call to a `def` in scope is
@@ -51931,11 +51946,11 @@ impl<'e> RegisterSpine<'e> {
         // by the stage after it, as a fresh item of a literal comma is (`def f: ., {a:1}; f | . as
         // {a:$a} | .`). Read per output ([`binds_fresh`] with `every` false counts only a body the
         // resolver binds per leaf).
-        let fresh = self.binds_fresh(e, true)
-            || (matches!(
-                unwrap_bind_source(e),
-                Expr::FuncCall { .. } | Expr::DefCall { .. } | Expr::FuncDef { .. }
-            ) && self.binds_fresh(e, false));
+        let call = matches!(
+            unwrap_bind_source(e),
+            Expr::FuncCall { .. } | Expr::DefCall { .. } | Expr::FuncDef { .. }
+        );
+        let fresh = self.binds_fresh(e, !call);
         if let Some(left) = budget {
             *left = if yields_exactly_one_value(e) {
                 *left - 1
@@ -52155,15 +52170,15 @@ impl<'e> RegisterSpine<'e> {
         // answered (`path(reduce 1 as $i (.; reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.;
         // .)))`). The value-mode operand it was feared to break (`-(reduce ...)` under a `try`, which
         // jq answers) was refused already, as a guess, and is the same wrong refusal either way.
-        // #4665: ... and a body that only calls a closure parameter, handed a comma
+        // #4665: ... and a body that only calls a closure parameter, handed a comma or another call
         // ([`call_comma_leaves`] binds the argument's leaves).
         let passes_comma_argument = || {
-            !params.iter().any(Param::is_dollar)
-                && matches!(peel_identity_stages(body), Expr::FuncCall { name, args: call_args, .. }
-                if call_args.is_empty()
-                    && params.iter().zip(args).any(|(param, arg)| {
-                        param.name() == name && matches!(unwrap_bind_source(arg), Expr::Comma(_))
-                    }))
+            closure_passthrough_arg(body, params, args).is_some_and(|arg| {
+                matches!(
+                    arg,
+                    Expr::Comma(_) | Expr::FuncCall { .. } | Expr::DefCall { .. }
+                )
+            })
         };
         let fresh = self.binds_fresh(body, true)
             || (!every

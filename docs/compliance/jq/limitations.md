@@ -2799,6 +2799,8 @@ is the revert that established what the other one costs.
    a closure-taking `def` that only calls its parameter, handed a comma (`def f(x): x; f(., {a:1}) as {a:$a} | .`,
    read per leaf by `call_comma_leaves`), and a call whose body hands the register on next to a fresh value as the pipe
    stage ahead of `. as P` (`def f: ., {a:1}; f | . as {a:$a} | .`, `fresh_among_leading`), including a call to a call.
+   Still accepted (jq raises): a `def` that forwards its parameter to another (`def g(y): f(y); g(., {a:1}) as P`), a call
+   nested in itself (`f(f(., {a:1}))`, the call guard reads the inner as the same call), and `nth(k; f)` with `k >= 1` over a call.
    Pinned by `test_fold_source_destructuring_a_fresh_item_handed_through_a_call_raises_4665`.
 
    A `reduce` source that destructures the register twice in a pipe is refused since
