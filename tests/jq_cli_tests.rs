@@ -74306,6 +74306,190 @@ fn test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499()
     ])
 }
 
+/// #4661 (#4499 residual): an `isempty`/`any`/`all` UPDATE over a fold that the first `isempty(FOLD)` fix left
+/// refused. A `reduce` operand backtracks its source and every UPDATE, so it leaves jq's register at the entry
+/// ([`reduce_leaves_register_in_place`]) and its one output is stated there; a `foreach` whose EXTRACT only
+/// computes after a navigating UPDATE (`$i`, `5`) leaves it on what UPDATE reached, which the emission now states;
+/// and the answer a verdict hands on is read by the enclosing fold's `advance` -- a `true` after a fold that never
+/// emitted (a non-`null` accumulator or register, where the caught `try .a` steps never pass `path_intact`) and an
+/// `any`/`all` that drained to its identity element are both at the entry. Every jq side captured from jq 1.7.1.
+/// The last three rows are controls: an EXTRACT that navigates (`.a`) and a `reduce` whose INIT navigates are not
+/// admitted, and keep the answer they had.
+#[test]
+fn test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_register_follows_jq_4661(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"null"#,
+            r#"path(foreach .a? as $k (0; isempty(reduce (1,2) as $i (1; try .a)); $k))"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(reduce (1,2) as $i (1; try .a)); $k))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"del(foreach .a? as $k (0; isempty(reduce (1,2) as $i (1; try .a)); $k))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"(foreach .a? as $k (0; isempty(reduce (1,2) as $i (1; try .a)); $k)) = 5"#,
+            "{\"a\":5}\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"path(foreach .a? as $k (0; isempty(reduce (1,2) as $i (1; try .a)); .))"#,
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r#"null"#,
+            r#"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); $k))"#,
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); $k))?]"#,
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"del(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); $k))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); $k)) = 5"#,
+            "{\"a\":{\"a\":5}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; 5)); $k))?]"#,
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; any(foreach (1,2) as $i (1; try .a; .); .); $k))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"del(foreach .a? as $k (0; any(foreach (1,2) as $i (1; try .a; .); .); $k))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; any(reduce (1,2) as $i (1; try .a); .); $k))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; all(reduce (1,2) as $i (1; try .a); .); $k))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[1]"#,
+            r#"[path(foreach .[]? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]"#,
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[1]"#,
+            r#"del(foreach .[]? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[1]"#,
+            r#"[path(foreach .[]? as $k (0; any(foreach (1,2) as $i (1; try .a; .); .); $k))?]"#,
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"[1]"#,
+            r#"[path(foreach .[]? as $k (0; all(reduce (1,2) as $i (1; try .a); .); $k))?]"#,
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k)) = 5"#,
+            "{\"a\":5}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); $k))"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .a)); $k))?]"#,
+            "[[\"a\",\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(reduce (1,2) as $i (.a; 1)); $k))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"null"#,
+            r#"[path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .a)); .))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the

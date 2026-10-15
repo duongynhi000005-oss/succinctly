@@ -305,6 +305,18 @@ OPERANDS = [
     # loop variable and a fold as the `cond` of `any`.
     "isempty(foreach (1,2) as $i (1; try .a; $i))",
     "any(foreach (1,2) as $i (1; try .a; .); .)",
+    # (#4661) the same folds with a computed EXTRACT after a navigating UPDATE, a `reduce` as the
+    # generator of `any`/`all`, a `null` INIT, a source that can be empty, and the controls that must
+    # keep their refusal (a reduce whose INIT navigates, a foreach whose EXTRACT navigates).
+    "isempty(foreach (1,2) as $i (1; try .a; 5))",
+    "isempty(foreach (1,2) as $i (null; try .a; $i))",
+    "isempty(foreach (1,2) as $i (1; try .a; .a))",
+    "isempty(reduce (1,2) as $i (null; try .a))",
+    "isempty(reduce .[]? as $i (1; .))",
+    "isempty(reduce (1,2) as $i (.a; 1))",
+    "any(reduce (1,2) as $i (1; try .a); .)",
+    "all(reduce (1,2) as $i (1; try .a); .)",
+    "all(foreach (1,2) as $i (1; try .a; $i); .)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
