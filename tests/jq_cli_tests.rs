@@ -142684,6 +142684,175 @@ fn test_reduce_source_first_of_register_comma_nested_or_behind_a_try_in_a_moved_
     ])
 }
 
+/// #4685: a navigation after `first(.)`, `limit(1; .)`, `nth(0; .)` or `first(., X)` (also behind a `try`/`?`)
+/// as a `reduce` source in the body of a `reduce` whose source moved the register. The wrapper emits the
+/// accumulator once, so `.a`, `.[]?` and `..` after it are path-checked against a node that is not the
+/// register and raise, as after a bare `.`. The nested-source read stopped at the first stage that was not
+/// `.`, a marker or a `select`, so the navigation behind the wrapper was never seen, the step stayed
+/// trackable, and `del` deleted the document. Controls: a navigating builtin that reads by value
+/// (`getpath`, `keys`, `length`), a `try` around the navigation, a fresh first leaf, and the accumulator as the
+/// register (`reduce 1 as $i`, a top-level fold). Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_navigating_after_first_of_dot_in_a_moved_body_4685() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (limit(1; .) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (nth(0; .) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | .[]?) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to iterate through {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | ..) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to iterate through {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try first(.) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.)? | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | select(.) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(first(.), 2) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (first(.) | .a) as $j (.; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce .[]? as $i (.; reduce (first(.) | .a) as $j (.; .))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; foreach (first(.) | .a) as $j (.; .; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; foreach (limit(1; .) | .[]?) as $j (.; .; .)))]",
+            "",
+            "Invalid path expression near attempt to iterate through {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r#"[path(reduce .[]? as $i (.; reduce (first(.) | getpath(["a"])) as $j (.; .)))]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | keys) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first({a:1}, .) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | try .a) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | (.a)?) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(.) | length) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce 1 as $i (.; reduce (first(.) | .a) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first(.) | .a) as $j (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4666 (the rest of #4597): a fresh comma item behind a wrapper that yields a counted number of
 /// outputs (`limit(3; limit(2; ., .), {a:1})`: two, so `{a:1}` is the third) or behind a pipe whose later
 /// stages only repeat their input (`(., {a:1}) | ., .`) is still generated and still meets the destructure,

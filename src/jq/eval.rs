@@ -51321,6 +51321,22 @@ fn limit_takes_some(n: &Expr) -> bool {
     limit_literal_count(n).is_some_and(|n| n > 0.0)
 }
 
+/// [`takes_only_an_identity_leaf`], also over a bare `.`: `first(.)`, `limit(1; .)` and `nth(0; .)` emit
+/// their input once (#4685).
+fn takes_only_dot(e: &Expr) -> bool {
+    takes_only_an_identity_leaf(e)
+        || match unwrap_bind_source(e) {
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                is_identity_stage(inner)
+            }
+            Expr::Limit { n, expr: inner } => limit_takes_one(n) && is_identity_stage(inner),
+            Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
+                limit_literal_count(n) == Some(0.0) && is_identity_stage(inner)
+            }
+            _ => false,
+        }
+}
+
 /// Whether `e` is `first(C)`, `limit(1; C)` or `nth(0; C)` over a comma `C` whose first leaf is
 /// `.` (#4667): the only output is `.` itself, because the wrapper stops before any other leaf is
 /// generated (`first(., {a:1})` is `.`). [`first_output_is_register`](RegisterSpine) reads the same
@@ -51343,7 +51359,7 @@ fn comma_first_leaf_is_dot(e: &Expr) -> bool {
     match unwrap_bind_source(e) {
         Expr::Comma(items) => items.first().is_some_and(|first| {
             is_identity_stage(first)
-                || takes_only_an_identity_leaf(peel_try_wrappers(first))
+                || takes_only_dot(peel_try_wrappers(first))
                 || comma_first_leaf_is_dot(first)
         }),
         _ => false,
@@ -57669,16 +57685,37 @@ fn nested_source_navigates(source: &Expr) -> bool {
     let Expr::Pipe(stages) = unwrap_paren(source) else {
         return update_navigates_within(source, false);
     };
+    // Whether a `first(.)`-like stage was read past (#4685).
+    let mut via_first = false;
     for stage in stages {
+        // #4685: after such a stage a caught navigation (`first(.) | try .a`) keeps the answer it had,
+        // which is jq's; only `.`-headed pipes refuse it today (`. | try .a`), a loss this does not widen.
+        if via_first
+            && match unwrap_paren(stage) {
+                Expr::Try { .. } => true,
+                // A postfix `?` on a primitive (`.a?`, `.[]?`) is not a catch: its path error is raised.
+                Expr::Optional(inner) => !is_postfix_optional_primitive(inner),
+                _ => false,
+            }
+        {
+            return false;
+        }
         if update_navigates_within(stage, false) {
             return true;
         }
-        if !matches!(
+        if matches!(
             unwrap_paren(stage),
             Expr::Identity | Expr::TrackedVar(_) | Expr::Builtin(Builtin::Select(_))
         ) {
-            return false;
+            continue;
         }
+        // #4685: `first(.)` (and `limit(1; .)`, `nth(0; .)`, `first(., X)`, behind a `try`/`?`) emits its
+        // input once, so `first(.) | .a` navigates the same node `. | .a` does.
+        if takes_only_dot(peel_try_wrappers(stage)) {
+            via_first = true;
+            continue;
+        }
+        return false;
     }
     false
 }
