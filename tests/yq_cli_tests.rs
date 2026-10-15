@@ -66748,3 +66748,35 @@ fn test_filtered_assignment_target_that_matches_nothing_skips_the_right_side_459
     }
     Ok(())
 }
+
+/// #4593: the same answer in YAML output keeps the document's comments and style, and the steps yq
+/// created while walking appear in it.
+#[test]
+fn test_filtered_assignment_target_that_matches_nothing_keeps_yaml_output_4593() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+            "(.zz | select(.)) = error(\"boom\")",
+            "a: [1, 2] # keep\nm: {k: 1}\nzz: null\n",
+        ),
+        (
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+            "(.a[] | select(. > 5)) = error(\"boom\")",
+            "a: [1, 2] # keep\nm: {k: 1}\n",
+        ),
+        (
+            "# head\na: &x [1]\nb: [2] # c\n",
+            "(.q.r | select(.)) = 1",
+            "# head\na: &x [1]\nb: [2] # c\nq:\n  r: null\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}`: {stderr:?}"
+        );
+    }
+    Ok(())
+}

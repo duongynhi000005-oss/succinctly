@@ -3092,6 +3092,9 @@ Two consequences worth naming:
   `test_filtered_assignment_target_that_matches_nothing_skips_the_right_side_4593`). Still evaluating the right side: a
   left side that is not a plain navigation followed by `select`s (`.m | to_entries | select(false)`), and an iteration
   over a missing or `null` key (`(.zz[] | select(.)) = v`, where yq turns the key into `[]`).
+  Also unchanged: `|=` (`(.zz | select(.)) |= 5` on `{}` is `{}` here and `{"zz":null}` in yq, as the walked steps are not created
+  by the update route), and a path that walks through an alias (`(.b.p | select(.)) = 1` on `b: *x` creates `p` on the anchor's
+  node in yq; the shortcut declines while an alias table is installed, so the previous route runs).
 - A right side that reads the assignment's **own target** still diverges, because
   succinctly has no node identity (the same limitation the anchor/alias section above
   records). Real yq's right-side candidates are pointers into the document, so writing
