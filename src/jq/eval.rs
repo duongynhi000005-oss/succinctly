@@ -47321,9 +47321,11 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
 }
 
 /// Whether a `foreach` SOURCE is `try CHAIN catch H` (#4627): `H` cannot move the register and
-/// `CHAIN` moves it at most through the tracked `INDEX` steps of destructuring binds of `.`. The steps move the register only on an emission that took
-/// them, which [`resolve_foreach`] reads per emission; a raised bind restores the register to the
-/// `try`'s entry and `H` emits from there.
+/// `CHAIN` moves it at most through the tracked `INDEX` steps of destructuring binds of `.`.
+/// Where such a bind raises, jq restores the register to the `try`'s entry and `H` emits from there.
+/// That holds only when the bind does raise, i.e. `.` is not the register: callers must rule out a
+/// `null`/boolean accumulator or register, which are `jv_identical` to each other by kind, so the
+/// bind succeeds and walks.
 fn source_is_caught_destructure(expr: &Expr) -> bool {
     fn chain(e: &Expr) -> bool {
         match unwrap_paren(e) {
@@ -47340,6 +47342,17 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
         } => cannot_move_register(handler) && chain(body),
         _ => false,
     }
+}
+
+/// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
+/// is a caught bind of `.` ([`source_is_caught_destructure`]) and nothing else in it can move it
+/// (#4627). Jq mode only, and not where the accumulator or register is a `null`/boolean.
+fn foreach_with_caught_bind_source_leaves_register(update: &Expr) -> bool {
+    matches!(unwrap_paren(update), Expr::Foreach { input, init, update, extract, .. }
+        if source_is_caught_destructure(input)
+            && cannot_move_register(init)
+            && cannot_move_register(update)
+            && extract.as_deref().map_or(true, cannot_move_register))
 }
 
 /// [`reduce_cannot_move_register`]'s `foreach` twin: EXTRACT runs in the same
@@ -49583,6 +49596,7 @@ impl FoldRegister {
         branch: &PathBranch<'_>,
         update_expr: &Expr,
         fold_frame: &Frame,
+        acc_is_register_by_kind: bool,
     ) -> Self {
         if branch.trackable {
             Self {
@@ -49627,18 +49641,14 @@ impl FoldRegister {
             // before it did (a recursion's seed, a caught body's handler): the
             // register is where UPDATE entered, which is `self`.
             || matches!(branch.register, BranchRegister::AtEntry)
-            // #4627: ...or a nested `foreach` whose source is a caught bind ([`source_is_caught_destructure`])
-            // and whose other parts cannot move it: where the bind raises, jq restores the register to
-            // where the `try` entered and the handler emits from there, so the register is where UPDATE
-            // entered. An element that took a walk step moved it; the fold's own register is not
-            // that element's, which only a body whose accumulator is the register can have (`null`/boolean).
+            // #4627: ...or a nested `foreach` whose source is a caught bind of `.`
+            // ([`foreach_with_caught_bind_source_leaves_register`]). Not where the accumulator or the
+            // register is a `null`/boolean: that is `jv_identical` to the other by kind, so the bind
+            // succeeds and walks.
             || (S::TAG == EvalTag::Jq
                 && fold_body::depth() != 0
-                && matches!(unwrap_paren(update_expr), Expr::Foreach { input, init, update, extract, .. }
-                    if source_is_caught_destructure(input)
-                        && cannot_move_register(init)
-                        && cannot_move_register(update)
-                        && extract.as_deref().map_or(true, cannot_move_register)))
+                && !acc_is_register_by_kind
+                && foreach_with_caught_bind_source_leaves_register(update_expr))
         {
             Self {
                 path: Rc::clone(&self.path),
@@ -57965,6 +57975,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // wrote `ab` where jq writes `a`. `resolve_reduce`'s UPDATE stays
                         // collected: jq evaluates every one of its outputs.
                         let entry_state = core::mem::replace(&mut state, OwnedValue::Null);
+                        let entry_state_by_kind = is_null_or_bool(&entry_state);
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
                         // escapes first, must not leave the old node's path behind).
@@ -58098,8 +58109,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     outcome = Some(FoldStepOutcome::Return(aborted.stop(control)));
                                     return Demand::Stop;
                                 }
-                                let extract_reg =
-                                    active_reg.advance::<S>(update_branch, &bound_update, frame);
+                                let extract_reg = active_reg.advance::<S>(
+                                    update_branch,
+                                    &bound_update,
+                                    frame,
+                                    entry_state_by_kind || is_null_or_bool(&active_reg.value),
+                                );
                                 // `update_branch` is itself already relocated (it's
                                 // `active_reg.resolve_sink()`'s own output above), and
                                 // `advance()` built `extract_reg` from this same

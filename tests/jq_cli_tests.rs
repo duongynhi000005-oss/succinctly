@@ -65048,6 +65048,25 @@ fn test_caught_bind_foreach_source_in_a_navigating_foreach_body_extracting_the_e
         );
         assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
     }
+    // A `null`/boolean accumulator is `jv_identical` to the register by kind, so the bind succeeds and
+    // walks (`[null,true]` with INIT `null`): the fold must not answer as if the register had stayed
+    // (it printed `[0]`/`[1]` where jq prints `[0,0]`/`[1]`). Refusing is the safe direction.
+    for (filter, jq_stdout) in [
+        (
+            r"path(foreach .[]? as $i (null; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i))",
+            "[0,0]\n[1]\n",
+        ),
+        (
+            r"del(foreach .[]? as $i (null; foreach (try (. as [$a] | .) catch .) as $y (.; .; .); $i))",
+            "[null]\n",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("[null,true]"))?;
+        assert!(
+            code == 5 || stdout == jq_stdout,
+            "`{filter}` answered {stdout:?} (exit {code}) where jq prints {jq_stdout:?}: {stderr:?}"
+        );
+    }
     Ok(())
 }
 
