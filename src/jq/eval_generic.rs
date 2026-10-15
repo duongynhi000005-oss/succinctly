@@ -37790,11 +37790,20 @@ fn owned_identity_leaving_cursor<S: EvalSemantics, V: DocumentValue>(
         OwnedIdentityRule::Detaches => Ok(Some(OwnedIdentity::detached())),
         // #3450: "has members", not `is_container` (which is "has a subtree" for JSON and "is a
         // mapping or sequence" for YAML): an empty container keeps its position, like a scalar.
-        OwnedIdentityRule::DetachesContainer => Ok(Some(if cursor.first_child().is_some() {
-            OwnedIdentity::detached()
-        } else {
-            id.rebuilt()
-        })),
+        // #4690: and by what the node *presents*, not by its subtree: an alias has a position of its
+        // own but no children, and a mapping whose only entry is a `<<` merge of an empty source has
+        // a child and no members.
+        OwnedIdentityRule::DetachesContainer => Ok(Some(
+            if (cursor.first_child().is_some() || cursor.is_alias()) && {
+                let node = cursor.value();
+                node.as_array().is_some_and(|items| !items.is_empty())
+                    || node.as_object().is_some_and(|fields| !fields.is_empty())
+            } {
+                OwnedIdentity::detached()
+            } else {
+                id.rebuilt()
+            },
+        )),
         OwnedIdentityRule::LeftOperand
         | OwnedIdentityRule::Extremum
         | OwnedIdentityRule::Slice

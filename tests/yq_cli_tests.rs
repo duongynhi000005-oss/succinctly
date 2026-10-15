@@ -66690,6 +66690,67 @@ fn test_map_over_an_empty_container_keeps_its_position_3450() -> Result<()> {
             &["-o=json", "-I=0"],
             "\"a\"\n",
         ),
+        // #4690: an alias is judged by its target's members, a merge-only mapping by its merged ones.
+        (
+            "a: &x [1]\nb: *x\n",
+            ".b | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n",
+        ),
+        (
+            "a: &x [1]\nb: *x\n",
+            ".b | map(.) | key",
+            &["-o=json", "-I=0"],
+            "",
+        ),
+        (
+            "a: &x [1]\nb: *x\n",
+            ".b | map(.) | parent",
+            &["-o=json", "-I=0"],
+            "",
+        ),
+        (
+            "a: &x [1]\nb: *x\n",
+            ".[] | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n[]\n",
+        ),
+        (
+            "a: &x {k: 1}\nb: *x\n",
+            ".b | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n",
+        ),
+        (
+            "a: &x []\nb: *x\n",
+            ".b | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"b\"]\n",
+        ),
+        (
+            "a: &x 5\nb: *x\n",
+            ".b | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"b\"]\n",
+        ),
+        (
+            "a: {<<: {}}\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            "a: {<<: {}}\n",
+            ".a | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "m: &m {k: 1}\na: {<<: *m}\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n",
+        ),
     ];
     for &(doc, filter, args, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
