@@ -50416,12 +50416,21 @@ fn certain_fresh_scan<'e>(
                   inner: &'e Expr,
                   take: usize,
                   budget: &mut Option<usize>| {
-        let mut inner_budget = Some(budget.map_or(take, |left| left.min(take)));
+        let taken = budget.map_or(take, |left| left.min(take));
+        let mut inner_budget = Some(taken);
         let scan = certain_fresh_scan(inner, defs, &mut inner_budget, position, hops);
-        if budget.is_some() {
-            *budget = Some(0);
+        // #4666: as in [`RegisterSpine::fresh_among_leading`], the operand's scan spends the whole
+        // budget where it could not count, and exactly the outputs it read where it could.
+        if let Some(left) = budget {
+            *left -= taken - inner_budget.unwrap_or(0);
         }
-        scan
+        // The operand running out of its own budget ends the wrapper, not the scan: its next item is
+        // never generated, and the items after the wrapper still are.
+        if scan == Scan::Stop && inner_budget == Some(0) {
+            Scan::Continue
+        } else {
+            scan
+        }
     };
     match unwrap_bind_source(e) {
         Expr::Comma(items) => {
@@ -50466,9 +50475,18 @@ fn certain_fresh_scan<'e>(
             }
         }
         Expr::Pipe(stages) if head => {
-            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
-            match (rest.next(), rest.next()) {
-                (Some(only), None) => certain_fresh_scan(only, defs, budget, position, hops),
+            let rest: Vec<&Expr> = stages
+                .iter()
+                .filter(|stage| !is_identity_stage(stage))
+                .collect();
+            match rest.as_slice() {
+                [only] => certain_fresh_scan(only, defs, budget, position, hops),
+                // #4666: stages after the first that only repeat their input, as the route reads them.
+                [first, repeats @ ..]
+                    if budget.is_none() && repeats.iter().all(|stage| repeats_input(stage)) =>
+                {
+                    certain_fresh_scan(first, defs, budget, position, hops)
+                }
                 _ => Scan::Stop,
             }
         }
@@ -50512,6 +50530,15 @@ fn certain_fresh_scan<'e>(
                 Scan::Continue
             }
         }
+    }
+}
+
+/// Whether a pipe stage only repeats its input: a comma of `.`s (`., .`), which yields each input
+/// once per item and moves nothing (#4666).
+fn repeats_input(stage: &Expr) -> bool {
+    match unwrap_bind_source(stage) {
+        Expr::Comma(items) => items.iter().all(is_identity_stage),
+        _ => false,
     }
 }
 
@@ -51723,11 +51750,14 @@ impl<'e> RegisterSpine<'e> {
         let e = unwrap_bind_source(e);
         // The operand of a wrapper that takes at most `take` outputs, scanned with that budget.
         let capped = |walk: &mut Self, inner: &'e Expr, take: usize, budget: &mut Option<usize>| {
-            let mut inner_budget = Some(budget.map_or(take, |left| left.min(take)));
+            let taken = budget.map_or(take, |left| left.min(take));
+            let mut inner_budget = Some(taken);
             let fresh = walk.fresh_among_leading(inner, &mut inner_budget, true);
-            // How many outputs the wrapper yielded is not known, so what follows it is not counted.
-            if budget.is_some() {
-                *budget = Some(0);
+            // #4666: what the operand's scan used of its budget is what the wrapper yielded when it
+            // counted every item (a comma of single-output items); where it could not, it spent the
+            // whole budget, which reads as the wrapper having used all it was allowed.
+            if let Some(left) = budget {
+                *left -= taken - inner_budget.unwrap_or(0);
             }
             fresh
         };
@@ -51782,9 +51812,20 @@ impl<'e> RegisterSpine<'e> {
                 fresh
             }
             Expr::Pipe(stages) => {
-                let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
-                match (rest.next(), rest.next()) {
-                    (Some(only), None) => self.fresh_among_leading(only, budget, true),
+                let rest: Vec<&Expr> = stages
+                    .iter()
+                    .filter(|stage| !is_identity_stage(stage))
+                    .collect();
+                match rest.as_slice() {
+                    [only] => self.fresh_among_leading(only, budget, true),
+                    // #4666: stages after the first that only repeat their input (`., .`) hand every
+                    // output of the first on, so the fresh item is still generated and the plain ones
+                    // ahead of it stay plain. Not under a budget: the repeats are not counted.
+                    [head, repeats @ ..]
+                        if budget.is_none() && repeats.iter().all(|stage| repeats_input(stage)) =>
+                    {
+                        self.fresh_among_leading(head, budget, true)
+                    }
                     _ => self.leaf_is_fresh(e, budget),
                 }
             }
@@ -87413,7 +87454,20 @@ mod tests {
             ("nth(0; {a:1}, .) | . as {a:$a} | .", false),
             // The outputs a wrapper may use up are not counted again for the items after it.
             ("limit(2; limit(2; ., .), {a:1}) | . as {a:$a} | .", false),
-            ("limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .", false),
+            // #4666: ...but a wrapper over single-output items spends exactly what it yields.
+            ("limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .", true),
+            ("limit(3; limit(1; ., .), ., {a:1}) | . as {a:$a} | .", true),
+            // (`first` is not read by the claim, only by the route.)
+            ("limit(3; first(., .), ., {a:1}) | . as {a:$a} | .", false),
+            (
+                "limit(2; limit(1; ., .), ., {a:1}) | . as {a:$a} | .",
+                false,
+            ),
+            // #4666: stages after the first that only repeat their input hand every output on.
+            ("((., {a:1}) | ., .) | . as {a:$a} | .", true),
+            ("((., {a:1}) | ., ., .) | . as {a:$a} | .", true),
+            ("((., {a:1}) | ., 1) | . as {a:$a} | .", false),
+            ("limit(3; (., {a:1}) | ., .) | . as {a:$a} | .", false),
             ("limit(2; ., ., {a:1}) | . as {a:$a} | .", false),
             ("limit(0; {a:1}, .) | . as {a:$a} | .", false),
             ("nth(1; {a:1}, .) | . as {a:$a} | .", false),

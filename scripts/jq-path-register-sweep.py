@@ -948,6 +948,21 @@ OPERANDS = [
     "(reduce (first(., {a:1}, 3) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (first(., {a:1}) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))",
+    # (#4666) a fresh comma item behind a nested `limit` whose count is known, and behind a pipe whose later
+    # stages only repeat their input; the contrasts stop short of the fresh item.
+    "(reduce (limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(3; limit(1; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(3; first(., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(2; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(2; limit(1; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(3; limit(5; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (((., {a:1}) | ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (((., {a:1}) | ., ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (((., 1) | ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (((., .) | ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (((., {a:1}) | ., 1) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(3; (., {a:1}) | ., .) | . as {a:$a} | .) as $k (.; .))",
+    "(foreach (limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .; .))",
     # (#4667) a stage after the destructure that catches or reshapes the raise: a `try`/`?` around it
     # answers in jq, and `//`, `if` and `select` after `first(., X)` do not.
     "(reduce (first(., {a:1}) | try (. as {a:$a} | .)) as $k (.; .))",
