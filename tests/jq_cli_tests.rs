@@ -142768,6 +142768,20 @@ fn test_reduce_source_navigating_after_first_of_dot_in_a_moved_body_4685() -> Re
         ),
         (
             r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(first(.)) | .a) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(first(.), {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
             r"del(reduce .[]? as $i (.; reduce (first(.) | .a) as $j (.; .)))",
             "",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",

@@ -51324,14 +51324,14 @@ fn limit_takes_some(n: &Expr) -> bool {
 /// [`takes_only_an_identity_leaf`], also over a bare `.`: `first(.)`, `limit(1; .)` and `nth(0; .)` emit
 /// their input once (#4685).
 fn takes_only_dot(e: &Expr) -> bool {
+    // The operand is `.` itself, or a wrapper that is (`first(first(.))`).
+    let dot = |inner: &Expr| is_identity_stage(inner) || takes_only_dot(peel_try_wrappers(inner));
     takes_only_an_identity_leaf(e)
         || match unwrap_bind_source(e) {
-            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-                is_identity_stage(inner)
-            }
-            Expr::Limit { n, expr: inner } => limit_takes_one(n) && is_identity_stage(inner),
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => dot(inner),
+            Expr::Limit { n, expr: inner } => limit_takes_one(n) && dot(inner),
             Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
-                limit_literal_count(n) == Some(0.0) && is_identity_stage(inner)
+                limit_literal_count(n) == Some(0.0) && dot(inner)
             }
             _ => false,
         }
