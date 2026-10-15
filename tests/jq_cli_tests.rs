@@ -141510,6 +141510,30 @@ fn test_reduce_update_limit_of_a_chain_hands_the_accumulator_on_4662() -> Result
             0,
         ),
         (
+            "path(reduce (1,2) as $i (.; limit(2; try (CHAIN))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; (CHAIN)?)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; limit(2; . as $x | CHAIN)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "path(reduce (1,2) as $i (.; first(try (CHAIN))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
             "path(reduce (1,2) as $i (.; limit(2; . as {a:$a} ?// $a | $a)))",
             "",
             "Invalid path expression with result true",

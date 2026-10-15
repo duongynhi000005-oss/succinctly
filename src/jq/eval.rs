@@ -36720,21 +36720,29 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// one, so the untracked branch is the only one the step sees. Not `nth`, whose index past the first
 /// alternative's lone output emits nothing in jq.
 fn update_is_input_chain_under_bound(update: &Expr) -> bool {
-    fn chain_hands_input_on(e: &Expr, budget: u8) -> bool {
+    // `bounded` is whether a `first`/`limit` has been read on the way down; the wrappers
+    // [`wrapped_bare_chain`] reads through (`try`, `?`, a `$x` bind) are read here too, so the two
+    // agree on which UPDATEs are chains.
+    fn chain_hands_input_on(e: &Expr, bounded: bool, budget: u8) -> bool {
         let Some(budget) = budget.checked_sub(1) else {
             return false;
         };
         match unwrap_bind_source(e) {
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-                chain_hands_input_on(inner, budget)
+                chain_hands_input_on(inner, true, budget)
             }
-            Expr::Limit { expr, .. } => chain_hands_input_on(expr, budget),
+            Expr::Limit { expr, .. } => chain_hands_input_on(expr, true, budget),
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+                chain_hands_input_on(expr, bounded, budget)
+            }
+            Expr::As { body, .. } => chain_hands_input_on(body, bounded, budget),
             Expr::AsPattern {
                 expr,
                 patterns,
                 body,
             } => {
-                patterns.len() > 1
+                bounded
+                    && patterns.len() > 1
                     && matches!(unwrap_paren(expr), Expr::Identity)
                     && update_returns_its_input(body)
             }
@@ -36742,11 +36750,7 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
         }
     }
     take_wrapped_bare_chain(update).is_some()
-        && matches!(
-            unwrap_bind_source(update),
-            Expr::FirstExpr(_) | Expr::Builtin(Builtin::FirstStream(_)) | Expr::Limit { .. }
-        )
-        && chain_hands_input_on(update, WRAPPED_CHAIN_DEPTH)
+        && chain_hands_input_on(update, false, WRAPPED_CHAIN_DEPTH)
 }
 
 /// Whether every output of a `reduce` UPDATE is the accumulator's own node, whatever
