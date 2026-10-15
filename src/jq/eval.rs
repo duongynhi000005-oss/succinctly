@@ -50136,6 +50136,58 @@ fn emits_the_register_on(body: &Expr) -> bool {
     }
 }
 
+/// The destructure a `?//` chain of the register ends on when its body destructures a variable only a
+/// later bare alternative binds, as a probe that raises that destructure's type error (#4578):
+/// `. as $x ?// $y | $y as {a:$a} | .` meets `$y` as the placeholder `null` under the first
+/// alternative, where the pattern's step is path-checked against a register that is not `null` and
+/// raises, and `?//` retries the next alternative, which binds `$y` to the value itself. There the
+/// step is a type check on that value, and a type error is the chain's: no alternative is left to
+/// retry onto. The by-value drive ran the first alternative's `null` destructure, which does not
+/// raise, and answered. `None` for a chain whose body does not start with such a destructure, whose
+/// head is not `.` (the value in hand is then not the one checked), or whose variable an earlier
+/// alternative also binds. The caller has established that the register is not `null` and that
+/// `value` is the fold's input.
+fn bare_alternative_destructure_probe(source: &Expr, value: &OwnedValue) -> Option<Expr> {
+    // The chain must be the whole source: behind a `try`, a `select`, an `if` or a comma the raise
+    // is caught, never reached, or followed by outputs jq delivers first.
+    let Expr::AsPattern {
+        expr,
+        patterns,
+        body,
+    } = unwrap_paren(source)
+    else {
+        return None;
+    };
+    if patterns.len() < 2 || !matches!(unwrap_paren(expr), Expr::Identity) {
+        return None;
+    }
+    let Expr::AsPattern {
+        expr: bound,
+        patterns: inner,
+        ..
+    } = unwrap_paren(body)
+    else {
+        return None;
+    };
+    let (Expr::Var(name), [destructure]) = (unwrap_paren(bound), inner.as_slice()) else {
+        return None;
+    };
+    if matches!(destructure, Pattern::Var(_)) || !pattern_step_type_errors(destructure, value) {
+        return None;
+    }
+    let binds = |pattern: &Pattern| {
+        let mut found = false;
+        visit_pattern_names(pattern, &mut |bound| found |= bound == name);
+        found
+    };
+    let first = patterns.iter().position(binds)?;
+    (first > 0 && matches!(patterns[first], Pattern::Var(_))).then(|| Expr::AsPattern {
+        expr: Box::new(Expr::Identity),
+        patterns: vec![destructure.clone()],
+        body: Box::new(Expr::Builtin(Builtin::Empty)),
+    })
+}
+
 /// How a `?//` chain of destructures of the register ends under a `try ... catch` (#4585): `Some(true)`
 /// when it raises, `Some(false)` when it is answered, `None` when this cannot tell. The register is
 /// moved by a matched alternative, so the code after the chain raises, which `?//` catches and
@@ -52400,6 +52452,20 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // The refusals below fire only for a trackable, non-`null` accumulator in an unplaced body.
     let refusal_eligible =
         unplaced_body && ambient.trackable && !matches!(ambient.value, OwnedValue::Null);
+    // #4578: a `?//` chain whose body destructures a variable only a later bare alternative binds
+    // ends on that alternative's type check, which raises on the value in hand.
+    if S::TAG == EvalTag::Jq
+        && fold_body::depth() != 0
+        // The accumulator is the register: where a `reduce` source moved it onto an element, the
+        // type check meets a path error first (`Invalid path expression`, #4507).
+        && fold_body::acc_is_register_here()
+        && ambient.trackable
+        && NotRegister::at_fold::<S>(ambient).null
+    {
+        if let Some(probe) = bare_alternative_destructure_probe(source, ambient.value) {
+            return drive_fold_source_by_value::<S>(&probe, ambient.value, ambient.trackable, step);
+        }
+    }
     // #4575: a `foreach` source whose `try`/`?` catches a destructure that raises a type error
     // answers in jq: nothing moved the register ([`prune_caught_destructures`]). A moved body is
     // left as it is: there the same destructure raises a path error on a marker that is not the
