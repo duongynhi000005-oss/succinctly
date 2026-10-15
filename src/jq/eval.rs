@@ -43128,6 +43128,21 @@ fn is_bare_register_neutral_builtin(expr: &Expr) -> bool {
     }
 }
 
+/// Whether an `any`/`all` `cond` navigates nothing, so it can neither move jq's register nor raise
+/// a path error on the element it is run on (#4641): [`cannot_move_register`] of it, of what is
+/// under the wrappers that add no movement ([`operand_leaves_register`]), a `select`/type filter
+/// ([`is_select_stage`]) under them, whose condition is a subexp, or a pipe or comma of those.
+fn cond_navigates_nothing(cond: &Expr) -> bool {
+    cannot_move_register(cond)
+        || operand_leaves_register(cond)
+        || match peel_register_transparent(cond) {
+            stage @ Expr::Builtin(_) => is_select_stage(stage),
+            Expr::Pipe(stages) => stages.iter().all(cond_navigates_nothing),
+            Expr::Comma(items) => items.iter().all(cond_navigates_nothing),
+            _ => false,
+        }
+}
+
 /// Whether `operand`, run from jq's register, leaves it where it entered (#3906):
 /// [`cannot_move_register`] of what is under the wrappers that add no movement of
 /// their own ([`peel_register_transparent`]), so `first($k)`, `limit(1; $k)` and
@@ -45568,15 +45583,16 @@ fn lost_at<'a, S: EvalSemantics>(value: &OwnedValue) -> BranchRegister<'a> {
 /// .[]?)` raises `near attempt to iterate through 1`, a postfix `?` does not
 /// catch it, and so does `all(unique_by(.))`). Two routes in jq mode (#3757):
 ///
-/// - A `cond` that provably navigates nothing (`cannot_move_register`, the
-///   allowlist: `.`, a literal, a comparison, ...) can neither move the register
-///   nor raise, so evaluating it by value is exact ([`any_all_probe_element_verdict`]).
+/// - A `cond` that provably navigates nothing ([`cond_navigates_nothing`]: the
+///   allowlist `cannot_move_register` -- `.`, a literal, a comparison, ... -- and,
+///   since #4641, `select(f)` and the wrappers over such a `cond` such as `first(.)`)
+///   can neither move the register nor raise, so evaluating it by value is exact
+///   ([`any_all_probe_element_verdict`]).
 /// - Anything else is resolved live, as a pipe stage on each branch `gen`
 ///   produced -- `gen | cond`, which is what jq runs -- so a path error on a
 ///   computed element raises as jq's does (catchable by `try`, as jq's is), and a
 ///   deciding output carries the register `cond` left. That covers a navigating
-///   `cond` (`.a`), one jq leaves in place that the allowlist cannot prove
-///   (`select(.)`, `first(.)`), and a builtin whose own path rules the resolver
+///   `cond` (`.a`), and a builtin whose own path rules the resolver
 ///   already models (`unique_by(.)`, an update assignment).
 ///
 /// An *untracked* element (one `gen` computed) can still be jq's register: `path_intact`
@@ -45621,7 +45637,12 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
     frame: &Frame,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
-    let live = S::TAG == EvalTag::Jq && !cannot_move_register(cond);
+    // #4641: `select(f)` and the wrappers that add no movement of their own over a `cond` that
+    // navigates nothing (`first(.)`) are as inert as the allowlist's own members: `f` is a subexp and
+    // `.` an identity, so neither can move the register or raise a path error on a computed element,
+    // and the by-value probe is exact. Resolved live, an untracked element equal to the register
+    // (`all(1; first(.))` over a `1` it holds) was an ambiguous guess and refused where jq answers.
+    let live = S::TAG == EvalTag::Jq && !cond_navigates_nothing(cond);
     // Whether `gen` provably leaves the register where this entered, so the
     // frame's carried register is still the one `cond` meets.
     let gen_inert = live && cannot_move_register(gen);
@@ -48495,9 +48516,9 @@ fn fans_out(expr: &Expr) -> bool {
 /// identity nothing to state, and a fold whose UPDATE is such a call refused where jq
 /// answers. The exemption is `isempty` alone: an `any`/`all(gen; cond)` whose `cond` binds
 /// runs its live stage against the carried register and trips the resolver's lost-register
-/// assertion. An operand with any other fan-out (a comma, a fold that reads a frozen `$var`, a call) still counts, and
-/// so does one that reads a frozen variable (`$k`): the marker re-establishes against the
-/// register the frame would now carry, which is the hazard #3145 withheld it for.
+/// assertion. An operand with any other fan-out (a comma, a call) still counts, and so does
+/// one that reads a frozen variable (`$k`), a fold included: the marker re-establishes against
+/// the register the frame would now carry, which is the hazard #3145 withheld it for.
 fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
     use crate::jq::walk::{search_subexpr, Visit};
     search_subexpr(expr, &mut |e| match e {
@@ -48527,13 +48548,12 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         // jq's own verdict, swallowed by the `try` inside it, and dropped from the stream
         // (`foreach .a? as $k (0; foreach (1,2) as $i (1; try .a; .); .)`). What the fold nests
         // (a comma in its source, a call) is its own to judge: the walk skips it, and the
-        // fold's own entry applies the rules that gate it. Inside an `isempty` operand
-        // (`patterns_fan_out` false) a fold still counts.
-        Expr::Reduce { .. } | Expr::Foreach { .. }
-            if patterns_fan_out && !mentions_marker(expr) =>
-        {
-            Visit::Skip
-        }
+        // fold's own entry applies the rules that gate it. #4499: that holds inside an
+        // `isempty` operand (`patterns_fan_out` false) too -- `isempty(foreach (1,2) as $i (1;
+        // try .a; .))` ran its operand against the register the frame carries, as a fold
+        // outside it does, and counting it dropped the caught step: `isempty` answered `true`
+        // where jq's inner fold emitted.
+        Expr::Reduce { .. } | Expr::Foreach { .. } if !mentions_marker(expr) => Visit::Skip,
         Expr::Comma(_)
         | Expr::AsPattern { .. }
         | Expr::Reduce { .. }
@@ -49725,16 +49745,81 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             })
         };
         match unwrap_paren(expr) {
-            Expr::Builtin(Builtin::IsEmpty(gen)) => neutral_leaves_register(gen).then_some(true),
+            Expr::Builtin(Builtin::IsEmpty(gen)) => {
+                verdict_operand_leaves_register(gen).then_some(true)
+            }
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
-                (neutral_leaves_register(gen) && neutral_leaves_register(cond)).then_some(true)
+                (verdict_operand_leaves_register(gen) && verdict_operand_leaves_register(cond))
+                    .then_some(true)
             }
             Expr::Pipe(stages) => fold(stages),
             Expr::Comma(items) => fold(items),
+            // #4641: `and`/`or` are not subexps: `DUP; L; JUMP_F; POP; R`, so `R` runs from the
+            // register `L` left, and the constant they emit is stated there. Both sides leaving
+            // it where it entered leaves the whole there.
+            Expr::And(left, right) | Expr::Or(left, right) => Some(leaves(left)? | leaves(right)?),
+            // #4641: a zero-arity `def` called as the whole of its scope (`def f: isempty(g); f`)
+            // is its body, which the resolver resolves in place against the call's own input and
+            // frame, as in [`def_call_keeps_register`]. Bound (a `DefCall`) it is read through the
+            // shared budget; unbound (the `FuncDef` the fold's UPDATE is written as) only when
+            // `then` is the one call to it, so no other body is looked into.
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                let mut verdict = None;
+                within_def_call_budget(|| {
+                    verdict = leaves(&def.body);
+                    verdict.is_some()
+                });
+                verdict
+            }
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                ..
+            } if params.is_empty()
+                && matches!(
+                    unwrap_paren(then),
+                    Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
+                ) =>
+            {
+                leaves(body)
+            }
             other => neutral_leaves_register(other).then_some(false),
         }
     }
     leaves(update) == Some(true)
+}
+
+/// Whether `operand` (the generator or `cond` of a verdict builtin, #4641) leaves jq's register
+/// where it entered once it has emitted and been backtracked out of: [`neutral_leaves_register`],
+/// plus the shapes that state no register of their own to move:
+/// - `path(f)`, which saves the register on entry and restores it on `PATH_END`, so whatever `f`
+///   navigates is undone before the path array is emitted;
+/// - `select(f)` and the type filters, which are `if f then . else empty end` over a subexp `f`;
+/// - a pipe that cannot emit past a leading `empty` (`empty | .a`): nothing it holds after the
+///   `empty` runs, and what is before it must leave the register itself (an earlier stage that
+///   navigates a computed value raises in jq where this evaluates by value);
+/// - a pipe or comma of those.
+fn verdict_operand_leaves_register(operand: &Expr) -> bool {
+    if neutral_leaves_register(operand) {
+        return true;
+    }
+    match peel_register_transparent(operand) {
+        Expr::Builtin(Builtin::Path(_)) => true,
+        stage @ Expr::Builtin(_) => is_select_stage(stage),
+        Expr::Pipe(stages) => {
+            match stages
+                .iter()
+                .position(|stage| matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Empty)))
+            {
+                Some(at) => stages[..at].iter().all(neutral_leaves_register),
+                None => stages.iter().all(verdict_operand_leaves_register),
+            }
+        }
+        Expr::Comma(items) => items.iter().all(verdict_operand_leaves_register),
+        _ => false,
+    }
 }
 
 /// The node `root` holds at `components` (a path's field, index and slice steps, root to leaf),
