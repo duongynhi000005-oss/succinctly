@@ -2271,6 +2271,8 @@ is the revert that established what the other one costs.
    be `null` ([`NotRegister`](https://github.com/rust-works/succinctly/issues/4603)), for a chain that is the whole source
    with head `.`; the same chain behind a `try`, with a head that navigates, or with an earlier alternative also binding the
    variable is untouched (pinned by `test_chain_source_with_later_bare_alternative_destructure_in_a_fold_body_4578`).
+   With a further bare alternative after that one (`. as $x ?// $y ?// $z | $y as {a:$a} | .`) jq's last retry meets `$y` as `null` and raises
+   the path error; the probe raises the type error instead (the same exit code, a different message).
    The bare (non-`foreach`) chain in a `reduce` UPDATE is refused on `{"a":1}` where jq answers (the safe direction).
    [#4278](https://github.com/rust-works/succinctly/issues/4278) closes the other carriers #4187 left: a destructure
    behind a mixed `?//` chain (`. as $x ?// [$q] | . as {a:$a} | .`, either order, and `. as [$q] ?// $x | $x as
