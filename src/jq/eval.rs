@@ -48916,7 +48916,9 @@ impl FoldRegister {
     /// register an untracked stage still holds when the fold carries it ([`Self::live_register`]),
     /// otherwise the fold's own register value. The accumulator is no stand-in for the live
     /// register: a `foreach` whose UPDATE emitted nothing hands the next step `null` while jq's
-    /// register stays where the fold left it.
+    /// register stays where the fold left it. Where the fold does not carry the live register
+    /// (the frame dropped it, as in a fold two deep) the fold's own value is all there is to
+    /// read, and it is the accumulator again: the old answer, not a new one.
     fn register_is_non_null(&self) -> bool {
         !matches!(
             self.live_register().unwrap_or(&self.value),

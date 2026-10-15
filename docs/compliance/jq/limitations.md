@@ -2364,7 +2364,11 @@ is the revert that established what the other one costs.
    whose UPDATE it is gets a `null` accumulator on its next step while jq's register stays on the document, and the fold
    reads the register it still holds (`FoldRegister::register_is_non_null`) rather than that accumulator (pinned by
    `test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update_4617`). On a `null` document the same
-   rows still answer `[]` where jq prints the pattern's path (`["b"]`), a different gap.
+   rows still answer `[]` where jq prints the pattern's path (`["b"]`), and so do they with a fold whose INIT navigated onto a
+   `null` (`foreach (1,2) as $i (.a; ...)` on `{"a":null}`: `["a"]` for jq's `["a","b"]`); both answer the same on `main`. A
+   fold nested *two* deep (the caught destructure's fold is itself the source of a fold in an UPDATE) is refused where jq answers
+   silently, because the frame no longer carries the live register there: `main` answered it by value, `[]` twice for `path()` and
+   `null` for `del()`, so this is the safe direction of a different wrong answer.
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which

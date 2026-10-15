@@ -64396,6 +64396,60 @@ fn test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update
             "[]\n[]\n",
             0,
         ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach (1,2) as $i (.a; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "{\"a\":{\"b\":1}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.[0]; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.[0]; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.[0]; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
