@@ -2384,9 +2384,13 @@ is the revert that established what the other one costs.
    refused where jq answers (a `$x` may be the register itself, whose bind then succeeds and walks), and so is the same shape under a
    `reduce` outer (`path(reduce .[]? as $i (.; foreach (try (. as [$a] | empty) catch .) as $y (.; .; .)))`, jq `[]`), and so is a `null` or boolean
    accumulator or register (`foreach .[]? as $i (null; ...; $i)` on `[null,true]`: the bind succeeds by kind and walks, so the register is not left at the entry).
-   Still accepted, for the single pattern as for the chain: a source whose destructure may not be reached (a bind ahead of
-   it such as `(1,2) as $q | $x as P`, a `select(false)`) and a `[ ... ]`-wrapped one in a `reduce`
-   ([#4655](https://github.com/rust-works/succinctly/issues/4655)). On a `null` accumulator a `$x` marker
+   A bind ahead of the destructure whose source always emits (`(1,2) as $q | $x as P`) no longer hides it
+   ([#4655](https://github.com/rust-works/succinctly/issues/4655): `always_emits`; pinned by
+   `test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_raises_4655`). Still accepted: a
+   `[ ... ]`-wrapped one in the body of a `reduce` whose source moved the register
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)), one behind a `limit(1; ...) |` stage, and a bind whose
+   source is a call or a navigation that happens to emit (`.[]? as $q | ...`: it may emit nothing, so the destructure
+   is read as possibly skipped). A source's own raise (`[.a.b] as $q | ...`) is reported as the pattern's error here. On a `null` accumulator a `$x` marker
    is the register by kind, as `.` is, so a `foreach` source that destructures it prints the path the pattern moved jq's register to
    (`["a"]`, `[0]`) and a comma beside the destructure raises, as jq does
    ([#4576](https://github.com/rust-works/succinctly/issues/4576): `fold_source_register_markers` reads a `null` marker in any

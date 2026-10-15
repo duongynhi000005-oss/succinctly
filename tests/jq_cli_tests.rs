@@ -133662,6 +133662,149 @@ fn test_foreach_source_outer_marker_chain_empty_body_destructure_in_navigating_f
     Ok(())
 }
 
+/// #4655: an outer `$x` destructured with an `empty` body behind a bind whose source always emits
+/// (`(1,2) as $q | ...`, a literal, an object, a one-element array), as a `foreach` source in a
+/// navigating fold's body, raises in jq: the bind's body runs, and the pattern's step with it. The
+/// route skipped any bind ahead of the destructure, since its source may emit nothing, and the source
+/// was answered. A bind whose source emits nothing (`empty`, `select(false)`) never reaches the
+/// destructure and is answered, as in jq. Every row captured from jq 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_raises_4655(
+) -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((1,2) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach .[]? as $i (.; foreach ((1,2) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(. as $x | foreach .[]? as $i (.; foreach ((1,2) as $q | $x as [$a] | empty) as $y (.; .; .); .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (1 as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ({a:1} as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([1] as $q | $x as {a:$a} ?// [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((empty) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (select(false) | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((select(false)) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([select(false)] as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([.[]|select(.a)] as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($i as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((1|.) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ([1] as [$q] | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ({(empty):1} as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ({a:(empty)} as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((empty,empty) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (limit(0;1) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((1|empty) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((.[0]|.a?) as $q | $x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4616: a `foreach` source that binds a freshly built value to a variable and destructures the
 /// variable is a destructure of a node the register is not on, so the pattern's tracked `INDEX` step
 /// raises in jq. It was driven by value and answered, and `del`, `=` and `|=` wrote through the answer;

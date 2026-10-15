@@ -164,6 +164,17 @@ SOURCES = [
     ("xpat-chain-empty", "$x as {a:$a} ?// [$a] | empty"),
     ("try-xpat-chain-empty-catch", "try ($x as {a:$a} ?// [$a] | empty) catch ."),
     ("xpat-chain-var-empty", "$x as [$a] ?// $b | empty"),
+    # (#4655) a bind ahead of the destructure: its body runs whenever the bound source emits
+    ("bind-comma-xpat-empty", "(1,2) as $q | $x as [$a] | empty"),
+    ("bind-obj-xpat-empty", "{a:1} as $q | $x as [$a] | empty"),
+    ("bind-arr-chain-empty", "[1] as $q | $x as {a:$a} ?// [$a] | empty"),
+    ("bind-gen-xpat-empty", ".[]? as $q | $x as [$a] | empty"),
+    ("bind-none-xpat-empty", "empty as $q | $x as [$a] | empty"),
+    ("bind-sel-xpat-empty", "(select(false)) as $q | $x as [$a] | empty"),
+    ("bind-arrsel-xpat-empty", "[select(false)] as $q | $x as [$a] | empty"),
+    ("bind-var-xpat-empty", "$i as $q | $x as [$a] | empty"),
+    ("bind-keyexpr-xpat-empty", "{(empty):1} as $q | $x as [$a] | empty"),
+    ("bind-limit0-xpat-empty", "limit(0;1) as $q | $x as [$a] | empty"),
     ("try-xpat-arr-empty-catch", "try ($x as [$a] | empty) catch ."),
     ("try-xpat-arr-empty-catch-empty", "try ($x as [$a] | empty) catch empty"),
     ("try-xpat-arr-empty", "try ($x as [$a] | empty)"),
@@ -235,6 +246,9 @@ DOCS = [
 KNOWN_ACCEPT_WRONG = {
     # a comma beside a literal `null` destructure, on a `null` document, under `|=`/`=` (#4603)
     ("lit-null-comma", "null"),
+    # (#4655) a bind whose source may emit nothing is read as possibly skipping the destructure behind it
+    # (`.[]?` does not, on the element jq's loop holds), so the moved `reduce` body is answered where jq raises
+    ("bind-gen-xpat-empty", None),
 }
 
 
