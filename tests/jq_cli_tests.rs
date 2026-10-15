@@ -146441,3 +146441,90 @@ fn test_foreach_source_wrapped_alt_chain_on_untracked_entry_states_the_register_
         0,
     )])
 }
+
+/// #4660: a `foreach` UPDATE that is a comma, or an `and`/`or`, of verdict builtins keeps jq's
+/// register for the leading verdict even when a later one navigates. jq emits the leading verdict's
+/// boolean at the entry register first and only then runs (or raises in) the navigating one, so
+/// under a `?` the stream keeps `[0]` where the whole-UPDATE gate refused the leading emission too,
+/// and without it the raise names jq's own `"a" of 0`. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_update_verdict_next_to_a_navigating_verdict_keeps_the_leading_register_4660(
+) -> Result<()> {
+    let near = r#"Invalid path expression near attempt to access element "a" of 0"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(1), isempty(.a?)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; isempty(1) and isempty(first(.a?)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (false; (isempty(1), isempty(first(.a?))); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; isempty(empty) or isempty(first(.a?)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(1), isempty(.a?), isempty(2)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        // Without the `?` the leading emission is printed and then jq raises at the navigation.
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), isempty(.a?)); $k))",
+            "[0]\n",
+            near,
+            5,
+        ),
+        (
+            "[1]",
+            r"path(foreach .[]? as $k (0; isempty(1) and isempty(first(.a?)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // Controls: a navigating verdict *first* drops the stream (the raise comes before any
+        // emission), and a short-circuiting `or` never reaches its right side.
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(.a?), isempty(1)); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(foreach .[]? as $k (0; isempty(1) or isempty(first(.a?)); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        // The write twins refuse as jq does.
+        (
+            "[1]",
+            r"del(foreach .[]? as $k (0; (isempty(1), isempty(.a?)); $k))",
+            "",
+            near,
+            5,
+        ),
+    ])
+}
