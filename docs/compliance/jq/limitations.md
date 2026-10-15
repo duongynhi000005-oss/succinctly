@@ -849,11 +849,19 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `label`/`break` the chain's `?//` catches, so by value it emits twice) also behind a `try`, a `?`,
   `nth(n; ..)` with a literal `n`, a wrapper under a wrapper and a plain `$x` bind in front of the chain
   (`take_wrapped_bare_chain`), outside every fold body. Pinned by
-  `test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497`. **Still divergent**: a `limit` whose
-  count is a generator (`limit(1,2; CHAIN)` runs the chain once per count, ours answers three outputs where jq
-  prints two), a comma inside `first` (`first((CHAIN), 1)`), a chain passed as a `def` argument, the same
-  source inside another fold's UPDATE, and `reduce (1,2) as $i (.; first(CHAIN))`, which is refused where jq
-  answers.
+  `test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497`.
+
+  **Since [#4537](https://github.com/rust-works/succinctly/issues/4537)** the rest of that family prints as jq does.
+  The mechanism is not the `break`: the chain's destructured first emission fails `path_intact` at the end of `path()`, the
+  error unwinds into the chain's `?//` fork, and the retried bare alternative is the one delivered. `first`/`limit`/`nth`'s
+  bounded sink latched the consumer's refusal of that first emission and reported the whole walk stopped after the retry was
+  accepted, which dropped the siblings of `first(CHAIN)` in a comma (`path(first(CHAIN), .b)`) and the second count of
+  `limit(1,2; CHAIN)`. The source route now also reads a `limit` whose count is a comma of literals, a comma inside `first`
+  (`first((CHAIN), 1)`), a chain passed as a `def` argument, a nested `foreach` over `first(CHAIN)` in a `foreach` UPDATE and
+  `first(CHAIN)` as a `reduce`/`foreach` UPDATE or EXTRACT. Pinned by
+  `test_first_limit_nth_chain_in_path_mode_stops_nothing_and_emits_per_count_4537`. **Still divergent**: a `limit` whose
+  count is not a literal or a comma of literals, `limit(2; (CHAIN), 1)` as a `foreach` source (ours prints the register
+  twice where jq prints it once), and `reduce (1,2) as $i (.; limit(1,2; CHAIN))`, which is refused where jq answers.
 
 ## A fold over the register itself (#3790)
 

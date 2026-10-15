@@ -141086,6 +141086,87 @@ fn test_foreach_wrapped_first_of_a_chain_emits_once_in_path_mode_4497() -> Resul
     ])
 }
 
+/// #4537: the rows #4497 left. A consumer that refuses the chain's destructured first emission
+/// (jq's path error at the end of `path()`, which the chain's `?//` catches and retries onto the
+/// bare alternative) must not stop its siblings once the retry is accepted: `resolve_bounded_sink`
+/// latched the refused answer and returned `Stopped`, so `path(first(CHAIN), .b)` lost `.b` and
+/// `limit(1,2; CHAIN)` answered one output for jq's two. Plus the shapes the source route did not
+/// read: a comma inside `first`, a chain passed as a `def` argument, a nested `foreach` over
+/// `first(CHAIN)` in a `foreach` UPDATE, and `first(CHAIN)` as a `reduce`/`foreach` UPDATE or
+/// EXTRACT. Every jq side captured from jq 1.7.1.
+#[test]
+fn test_first_limit_nth_chain_in_path_mode_stops_nothing_and_emits_per_count_4537() -> Result<()> {
+    let doc: &'static str = r#"{"a":true}"#;
+    let two: &'static str = r#"{"a":true,"b":1}"#;
+    let chain = ". as {a:$a} ?// $a | .";
+    // (document, program with CHAIN, jq's output)
+    for (document, program, expected) in [
+        // The issue's five rows.
+        (
+            doc,
+            "path(foreach (limit(1,2; CHAIN)) as $k (.; .; .))",
+            "[]\n[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (first((CHAIN), 1)) as $k (.; .; .))",
+            "[]\n",
+        ),
+        (
+            doc,
+            "def f(g): foreach (first(g)) as $k (.; .; .); path(f(CHAIN))",
+            "[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (1,2) as $i (.; foreach (first(CHAIN)) as $k (.; .; .); .))",
+            "[]\n[]\n",
+        ),
+        (doc, "path(reduce (1,2) as $i (.; first(CHAIN)))", "[]\n"),
+        (
+            doc,
+            "path(reduce (1,2) as $i (.; foreach (first(CHAIN)) as $k (.; .; .)))",
+            "[]\n",
+        ),
+        // `first(CHAIN)` as the UPDATE or EXTRACT of a `foreach`.
+        (
+            doc,
+            "path(foreach (1,2) as $i (.; first(CHAIN); .))",
+            "[]\n[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (1,2) as $i (.; .; first(CHAIN)))",
+            "[]\n[]\n",
+        ),
+        // The count generator is the outer loop, the chain answered once per count.
+        (two, "[path(limit(1,2; CHAIN))]", "[[],[]]\n"),
+        (two, "[path(limit(2,1; CHAIN), .b)]", "[[],[],[\"b\"]]\n"),
+        (
+            doc,
+            "path(foreach (limit(1,2; CHAIN)) as $k (.; .; $k))",
+            "[]\n[]\n",
+        ),
+        // The consumer's refusal of the first emission does not stop the siblings.
+        (two, "[path(first(CHAIN), .b)]", "[[],[\"b\"]]\n"),
+        (two, "[path(nth(0; CHAIN), .b)]", "[[],[\"b\"]]\n"),
+        (two, "[path(first(CHAIN), first(CHAIN))]", "[[],[]]\n"),
+        (two, "[path(first(first(CHAIN), .b), .b)]", "[[],[\"b\"]]\n"),
+    ] {
+        // The rows hold `&'static str`, so the formatted program is leaked (a test, a few bytes).
+        let program: &'static str = Box::leak(program.replace("CHAIN", chain).into_boxed_str());
+        assert_path_rows_both_routes_3749(&[(document, program, expected, "", 0)])?;
+    }
+    // The write through a sibling of the chain reaches it.
+    assert_path_rows_both_routes_3749(&[(
+        two,
+        r"del(first(. as {a:$a} ?// $a | .), .b)",
+        "null\n",
+        "",
+        0,
+    )])
+}
+
 /// #4494 (the top-level `reduce` source): a `reduce` source that destructures a call whose `def`
 /// builds its result (`def f: {a:1}; f as {a:$a} | .`) raises at the pattern's tracked `INDEX` step
 /// in jq whatever the register is, as the `foreach` source does since #4452. The by-value drive
