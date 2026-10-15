@@ -2631,13 +2631,13 @@ is the revert that established what the other one costs.
    `test_foreach_source_nested_foreach_loop_variable_hands_the_register_on_4485`,
    `test_foreach_source_two_partial_register_stages_4485` and
    `test_foreach_source_def_parameter_bound_to_a_literal_4485`. Over the 24 operands added for #4485 and #4615 (`--stage-only`, 49,947
-   rows, jq 1.7.1, candidate vs a `main` build): MATCH 44,353 -> 44,850, REFUSE_WRONG 4,961 -> 4,497, ACCEPT_WRONG 494 -> 484 and DIFF 139 -> 116, 0
-   regressions, no lost match. A 50,027-row seeded sample of every operand (`--stage-only --sample 50000 --seed 4485`): MATCH 47,922 ->
-   47,938, REFUSE_WRONG 1,962 -> 1,946, ACCEPT_WRONG (36) and DIFF (106) unchanged, 0 regressions; a 60,027-row whole-grid sample (`--sample 60000
+   rows, jq 1.7.1, candidate vs a `main` build): MATCH 44,353 -> 44,854, REFUSE_WRONG 4,961 -> 4,497, ACCEPT_WRONG 494 -> 482 and DIFF 139 -> 114, 0
+   regressions, no lost match. A 50,027-row seeded sample of every operand (`--stage-only --sample 50000 --seed 4485`): MATCH 47,791 ->
+   47,826, REFUSE_WRONG 2,078 -> 2,045, ACCEPT_WRONG (46) unchanged and DIFF 110 -> 108, 0 regressions; a 60,027-row whole-grid sample (`--sample 60000
    --seed 77`): MATCH 58,069 -> 58,089, REFUSE_WRONG 1,883 -> 1,863, ACCEPT_WRONG (14) and DIFF (60) unchanged, 0 regressions. The
    marks change reaches every `foreach` emission, so a 60,027-row sample of the 453 `foreach` operands inside the 60 `reduce`/`foreach`-body
    contexts (`--stage-only --seed 4486`) was swept on its own: MATCH 56,864 -> 56,865, ACCEPT_WRONG (79) and REFUSE_WRONG (3,018) unchanged, 0
-   regressions; 380 `def`-with-literal-parameter programs in jq value mode, jq path mode and `yq` mode print byte-identical output on `main` and the
+   regressions (DIFF 66 -> 65); 380 `def`-with-literal-parameter programs in jq value mode, jq path mode and `yq` mode print byte-identical output on `main` and the
    candidate. `scripts/jq-bind-origin-fuzz.py` (6,000
    programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **What it leaves**: the `foreach`-inside-another-fold-body
    rows of #4615 (`foreach (1,2) as $j (.; (foreach CHAIN as $k (.; .; .)); .)` on an untracked entry, still refused where jq answers):
