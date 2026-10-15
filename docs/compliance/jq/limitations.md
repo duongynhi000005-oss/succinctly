@@ -2634,10 +2634,11 @@ is the revert that established what the other one costs.
    ([#4597](https://github.com/rust-works/succinctly/issues/4597)): `first({a:1}, .)` raises, `first(., {a:1})` answers. The rest of
    #4597 reads the wrappers as they generate (`RegisterSpine::fresh_among_leading`): `try`/`?` every item, `first`/`limit(n; ..)`
    the first n outputs (`limit(2; ., {a:1}, .)` raises, `limit(2; ., ., {a:1})` answers), `nth(k; ..)` the output at index k,
-   and a nested comma counting its items. Like the bare comma, the scan asks what the source *can* generate: an `error` or a `break`
-   ahead of the fresh item is not read as hiding it, so `try (., error("x"), {a:1}) | . as {a:$a} | .` is routed to the resolver,
-   which models the cut and answers as jq does, but inside another fold's body the same routing can refuse a row jq answers (the
-   safe direction). A `reduce` stage that starts from `.` and keeps its accumulator hands `.` on, and
+   and a nested comma counting its items. Inside a wrapper an `error` or `break` ahead of the fresh item hides it (the items behind
+   it are not generated), so `try (., error("x"), {a:1}) | . as {a:$a} | .` answers, as it did before. The bare comma stage keeps
+   asking what it *can* generate, as #4582 did (routing a source the resolver models exactly costs a refusal at worst, where the
+   by-value drive can accept what jq refuses), so `(., error("x"), {a:1}) | . as {a:$a} | .` is routed, but an
+   `isempty`/`any`/`all` consumer behind a stage whose cut precedes the fresh item is not read. A `reduce` stage that starts from `.` and keeps its accumulator hands `.` on, and
    `isempty(g)`/`any(g; c)`/`all(g; c)` run their generator where they stand, so `({a:1}, .) | isempty(. as {a:$a} | .)` raises.
    A `label` is read like a `try`, and an item that fans out stops the count (withholding a route, never adding
    one). Inside another fold's body such a source raises as in jq but with the

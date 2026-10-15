@@ -948,8 +948,8 @@ OPERANDS = [
     # (#4600) the wrappers and predicates of the second #4597 block as the nested source's generator: a fresh
     # item certainly among the outputs raises jq's catchable error, which the resolver now models (the
     # `certain_fresh_destructure` claim), and one that is not (`first(., {a:1})`, `limit(2; ., ., {a:1})`)
-    # answers. The residual contrasts are an `error`/`break` ahead of the fresh item behind
-    # `isempty`/`any`/`all` (routed, so refused where jq answers: a lost match in the safe direction).
+    # answers. The contrasts are an `error`/`break` ahead of the fresh item inside a wrapper or behind
+    # `isempty`/`any`/`all`, which hides it (jq answers, and so does the build).
     "(reduce 1 as $i (.; -(reduce (try (., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
     "(reduce 1 as $i (.; -(reduce (label $f | (., {a:1}) | . as {a:$a} | .) as $j (.; .))))",
     "(reduce 1 as $i (.; -(reduce (limit(2; ., {a:1}, .) | . as {a:$a} | .) as $j (.; .))))",

@@ -50375,17 +50375,15 @@ fn pattern_performs_a_step(patterns: &[Pattern]) -> bool {
     }
 }
 
-/// An item of a comma that yields one output and cannot cut the generation short.
+/// An item of a comma that yields exactly one output and cannot cut the generation short.
 fn is_plain_item(item: &Expr) -> bool {
     (is_identity_stage(item)
         || matches!(
             item,
-            Expr::Literal(_)
-                | Expr::Var(_)
-                | Expr::TrackedVar(_)
-                | Expr::Array(_)
-                | Expr::Object(_)
-        ))
+            Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Array(_)
+        )
+        // An object yields nothing when a value or key does (`{a:empty}`).
+        || (matches!(item, Expr::Object(_)) && yields_exactly_one_value(item)))
         && !may_cut_generation(item)
 }
 
@@ -51542,8 +51540,8 @@ impl<'e> RegisterSpine<'e> {
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 capped(self, inner, 1, budget)
             }
-            // A `label` generates every item until a `break` ends it; like the bare comma, the scan
-            // asks what can be generated.
+            // A `label` generates every item until a `break` ends it, which a wrapper's scan reads as the
+            // end of what is generated (`cut_aware`).
             Expr::Label { body: inner, .. } => self.fresh_among_leading(inner, budget, true),
             Expr::Limit { n, expr: inner } if limit_takes_some(n) => {
                 let take = limit_literal_count(n).map_or(1, |count| count.ceil() as usize);
@@ -87060,6 +87058,7 @@ mod tests {
             // A raise that may not be reached, or not be this one.
             ("(., error(\"x\"), {a:1}) as {a:$a} | .", false),
             ("(., {a:error(\"x\")}) as {a:$a} | .", false),
+            ("(., {a:empty}) as {a:$a} | .", false),
             ("(., {a:1}) as {a:$a} ?// $a | .", false),
             ("(., {a:1}) as $x | .", false),
             ("(., .) as {a:$a} | .", false),
