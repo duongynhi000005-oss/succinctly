@@ -2328,8 +2328,9 @@ is the revert that established what the other one costs.
    not run: `if $x then . else $x as {b:$b} | . end` is answered), and a `null`/`false` one not behind a `select`; the body of a
    `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). A `select($x)` in front of a destructure of `.` passes the register on by `$x`'s own truthiness whatever node it is bound to
    (since [#4604](https://github.com/rust-works/succinctly/issues/4604) any truthy marker is read, not only one equal to the
-   accumulator; pinned by `test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604`; the refusal is the resolver's guess, so an enclosing `?`/`try` around the whole fold does not catch it where jq's own error is caught, as for the plain `. as [$a]` form). Still accepted: that moved body
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `if $x`, `select($x|not)` on a `null` document)). A
+   accumulator; pinned by `test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604`; the refusal is the resolver's guess, so an enclosing `?`/`try` around the whole fold does not catch it where jq's own error is caught, as for the plain `. as [$a]` form). An `if $x`/`if $x|not` on a bound marker runs one branch, fixed by `$x`'s value, so the source is read with the taken branch
+   (`resolve_marker_ifs`; pinned by `test_fold_source_if_on_a_marker_reads_the_taken_branch_4604`). Still accepted: that moved body
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `select($x|not)` on a `null` document)). A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by
