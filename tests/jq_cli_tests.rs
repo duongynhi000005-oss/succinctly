@@ -64132,6 +64132,282 @@ fn test_literal_null_bool_destructure_in_a_fold_source_raises_off_the_register_4
     Ok(())
 }
 
+/// #4617: a `?`/`try` around a literal `null`/boolean destructure that is a nested fold's source. The
+/// destructure's path error is caught and the source emits nothing, so the enclosing `foreach`'s UPDATE
+/// emits nothing and its next step gets a `null` accumulator while jq's register stays on the document.
+/// The fold took that `null` for the register (`FoldSourceAmbient::register_non_null` read the
+/// accumulator), drove the source by value, and the inner fold emitted a `null` that `path()` refused
+/// uncatchably (exit 5) where jq answers silently. The fold's live register is read instead
+/// (`FoldRegister::register_is_non_null`). Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update_4617() -> Result<()>
+{
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "[true]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .))",
+            "{\"a\":null}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) |= 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) |= 9",
+            "[true]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) |= 9",
+            "{\"a\":null}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) = 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) = 9",
+            "[true]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .); .)) = 9",
+            "{\"a\":null}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) = 9",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(reduce (1,2) as $i (.; foreach ((null as {b:$b} | .)?) as $y (.; .; .))) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .)) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((null as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach ((null as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((null as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try (null as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((true as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach ((true as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((true as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((false as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; foreach ((false as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach ((false as [$b] | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; reduce ((null as {b:$b} | .)?) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $i (.; reduce ((null as {b:$b} | .)?) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; reduce ((null as {b:$b} | .)?) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an
