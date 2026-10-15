@@ -50471,11 +50471,17 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     off_body: bool,
 ) -> Vec<(*const Tracked, bool)> {
     let mut markers = Vec::new();
+    // #4621: off the register a `?//` chain of destructuring alternatives raises as a single pattern
+    // does: each alternative's step raises on a marker bound elsewhere, the next is tried, and the
+    // last one's raise stands. A chain with a bare `$var` alternative runs it without a step.
+    let destructures = |patterns: &[Pattern]| {
+        routes_destructuring(patterns) || (off_body && patterns_all_destructuring_chain(patterns))
+    };
     if S::TAG != EvalTag::Jq
         || fold_body::source_moved_here()
         || !any_subexpr(
             source,
-            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if destructures(patterns)),
         )
     {
         return markers;
@@ -50504,7 +50510,7 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         let destructures = |e: &Expr| {
             any_subexpr(
                 e,
-                &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+                &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if destructures(patterns)),
             )
         };
         if any_subexpr(source, &mut |e| match e {

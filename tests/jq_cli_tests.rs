@@ -133283,6 +133283,70 @@ fn test_foreach_source_outer_marker_empty_body_destructure_in_navigating_fold_ra
     Ok(())
 }
 
+/// #4621: the `?//` chain spelling of #4626's outer-marker destructure with an `empty` body, as the
+/// source of a `foreach` inside the body of a navigating `foreach`. Every alternative's tracked `INDEX`
+/// step raises on a `$x` bound elsewhere than the register and the last one's raise stands, bare or
+/// under a `try ... catch H` whose handler emits. A chain with a bare `$var` alternative runs it, which
+/// performs no step, so jq answers. Every row captured from jq 1.7.1; stdout and the exit status are
+/// pinned.
+#[test]
+fn test_foreach_source_outer_marker_chain_empty_body_destructure_in_navigating_fold_raises_4621(
+) -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as {a:$a} ?// [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as $b ?// [$a] | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as [$a] ?// $b | empty) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] ?// $b | empty) catch .) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+    ];
+    for &(input, filter, stdout, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}` on {input}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4616: a `foreach` source that binds a freshly built value to a variable and destructures the
 /// variable is a destructure of a node the register is not on, so the pattern's tracked `INDEX` step
 /// raises in jq. It was driven by value and answered, and `del`, `=` and `|=` wrote through the answer;
