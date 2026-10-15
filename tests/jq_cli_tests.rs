@@ -133669,6 +133669,7 @@ fn test_foreach_source_outer_marker_chain_empty_body_destructure_in_navigating_f
 /// was answered. A bind whose source emits nothing (`empty`, `select(false)`) never reaches the
 /// destructure and is answered, as in jq. Every row captured from jq 1.7.1.
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_source_outer_marker_destructure_behind_an_always_emitting_bind_raises_4655(
 ) -> Result<()> {
     let rows: &[(&str, &str, &str, i32)] = &[
