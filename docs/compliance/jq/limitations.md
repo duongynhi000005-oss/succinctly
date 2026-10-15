@@ -705,7 +705,16 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `foreach` UPDATE that answered `["a"]` where jq prints nothing, which this gate then dropped). Left refused: a source through `first`/`limit`/`nth` (a `?//` chain beneath one that
   yields several outputs retries after the consumer's stop and emitted an extra element:
   `foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three here, so the loss was
-  kept rather than traded for a wrong count), a `def` call with arguments and a nested `foreach`. A
+  kept rather than traded for a wrong count). Since
+  [#4615](https://github.com/rust-works/succinctly/issues/4615) the gate also reads through a call to a
+  `def` with arguments (`def f(g): g; foreach f(CHAIN) ...`, a `def` written in the source too), through the
+  argument it shares into the body, and through a nested `foreach` whose INIT, UPDATE and EXTRACT cannot
+  move the register and whose loop pattern is a bare variable: `def f(g): g; path(. as $x | 1 |
+  (foreach f((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)` and the same chain as the source of a nested
+  `foreach` are jq's `[]` (both refused "with result [[1],[1]]"). The call is read as
+  `update_navigates_within` reads one, from the same bound-body cache, under the spine's call budget
+  (`SPINE_CALL_BUDGET`), which bounds how often a recursive body is read (past it the source is refused, as before). Not read: the `reduce` twin
+  of either, and the same sources inside another fold's body (what #4485's paragraph below leaves). A
   `null` source on a `null` document is unchanged: the first alternative *succeeds* there and
   jq's path is `["a"]`, which was already a `DIFF` on `main`. Pinned by
   `test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489`. Over the 91 `foreach`
@@ -2602,6 +2611,36 @@ is the revert that established what the other one costs.
    (`foreach (., 1) as $j (.; .; $j) | CHAIN` answers the root twice where jq answers `["a"]` then `[]`); and
    `first(CHAIN)` / `limit(1; CHAIN)` as the source on a register that is not `null`, where jq's path mode emits the first
    output once and the by-value drive emits it twice (value mode emits it twice in both tools).
+   [#4485](https://github.com/rust-works/succinctly/issues/4485) closes three of those. **A nested `foreach` whose UPDATE or
+   EXTRACT is its loop variable** (`foreach (., 1) as $j (.; .; $j) | CHAIN`): `$j` is the source element, the register's own
+   node wherever the source handed the register on, so it is read as `.` is (`body_hands_on_loop_var`, one bare pattern only:
+   a `?//` chain of loop variables leaves a later one `null`). **Two stages that are the register on only some outputs in one
+   pipe** (`foreach (.,1) as $j (.; .; .) | (.,1) | CHAIN`, or `(.,1) | (.,1) | CHAIN`): the walk stopped at the second because
+   the resolver aborted partway (`Invalid path expression with result 1` after the first output), and the cause was not the
+   second stage. Everything a `foreach` emits is handed to its consumer from inside `resolve_foreach`'s UPDATE/EXTRACT, which hold the
+   fold-body marks (`fold_body::foreach_body`), so the stages after a nested `foreach` resolved at `fold_body::depth() >= 1`, where
+   `resolve_as_pattern`'s "the body performs no step, so the next step checks the untracked element" hand-on is off, and the `1`
+   was refused. It reproduces on `main` with one partial stage after a nested `foreach` (`foreach . as $j (.;.;.) | (1,.) | CHAIN`).
+   A `foreach` now emits at the marks it was entered with (`fold_body::marks`/`restore`, in `resolve_foreach`'s `stating_sink`), which is
+   where jq runs what follows a `foreach`, and the walk keeps a second partial stage `Partial`. **A `$`-parameter bound to a
+   literal as the body's last stage** (`def f($x): . as {a:$a} ?// $a | $x; f(2)` on `null`: jq `["a"]`, here `[]`; the `{}` row of
+   the issue was #4512's): the walk placed the call, the resolver did not, because the literal is substituted as a shared
+   argument that `cannot_move_register` did not read (the same body with `2` written inline worked, as did an argument that is a
+   node, which is bound by an `as`); it is read as its argument now. Pinned by
+   `test_foreach_source_nested_foreach_loop_variable_hands_the_register_on_4485`,
+   `test_foreach_source_two_partial_register_stages_4485` and
+   `test_foreach_source_def_parameter_bound_to_a_literal_4485`. Over the 24 operands added for #4485 and #4615 (`--stage-only`, 49,947
+   rows, jq 1.7.1, candidate vs a `main` build): MATCH 44,353 -> 44,850, REFUSE_WRONG 4,961 -> 4,497, ACCEPT_WRONG 494 -> 484 and DIFF 139 -> 116, 0
+   regressions, no lost match. A 50,027-row seeded sample of every operand (`--stage-only --sample 50000 --seed 4485`): MATCH 47,922 ->
+   47,938, REFUSE_WRONG 1,962 -> 1,946, ACCEPT_WRONG (36) and DIFF (106) unchanged, 0 regressions; a 60,027-row whole-grid sample (`--sample 60000
+   --seed 77`): MATCH 58,069 -> 58,089, REFUSE_WRONG 1,883 -> 1,863, ACCEPT_WRONG (14) and DIFF (60) unchanged, 0 regressions. `scripts/jq-bind-origin-fuzz.py` (6,000
+   programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **What it leaves**: an EXTRACT that
+   emits the register on some outputs and something else on others (`foreach (., 1) as $j (.; .; ., 1) | CHAIN` answers the root
+   four times where jq answers `["a"]` `[]` `["a"]` `[]`: the walk reads a comma EXTRACT as opaque); and the `foreach`-inside-another-fold-body
+   rows of #4615 (`foreach (1,2) as $j (.; (foreach CHAIN as $k (.; .; .)); .)` on an untracked entry, still refused where jq answers):
+   lifting #4489's `fold_body::depth() == 0` gate alone does not place them, the refusal then comes from the outer
+   `foreach`'s own emission, whose UPDATE is the nested fold (`step_cannot_move` is false, so the outer emission cannot state the
+   register), and stating it there is the `try`-in-UPDATE row #4609's whole-grid sample found. Filed separately.
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node
