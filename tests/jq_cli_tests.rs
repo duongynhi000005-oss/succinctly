@@ -134258,6 +134258,222 @@ fn test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in
     Ok(())
 }
 
+/// #4644: #4635's two run branches without the `[ ... ]` around them: the right operand of a `//` whose
+/// left cannot yield a truthy value, and the handler of a `try` whose body can only raise, as the
+/// whole source of a `foreach`/`reduce` in a moved `reduce` body. jq runs them and their destructure
+/// of `.` raises because `.` is not the register; the register walk read both as opaque, so `del`,
+/// `=` and `|=` wrote through the answer. Controls: a truthy left, a body that does not raise and a
+/// branch that never runs raise nothing (a bare branch under `if`, `limit`, `first` or `nth` may never run, and
+/// is answered). Every row captured from jq 1.7.1; stdout and the exit
+/// status are pinned.
+#[test]
+fn test_reduce_body_source_destructuring_dot_behind_a_bare_alternative_or_handler_raises_4644(
+) -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false|not|not) // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (null // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (empty // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"path(. as $x | reduce .[]? as $i (.; foreach (try error("x") catch (. as {b:$b}|.)) as $y (.; .; .)))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // false // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // (null // (. as {b:$b}|.))) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try error catch (false // (. as {b:$b}|.))) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try (. | error) catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (true // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false|not) // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try 1 catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try error catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // select(false)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // (select(false) | . as {b:$b} | .)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try (select(false) | error) catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | reduce .[]? as $i (.; foreach (false // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | reduce .[]? as $i (.; foreach (false // (. as {b:$b}|.)) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; reduce (false // (. as {b:$b}|.)) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | reduce .[]? as $i (.; foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | reduce .[]? as $i (.; foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .))) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; reduce (try error catch (. as {b:$b}|.)) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // (. as {b:$b} | .) // 3) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b} | .)) // 3) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (limit(1; ., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (if false then (false // (. as {b:$b} | .)) else . end) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (if .a then . else (false // (. as {b:$b} | .)) end) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (first(., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (nth(0; ., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (limit(1; ., try error catch (. as {b:$b} | .))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, stdout, code) in rows {
+        let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (out.as_str(), status),
+            (*stdout, *code),
+            "`{filter}` on {doc}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4604: `select($x)` passes the register on by `$x`'s own truthiness, whatever node it is bound to, so
 /// a fold source `select($x) | . as {a:$a} | .` in the body of a `reduce` whose source moved the register
 /// destructures `.`, which is the accumulator and not the register there, and raises in jq. The

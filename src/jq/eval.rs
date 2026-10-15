@@ -53200,11 +53200,16 @@ fn caught_destructure_in_unrouted_body(
 /// brackets is answered everywhere else), so the source was driven by value. Read with the brackets
 /// dropped, for a moved body only.
 fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
-    any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
-        && source_destructures_register(&drop_array_wrappers(source), true)
+    (any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
+        && source_destructures_register(&drop_array_wrappers(source), true))
+        // #4644: the same two run branches with no brackets, where they are the whole source: that is
+        // the only place a branch is known to run (under an `if`, a `limit` or a `first` it may not).
+        || matches!(unwrap_paren(source), Expr::Alternative(..) | Expr::Try { catch: Some(_), .. })
+            && run_branch_of_bind_chain(source)
+                .is_some_and(|chain| source_destructures_register(chain, true))
 }
 
-/// `source` with every `[E]` whose `E` is a plain bind chain replaced by `E`
+/// `source` with every `[E]` (and, #4644, every bare `//` or `try ... catch` run branch) whose `E` is a plain bind chain replaced by `E`
 /// ([`array_wrapped_destructure_of_register`]). Not an `E` with control flow around the bind
 /// (`select(false) | ...`, `limit(0; ...)`, an `if`, `first(...)`): the destructure may sit on a branch
 /// that never runs, which jq answers and the syntactic walk would refuse.
@@ -53226,6 +53231,8 @@ fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
     match unwrap_paren(e) {
         _ if is_plain_bind_chain(e) => Some(e),
         Expr::Alternative(left, right) if never_truthy(left) => run_branch_of_bind_chain(right),
+        // `A // B` runs `A` first, so the run branch of `A` always runs (`(false // X) // 3`, #4644).
+        Expr::Alternative(left, _) => run_branch_of_bind_chain(left),
         Expr::Try {
             expr: body,
             catch: Some(handler),
