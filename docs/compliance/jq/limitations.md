@@ -2614,7 +2614,8 @@ is the revert that established what the other one costs.
    [#4485](https://github.com/rust-works/succinctly/issues/4485) closes three of those. **A nested `foreach` whose UPDATE or
    EXTRACT is its loop variable** (`foreach (., 1) as $j (.; .; $j) | CHAIN`): `$j` is the source element, the register's own
    node wherever the source handed the register on, so it is read as `.` is (`body_hands_on_loop_var`, one bare pattern only:
-   a `?//` chain of loop variables leaves a later one `null`). **Two stages that are the register on only some outputs in one
+   a `?//` chain of loop variables leaves a later one `null`); an EXTRACT that is a comma of it (or `.`) and a value that moves nothing
+   (`., 1`) emits the register on some outputs and not on others, so it is read as a partial stage (`extract_leaves_hand_on`). **Two stages that are the register on only some outputs in one
    pipe** (`foreach (.,1) as $j (.; .; .) | (.,1) | CHAIN`, or `(.,1) | (.,1) | CHAIN`): the walk stopped at the second because
    the resolver aborted partway (`Invalid path expression with result 1` after the first output), and the cause was not the
    second stage. Everything a `foreach` emits is handed to its consumer from inside `resolve_foreach`'s UPDATE/EXTRACT, which hold the
@@ -2638,9 +2639,7 @@ is the revert that established what the other one costs.
    contexts (`--stage-only --seed 4486`) was swept on its own: MATCH 56,864 -> 56,865, ACCEPT_WRONG (79) and REFUSE_WRONG (3,018) unchanged, 0
    regressions; 380 `def`-with-literal-parameter programs in jq value mode, jq path mode and `yq` mode print byte-identical output on `main` and the
    candidate. `scripts/jq-bind-origin-fuzz.py` (6,000
-   programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **What it leaves**: an EXTRACT that
-   emits the register on some outputs and something else on others (`foreach (., 1) as $j (.; .; ., 1) | CHAIN` answers the root
-   four times where jq answers `["a"]` `[]` `["a"]` `[]`: the walk reads a comma EXTRACT as opaque); and the `foreach`-inside-another-fold-body
+   programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **What it leaves**: the `foreach`-inside-another-fold-body
    rows of #4615 (`foreach (1,2) as $j (.; (foreach CHAIN as $k (.; .; .)); .)` on an untracked entry, still refused where jq answers):
    lifting #4489's `fold_body::depth() == 0` gate alone does not place them, the refusal then comes from the outer
    `foreach`'s own emission, whose UPDATE is the nested fold (`step_cannot_move` is false, so the outer emission cannot state the

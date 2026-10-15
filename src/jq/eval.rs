@@ -36877,6 +36877,25 @@ fn body_hands_on_loop_var(e: &Expr, patterns: &[Pattern]) -> bool {
     }
 }
 
+/// Whether every output of a nested `foreach`'s EXTRACT is either the loop variable or the state
+/// ([`body_hands_on_loop_var`]) or a value that moves nothing ([`cannot_move_register`]), at least one
+/// of the first kind: a comma of them (`., 1`) emits the register's node on some outputs and not on
+/// others, and the stages after it meet the register on the first (#4485).
+fn extract_leaves_hand_on(e: &Expr, patterns: &[Pattern]) -> bool {
+    match e {
+        Expr::Paren(inner) => extract_leaves_hand_on(inner, patterns),
+        Expr::Comma(items) => {
+            items
+                .iter()
+                .all(|item| body_hands_on_loop_var(item, patterns) || cannot_move_register(item))
+                && items
+                    .iter()
+                    .any(|item| body_hands_on_loop_var(item, patterns))
+        }
+        other => body_hands_on_loop_var(other, patterns),
+    }
+}
+
 /// Flatten an expression into the list of path components it denotes.
 ///
 /// `Pipe` and `Paren` are transparent and `Identity` contributes nothing, so
@@ -52089,11 +52108,16 @@ impl<'e> RegisterSpine<'e> {
                         && body_hands_on_loop_var(update, patterns)
                         && extract
                             .as_deref()
-                            .map_or(true, |extract| body_hands_on_loop_var(extract, patterns)) =>
+                            .map_or(true, |extract| extract_leaves_hand_on(extract, patterns)) =>
                     {
-                        match self.reach(input) {
-                            Reach::HandsOn => Reach::HandsOn,
-                            Reach::Partial => Reach::Partial,
+                        // An EXTRACT that is the register on some outputs and a value that moves
+                        // nothing on the others fans the register out as a comma stage does.
+                        let fans_out = extract
+                            .as_deref()
+                            .is_some_and(|extract| !body_hands_on_loop_var(extract, patterns));
+                        match (self.reach(input), fans_out) {
+                            (Reach::HandsOn, false) => Reach::HandsOn,
+                            (Reach::HandsOn | Reach::Partial, _) => Reach::Partial,
                             _ => Reach::Opaque,
                         }
                     }

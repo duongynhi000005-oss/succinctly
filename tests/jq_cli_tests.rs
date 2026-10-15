@@ -143759,6 +143759,50 @@ fn test_foreach_source_nested_foreach_loop_variable_hands_the_register_on_4485()
             "[]\n[]\n",
             0,
         ),
+        // An EXTRACT that is the register on some outputs and a value that moves nothing on the others
+        // (`., 1`) fans it out as a comma stage does.
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; ., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; $j, 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; 1, .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[\"a\"]\n[]\n[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach . as $j (.; .; ., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach (foreach (., 1) as $j (.; .; ., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .)) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (foreach (., 1) as $j (.; .; ., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"5",
+            r#"path(foreach (foreach (., 1) as $j (.; .; ., "x") | . as {a:$a} ?// $a | .) as $k (.; .; .))"#,
+            "[]\n[]\n[]\n[]\n",
+            0,
+        ),
     ];
     for &(doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
