@@ -1086,6 +1086,20 @@ OPERANDS = [
     "(reduce (def f: ., {a:1}; f as {a:$a} ?// $a | .) as $k (.; .))",
     "(reduce (def f: ., {a:1}; f as [$a] ?// {a:$a} | .) as $k (.; .))",
     "(reduce (def f: ., {a:1}; f as {a:$a} | $a) as $k (.; .))",
+    # (#4665) a fresh item handed through a call: a closure-taking `def` handed a comma, and a call whose body
+    # hands the register on next to a fresh value as the pipe stage ahead of `. as P`. The contrasts: an
+    # argument that is all the register, a `first(f)`/`limit(1; f)` that stops before the fresh item, a `$`-style
+    # parameter beside the closure one.
+    "(reduce (def f(x): x; f(., {a:1}) as {a:$a} | .) as $k (.; .))",
+    "(foreach (def f(x): x; f(., {a:1}) as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $k (.; .))",
+    "(reduce ((def f: ., {a:1}; f) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (def g: ., {a:1}; def f: g; f | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f($y; x): x; f(1; (., {a:1})) as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f(x): x; f(., .) as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: ., {a:1}; first(f) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (def f: ., {a:1}; limit(1; f) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce 1 as $i (.; reduce (def f: ., {a:1}; f | . as {a:$a} | .) as $j (.; .)))",
     "(reduce (def f: ., {a:1}; f as $x | $x as {a:$a} | .) as $k (.; .))",
     "(reduce 1 as $i (.; reduce (def f: ., {a:1}; f as {a:$a} | .) as $j (.; .)))",
     "(reduce (def f: {a:1}; f as {a:$a} | .) as $k (.; reduce (def g: {b:1}; g as {b:$b} | .) as $j (.; .)))",
