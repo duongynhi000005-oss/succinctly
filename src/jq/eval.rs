@@ -51343,7 +51343,7 @@ fn comma_first_leaf_is_dot(e: &Expr) -> bool {
     match unwrap_bind_source(e) {
         Expr::Comma(items) => items.first().is_some_and(|first| {
             is_identity_stage(first)
-                || takes_only_an_identity_leaf(first)
+                || takes_only_an_identity_leaf(peel_try_wrappers(first))
                 || comma_first_leaf_is_dot(first)
         }),
         _ => false,
@@ -52812,14 +52812,11 @@ impl<'e> RegisterSpine<'e> {
                 // #4674: also behind a `try`/`?` that wraps the wrapper alone, but only in a moved body,
                 // where the raise is certain: elsewhere the destructure of `.` can succeed (a `foreach`
                 // EXTRACT under a `foreach` that moved nothing) and the refusal would lose an answer.
-                let caught = matches!(
-                    unwrap_bind_source(other),
-                    Expr::Try { catch: None, .. } | Expr::Optional(_)
-                );
+                let bare = peel_try_wrappers(other);
+                let caught = !core::ptr::eq(bare, unwrap_bind_source(other));
                 if self.taken_first_is_dot
-                    && (!self.through_reduce || fold_body::source_moved_here())
-                    && (!caught || fold_body::source_moved_here())
-                    && takes_only_an_identity_leaf(peel_try_wrappers(other))
+                    && (!(self.through_reduce || caught) || fold_body::source_moved_here())
+                    && takes_only_an_identity_leaf(bare)
                 {
                     return Reach::HandsOn;
                 }

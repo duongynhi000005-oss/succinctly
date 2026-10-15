@@ -142613,6 +142613,13 @@ fn test_reduce_source_first_of_register_comma_nested_or_behind_a_try_in_a_moved_
         ),
         (
             r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(try first(., {a:1}), 2) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
             r"[path(reduce .[]? as $i (.; foreach (try first(., {a:1}) | . as {a:$a} | .) as $j (.; .; .)))]",
             "",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
