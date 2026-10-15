@@ -142534,6 +142534,18 @@ fn test_reduce_source_try_around_first_of_register_comma_alone_raises_in_a_moved
             "[[]]\n",
             0,
         ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (first(., {a:1}) | try (reduce . as {a:$a} (0; .))) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (first(., {a:1}) | try (foreach . as {a:$a} (0; .; .))) as $j (.; .)))",
+            "null\n",
+            0,
+        ),
     ];
     for (doc, filter, stdout, code) in rows {
         let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;

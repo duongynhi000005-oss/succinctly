@@ -51331,12 +51331,19 @@ fn strip_try_wrappers(e: &Expr) -> &Expr {
 }
 
 /// Whether a `try` or `?` in `source` has a destructure inside its body (#4676): only such a one can
-/// catch the destructure's raise. One around a wrapper alone (`try first(., X) | . as {a:$a} | .`)
+/// catch the destructure's raise (conservative: any bind, `reduce` or `foreach` in the body counts, and
+/// a `try ... catch H` around the wrapper is left opaque, [`strip_try_wrappers`] strips none). One around a wrapper alone (`try first(., X) | . as {a:$a} | .`)
 /// leaves the destructure outside the catch.
 fn try_covers_destructure(source: &Expr) -> bool {
     any_subexpr(source, &mut |e| match e {
         Expr::Try { expr, .. } | Expr::Optional(expr) => {
-            any_subexpr(expr, &mut |inner| matches!(inner, Expr::AsPattern { .. }))
+            // A `reduce`/`foreach` loop pattern destructures its source too (#4676 review).
+            any_subexpr(expr, &mut |inner| {
+                matches!(
+                    inner,
+                    Expr::AsPattern { .. } | Expr::Reduce { .. } | Expr::Foreach { .. }
+                )
+            })
         }
         _ => false,
     })
@@ -51492,7 +51499,8 @@ struct RegisterSpine<'e> {
     /// Always `false` for an ordinary walk.
     dot_fresh: bool,
     /// Whether `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` are read as handing the register
-    /// on (#4667): a register walk over a source with no `try`/`?`. A `try` around the destructure
+    /// on (#4667): a register walk over a source where no `try`/`?` holds a destructure
+    /// ([`try_covers_destructure`], #4676). A `try` around the destructure
     /// that follows catches the raise jq makes, which the loud refusal this reads into cannot.
     taken_first_is_dot: bool,
     /// In a `fresh_only` walk, whether the stage that made `.` fresh ([`dot_fresh`](Self::dot_fresh))
