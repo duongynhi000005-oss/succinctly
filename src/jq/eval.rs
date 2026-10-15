@@ -145793,7 +145793,10 @@ mod touched_edge_cases_2999 {
             ("isempty(foreach (1,2) as $i (1; .a; .))", false),
             ("isempty(foreach (1,2) as $i (1; try .a; .))", false),
             ("isempty(reduce (1,2) as $i (1; try .a))", false),
-            ("isempty(first(foreach (1,2) as $i (null; try .a; .)))", false),
+            (
+                "isempty(first(foreach (1,2) as $i (null; try .a; .)))",
+                false,
+            ),
             ("isempty((foreach (1,2) as $i (1; try .a; .), f))", true),
         ] {
             assert_eq!(fans_out(&parse(src).unwrap()), fans, "fans_out({src})");

@@ -74222,7 +74222,27 @@ fn test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_o
             "",
             0,
         ),
-
+        (
+            r#"{"a":true}"#,
+            r"path(.a and any(true; select(.)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a and any(true; select(.)))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"try del(.a and any(true; select(.) | error("boom"))) catch ."#,
+            "\"boom\"\n",
+            "",
+            0,
+        ),
     ])
 }
 
@@ -77233,13 +77253,12 @@ fn test_reduce_update_try_body_navigation_is_caught_4459() -> Result<()> {
 /// untracked entry by #3826 and a `def` call or `reduce` of one by #3826 too, see
 /// [`test_pipe_stage_reads_the_backtracked_register_verdict_3758`],
 /// [`test_verdict_stage_on_an_untracked_entry_3826`] and
-/// [`test_verdict_stage_behind_a_def_or_reduce_3826`]). And a
-/// computed `true` that decides under a `cond` on an untracked entry
-/// (`.a and any(true; select(.))`, an `and` right operand) is ambiguous -- it
-/// may be the carried register, whose position is not known -- so jq's `["a"]`
-/// is refused as an uncatchable guess, and so is a `cond` that raises there
-/// (`try ... catch .` would answer `"boom"` in jq). (A generator of literals
-/// such as `first(2, 3)` was refused here until #3862: each sibling of its comma now
+/// [`test_verdict_stage_behind_a_def_or_reduce_3826`]). (A computed `true` that decides
+/// under a `select(f)` `cond` on an untracked entry, `.a and any(true; select(.))`, an `and` right
+/// operand, was refused here as an ambiguous guess until #4641: such a `cond` navigates nothing, so
+/// it is evaluated by value as `any(true; .)` always was, see
+/// [`test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_or_def_4641`]. A
+/// generator of literals such as `first(2, 3)` was refused until #3862: each sibling of its comma now
 /// states the register on its own, see
 /// [`test_comma_siblings_state_the_register_on_their_own_3862`].) Pinned on both
 /// routes so lifting any is a deliberate change; the jq answers are in each row.
@@ -77271,24 +77290,6 @@ fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
             r"path(. as $x | 1 | isempty(def f: 2; f) | $x)",
             "[]",
             r#"Invalid path expression with result {"a":1}"#,
-        ),
-        (
-            r#"{"a":true}"#,
-            r"path(.a and any(true; select(.)))",
-            r#"["a"]"#,
-            "Invalid path expression with result true",
-        ),
-        (
-            r#"{"a":true}"#,
-            r"del(.a and any(true; select(.)))",
-            "{}",
-            "Invalid path expression with result true",
-        ),
-        (
-            r#"{"a":true}"#,
-            r#"try del(.a and any(true; select(.) | error("boom"))) catch ."#,
-            r#""boom""#,
-            "Invalid path expression with result true",
         ),
     ] {
         let routes = [
