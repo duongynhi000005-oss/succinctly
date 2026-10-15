@@ -52808,8 +52808,17 @@ impl<'e> RegisterSpine<'e> {
                 // $i (.; -(reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))))`).
                 //
                 // [`taken_first_is_dot`]: Self::taken_first_is_dot
+                //
+                // #4674: also behind a `try`/`?` that wraps the wrapper alone, but only in a moved body,
+                // where the raise is certain: elsewhere the destructure of `.` can succeed (a `foreach`
+                // EXTRACT under a `foreach` that moved nothing) and the refusal would lose an answer.
+                let caught = matches!(
+                    unwrap_bind_source(other),
+                    Expr::Try { catch: None, .. } | Expr::Optional(_)
+                );
                 if self.taken_first_is_dot
                     && (!self.through_reduce || fold_body::source_moved_here())
+                    && (!caught || fold_body::source_moved_here())
                     && takes_only_an_identity_leaf(peel_try_wrappers(other))
                 {
                     return Reach::HandsOn;
