@@ -856,8 +856,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   error unwinds into the chain's `?//` fork, and the retried bare alternative is the one delivered. `first`/`limit`/`nth`'s
   bounded sink latched the consumer's refusal of that first emission and reported the whole walk stopped after the retry was
   accepted, which dropped the siblings of `first(CHAIN)` in a comma (`path(first(CHAIN), .b)`) and the second count of
-  `limit(1,2; CHAIN)`. The source route now also reads a `limit` whose count is a comma of literals, a comma inside `first`
-  (`first((CHAIN), 1)`), a chain passed as a `def` argument, a nested `foreach` over `first(CHAIN)` in a `foreach` UPDATE and
+  `limit(1,2; CHAIN)`. The source route now also reads a `limit`/`nth` whose count is a comma of literals, a `try`/`?` inside the wrapper
+  (`first(try CHAIN)`), a comma inside `first` (`first((CHAIN), 1)`), a chain passed as a `def` argument, a nested `foreach` over `first(CHAIN)` in a `foreach` UPDATE and
   `first(CHAIN)` as a `reduce`/`foreach` UPDATE or EXTRACT. Pinned by
   `test_first_limit_nth_chain_in_path_mode_stops_nothing_and_emits_per_count_4537`. **Still divergent**: a `limit` whose
   count is not a literal or a comma of literals, `limit(2; (CHAIN), 1)` as a `foreach` source (ours prints the register

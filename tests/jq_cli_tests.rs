@@ -141147,6 +141147,28 @@ fn test_first_limit_nth_chain_in_path_mode_stops_nothing_and_emits_per_count_453
             "path(foreach (limit(1,2; CHAIN)) as $k (.; .; $k))",
             "[]\n[]\n",
         ),
+        // A `try`/`?` inside the wrapper and a comma count on `nth`.
+        (
+            doc,
+            "path(foreach (first(try CHAIN)) as $k (.; .; .))",
+            "[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (first((CHAIN)?)) as $k (.; .; .))",
+            "[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (1,2) as $i (.; .; first(try CHAIN)))",
+            "[]\n[]\n",
+        ),
+        (
+            doc,
+            "path(foreach (nth(0,1; CHAIN)) as $k (.; .; .))",
+            "[]\n",
+        ),
+        (two, "[path(nth(0,1; CHAIN), .b)]", "[[],[\"b\"]]\n"),
         // The consumer's refusal of the first emission does not stop the siblings.
         (two, "[path(first(CHAIN), .b)]", "[[],[\"b\"]]\n"),
         (two, "[path(nth(0; CHAIN), .b)]", "[[],[\"b\"]]\n"),
