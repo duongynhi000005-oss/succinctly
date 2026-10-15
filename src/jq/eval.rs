@@ -52212,12 +52212,12 @@ fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
 /// constant run through `not` (`false | not | not`).
 fn never_truthy(e: &Expr) -> bool {
     match unwrap_paren(e) {
-        Expr::Literal(Literal::Null) | Expr::Literal(Literal::Bool(false)) => true,
+        Expr::Literal(Literal::Null | Literal::Bool(false)) => true,
         Expr::Builtin(Builtin::Empty) => true,
         Expr::Pipe(stages) => match stages.split_first() {
             Some((head, rest)) if !rest.is_empty() => {
                 let truthy = match unwrap_paren(head) {
-                    Expr::Literal(Literal::Null) | Expr::Literal(Literal::Bool(false)) => false,
+                    Expr::Literal(Literal::Null | Literal::Bool(false)) => false,
                     Expr::Literal(Literal::Bool(true)) => true,
                     _ => return false,
                 };
