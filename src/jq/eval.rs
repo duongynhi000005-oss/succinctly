@@ -48912,6 +48912,20 @@ impl FoldRegister {
         }
     }
 
+    /// Whether the value jq's register holds is known not to be `null` (#4581, #4617): the live
+    /// register an untracked stage still holds when the fold carries it ([`Self::live_register`]),
+    /// otherwise the fold's own register value. The accumulator is no stand-in for the live
+    /// register: a `foreach` whose UPDATE emitted nothing hands the next step `null` while jq's
+    /// register stays where the fold left it. Where the fold does not carry the live register
+    /// (the frame dropped it, as in a fold two deep) the fold's own value is all there is to
+    /// read, and it is the accumulator again: the old answer, not a new one.
+    fn register_is_non_null(&self) -> bool {
+        !matches!(
+            self.live_register().unwrap_or(&self.value),
+            OwnedValue::Null
+        )
+    }
+
     /// #4131: this untracked register as a *trackable* one at the fold's root, when the stage
     /// carries its live value ([`FoldRegister::live_register`]) and that value is `null` or a
     /// boolean. Those are `jv_identical` to any equal `null`/boolean by kind
@@ -54894,7 +54908,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             trackable: source_trackable,
             snapshot: path_snapshot,
             frame: frame.clone(),
-            register_non_null: !matches!(reg.value, OwnedValue::Null),
+            register_non_null: reg.register_is_non_null(),
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s
@@ -54923,7 +54937,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         trackable: at_register,
         snapshot: Snapshot::No,
         frame: frame.unknown(),
-        register_non_null: !matches!(reg.value, OwnedValue::Null),
+        register_non_null: reg.register_is_non_null(),
     }
 }
 
