@@ -2431,7 +2431,17 @@ is the revert that established what the other one costs.
    `test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in_an_array_raises_4635`; the same two shapes
    *without* the brackets are still accepted,
    [#4644](https://github.com/rust-works/succinctly/issues/4644)), but a `$x` marker destructured there is the
-   #4604 family. The same shapes on a
+   #4604 family. A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
+   body raises too ([#4667](https://github.com/rust-works/succinctly/issues/4667): these emit their comma's first leaf only, so
+   they hand the register on as `.` does, `takes_only_an_identity_leaf`; pinned by
+   `test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667`), also when the wrapper is nested in another
+   (`first(first(., X), 2)`) or sits behind a `try`/`?` that wraps it alone (`try first(., X) | . as {a:$a} | .`), where the
+   destructure is outside the catch ([#4674](https://github.com/rust-works/succinctly/issues/4674): `comma_first_leaf_is_dot`,
+   `peel_try_wrappers`, `catches_a_destructure`; pinned by
+   `test_reduce_source_first_of_register_comma_nested_or_behind_a_try_in_a_moved_body_4674`). A `try`/`?` around the destructure
+   keeps the source answered, as jq does. Still accepted where jq raises: the same stage followed by a navigation or an
+   alternative (`first(., X) | .a`, `first(.) | ..`, `first(., X) | (. as {a:$a} | .) // 3`; the navigation form is not
+   specific to `first(., X)`: `first(.) | .a` and `limit(1; .) | .a` are accepted too). The same shapes on a
    `null` document, where a `null` that is not the register is `jv_identical` to it by kind (the path the pattern moved
    jq's register to). A `null`/boolean *literal* bound by a destructure in a fold source (`null as {b:$b} | .`, or a `$x`
    bound to one outside the fold) has no marker, and jq's `jv_identical` makes it the register only when the register holds the same one, so it is

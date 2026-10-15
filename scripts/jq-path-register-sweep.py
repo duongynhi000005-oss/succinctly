@@ -990,6 +990,24 @@ OPERANDS = [
     "(reduce ((first(., {a:1}) | . as {a:$a} | .), 1) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    # (#4674) the wrapper nested in another (`first(first(., X), 2)`, a first leaf that is itself one) or behind a
+    # `try`/`?` that wraps it alone: the destructure sits outside the catch, so jq raises. Contrasts: a fresh first
+    # leaf under the nested wrapper, a `try` around the destructure as well, and a `try` that catches it.
+    "(reduce (first(first(., {a:1}), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first((., 1), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (limit(1; first(., {a:1}), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (nth(0; first(., {a:1}), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(first({a:1}, .), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try first(., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(., {a:1})? | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try limit(1; ., {a:1}) | . as [$x] | .) as $k (.; .))",
+    "(reduce (try try first(., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try first(first(., {a:1}), 2) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (try first({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    "(foreach (try first(., {a:1}) | . as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (first(., {a:1})? | . as {a:$a} | .) as $k (.; .; .))",
+    "(foreach (first(first(., {a:1}), 2) | . as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (try first(., {a:1}) | try (. as {a:$a} | .)) as $k (.; .))",
     "(foreach (first({a:1}, .) | . as {a:$a} | .) as $k (.; .; .))",
     # (#4597, second part) the same fresh comma behind a wrapper that generates every item (`try`, `?`),
     # a `limit(n)` or a nested comma whose leading outputs hold it, `nth(k; ..)`, a `reduce` stage that
