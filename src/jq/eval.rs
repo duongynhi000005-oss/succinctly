@@ -52478,26 +52478,31 @@ fn resolve_marker_ifs(source: &Expr) -> Expr {
     map_subexprs(source, &mut |child| resolve_marker_ifs(child))
 }
 
-/// The element jq's first pattern step of `source` indexes with (#4637): `0` for an array
-/// pattern, the key of an object pattern's first literal entry. `None` for a computed key or a
-/// source with no destructuring pattern, whose message cannot be built from the text.
-fn first_destructure_element(source: &Expr) -> Option<OwnedValue> {
-    let mut element = None;
-    any_subexpr(source, &mut |e| {
-        let Expr::AsPattern { patterns, .. } = e else {
-            return false;
-        };
-        element = match patterns.first() {
-            Some(Pattern::Array(_)) => Some(OwnedValue::Int(0)),
-            Some(Pattern::Object(entries)) => match entries.first().map(|entry| &entry.key) {
-                Some(ObjectKey::Literal(key)) => Some(OwnedValue::from(key.as_str())),
-                _ => None,
-            },
-            _ => None,
-        };
-        true
-    });
-    element
+/// The element jq's first pattern step indexes with when `source` begins with a destructure of
+/// `.` that certainly runs (#4637): `0` for an array pattern, the key of an object pattern's first
+/// literal entry. `None` for anything that may not reach the destructure (a `select`, an `if`, a
+/// `//`, a `try` ahead of it, where jq raises nothing and the source is just empty), a `?//` chain,
+/// a computed key, or a bare variable.
+fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
+    match unwrap_paren(source) {
+        Expr::Pipe(stages) => {
+            let first = stages.iter().find(|stage| !is_identity_stage(stage))?;
+            leading_destructure_of_dot_element(first)
+        }
+        Expr::AsPattern { expr, patterns, .. }
+            if is_identity_stage(expr) && patterns.len() == 1 =>
+        {
+            match &patterns[0] {
+                Pattern::Array(_) => Some(OwnedValue::Int(0)),
+                Pattern::Object(entries) => match entries.first().map(|entry| &entry.key) {
+                    Some(ObjectKey::Literal(key)) => Some(OwnedValue::from(key.as_str())),
+                    _ => None,
+                },
+                Pattern::Var(_) => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn drive_fold_source_with<S: EvalSemantics>(
@@ -52806,9 +52811,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4637: in the body of a `reduce` whose source moved the register onto an element,
         // neither `.` nor a `$x` bound outside is that register ([`in_moved_body`]), so jq's
         // pattern step raises its own `near attempt to access element` error on the accumulator,
-        // which an enclosing `?`/`try` catches. Anywhere else the register may be where the
-        // accumulator is, and the refusal stays the resolver's guess that nothing catches.
-        let refusal = match first_destructure_element(source).filter(|_| in_moved_body) {
+        // which an enclosing `?`/`try` catches. Only for a source that begins with the destructure
+        // of `.`: one that may not reach it (a `select(false)`, a `try` that catches it) emits
+        // nothing and raises nothing, so the enclosing `reduce` UPDATE emits nothing and its `null`
+        // state is refused at the end of the path, outside any `try` around the fold. Anywhere else
+        // the register may be where the accumulator is, and the refusal stays the resolver's guess
+        // that nothing catches.
+        let refusal = match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
             Some(element) => {
                 EvalError::invalid_path_expression_near_access(&element, ambient.value)
             }

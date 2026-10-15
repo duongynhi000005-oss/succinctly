@@ -18,7 +18,7 @@ ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that 
 #3186/#3267), or a candidate timeout. Run it against a `main` build as `--base` to see what a change moved.
 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
-                                                   [--only SUBSTR] [--jobs N]
+                                                   [--only SUBSTR[,SUBSTR...]] [--jobs N] [--wrapped]
 """
 import argparse
 import collections
@@ -181,7 +181,13 @@ CONTEXTS = [
     ("path-nav", "path(.a as $x | {O})"),
     ("del-nav", "del(.a as $x | {O})"),
     ("update-nav", "(.a as $x | {O}) |= 9"),
-    # (#4637) an enclosing `?`/`try` around the whole fold catches the path error jq raises there
+]
+# (#4637) an enclosing `?`/`try` around the whole fold. jq catches a path error raised inside it, but not
+# the "with result" one a fold's `null`/value output raises at the end of the path, outside the `try`, so
+# the same fold is caught or not by what its source leaves behind. Opt-in (`--wrapped`): these rows were
+# never gated, `main` is wrong on hundreds of them, and the run is judged against `--base` alone (a lost
+# match or a newly wrong accept fails it).
+WRAPPED_CONTEXTS = [
     ("path-opt", "path((. as $x | {O})?)"),
     ("path-try", "path(try (. as $x | {O}))"),
     ("del-opt", "del((. as $x | {O})?)"),
@@ -192,7 +198,7 @@ CONTEXTS = [
 # moved the register, where the register is on an element and a marker may be that very node, and a
 # destructure of `.` behind a `select($x|not)`/`select($x)` that the markers do not decide. They count
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
-RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav", "path-nav-opt"}
+RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
 RESIDUAL_NAV_MAX = 51
 DOCS = [
@@ -250,11 +256,17 @@ def main():
     ap.add_argument("--show", type=int, default=20, help="max rows printed per section")
     ap.add_argument("--only", default="", help="restrict to rows whose name contains this (comma-separated: any of)")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument(
+        "--wrapped",
+        action="store_true",
+        help="run the `?`/`try`-wrapped contexts instead of the gated ones (#4637); judged against --base only",
+    )
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
 
     rows = []
-    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(OUTER, INNER, SOURCES, CONTEXTS, DOCS):
+    contexts = WRAPPED_CONTEXTS if args.wrapped else CONTEXTS
+    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(OUTER, INNER, SOURCES, contexts, DOCS):
         name = f"{on}/{inn}/{sn}/{cn}"
         if args.only and not any(part in name for part in args.only.split(",")):
             continue
@@ -320,6 +332,13 @@ def main():
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
+    if args.wrapped:
+        # `main` is not clean on these rows: only what the candidate moved for the worse counts.
+        worse = [r for r in results if r[5] == "ACCEPT_WRONG" and r[7] not in (None, "ACCEPT_WRONG")]
+        print(f"newly ACCEPT_WRONG against --base: {len(worse)}")
+        for name, _sn, prog, doc, oracle, klass, cand, _b in worse[: args.show]:
+            print(f"NEW ACCEPT_WRONG {name}\n   {prog}\n   in={doc} jq={oracle} build={cand}")
+        return 1 if worse or lost or hung else 0
     return 1 if fresh or lost or hung or len(residual_nav) > RESIDUAL_NAV_MAX else 0
 
 
