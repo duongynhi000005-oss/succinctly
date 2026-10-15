@@ -50925,6 +50925,25 @@ fn unplaced_register_markers<S: EvalSemantics>(
     markers
 }
 
+/// Whether `e` emits at least once whatever its input: `.`, a variable, a literal, an array
+/// construction, an object construction of literal keys and such values, a comma with such an item,
+/// a pipe of them or a `limit` of one (#4655). Not a computed key (`{(empty): 1}`), a navigation (`.a?`) or a call, which may emit nothing.
+fn always_emits(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Literal(_) | Expr::Array(_) => {
+            true
+        }
+        // Literal keys and values that each emit: `{a:1}` (a computed key or a generator value may emit nothing).
+        Expr::Object(entries) => entries
+            .iter()
+            .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && always_emits(&entry.value)),
+        Expr::Comma(items) => items.iter().any(always_emits),
+        Expr::Pipe(stages) => stages.iter().all(always_emits),
+        Expr::Limit { n, expr } => limit_takes_some(n) && always_emits(expr),
+        _ => false,
+    }
+}
+
 /// Whether no stage of `source` can end it before a destructure runs: a `select` or `limit` that
 /// may pass nothing (`select(false)`, `limit(0; ..)`), a bind whose source may be empty
 /// (`(.a | select(.zz)) as $y | $x as P`), `empty`, a nested `foreach` or a `label` all skip the
@@ -50944,12 +50963,11 @@ fn source_always_reaches_destructure(source: &Expr) -> bool {
         }
         Expr::Limit { n, .. } => !matches!(unwrap_paren(n), Expr::Literal(lit)
             if literal_to_owned(lit).as_f64().is_some_and(|n| n >= 1.0)),
-        Expr::As { .. } | Expr::Foreach { .. } | Expr::Label { .. } => true,
+        // #4655: a bind whose source always emits runs its body (`(1,2) as $q | $x as P`).
+        Expr::As { expr, .. } => !always_emits(expr),
+        Expr::Foreach { .. } | Expr::Label { .. } => true,
         Expr::Builtin(Builtin::Empty | Builtin::NthStream(..)) | Expr::NthExpr { .. } => true,
-        Expr::AsPattern { expr, .. } => !matches!(
-            unwrap_paren(expr),
-            Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
-        ),
+        Expr::AsPattern { expr, .. } => !always_emits(expr),
         _ => false,
     })
 }
