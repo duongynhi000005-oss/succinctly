@@ -826,11 +826,30 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`(isempty(1), isempty(2))`, `(isempty(1), 5)`) and for an operand that is a `first`/`limit` of something that leaves the
   register (`isempty(first(1))`, `any(first(1); .)`). Pinned by
   `test_foreach_navigating_source_with_a_comma_or_wrapped_verdict_update_keeps_the_register_4623`.
-  **Still refused where jq answers** (the operands are not ones
-  `neutral_leaves_register` admits; a refusal under an enclosing `?`/`try` is swallowed, so `[path(foreach .[]? as $k (0; isempty(path(.[]?)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`): `isempty(path(.[]?))`, `isempty(empty | .a)`,
-  `isempty(1) and isempty(2)`, `all(1; first(.))`, a `select` as `cond` and a verdict piped into a builtin outside the neutral list
-  (`isempty(1) | tostring`), and a `def` wrapper (`def f: isempty(empty); f`)
-  ([#4641](https://github.com/rust-works/succinctly/issues/4641)).
+  **Since [#4641](https://github.com/rust-works/succinctly/issues/4641)** the verdict's operands may also be a `path(f)`
+  (`isempty(path(.[]?))`: `PATH_END` restores the register), a `select(f)` or type filter (`any(true; select(.))`, `all(1; select(.))`,
+  `f` being a subexp), a pipe that cannot emit past a leading `empty` (`isempty(empty | .a)`), and the verdicts may be joined by
+  `and`/`or` (`isempty(1) and isempty(2)`) or sit behind a zero-arity `def` (`def f: isempty(empty); f`); an `any`/`all` `cond` that
+  navigates nothing (`first(.)`, `select(f)`) is evaluated by value, as the allowlist's own members are, instead of resolved live, where
+  a `1` element equal to the register's `1` read as an ambiguous guess and refused. The same rows under `?`/`try` no longer answer `[]`
+  where jq prints `[[0]]`. Pinned by
+  `test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_or_def_4641`.
+  **Still refused where jq answers**: a verdict that is a comma item or an `and`/`or` side next to a *navigating* one
+  (`(isempty(1), isempty(.a?))`, `isempty(1) and isempty(first(.a?))`), where jq emits the leading verdict at the entry register before
+  the navigating one runs or raises; the whole UPDATE is judged at once, so the leading emission is refused too (a refusal under
+  `?`/`try` is swallowed: `[path(foreach .[]? as $k (0; (isempty(1), isempty(.a?)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`).
+  **Since [#4499](https://github.com/rust-works/succinctly/issues/4499)** an `isempty` whose operand is a `foreach` is one flow, not
+  siblings, so a caught `try .a` step of the inner fold against a live `null` accumulator is no longer dropped
+  (`path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))` on `null` is `["a","a"]`, it raised `... with result null`;
+  with `.` as EXTRACT the error names `result false`, it said `result true`). Pinned by
+  `test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499`. **Still refused where jq answers** (unchanged by
+  it): the other `isempty(FOLD)` shapes -- an inner `reduce` (`isempty(reduce (1,2) as $i (1; try .a))`), an inner EXTRACT that
+  reads the loop variable (`... try .a; $i)`), a non-`null` accumulator or register (`[path(foreach .[]? as $k (0;
+  isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`), and a fold as the `cond` of
+  `any`/`all` -- and a nested fold that
+  reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
+  `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
+  the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly.
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare

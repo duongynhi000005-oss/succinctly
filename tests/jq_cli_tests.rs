@@ -74014,6 +74014,298 @@ fn test_foreach_navigating_source_with_a_comma_or_wrapped_verdict_update_keeps_t
     ])
 }
 
+/// #4641: #4623's verdict-builtin UPDATE over the operands it still refused. jq runs the operand and
+/// backtracks, so the register is where UPDATE entered whatever the operand navigates *inside* a `path()`,
+/// after a leading `empty` or in a `select`'s subexp, whether the verdicts are joined by `and`/`or`, whether
+/// the `cond` is a `select` or `first(.)`, and whether the call is behind a zero-arity `def`; EXTRACT's `$k`
+/// IS that register and names its path. The same rows under `?` answered `[]` because the refusal was
+/// taken for jq's own and swallowed. Controls: an operand that navigates *before* it can emit nothing
+/// (`.a? | empty`), a `select` whose condition raises, and a verdict as EXTRACT. Every jq side captured from
+/// jq 1.7.1.
+#[test]
+fn test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_or_def_4641(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(path(.[]?)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(empty | .a); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(1) and isempty(2); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(1) or isempty(.a?); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; any(true; select(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; first(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; select(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (1 | isempty(.)) | tostring; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: isempty(empty); f; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1), isempty(path(.[]?))); $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; isempty(path(.[]?)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; isempty(1) and isempty(2); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(1), isempty(path(.[]?))); $k))?]",
+            "[[0],[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; isempty(path(.[]?)); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; isempty(1) and isempty(2); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(.a? | empty); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(.a) and isempty(1); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; select(.a)); $k))",
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(select(.a)); $k))",
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(.a | empty); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(select(.) | path(.[]?)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; any(true; select(.) | first(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; (select(.), first(.))); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(numbers); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(empty | .a | .b); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: isempty(empty); path(foreach .[]? as $k (0; f; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: isempty(1); def g: f; path(foreach .[]? as $k (0; g; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; all(1; select(.) | first(.)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a and any(true; select(.)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(.a and any(true; select(.)))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"try del(.a and any(true; select(.) | error("boom"))) catch ."#,
+            "\"boom\"\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4499: an `isempty` whose operand is a `foreach`/`reduce`. The operand fold is one flow that reads the
+/// register from the frame it is entered with, as a fold outside `isempty` does (#4492), but `fans_out_with`
+/// still counted it as siblings, which withheld the register from its UPDATE: a caught `try .a` step on a
+/// `null` accumulator was refused as jq's own and the stream element vanished, so `isempty` answered
+/// `true` where jq's inner fold emitted (`false`). Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach . as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; isempty(first(foreach (1,2) as $i (null; try .a; .))); $k))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); .))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; $i)); .))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the
@@ -76961,13 +77253,12 @@ fn test_reduce_update_try_body_navigation_is_caught_4459() -> Result<()> {
 /// untracked entry by #3826 and a `def` call or `reduce` of one by #3826 too, see
 /// [`test_pipe_stage_reads_the_backtracked_register_verdict_3758`],
 /// [`test_verdict_stage_on_an_untracked_entry_3826`] and
-/// [`test_verdict_stage_behind_a_def_or_reduce_3826`]). And a
-/// computed `true` that decides under a `cond` on an untracked entry
-/// (`.a and any(true; select(.))`, an `and` right operand) is ambiguous -- it
-/// may be the carried register, whose position is not known -- so jq's `["a"]`
-/// is refused as an uncatchable guess, and so is a `cond` that raises there
-/// (`try ... catch .` would answer `"boom"` in jq). (A generator of literals
-/// such as `first(2, 3)` was refused here until #3862: each sibling of its comma now
+/// [`test_verdict_stage_behind_a_def_or_reduce_3826`]). (A computed `true` that decides
+/// under a `select(f)` `cond` on an untracked entry, `.a and any(true; select(.))`, an `and` right
+/// operand, was refused here as an ambiguous guess until #4641: such a `cond` navigates nothing, so
+/// it is evaluated by value as `any(true; .)` always was, see
+/// [`test_foreach_navigating_source_with_a_verdict_over_path_empty_select_and_or_or_def_4641`]. A
+/// generator of literals such as `first(2, 3)` was refused until #3862: each sibling of its comma now
 /// states the register on its own, see
 /// [`test_comma_siblings_state_the_register_on_their_own_3862`].) Pinned on both
 /// routes so lifting any is a deliberate change; the jq answers are in each row.
@@ -76999,24 +77290,6 @@ fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
             r"path(. as $x | 1 | isempty(def f: 2; f) | $x)",
             "[]",
             r#"Invalid path expression with result {"a":1}"#,
-        ),
-        (
-            r#"{"a":true}"#,
-            r"path(.a and any(true; select(.)))",
-            r#"["a"]"#,
-            "Invalid path expression with result true",
-        ),
-        (
-            r#"{"a":true}"#,
-            r"del(.a and any(true; select(.)))",
-            "{}",
-            "Invalid path expression with result true",
-        ),
-        (
-            r#"{"a":true}"#,
-            r#"try del(.a and any(true; select(.) | error("boom"))) catch ."#,
-            r#""boom""#,
-            "Invalid path expression with result true",
         ),
     ] {
         let routes = [

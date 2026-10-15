@@ -280,6 +280,31 @@ OPERANDS = [
     "all(1; first(.))",
     "isempty(first(.a?))",
     "isempty(path(.[]?))",
+    # (#4641) the verdict operands #4623 still refused: a `path()` operand, a pipe that can emit
+    # nothing before it navigates, `and`/`or` over verdicts, a `select` or `first(.)` as `cond`, a
+    # `def` wrapper, and the controls that must stay refused (an operand that navigates before it
+    # can emit nothing, a verdict whose operand navigates, a `select` whose condition raises).
+    "isempty(empty | .a)",
+    "isempty(.a? | empty)",
+    "isempty(1) and isempty(2)",
+    "isempty(1) or isempty(.a?)",
+    "isempty(.a) and isempty(1)",
+    "isempty(1) and isempty(first(.a?))",
+    "any(true; select(.))",
+    "all(1; select(.))",
+    "any(1; first(.))",
+    "all(1; select(.a))",
+    "isempty(select(.a))",
+    "(def f: isempty(empty); f)",
+    "(def f: isempty(.a?); f)",
+    # (#4499) an `isempty` over a fold: the operand fold is one flow, not siblings.
+    "isempty(foreach (1,2) as $i (1; try .a; .))",
+    "isempty(first(foreach (1,2) as $i (null; try .a; .)))",
+    "isempty(reduce (1,2) as $i (1; try .a))",
+    # (#4499 review) the shapes the `isempty(FOLD)` fix leaves refused: an inner EXTRACT that reads the
+    # loop variable and a fold as the `cond` of `any`.
+    "isempty(foreach (1,2) as $i (1; try .a; $i))",
+    "any(foreach (1,2) as $i (1; try .a; .); .)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
