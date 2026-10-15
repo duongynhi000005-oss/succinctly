@@ -142508,6 +142508,110 @@ fn test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667() -> R
     ])
 }
 
+/// #4666 (the rest of #4597): a fresh comma item behind a wrapper that yields a counted number of
+/// outputs (`limit(3; limit(2; ., .), {a:1})`: two, so `{a:1}` is the third) or behind a pipe whose later
+/// stages only repeat their input (`(., {a:1}) | ., .`) is still generated and still meets the destructure,
+/// which raises on it. The contrasts stop short of the fresh item (`limit(2; limit(2; ., .), {a:1})`) and
+/// answer. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_fresh_comma_behind_counted_wrappers_and_repeating_stages_4666() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce (limit(3; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; limit(1; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; first(., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; limit(5; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (((., {a:1}) | ., .) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce (((., {a:1}) | ., ., .) | . as {a:$a} | .) as $k (.; .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; nth(0; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(3; limit(0; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(2; limit(5; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(2; limit(2; ., .), {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (limit(2; limit(1; ., .), ., {a:1}) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (((., .) | ., .) | . as {a:$a} | .) as $k (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4597 (the rest): a `reduce` source whose pipe stage generates a freshly built item next to the
 /// register (`({a:1}, .)`) meets that item at the destructure that follows, wherever the register is.
 /// The wrappers that hand their operand's outputs on are read as they generate: `try`/`?` every item,
