@@ -50296,15 +50296,26 @@ fn source_always_reaches_destructure(source: &Expr) -> bool {
     })
 }
 
-/// `source` with every bind whose body is `empty` given the body `.` ([`foreign_register_markers_with`]).
-/// The marker `Rc`s are shared with `source`.
+/// Whether `body` emits nothing from its first stage on: `empty`, or a pipe headed by it.
+fn body_starts_with_empty(body: &Expr) -> bool {
+    match unwrap_paren(body) {
+        Expr::Builtin(Builtin::Empty) => true,
+        Expr::Pipe(stages) => stages
+            .first()
+            .is_some_and(|first| matches!(unwrap_paren(first), Expr::Builtin(Builtin::Empty))),
+        _ => false,
+    }
+}
+
+/// `source` with every bind whose body emits nothing ([`body_starts_with_empty`]) given the body
+/// `.` ([`foreign_register_markers_with`]). The marker `Rc`s are shared with `source`.
 fn empty_bind_bodies_as_identity(source: &Expr) -> Expr {
     match source {
         Expr::AsPattern {
             expr,
             patterns,
             body,
-        } if matches!(unwrap_paren(body), Expr::Builtin(Builtin::Empty)) => Expr::AsPattern {
+        } if body_starts_with_empty(body) => Expr::AsPattern {
             expr: Box::new(empty_bind_bodies_as_identity(expr)),
             patterns: patterns.clone(),
             body: Box::new(Expr::Identity),
@@ -50341,8 +50352,8 @@ fn foreign_register_markers<S: EvalSemantics>(
 
 /// [`foreign_register_markers`], where `off_body` says the accumulator is provably not jq's
 /// register ([`foreign_in_off_body`]) and the frame names where the register is. The accumulator
-/// then says nothing about the register's value, so only a marker holding a non-empty container
-/// (compared by pointer in jq, never by kind) is provably not it.
+/// then says nothing about the register's value, so only a marker holding a container (compared by
+/// pointer in jq, never by kind) bound at another position is provably not it.
 fn foreign_register_markers_with<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
@@ -50379,12 +50390,25 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     let source = if off_body {
         // A `try` with no handler (or a `?`) swallows the raise and a handler that emits nothing
         // leaves the source empty: jq answers both.
+        let destructures = |e: &Expr| {
+            any_subexpr(
+                e,
+                &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)),
+            )
+        };
         if any_subexpr(source, &mut |e| match e {
-            Expr::Optional(_) | Expr::Try { catch: None, .. } => true,
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            } => destructures(inner),
             Expr::Try {
+                expr: inner,
                 catch: Some(handler),
-                ..
-            } => matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)),
+            } => {
+                matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty))
+                    && destructures(inner)
+            }
             _ => false,
         }) {
             return markers;
@@ -50412,8 +50436,7 @@ fn foreign_register_markers_with<S: EvalSemantics>(
                 _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
             };
             let provably_other = if off_body {
-                matches!(&marker.value, OwnedValue::Array(items) if !items.is_empty())
-                    || matches!(&marker.value, OwnedValue::Object(map) if !map.is_empty())
+                matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
             } else {
                 !marker_identical::<S>(marker, ambient.value, &ambient.frame)
                     && !null_bool_identical(&marker.value, ambient.value)
@@ -52487,6 +52510,8 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // backtracks included, so it is refused for either fold, in any fold body (outside every body
     // all markers are read, #4320). Not under a `try`/`?`, which catches the path error (`reduce
     // (try ($x as {b:$b} | .)) as $y (.; .)` is answered).
+    // #4626: ...or where the accumulator is provably off the register and the frame names it.
+    let off_body = foreign_in_off_body::<S>(ambient);
     let foreign_pairs = if S::TAG == EvalTag::Jq
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
@@ -52494,7 +52519,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && try_free()
     {
         foreign_register_markers::<S>(source, ambient)
-    } else if foreign_in_off_body::<S>(ambient) {
+    } else if off_body {
         foreign_register_markers_with::<S>(source, ambient, true)
     } else {
         Vec::new()
@@ -52586,14 +52611,14 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4626: off the register the pattern's raise is caught by a `try ... catch H` whose handler
     // emits ([`foreign_register_markers_with`] admits no other), and the fold's emission of its
     // accumulator then raises: read the body with the handler's `try` dropped.
-    let handlers_dropped;
-    let foreign_source = if foreign_in_off_body::<S>(ambient) {
-        handlers_dropped = drop_caught_handlers(source);
-        &handlers_dropped
-    } else {
-        source
-    };
     let foreign_verdict = !foreign_markers.is_empty() && {
+        let handlers_dropped;
+        let foreign_source = if off_body {
+            handlers_dropped = drop_caught_handlers(source);
+            &handlers_dropped
+        } else {
+            source
+        };
         let plain = collapse_marker_pipes(foreign_source, &foreign_markers, &[], false);
         source_destructures_register_with(&plain, true, foreign_markers.clone(), false)
             || (foreach_source && select_passes && {
@@ -52635,7 +52660,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
         // provably off it: the pattern's step raises, so the resolver decides rather than the
         // by-value drive, which has no register to check the step against.
-        || (foreign_verdict && foreign_in_off_body::<S>(ambient))
+        || (foreign_verdict && off_body)
         // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
         // result, a fresh value beside the register in a comma): the pattern's step raises on it
         // whatever the register is. Not gated on `ambient.trackable` (#4522): a path-expression

@@ -132586,6 +132586,48 @@ fn test_foreach_source_outer_marker_empty_body_destructure_in_navigating_fold_ra
             5,
         ),
         (
+            r"[[],[]]",
+            r"path(.[1] as $x | foreach .[]? as $i (.; foreach ($x as [$a] | empty) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[{},{}]",
+            r"path(.[1] as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | empty) catch .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ($x as [$a] | empty | 5) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; reduce (try ($x as [$a] | empty) catch .) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; reduce ($x as [$a] | empty) as $y (.; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | foreach .[]? as $i (.; foreach ((try ($x as [$a] | empty) catch .), (.a?)) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(. as $x | reduce .[]? as $i (.; reduce (try ($x as [$a] | empty) catch .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
             r"[true]",
             r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as [$a] | empty) catch empty) as $y (.; .; .); .))",
             "",
