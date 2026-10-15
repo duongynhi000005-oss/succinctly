@@ -36860,6 +36860,42 @@ fn body_performs_no_step(e: &Expr) -> bool {
     }
 }
 
+/// [`body_performs_no_step`], also admitting the loop variable of a nested `foreach` with a single
+/// bare pattern (#4485): `$j` is the source element, which is the register's own node wherever the
+/// source handed the register on, so `foreach (SRC) as $j (.; .; $j)` emits it as `.` does (jq's
+/// `jv_identical` holds for the same node, and for any `null` or boolean by kind).
+fn body_hands_on_loop_var(e: &Expr, patterns: &[Pattern]) -> bool {
+    match e {
+        Expr::Var(name) => {
+            matches!(patterns, [Pattern::Var(bound)] if bound == name)
+        }
+        Expr::Paren(inner) => body_hands_on_loop_var(inner, patterns),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| body_hands_on_loop_var(stage, patterns)),
+        other => body_performs_no_step(other),
+    }
+}
+
+/// Whether every output of a nested `foreach`'s EXTRACT is either the loop variable or the state
+/// ([`body_hands_on_loop_var`]) or a value that moves nothing ([`cannot_move_register`]), at least one
+/// of the first kind: a comma of them (`., 1`) emits the register's node on some outputs and not on
+/// others, and the stages after it meet the register on the first (#4485).
+fn extract_leaves_hand_on(e: &Expr, patterns: &[Pattern]) -> bool {
+    match e {
+        Expr::Paren(inner) => extract_leaves_hand_on(inner, patterns),
+        Expr::Comma(items) => {
+            items
+                .iter()
+                .all(|item| body_hands_on_loop_var(item, patterns) || cannot_move_register(item))
+                && items
+                    .iter()
+                    .any(|item| body_hands_on_loop_var(item, patterns))
+        }
+        other => body_hands_on_loop_var(other, patterns),
+    }
+}
+
 /// Flatten an expression into the list of path components it denotes.
 ///
 /// `Pipe` and `Paren` are transparent and `Identity` contributes nothing, so
@@ -47358,6 +47394,15 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// wrong answer where the loss was a refusal. Conservative: a `false` only leaves the source to
 /// the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
+    let mut calls = SPINE_CALL_BUDGET;
+    moves_register_only_by_binds(expr, &mut calls)
+}
+
+/// [`source_moves_register_only_by_binds`] for one node, with what is left of the budget for bodies
+/// read through a call ([`SPINE_CALL_BUDGET`]); past it the source is not read. The recursion is
+/// bounded without a depth of its own: the parser caps how deep a source nests, a call is read at most
+/// budget times, and a call or a shared argument checks the native stack first.
+fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
     match unwrap_paren(expr) {
         // A destructuring chain that ends in a bare `$var`: when every pattern before it raises,
         // `?//` restores the path and the bare alternative leaves the register alone. A chain that
@@ -47366,13 +47411,17 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
         Expr::AsPattern { patterns, body, .. }
             if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) =>
         {
-            source_moves_register_only_by_binds(body)
+            moves_register_only_by_binds(body, calls)
         }
         Expr::As { body, .. } | Expr::Label { body, .. } => {
-            source_moves_register_only_by_binds(body)
+            moves_register_only_by_binds(body, calls)
         }
-        Expr::Pipe(stages) => stages.iter().all(source_moves_register_only_by_binds),
-        Expr::Comma(stages) => stages.iter().all(source_moves_register_only_by_binds),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| moves_register_only_by_binds(stage, calls)),
+        Expr::Comma(stages) => stages
+            .iter()
+            .all(|stage| moves_register_only_by_binds(stage, calls)),
         // Only the condition is a subexpression; the branch that runs is not. A literal condition
         // runs one branch only ([`cannot_move_register`]'s #4124).
         Expr::If {
@@ -47380,15 +47429,63 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
             then_branch,
             else_branch,
         } => match &**cond {
-            Expr::Literal(Literal::Bool(true)) => source_moves_register_only_by_binds(then_branch),
+            Expr::Literal(Literal::Bool(true)) => moves_register_only_by_binds(then_branch, calls),
             Expr::Literal(Literal::Bool(false) | Literal::Null) => {
-                source_moves_register_only_by_binds(else_branch)
+                moves_register_only_by_binds(else_branch, calls)
             }
             _ => {
-                source_moves_register_only_by_binds(then_branch)
-                    && source_moves_register_only_by_binds(else_branch)
+                moves_register_only_by_binds(then_branch, calls)
+                    && moves_register_only_by_binds(else_branch, calls)
             }
         },
+        // #4615: a call runs its body where it is, with each argument shared into the places the
+        // body names it, so what moves the register is what the bound body does
+        // (`def f(g): g; f(CHAIN)`). Read as [`update_navigates_within`] reads one, from the same
+        // cache, under a budget of its own, so a recursive body is read a bounded number of times.
+        Expr::DefCall {
+            def,
+            args,
+            frames,
+            bound,
+        } => {
+            *calls > 0 && {
+                *calls -= 1;
+                probe_def_call(def, args, *frames, bound)
+                    .is_ok_and(|body| moves_register_only_by_binds(&body, calls))
+            }
+        }
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            then,
+            bound,
+        } => {
+            *calls > 0 && {
+                *calls -= 1;
+                moves_register_only_by_binds(&bind_def(name, params, body, then, bound), calls)
+            }
+        }
+        // #4615: an argument reaches the bound body as a `Shared`, run where the body names it.
+        Expr::Shared(arg) => {
+            !native_stack_exhausted() && moves_register_only_by_binds(arg.expr(), calls)
+        }
+        // #4615: a nested `foreach` hands its source's elements on as its own state, so it moves
+        // the register as its source does when its INIT, UPDATE and EXTRACT move nothing and its
+        // loop pattern binds a bare variable (a destructuring pattern walks its own steps).
+        Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update,
+            extract,
+        } => {
+            patterns_all_bare(patterns)
+                && cannot_move_register(init)
+                && cannot_move_register(update)
+                && extract.as_deref().map_or(true, cannot_move_register)
+                && moves_register_only_by_binds(input, calls)
+        }
         // `last(f)` is a `reduce`, which backtracks `f`: the register is back where it entered.
         other if is_last_stage(other) => true,
         other => cannot_move_register(other),
@@ -47834,6 +47931,11 @@ fn cannot_move_register(expr: &Expr) -> bool {
         Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
             def_call_body_cannot_move_register(&def.body)
         }
+
+        // #4485: a `$`-parameter bound to a literal is substituted into the body as a shared
+        // argument (`def f($x): . as {a:$a} | $x; f(2)` reads `$x` as that `2`). It runs where it is
+        // written, so it moves the register as its argument does.
+        Expr::Shared(arg) => !native_stack_exhausted() && cannot_move_register(arg.expr()),
 
         // `fromjson` parses its input without indexing it. Its result can
         // re-establish a null register by jq's null identity rule; otherwise
@@ -52288,11 +52390,13 @@ impl<'e> RegisterSpine<'e> {
                 for stage in stages {
                     match self.reach(stage) {
                         Reach::HandsOn => {}
-                        // A second such stage fans the register out again, which the resolver
-                        // does not place (`foreach (., 1) as $j (.; .; .) | (., 1) | CHAIN`
-                        // aborted partway): the walk stops there.
-                        Reach::Partial if reach == Reach::HandsOn => reach = Reach::Partial,
-                        Reach::Partial => return Reach::Opaque,
+                        // A second such stage fans the register out again, and the next stage
+                        // meets it on the outputs that are it, as after the first (#4485). The
+                        // walk used to stop here because the resolver aborted partway when a nested
+                        // `foreach` came first (`foreach (.,1) as $j (.; .; .) | (.,1) | CHAIN`); that
+                        // was the marks a `foreach` emits at ([`resolve_foreach`]), not this stage, and
+                        // a pipe of commas alone never needed the stop.
+                        Reach::Partial => reach = Reach::Partial,
                         other => return other,
                     }
                 }
@@ -52423,12 +52527,19 @@ impl<'e> RegisterSpine<'e> {
                         extract,
                     } if patterns_all_bare(patterns)
                         && body_performs_no_step(init)
-                        && body_performs_no_step(update)
-                        && extract.as_deref().map_or(true, body_performs_no_step) =>
+                        && body_hands_on_loop_var(update, patterns)
+                        && extract
+                            .as_deref()
+                            .map_or(true, |extract| extract_leaves_hand_on(extract, patterns)) =>
                     {
-                        match self.reach(input) {
-                            Reach::HandsOn => Reach::HandsOn,
-                            Reach::Partial => Reach::Partial,
+                        // An EXTRACT that is the register on some outputs and a value that moves
+                        // nothing on the others fans the register out as a comma stage does.
+                        let fans_out = extract
+                            .as_deref()
+                            .is_some_and(|extract| !body_hands_on_loop_var(extract, patterns));
+                        match (self.reach(input), fans_out) {
+                            (Reach::HandsOn, false) => Reach::HandsOn,
+                            (Reach::HandsOn | Reach::Partial, _) => Reach::Partial,
                             _ => Reach::Opaque,
                         }
                     }
@@ -58257,7 +58368,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // (`step_at_entry`, set per step below), a loss otherwise.
     let states_untracked = S::TAG == EvalTag::Jq && !trackable;
     let step_at_entry = core::cell::Cell::new(false);
+    // #4485: what follows the `foreach` runs outside its UPDATE and EXTRACT, which hold the marks
+    // of the body while they emit.
+    let entry_marks = fold_body::marks();
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
+        let _after_the_loop = fold_body::restore(entry_marks);
         if register_unmoved && !branch.trackable {
             sink(branch.with_register(BranchRegister::Unmoved(Cow::Borrowed(value))))
         } else if states_untracked && !branch.trackable && branch.path.depth() == 0 {
@@ -67659,6 +67774,53 @@ mod fold_body {
         depth() > 0 && LOOP_DEPTH.with(Cell::get) == depth()
     }
 
+    /// Every mark of the body being resolved, for [`restore`].
+    #[derive(Clone, Copy)]
+    pub(crate) struct Marks {
+        depth: u32,
+        acc: u32,
+        off: u32,
+        moved: Moved,
+        looping: u32,
+    }
+
+    /// The marks as they stand now.
+    pub(crate) fn marks() -> Marks {
+        Marks {
+            depth: depth(),
+            acc: ACC_DEPTH.with(Cell::get),
+            off: OFF_DEPTH.with(Cell::get),
+            moved: MOVED.with(Cell::get),
+            looping: LOOP_DEPTH.with(Cell::get),
+        }
+    }
+
+    /// Restores the marks [`restore`] replaced.
+    pub(crate) struct RestoreGuard(Marks);
+
+    /// Sets every mark to `to` until the guard drops: a `foreach` hands its emission to what
+    /// follows it, which is not in the loop's UPDATE or EXTRACT, so it resolves at the marks the
+    /// fold was entered with (#4485). jq runs the stages after a `foreach` outside its body.
+    pub(crate) fn restore(to: Marks) -> RestoreGuard {
+        let previous = marks();
+        set_marks(to);
+        RestoreGuard(previous)
+    }
+
+    fn set_marks(to: Marks) {
+        DEPTH.with(|d| d.set(to.depth));
+        ACC_DEPTH.with(|a| a.set(to.acc));
+        OFF_DEPTH.with(|a| a.set(to.off));
+        MOVED.with(|a| a.set(to.moved));
+        LOOP_DEPTH.with(|l| l.set(to.looping));
+    }
+
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            set_marks(self.0);
+        }
+    }
+
     pub(crate) fn enter() -> Guard {
         DEPTH.with(|d| d.set(d.get() + 1));
         Guard
@@ -67732,6 +67894,19 @@ mod fold_body {
 
     pub(crate) fn foreach_body_here() -> bool {
         false
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct Marks;
+
+    pub(crate) fn marks() -> Marks {
+        Marks
+    }
+
+    pub(crate) struct RestoreGuard;
+
+    pub(crate) fn restore(_to: Marks) -> RestoreGuard {
+        RestoreGuard
     }
 
     pub(crate) fn enter() -> Guard {
