@@ -142548,3 +142548,356 @@ fn test_select_not_on_a_falsy_marker_passes_the_register_on_4604() -> Result<()>
     }
     Ok(())
 }
+
+/// #4640: a `try`/`?` around a destructure of a variable bound to a fresh value (`{a:1} as $n | $n as
+/// {b:$b} | .`), as a fold source inside another fold. The `fresh_only` spine walk of #4616 did not look
+/// inside the `try`, so the source was driven by value: the raise was never seen, and on a `null` or `true`
+/// document an `fe-y` EXTRACT (`foreach (...) as $y (.; $y; .)`) that reads the caught message met a value
+/// it took for the register, so `path()` printed `[]` and `del` returned `null` where jq raises. The walk
+/// reads through the `try`/`?` now, and the resolver models the catch as it does for the destructure
+/// written directly. Every row is a live jq 1.7.1 capture (stdout and exit code).
+#[test]
+fn test_try_around_a_fresh_variable_destructure_in_a_fold_source_4640() -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"null",
+            r"path(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(foreach (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(foreach (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(reduce (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(reduce (1,2) as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(reduce (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(reduce (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce .a? as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(reduce .a? as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce .a? as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(reduce .a? as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; foreach (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; $y; .); .))",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (try (true as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .); .))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach (1,2) as $i (.; foreach (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; .; .); .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; .; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; reduce (try ({a:1} as $n | $n as {b:$b} | .)) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; reduce (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; reduce (try (true as $n | $n as {b:$b} | .) catch .) as $y (.; .); .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"true",
+            r"del(reduce (1,2) as $i (.; foreach (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach (try (true as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; reduce (try ({a:1} as $n | $n as {b:$b} | .)) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; reduce (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; reduce (try (true as $n | $n as {b:$b} | .) catch .) as $y (.; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(reduce .a? as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(reduce .a? as $i (.; foreach (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(reduce .a? as $i (.; foreach (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; $y; .)))",
+            "",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; foreach ({a:1} as $n | $n as {b:$b} | .) as $y (.; $y; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; foreach (try ({a:1} as $n | $n as {b:$b} | .)) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; foreach (try ([1] as $n | $n as [$b] | .) catch .) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; foreach (try (true as $n | $n as {b:$b} | .) catch .) as $y (.; .; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; reduce (try ({a:1} as $n | $n as {b:$b} | .) catch .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; reduce (({a:1} as $n | $n as {b:$b} | .)?) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; reduce (try (null as $n | $n as {b:$b} | .) catch .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(reduce .a? as $i (.; reduce ({a:1} as $n | $n as {b:$b} | .) as $y (.; .)))",
+            "null\n",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    Ok(())
+}
