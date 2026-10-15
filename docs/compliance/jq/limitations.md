@@ -2381,7 +2381,9 @@ is the revert that established what the other one costs.
    navigated, and an element a `reduce` source moved onto that is not `null`. A `null` register, a `null` element and an INIT
    that navigated onto a `null` keep the by-value answer, which is jq's. A variable bound to such a literal
    (`null as $n | $n as {a:$a} | .`) is read the same way, by a `foreach` source through `source_destructures_fresh`
-   ([#4616](https://github.com/rust-works/succinctly/issues/4616)) and a `reduce` source alike. Still accepted: a
+   ([#4616](https://github.com/rust-works/succinctly/issues/4616)) and a `reduce` source alike; a `try`/`?` around that destructure is read through
+   ([#4640](https://github.com/rust-works/succinctly/issues/4640): the `fresh_only` walk descends into it, and the resolver models the catch; pinned by
+   `test_try_around_a_fresh_variable_destructure_in_a_fold_source_4640`). Still accepted: a
    comma beside the destructure on a `null` document under `=`/`|=`, a `null` literal destructure in a fold nested in a fold whose
    source is untracked (`reduce (.a? // 1) as $i (.; reduce (null as {b:$b} | .) as $z (.; .))`: the ambient does not describe jq's
    register there), and a boolean literal after an INIT that navigated or in a moved `reduce` body, which still raises, with the

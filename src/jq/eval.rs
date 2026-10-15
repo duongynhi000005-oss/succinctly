@@ -51530,6 +51530,17 @@ impl<'e> RegisterSpine<'e> {
         // (`Expr::Shared`, #3149), which is the argument's own expression.
         match unwrap_bind_source(e) {
             Expr::Identity => Reach::HandsOn,
+            // #4640: a `try`/`?` around a destructure of a fresh value catches the raise but the
+            // source is still routed (the resolver models the catch), as the destructure itself is
+            // (`is_fold_source_destructuring` looks inside it). Only the question "does it destructure
+            // a fresh value" is asked, and only by the `fresh_only` walk: the register walks read a
+            // `try` as opaque (the retry rules of #4575/#4585).
+            Expr::Try { expr, .. } | Expr::Optional(expr) if self.fresh_only => {
+                match self.reach(expr) {
+                    Reach::Destructures => Reach::Destructures,
+                    _ => Reach::Opaque,
+                }
+            }
             // #4278: a variable the spine bound to the register hands it on as `.` does.
             Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
             // #4187: a plain bind (`. as $x | BODY`, or a `?//` chain of bare `$var`s) does
