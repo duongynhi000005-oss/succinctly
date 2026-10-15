@@ -52182,8 +52182,58 @@ fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
 /// that never runs, which jq answers and the syntactic walk would refuse.
 fn drop_array_wrappers(source: &Expr) -> Expr {
     match source {
-        Expr::Array(inner) if is_plain_bind_chain(inner) => drop_array_wrappers(inner),
+        Expr::Array(inner) => match run_branch_of_bind_chain(inner) {
+            Some(chain) => drop_array_wrappers(chain),
+            None => map_subexprs(source, &mut |child| drop_array_wrappers(child)),
+        },
         other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
+    }
+}
+
+/// The part of `E` that is a plain bind chain and always runs ([`drop_array_wrappers`]): `E`
+/// itself, the right operand of a `//` whose left cannot yield a truthy value (jq then yields
+/// the right operand's outputs, #4635), or the handler of a `try` whose body can only raise
+/// (the handler then runs on its error, #4635). `None` when no such part is known to run.
+fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
+    match unwrap_paren(e) {
+        _ if is_plain_bind_chain(e) => Some(e),
+        Expr::Alternative(left, right) if never_truthy(left) && is_plain_bind_chain(right) => {
+            Some(right)
+        }
+        Expr::Try {
+            expr: body,
+            catch: Some(handler),
+        } if body_always_raises(body) && is_plain_bind_chain(handler) => Some(handler),
+        _ => None,
+    }
+}
+
+/// Whether `e` is a constant that yields no truthy output: `null`, `false`, `empty`, or a
+/// constant run through `not` (`false | not | not`).
+fn never_truthy(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Literal(Literal::Null) | Expr::Literal(Literal::Bool(false)) => true,
+        Expr::Builtin(Builtin::Empty) => true,
+        Expr::Pipe(stages) => match stages.split_first() {
+            Some((head, rest)) if !rest.is_empty() => {
+                let truthy = match unwrap_paren(head) {
+                    Expr::Literal(Literal::Null) | Expr::Literal(Literal::Bool(false)) => false,
+                    Expr::Literal(Literal::Bool(true)) => true,
+                    _ => return false,
+                };
+                let mut nots = 0;
+                for stage in rest {
+                    if !matches!(unwrap_paren(stage), Expr::Not) {
+                        return false;
+                    }
+                    nots += 1;
+                }
+                // `not` flips truthiness, so an odd count of them flips it.
+                truthy == (nots % 2 == 1)
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
