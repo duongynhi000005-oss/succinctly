@@ -36860,6 +36860,23 @@ fn body_performs_no_step(e: &Expr) -> bool {
     }
 }
 
+/// [`body_performs_no_step`], also admitting the loop variable of a nested `foreach` with a single
+/// bare pattern (#4485): `$j` is the source element, which is the register's own node wherever the
+/// source handed the register on, so `foreach (SRC) as $j (.; .; $j)` emits it as `.` does (jq's
+/// `jv_identical` holds for the same node, and for any `null` or boolean by kind).
+fn body_hands_on_loop_var(e: &Expr, patterns: &[Pattern]) -> bool {
+    match e {
+        Expr::Var(name) => {
+            matches!(patterns, [Pattern::Var(bound)] if bound == name)
+        }
+        Expr::Paren(inner) => body_hands_on_loop_var(inner, patterns),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| body_hands_on_loop_var(stage, patterns)),
+        other => body_performs_no_step(other),
+    }
+}
+
 /// Flatten an expression into the list of path components it denotes.
 ///
 /// `Pipe` and `Paren` are transparent and `Identity` contributes nothing, so
@@ -51880,11 +51897,13 @@ impl<'e> RegisterSpine<'e> {
                 for stage in stages {
                     match self.reach(stage) {
                         Reach::HandsOn => {}
-                        // A second such stage fans the register out again, which the resolver
-                        // does not place (`foreach (., 1) as $j (.; .; .) | (., 1) | CHAIN`
-                        // aborted partway): the walk stops there.
-                        Reach::Partial if reach == Reach::HandsOn => reach = Reach::Partial,
-                        Reach::Partial => return Reach::Opaque,
+                        // A second such stage fans the register out again, and the next stage
+                        // meets it on the outputs that are it, as after the first (#4485). The
+                        // walk used to stop here because the resolver aborted partway when a nested
+                        // `foreach` came first (`foreach (.,1) as $j (.; .; .) | (.,1) | CHAIN`); that
+                        // was the marks a `foreach` emits at ([`resolve_foreach`]), not this stage, and
+                        // a pipe of commas alone never needed the stop.
+                        Reach::Partial => reach = Reach::Partial,
                         other => return other,
                     }
                 }
@@ -52001,8 +52020,10 @@ impl<'e> RegisterSpine<'e> {
                         extract,
                     } if patterns_all_bare(patterns)
                         && body_performs_no_step(init)
-                        && body_performs_no_step(update)
-                        && extract.as_deref().map_or(true, body_performs_no_step) =>
+                        && body_hands_on_loop_var(update, patterns)
+                        && extract
+                            .as_deref()
+                            .map_or(true, |extract| body_hands_on_loop_var(extract, patterns)) =>
                     {
                         match self.reach(input) {
                             Reach::HandsOn => Reach::HandsOn,
@@ -57798,7 +57819,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // (`step_at_entry`, set per step below), a loss otherwise.
     let states_untracked = S::TAG == EvalTag::Jq && !trackable;
     let step_at_entry = core::cell::Cell::new(false);
+    // #4485: what follows the `foreach` runs outside its UPDATE and EXTRACT, which hold the marks
+    // of the body while they emit.
+    let entry_marks = fold_body::marks();
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
+        let _after_the_loop = fold_body::restore(entry_marks);
         if register_unmoved && !branch.trackable {
             sink(branch.with_register(BranchRegister::Unmoved(Cow::Borrowed(value))))
         } else if states_untracked && !branch.trackable && branch.path.depth() == 0 {
@@ -67171,6 +67196,53 @@ mod fold_body {
         depth() > 0 && LOOP_DEPTH.with(Cell::get) == depth()
     }
 
+    /// Every mark of the body being resolved, for [`restore`].
+    #[derive(Clone, Copy)]
+    pub(crate) struct Marks {
+        depth: u32,
+        acc: u32,
+        off: u32,
+        moved: Moved,
+        looping: u32,
+    }
+
+    /// The marks as they stand now.
+    pub(crate) fn marks() -> Marks {
+        Marks {
+            depth: depth(),
+            acc: ACC_DEPTH.with(Cell::get),
+            off: OFF_DEPTH.with(Cell::get),
+            moved: MOVED.with(Cell::get),
+            looping: LOOP_DEPTH.with(Cell::get),
+        }
+    }
+
+    /// Restores the marks [`restore`] replaced.
+    pub(crate) struct RestoreGuard(Marks);
+
+    /// Sets every mark to `to` until the guard drops: a `foreach` hands its emission to what
+    /// follows it, which is not in the loop's UPDATE or EXTRACT, so it resolves at the marks the
+    /// fold was entered with (#4485). jq runs the stages after a `foreach` outside its body.
+    pub(crate) fn restore(to: Marks) -> RestoreGuard {
+        let previous = marks();
+        set_marks(to);
+        RestoreGuard(previous)
+    }
+
+    fn set_marks(to: Marks) {
+        DEPTH.with(|d| d.set(to.depth));
+        ACC_DEPTH.with(|a| a.set(to.acc));
+        OFF_DEPTH.with(|a| a.set(to.off));
+        MOVED.with(|a| a.set(to.moved));
+        LOOP_DEPTH.with(|l| l.set(to.looping));
+    }
+
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            set_marks(self.0);
+        }
+    }
+
     pub(crate) fn enter() -> Guard {
         DEPTH.with(|d| d.set(d.get() + 1));
         Guard
@@ -67234,6 +67306,19 @@ mod fold_body {
 
     pub(crate) fn foreach_body_here() -> bool {
         false
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct Marks;
+
+    pub(crate) fn marks() -> Marks {
+        Marks
+    }
+
+    pub(crate) struct RestoreGuard;
+
+    pub(crate) fn restore(_to: Marks) -> RestoreGuard {
+        RestoreGuard
     }
 
     pub(crate) fn enter() -> Guard {

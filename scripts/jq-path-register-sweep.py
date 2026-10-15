@@ -710,6 +710,21 @@ OPERANDS = [
     "(foreach (foreach . as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach (foreach .a as $j (.; .; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    # (#4485) a nested `foreach` whose UPDATE or EXTRACT hands its loop variable on, and two stages
+    # that are the register on only some outputs in one pipe: what follows a `foreach` resolves at
+    # the marks of the fold it is in, not of the loop body it was emitted from.
+    "(foreach (foreach . as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; $j; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; $j; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; $j | .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; .a) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; ., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach (., 1) as $j (.; .; .) | (., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach . as $j (.; .; .) | (., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (foreach . as $j (.; .; .) | (1, .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((., 1) | (., 1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((., 1) | (., 1) | . as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+    "(foreach ((., 1) | (1, .) | . as {a:$a} | .) as $k (.; .; .))",
     "(reduce ((., 1) | . as {a:$a} ?// $a | .) as $k (.; .))",
     # (#4424) a pipe source of a chain of destructuring patterns only, outside a fold: its first
     # step is the register's whatever the pipe is, and the alternative that matches moves it. The

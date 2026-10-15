@@ -143653,3 +143653,151 @@ fn test_try_around_a_fresh_variable_destructure_in_a_fold_source_4640() -> Resul
     }
     Ok(())
 }
+
+/// #4485 (first shape): a nested `foreach` whose UPDATE or EXTRACT is its loop variable (`$j`, the
+/// source element, which is the register's own node wherever the source handed the register on)
+/// hands the register on as `.` does, so a `?//` chain after it in a `foreach` source is placed
+/// by the resolver: on `null` jq's first alternative walks the register onto `.a` for the
+/// element that is the register and falls back to the bare one for the other. The walk read
+/// only a nested `foreach` whose INIT, UPDATE and EXTRACT were all `.`, so the by-value drive
+/// answered the root. The contrasts stay as they were: an EXTRACT that is not a loop variable
+/// (`5`, `.a`) and a non-`null` document. Every row captured from jq 1.7.1 with `-c`; stdout and
+/// the exit status are pinned.
+#[test]
+fn test_foreach_source_nested_foreach_loop_variable_hands_the_register_on_4485() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach . as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; $j; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; $j; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .)) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .)) |= 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; 5) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (., 1) as $j (.; .; .a) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            0,
+        ),
+    ];
+    for &(doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want_stdout, want_code),
+            "`{filter}` on {doc}: stderr {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4485 (second shape): two stages in one pipe that are the register on only some outputs
+/// (`(., 1) | (., 1) | CHAIN`, or a nested `foreach` followed by one) are placed like one. What a
+/// `foreach` emits ran at the fold-body marks of its own UPDATE/EXTRACT, so the stages after a
+/// nested `foreach` met `fold_body::depth() >= 1` and the untracked `1` was refused with
+/// `Invalid path expression with result 1` after the first output; it is handed to its
+/// consumer at the marks the fold was entered with, and the walk no longer stops at the second
+/// partial stage. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_two_partial_register_stages_4485() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"null",
+            r"path(foreach (foreach (.,1) as $j (.; .; .) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach . as $j (.; .; .) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach . as $j (.; .; .) | (1,.) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach ((.,1) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach ((.,1) | (.,1) | . as {a:$a} ?// [$a] | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach (foreach (.,1) as $j (.; .; .) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .)) = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (foreach (.,1) as $j (.; .; .) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n[]\n[]\n",
+            0,
+        ),
+    ];
+    for &(doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want_stdout, want_code),
+            "`{filter}` on {doc}: stderr {stderr:?}"
+        );
+    }
+    Ok(())
+}
