@@ -145361,3 +145361,30 @@ fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() ->
     }
     Ok(())
 }
+
+/// #4663: `limit(n; (CHAIN), X)` as a `foreach` source. The refused first emission of the chain
+/// counts against `n` (jq's `limit` is a `label`/`break` the chain's `?//` retries past), so the
+/// sibling `X` is reached only when `n` is 3 or more: `n` = 1 and 2 print the register once, where
+/// the by-value drive printed it twice. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_limit_of_a_chain_with_a_comma_sibling_counts_the_refused_emission_4663() -> Result<()> {
+    let doc: &'static str = r#"{"a":true}"#;
+    let chain = ". as {a:$a} ?// $a | .";
+    for (n, x, stdout, stderr, code) in [
+        ("1", "1", "[]\n", "", 0),
+        ("2", "1", "[]\n", "", 0),
+        ("3", "1", "[]\n[]\n", "", 0),
+        ("1", ".a", "[]\n", "", 0),
+        ("2", ".a", "[]\n", "", 0),
+        ("3", ".a", "[]\n", "Invalid path expression with result", 5),
+        ("1", "empty", "[]\n", "", 0),
+        ("2", "empty", "[]\n", "", 0),
+        ("3", "empty", "[]\n", "", 0),
+    ] {
+        let program: &'static str = Box::leak(
+            format!("path(foreach (limit({n}; ({chain}), {x})) as $k (.; .; .))").into_boxed_str(),
+        );
+        assert_path_rows_both_routes_3749(&[(doc, program, stdout, stderr, code)])?;
+    }
+    Ok(())
+}
