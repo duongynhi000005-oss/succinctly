@@ -9255,7 +9255,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         // `del(.name)` all apply per document, while `[.]` collects across
         // the whole list. Each entry carries its own `(file, document)`
         // origin, which is what `file_index`/`document_index` read back.
-        let mut all_docs: Vec<(OwnedValue, usize, usize)> = Vec::new();
+        let mut all_docs: Vec<(OwnedValue, usize, usize, bool)> = Vec::new();
         let mut global_doc_index: usize = 0;
         let source_file_indices = gathered_file_indices(&input_files);
         for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
@@ -9273,7 +9273,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     .document
                     .map_or(true, |target| target == global_doc_index);
                 if should_include {
-                    all_docs.push((input, file_idx, doc_idx));
+                    all_docs.push((input, file_idx, doc_idx, *format == InputFormat::Json));
                 }
                 global_doc_index += 1;
             }

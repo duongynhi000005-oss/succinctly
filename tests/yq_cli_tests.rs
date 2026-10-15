@@ -13840,6 +13840,43 @@ fn test_line_and_column_of_json_input_are_zero_4382() -> Result<()> {
     Ok(())
 }
 
+/// #4544: `--eval-all` reindexes each document into bridge text, so `line` and `column` of a node
+/// read from JSON answered the position in that text (`[1,6]`) where yq answers `[0,0]` (live yq
+/// v4.53.3 capture of `yq ea -o=json -I=0 '.a | [line,column]'` over `{"a":[1,{"b":2}]}`).
+#[test]
+fn test_eval_all_line_and_column_of_json_input_are_zero_4544() -> Result<()> {
+    let dir = TempDir::new()?;
+    let json = dir.path().join("t.json");
+    std::fs::write(&json, "{\"a\":[1,{\"b\":2}]}\n")?;
+    let json = json.to_str().expect("utf-8 temp path");
+    let argv = ["-o", "json", "-I", "0", "--eval-all"];
+    for (filter, expected) in [
+        (".a | [line,column]", "[0,0]"),
+        (".a[1].b | [line,column]", "[0,0]"),
+        ("[line,column]", "[0,0]"),
+    ] {
+        let (stdout, code) = run_yq_file(filter, json, &argv)?;
+        assert_eq!((stdout.trim(), code), (expected, 0), "{filter}");
+    }
+    // `-p json` on stdin.
+    let (stdout, code) = run_yq_stdin(
+        ".a | [line,column]",
+        "{\"a\":[1]}\n",
+        &["-o", "json", "-I", "0", "--eval-all", "-p", "json"],
+    )?;
+    assert_eq!((stdout.as_str(), code), ("[0,0]\n", 0));
+    // The document index and file index still come from the origin.
+    let (stdout, code) = run_yq_file("[document_index, file_index]", json, &argv)?;
+    assert_eq!((stdout.trim(), code), ("[0,0]", 0));
+    // YAML input keeps a non-zero position (the flag is set from the source's format only).
+    let yaml = dir.path().join("t.yaml");
+    std::fs::write(&yaml, "a:\n  - 1\n")?;
+    let (stdout, code) = run_yq_file(".a | line", yaml.to_str().expect("utf-8 temp path"), &argv)?;
+    assert_eq!(code, 0);
+    assert_ne!(stdout.trim(), "0", "YAML input must keep its position");
+    Ok(())
+}
+
 /// #4394: yq picks one input decoder for a whole run, from the *first* file argument's extension
 /// (`.json` is JSON; `.yaml`, `.yml`, `.txt`, no extension and `-` are YAML), and reads every file
 /// with it. An explicit `-p` overrides the extension for all of them. Each row is a live yq v4.53.3

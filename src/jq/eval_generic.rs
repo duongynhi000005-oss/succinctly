@@ -7841,6 +7841,10 @@ pub(crate) fn resolve_path_context_at<S: EvalSemantics>(
 pub(crate) struct NodeOrigin {
     pub(crate) file: usize,
     pub(crate) document: Option<usize>,
+    /// The document was decoded from JSON, so `line` and `column` answer `0`
+    /// as in yq (#4544) rather than reading the position of the bridge text
+    /// `--eval-all` reindexes it into.
+    pub(crate) json_sourced: bool,
 }
 
 /// The ambient [`NodeOrigin`]. Same `thread_local!`-with-restore shape, and
@@ -7918,6 +7922,11 @@ pub(crate) fn enter_node_origin(origin: NodeOrigin) -> NodeOriginGuard {
 
 /// The RAII guard [`enter_node_origin`] returns.
 pub(crate) type NodeOriginGuard = node_origin::Guard;
+
+/// Whether the ambient node origin is a document decoded from JSON (#4544).
+fn ambient_json_sourced() -> bool {
+    node_origin::current().is_some_and(|origin| origin.json_sourced)
+}
 
 /// `file_index` from the ambient node origin, if one is installed.
 ///
@@ -31627,12 +31636,20 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
     };
     match builtin {
         Builtin::Line => {
-            let line = cursor.map_or(0, |c| c.line());
+            let line = if ambient_json_sourced() {
+                0
+            } else {
+                cursor.map_or(0, |c| c.line())
+            };
             GenericResult::Owned(OwnedValue::Int(line as i64))
         }
 
         Builtin::Column => {
-            let column = cursor.map_or(0, |c| c.column());
+            let column = if ambient_json_sourced() {
+                0
+            } else {
+                cursor.map_or(0, |c| c.column())
+            };
             GenericResult::Owned(OwnedValue::Int(column as i64))
         }
 
