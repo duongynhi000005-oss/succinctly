@@ -66503,3 +66503,159 @@ fn test_reduce_live_null_register_step_stays_jq_only_4445() -> Result<()> {
     }
     Ok(())
 }
+
+/// #3450: `map(.)` over an *empty* container keeps the node's position in yq, as over a scalar, so
+/// `path`/`key`/`parent` after it still see the original node (`a: []`: `.a | map(.) | path` is
+/// `["a"]`); over a non-empty container it detaches (`a: [1]`: `[]`, no `key`, no `parent`). The
+/// rule asked the cursor's `is_container`, which means "has a subtree" for JSON and "is a
+/// sequence or mapping" for YAML, so the YAML cursor of an empty container disagreed with the
+/// owned value. Every row captured from yq v4.53.3 (Homebrew), YAML and JSON input.
+#[test]
+fn test_map_over_an_empty_container_keeps_its_position_3450() -> Result<()> {
+    let rows: &[(&str, &str, &[&str], &str)] = &[
+        (
+            "a: []\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            "a: []\n",
+            ".a | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "a: []\n",
+            ".a | map(.) | parent",
+            &["-o=json", "-I=0"],
+            "{\"a\":[]}\n",
+        ),
+        (
+            "a: {}\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            "a: {}\n",
+            ".a | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "a: {}\n",
+            ".a | map(.) | parent",
+            &["-o=json", "-I=0"],
+            "{\"a\":{}}\n",
+        ),
+        (
+            "a: [1]\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n",
+        ),
+        ("a: [1]\n", ".a | map(.) | key", &["-o=json", "-I=0"], ""),
+        ("a: [1]\n", ".a | map(.) | parent", &["-o=json", "-I=0"], ""),
+        (
+            "a: {k: 1}\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[]\n",
+        ),
+        ("a: {k: 1}\n", ".a | map(.) | key", &["-o=json", "-I=0"], ""),
+        (
+            "a: {k: 1}\n",
+            ".a | map(.) | parent",
+            &["-o=json", "-I=0"],
+            "",
+        ),
+        (
+            "a: 5\n",
+            ".a | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            "a: 5\n",
+            ".a | map(.) | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "a: 5\n",
+            ".a | map(.) | parent",
+            &["-o=json", "-I=0"],
+            "{\"a\":5}\n",
+        ),
+        (
+            r#"{"a":[]}"#,
+            ".a | map(.) | path",
+            &["-p=json", "-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            r#"{"a":[]}"#,
+            ".a | map(.) | key",
+            &["-p=json", "-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            r#"{"a":[]}"#,
+            ".a | map(.) | parent",
+            &["-p=json", "-o=json", "-I=0"],
+            "{\"a\":[]}\n",
+        ),
+        (
+            r#"{"a":{}}"#,
+            ".a | map(.) | path",
+            &["-p=json", "-o=json", "-I=0"],
+            "[\"a\"]\n",
+        ),
+        (
+            r#"{"a":{}}"#,
+            ".a | map(.) | key",
+            &["-p=json", "-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            r#"{"a":{}}"#,
+            ".a | map(.) | parent",
+            &["-p=json", "-o=json", "-I=0"],
+            "{\"a\":{}}\n",
+        ),
+        (
+            r#"{"a":[1]}"#,
+            ".a | map(.) | path",
+            &["-p=json", "-o=json", "-I=0"],
+            "[]\n",
+        ),
+        (
+            r#"{"a":[1]}"#,
+            ".a | map(.) | key",
+            &["-p=json", "-o=json", "-I=0"],
+            "",
+        ),
+        (
+            r#"{"a":[1]}"#,
+            ".a | map(.) | parent",
+            &["-p=json", "-o=json", "-I=0"],
+            "",
+        ),
+        (
+            "a: {b: []}\n",
+            ".a.b | map(.) | path",
+            &["-o=json", "-I=0"],
+            "[\"a\",\"b\"]\n",
+        ),
+    ];
+    for &(doc, filter, args, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}

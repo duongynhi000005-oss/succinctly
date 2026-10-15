@@ -3844,6 +3844,9 @@ fixed on its own terms (#2375); the second is still open:
   there detaches a container result and passes a scalar through with its position, which
   is the same mechanism seen from both sides — yq never replaced the scalar node, so it
   kept its own path. Pinned in `test_owned_identity_rules_match_yq_2416`.
+  An *empty* container is the exception, as a scalar is: yq keeps its position through `map(.)` (`a: []` with
+  `.a | map(.) | path` is `["a"]`, `key` is `"a"`, `parent` is the document), so the rule detaches only a container with members
+  ([#3450](https://github.com/rust-works/succinctly/issues/3450); pinned in `test_map_over_an_empty_container_keeps_its_position_3450`).
 - **`first(.a[])` on a genuinely-resolved scalar still raises** (`resolve_iterate_sink`,
   shared by `resolve_node`'s own `Expr::Iterate` arm and `first`/`limit`'s fast path) —
   this function is also reached by `resolve_del_path_branches`'s comma-fanout fallback for a

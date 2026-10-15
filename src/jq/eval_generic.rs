@@ -33809,9 +33809,9 @@ enum OwnedIdentityRule {
     /// The output starts a detached tree: `keys`, `with_entries`, `{...}`,
     /// a literal.
     Detaches,
-    /// `map`: a container input yields a detached tree (where `[.[] | f]`
-    /// keeps -- yq's own inconsistency, reproduced), but a scalar or `null`
-    /// passes through with its position (`.a | map(. + 1) | key` on `a: 5`
+    /// `map`: a non-empty container input yields a detached tree (where `[.[] | f]`
+    /// keeps -- yq's own inconsistency, reproduced), but a scalar, `null` or an
+    /// empty container (#3450) passes through with its position (`.a | map(. + 1) | key` on `a: 5`
     /// is `"a"`; on `a: [1, 2]` it is nothing).
     DetachesContainer,
     /// The output stands where the *left operand* stood: arithmetic,
@@ -35654,7 +35654,10 @@ fn owned_identity_placed_by<S: EvalSemantics, V: DocumentValue>(
         }
         OwnedIdentityRule::Detaches => Some(OwnedIdentity::detached()),
         OwnedIdentityRule::DetachesContainer => {
-            if value.as_array().is_some() || value.as_object().is_some() {
+            // #3450: an empty container keeps its position, like a scalar.
+            if value.as_array().is_some_and(|items| !items.is_empty())
+                || value.as_object().is_some_and(|fields| !fields.is_empty())
+            {
                 Some(OwnedIdentity::detached())
             } else {
                 Some(id.clone())
@@ -37785,7 +37788,9 @@ fn owned_identity_leaving_cursor<S: EvalSemantics, V: DocumentValue>(
         // where the node stood, flagged so a second `key` emits nothing.
         OwnedIdentityRule::KeyNode => Ok(Some(id.rebuilt().with_key_node(true))),
         OwnedIdentityRule::Detaches => Ok(Some(OwnedIdentity::detached())),
-        OwnedIdentityRule::DetachesContainer => Ok(Some(if cursor.is_container() {
+        // #3450: "has members", not `is_container` (which is "has a subtree" for JSON and "is a
+        // mapping or sequence" for YAML): an empty container keeps its position, like a scalar.
+        OwnedIdentityRule::DetachesContainer => Ok(Some(if cursor.first_child().is_some() {
             OwnedIdentity::detached()
         } else {
             id.rebuilt()
