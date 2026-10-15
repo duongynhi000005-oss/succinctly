@@ -181,12 +181,18 @@ CONTEXTS = [
     ("path-nav", "path(.a as $x | {O})"),
     ("del-nav", "del(.a as $x | {O})"),
     ("update-nav", "(.a as $x | {O}) |= 9"),
+    # (#4637) an enclosing `?`/`try` around the whole fold catches the path error jq raises there
+    ("path-opt", "path((. as $x | {O})?)"),
+    ("path-try", "path(try (. as $x | {O}))"),
+    ("del-opt", "del((. as $x | {O})?)"),
+    ("update-try", "(try (. as $x | {O})) |= 9"),
+    ("path-nav-opt", "path((.a as $x | {O})?)"),
 ]
 # The ACCEPT_WRONG rows of these contexts still left (#4588): the body of a `reduce` whose source
 # moved the register, where the register is on an element and a marker may be that very node, and a
 # destructure of `.` behind a `select($x|not)`/`select($x)` that the markers do not decide. They count
 # against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
-RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
+RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav", "path-nav-opt"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
 RESIDUAL_NAV_MAX = 51
 DOCS = [
@@ -242,7 +248,7 @@ def main():
     ap.add_argument("--base", help="reference succinctly build; a lost match against it fails")
     ap.add_argument("--jq", default="/usr/bin/jq", help="the pinned oracle (jq 1.7.1)")
     ap.add_argument("--show", type=int, default=20, help="max rows printed per section")
-    ap.add_argument("--only", default="", help="restrict to rows whose name contains this")
+    ap.add_argument("--only", default="", help="restrict to rows whose name contains this (comma-separated: any of)")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
@@ -250,7 +256,7 @@ def main():
     rows = []
     for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(OUTER, INNER, SOURCES, CONTEXTS, DOCS):
         name = f"{on}/{inn}/{sn}/{cn}"
-        if args.only and args.only not in name:
+        if args.only and not any(part in name for part in args.only.split(",")):
             continue
         prog = c.replace("{O}", o.replace("{I}", i.replace("{S}", s)))
         rows.append((name, sn, prog, doc))

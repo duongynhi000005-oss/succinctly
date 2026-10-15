@@ -2229,7 +2229,11 @@ is the revert that established what the other one costs.
    answers (a nested fold under a `?//` bind, a destructuring `foreach` source behind an `and`) are now refused, in the
    safe direction. Inside another fold's body the refusal fires whenever that fold's UPDATE is not a pass-through of its
    accumulator, so `del(reduce .[]? as $k (.; reduce (try (. as {a:$a} | .)) as $y (.; .)))` (jq answers `null`) is
-   refused too. The `foreach` route takes a bare `.`, a `select(literal)` and a comma of them (`(., .) as {...}`, #4150);
+   refused too. In the body of a `reduce` whose source moved the register onto an element the refusal is jq's own
+   pattern-step error (`near attempt to access element 0 of ...`: neither `.` nor a `$x` bound outside is the register there),
+   so an enclosing `?`/`try` catches it ([#4637](https://github.com/rust-works/succinctly/issues/4637); pinned by
+   `test_moved_body_foreach_source_destructure_refusal_is_caught_by_an_enclosing_try_4637`); elsewhere it stays the uncatchable
+   guess. The `foreach` route takes a bare `.`, a `select(literal)` and a comma of them (`(., .) as {...}`, #4150);
    a `(.|.) as {...}` pipe source was read as a computed value by the resolver then and stayed as it was (it is the register since #4320's third part, below).
    [#4150](https://github.com/rust-works/succinctly/issues/4150) closes the same accept under `try`/`?`/`and`/`or`: a
    non-last `?//` alternative's refusal is not retried (the resolver cannot tell jq's path error from its guess), and an
