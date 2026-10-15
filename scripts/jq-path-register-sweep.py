@@ -990,6 +990,25 @@ OPERANDS = [
     "(reduce ((first(., {a:1}) | . as {a:$a} | .), 1) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    # (#4685) a navigation after `first(.)`, `limit(1; .)`, `nth(0; .)` or `first(., X)` as a nested fold's source:
+    # the wrapper emits the accumulator once, so the navigation is path-checked against it and raises in a moved
+    # `reduce` body, as after a bare `.`. Contrasts: a builtin that reads by value (`getpath`, `keys`), a `try`
+    # around the navigation (`. | try .a` is refused today; behind `first(.)` it keeps its answer), a fresh first leaf.
+    "(reduce (first(.) | .a) as $k (.; .))",
+    "(reduce (limit(1; .) | .a) as $k (.; .))",
+    "(reduce (nth(0; .) | .a) as $k (.; .))",
+    "(reduce (first(.) | .[]?) as $k (.; .))",
+    "(reduce (first(.) | ..) as $k (.; .))",
+    "(reduce (first(., {a:1}) | .a) as $k (.; .))",
+    "(reduce (try first(.) | .a) as $k (.; .))",
+    "(reduce (first(.)? | .a) as $k (.; .))",
+    "(reduce (first(first(.), 2) | .a) as $k (.; .))",
+    "(reduce (first(.) | select(.) | .a) as $k (.; .))",
+    "(reduce (first(.) | getpath([\"a\"])) as $k (.; .))",
+    "(reduce (first(.) | keys) as $k (.; .))",
+    "(reduce (first(.) | try .a) as $k (.; .))",
+    "(reduce (first({a:1}, .) | .a) as $k (.; .))",
+    "(foreach (first(.) | .a) as $k (.; .; .))",
     # (#4674) the wrapper nested in another (`first(first(., X), 2)`, a first leaf that is itself one) or behind a
     # `try`/`?` that wraps it alone: the destructure sits outside the catch, so jq raises. Contrasts: a fresh first
     # leaf under the nested wrapper, a `try` around the destructure as well, and a `try` that catches it.
