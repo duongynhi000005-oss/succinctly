@@ -940,6 +940,13 @@ OPERANDS = [
     "(reduce (limit(1; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (limit(2; ., {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
     "(reduce (nth(0; {a:1}, .) | . as {a:$a} | .) as $k (.; .))",
+    # (#4667) `nth(0; ., X)` and a `foreach` source behind `first(., X)`: in the body of a `reduce` whose
+    # source moved the register the destructure meets `.`, which is not the register there.
+    "(reduce (nth(0; ., {a:1}) | . as {a:$a} | .) as $k (.; .))",
+    "(foreach (first(., {a:1}) | . as {a:$a} | .) as $k (.; .; .))",
+    "(reduce (first(., {a:1}) | . as [$a] | .) as $k (.; .))",
+    "(reduce (first(., {a:1}, 3) | . as {a:$a} | .) as $k (.; .))",
+    "(reduce (first(., {a:1}) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as [$a] | .) as $k (.; .))",
     "(reduce (first({a:1}, .) | . as {a:$a} | $a) as $k (.; .))",
     "(reduce (try ({a:1}, .) | . as {a:$a} | .) as $k (.; .))",
