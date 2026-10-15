@@ -143801,3 +143801,77 @@ fn test_foreach_source_two_partial_register_stages_4485() -> Result<()> {
     }
     Ok(())
 }
+
+/// #4485 (third shape, the `null` row): a parameter bound to a literal is substituted into the body
+/// as a shared literal, which `cannot_move_register` did not read, so the call was not placed
+/// and the by-value drive answered `[]` where jq's register had moved onto `.a`
+/// (`def f($x): . as {a:$a} ?// $a | $x; f(2)`). The same body with the literal written inline
+/// was placed. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_def_parameter_bound_to_a_literal_4485() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"null",
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | $x; f(2)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | $x; f(null)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | [$x]; f(2)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f($x; $y): . as {a:$a} ?// $a | $y; f(2; 3)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f(g): . as {a:$a} ?// $a | g; f(2)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (def f($x): . as {a:$a} | $x; f(2)) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach (def f($x): . as {a:$a} ?// $a | $x; f(2)) as $k (.; .; .)) = 9",
+            "{\"a\":9}\n",
+            0,
+        ),
+        (
+            r"{}",
+            r"path(foreach (def f($x): . as {a:$a} | $x; f(2)) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (def f($x): . as {a:$a} ?// $a | $x; f(2)) as $k (.; .; .))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for &(doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want_stdout, want_code),
+            "`{filter}` on {doc}: stderr {stderr:?}"
+        );
+    }
+    Ok(())
+}

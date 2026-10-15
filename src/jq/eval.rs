@@ -47803,6 +47803,11 @@ fn cannot_move_register(expr: &Expr) -> bool {
             def_call_body_cannot_move_register(&def.body)
         }
 
+        // #4485: a `$`-parameter bound to a literal is substituted into the body as a shared
+        // argument (`def f($x): . as {a:$a} | $x; f(2)` reads `$x` as that `2`). It runs where it is
+        // written, so it moves the register as its argument does.
+        Expr::Shared(arg) => !native_stack_exhausted() && cannot_move_register(arg.expr()),
+
         // `fromjson` parses its input without indexing it. Its result can
         // re-establish a null register by jq's null identity rule; otherwise
         // the ordinary identity check still rejects rebuilt values (#3049).
