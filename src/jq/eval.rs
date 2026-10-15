@@ -50276,6 +50276,9 @@ fn source_destructures_register_with(
         held: Vec::new(),
         markers,
         dot_fresh: false,
+        taken_first_is_dot: !any_subexpr(source, &mut |e| {
+            matches!(e, Expr::Try { .. } | Expr::Optional(_))
+        }),
         fresh_cut_free: true,
         known: NotRegister::default(),
         moved: false,
@@ -50568,6 +50571,7 @@ fn source_destructures_fresh(
         held: Vec::new(),
         markers: Vec::new(),
         dot_fresh: dot_off_register,
+        taken_first_is_dot: false,
         fresh_cut_free: true,
         known,
         moved: false,
@@ -51233,6 +51237,22 @@ fn limit_takes_some(n: &Expr) -> bool {
     limit_literal_count(n).is_some_and(|n| n > 0.0)
 }
 
+/// Whether `e` is `first(C)`, `limit(1; C)` or `nth(0; C)` over a comma `C` whose first leaf is
+/// `.` (#4667): the only output is `.` itself, because the wrapper stops before any other leaf is
+/// generated (`first(., {a:1})` is `.`). [`first_output_is_register`](RegisterSpine) reads the same
+/// shape for a bind source.
+fn takes_only_an_identity_leaf(e: &Expr) -> bool {
+    let takes_first = |inner: &Expr| is_comma(inner) && comma_first_leaf_is_identity(inner);
+    match unwrap_bind_source(e) {
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => takes_first(inner),
+        Expr::Limit { n, expr: inner } => limit_takes_one(n) && takes_first(inner),
+        Expr::NthExpr { n, expr: inner } | Expr::Builtin(Builtin::NthStream(n, inner)) => {
+            limit_literal_count(n) == Some(0.0) && takes_first(inner)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `e` is a comma whose first output is `.`: its first leaf, through nested commas
 /// (`(., 1), 2`).
 fn comma_first_leaf_is_identity(e: &Expr) -> bool {
@@ -51366,6 +51386,10 @@ struct RegisterSpine<'e> {
     /// fresh stage earlier in the pipe (`{a:1} | . as {a:$a}`, `$x | ..`, `keys | ..`) made it so.
     /// Always `false` for an ordinary walk.
     dot_fresh: bool,
+    /// Whether `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` are read as handing the register
+    /// on (#4667): a register walk over a source with no `try`/`?`. A `try` around the destructure
+    /// that follows catches the raise jq makes, which the loud refusal this reads into cannot.
+    taken_first_is_dot: bool,
     /// In a `fresh_only` walk, whether the stage that made `.` fresh ([`dot_fresh`](Self::dot_fresh))
     /// generates its fresh item before anything can cut its generation short (`error`, `break`, `halt`,
     /// #4597): a consumer the walk newly reads (`isempty`/`any`/`all`) is claimed only then, since
@@ -52625,6 +52649,22 @@ impl<'e> RegisterSpine<'e> {
                         }
                     }
                 }
+                // #4667: `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` emit their comma's first leaf
+                // and stop, so `X` is never generated and the stage hands the register on as `.` does
+                // (peeling the wrapper alone would leave the whole comma, read as opaque). Only for a
+                // register walk over a source with no `try`/`?` ([`taken_first_is_dot`]), and in the
+                // `through_reduce` walk only in the body of a `reduce` whose source moved the register,
+                // where the destructure of `.` certainly raises: elsewhere the loud refusal it would
+                // reach is a guess, and these sources are answered today (#4600: `del(try (reduce 1 as
+                // $i (.; -(reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))))`).
+                //
+                // [`taken_first_is_dot`]: Self::taken_first_is_dot
+                if self.taken_first_is_dot
+                    && (!self.through_reduce || fold_body::source_moved_here())
+                    && takes_only_an_identity_leaf(other)
+                {
+                    return Reach::HandsOn;
+                }
                 let peeled = peel_register_transparent(other);
                 if !core::ptr::eq(peeled, other) {
                     self.reach(peeled)
@@ -53273,7 +53313,10 @@ fn resolve_marker_ifs(source: &Expr) -> Expr {
 fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
     match unwrap_paren(source) {
         Expr::Pipe(stages) => {
-            let first = stages.iter().find(|stage| !is_identity_stage(stage))?;
+            // #4667: `first(., X)` and its `limit(1; ..)`/`nth(0; ..)` spellings are `.`.
+            let first = stages
+                .iter()
+                .find(|stage| !is_identity_stage(stage) && !takes_only_an_identity_leaf(stage))?;
             leading_destructure_of_dot_element(first)
         }
         Expr::AsPattern { expr, patterns, .. }

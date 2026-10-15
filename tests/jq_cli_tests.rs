@@ -142058,6 +142058,97 @@ fn test_reduce_source_destructuring_a_fresh_value_mixed_body_and_nested_fold_452
     ])
 }
 
+/// #4667: `first(., X)`, `limit(1; ., X)` and `nth(0; ., X)` generate only their comma's first leaf, so
+/// as a `reduce` source in the body of a `reduce` whose source moved the register, `first(., {a:1}) | . as
+/// {a:$a} | .` destructures `.`, which is not the register there, and raises -- the fresh item is never
+/// generated. It used to be answered (`del` deleted the document). `first({a:1}, .)` raises on the fresh
+/// item instead, and outside a moved body the destructure of the register succeeds. A `try`/`?` around
+/// the destructure catches the raise, so those sources are answered. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // A `foreach` source reads the same wherever the register is: `first(., X)` is `first(.)`.
+        (
+            r#"{"a":false,"b":null}"#,
+            r"del(foreach (1,2) as $k (.; .; (foreach (first(., {a:1}) | . as {a:$a} | .) as $k (.; .; .))))",
+            "",
+            "Invalid path expression with result {\"a\":false,\"b\":null}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"del(reduce .[]? as $i (.; reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"(reduce .[]? as $i (.; reduce (limit(1; ., {a:1}) | . as {a:$a} | .) as $j (.; .))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (nth(0; ., {a:1}) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; foreach (first(., {a:1}) | . as {a:$a} | .) as $j (.; .; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first({a:1}, .) | . as {a:$a} | .) as $j (.; .)))]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | try (. as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (first(., {a:1}) | (. as {a:$a} | .)?) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce .[]? as $i (.; reduce (try (first(., {a:1}) | . as {a:$a} | .)) as $j (.; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":5}"#,
+            r"[path(reduce (first(., {a:1}) | . as {a:$a} | .) as $j (.; .))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4597 (the rest): a `reduce` source whose pipe stage generates a freshly built item next to the
 /// register (`({a:1}, .)`) meets that item at the destructure that follows, wherever the register is.
 /// The wrappers that hand their operand's outputs on are read as they generate: `try`/`?` every item,
