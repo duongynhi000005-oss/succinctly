@@ -143726,6 +143726,39 @@ fn test_foreach_source_nested_foreach_loop_variable_hands_the_register_on_4485()
             "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
             0,
         ),
+        // Documents that are not `null`: only a `null` or a boolean register is `jv_identical` to another by kind,
+        // and the element that is the register's own node is still the one the chain walks, so the answer is
+        // the same on a number, a string, a boolean, an array and an object.
+        (
+            r"5",
+            r"path(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#""x""#,
+            r#"path(foreach (foreach (., "x") as $j (.; $j; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))"#,
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"true",
+            r"path(foreach (foreach . as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach (foreach (., 1) as $j (.; .; $j) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(foreach (foreach (., "x") as $j (.; $j; .) | . as {a:$a} ?// $a | .) as $k (.; .; .))"#,
+            "[]\n[]\n",
+            0,
+        ),
     ];
     for &(doc, filter, want_stdout, want_code) in ROWS {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
@@ -143788,6 +143821,43 @@ fn test_foreach_source_two_partial_register_stages_4485() -> Result<()> {
             r#"{"a":1}"#,
             r"path(foreach (foreach (.,1) as $j (.; .; .) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
             "[]\n[]\n[]\n[]\n",
+            0,
+        ),
+        // Three stages, an `if` and `first(...)` in front of the chain.
+        (
+            r"null",
+            r"path(foreach ((.,1) | (.,1) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (foreach (.,1) as $j (.;.;.) | (.,1) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[]\n[]\n[\"a\"]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (if true then (.,1) else . end | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (first((.,1) | (.,1)) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach ((.,1) | first((.,1)) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(foreach ((.,1) | (.,1) | (.,1) | . as {a:$a} ?// $a | .) as $k (.; .; .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
             0,
         ),
     ];
@@ -143972,6 +144042,45 @@ fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() ->
             r"def f($n; g): if $n == 0 then g else f($n - 1; g) end; path(. as $x | 1 | (foreach f(3; (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
             "",
             5,
+        ),
+        // A nested `foreach` whose INIT, UPDATE or EXTRACT is a fresh value (`5`, `[$j]`) hands its source's
+        // register statement on all the same: the element states its own provenance, and the outer fold's
+        // emission is the register where the chain left it.
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; 5)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; 5; .)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (5; .; .)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[null]",
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; [$j])) as $k (.; .; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; $j)) as $k (.; $k; .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"del(. as $x | 1 | (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $j (.; .; 5)) as $k (.; .; .)) | $x.a?)",
+            "[[1],[1]]\n",
+            0,
         ),
     ];
     for &(doc, filter, want_stdout, want_code) in ROWS {
