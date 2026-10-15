@@ -143301,6 +143301,90 @@ fn test_reduce_source_fresh_comma_behind_counted_wrappers_and_repeating_stages_4
     ])
 }
 
+/// #4651: a `foreach` over a two-destructuring-alternative `?//` chain of `.`, inside the UPDATE of a
+/// `reduce` that carries `.` through (`reduce 1 as $j (.; foreach (CHAIN) ...)`), run in the body of another
+/// fold whose source moved jq's register onto an element: `.` there is the outer state, which the register
+/// is not at, so the chain's first step fails `path_intact`, the second alternative's step fails the
+/// same way, and the raise stands. It was answered (`del` deleted the document). The same fold where `.` is
+/// the register (a literal source) answers, as before. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_two_alternative_chain_foreach_in_a_carrying_reduce_in_a_moved_fold_body_4651() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[null]",
+            r"[path(reduce .[]? as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))]",
+            "",
+            "Invalid path expression near attempt to access element 0 of [null]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce .[1+1] as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce first as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[[]]",
+            r"del(foreach .[]? as $k (.; (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) and (.a)?; .b?))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [[]]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach .[]? as $k (.; (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) and (.a)?; $k))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"[path(reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del(foreach (1,2) as $k (.; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)))); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (1,2) as $k (.; .; ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4597 (the rest): a `reduce` source whose pipe stage generates a freshly built item next to the
 /// register (`({a:1}, .)`) meets that item at the destructure that follows, wherever the register is.
 /// The wrappers that hand their operand's outputs on are read as they generate: `try`/`?` every item,
