@@ -64462,6 +64462,344 @@ fn test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update
     Ok(())
 }
 
+/// #4637: a `foreach` (or `reduce`) source that begins with a destructure of `.`, in the body of a `reduce` whose
+/// source moved the register onto an element. The accumulator is no node of that register, so
+/// jq's pattern step raises `near attempt to access element 0 of ...`, which an enclosing `?`/`try`
+/// catches; the fold refused with the resolver's uncatchable guess, so `(...)? = 9` and
+/// `path((...)?)` raised where jq answers (`{"a":1}` unchanged, no path). Uncaught, it now reads as
+/// jq's own error. Every row is a live jq 1.7.1 capture.
+#[test]
+fn test_moved_body_foreach_source_destructure_refusal_is_caught_by_an_enclosing_try_4637(
+) -> Result<()> {
+    // (document, filter, stdout, exit code)
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":1}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))? = 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))? = 9",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))? = 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))?)",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))? = 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))? = 9",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))? = 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))?)",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":[1]}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))) |= 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))? = 9",
+            "[1]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (. as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r"[1]",
+            r"(try (.a as $x | reduce .[]? as $i (.; foreach (select($x) | . as [$a] | .) as $y (.; .; .)))) |= 9",
+            "[1]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(.a as $x | reduce .[]? as $i (.; foreach ($x as [$a] | .) as $y (.; .; .)))? = 9",
+            "9\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del((.a as $x | reduce .[]? as $i (.; foreach ($x as [$a] | .) as $y (.; .; .)))?)",
+            "[1]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(.a as $x | reduce .[]? as $i (.; foreach ($x as [$a] | .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(try (.a as $x | reduce .[]? as $i (.; foreach ((. as {b:$b} | .), 1) as $y (.; .; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .)))? = 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .)))?)",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .))))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(.a as $x | reduce .[]? as $i (.; reduce (. as {a:$a} | .) as $y (.; .)))? = 9",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path((.a as $x | reduce .[]? as $i (.; reduce (. as {a:$a} | .) as $y (.; .)))?)",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del((.a as $x | reduce .[]? as $i (.; reduce (. as {a:$a} | .) as $y (.; .)))?)",
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(try (.a as $x | reduce .[]? as $i (.; reduce (. as {a:$a} | .) as $y (.; .))))",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .)))? = 9",
+            "[1]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path((.a as $x | reduce .[]? as $i (.; reduce (. as [$a] | .) as $y (.; .)))?)",
+            "",
+            0,
+        ),
+    ];
+    for (doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            stdout, *want_stdout,
+            "`{filter}` on {doc}: stderr: {stderr:?}"
+        );
+        assert_eq!(code, *want_code, "`{filter}` on {doc}: stderr: {stderr:?}");
+    }
+    // Uncaught it is jq's own message, not the "with result" wording the guess carried.
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-c",
+            r"path(.a as $x | reduce .[]? as $i (.; foreach (. as [$a] | .) as $y (.; .; .)))",
+        ],
+        Some(r#"{"a":1}"#),
+    )?;
+    assert_eq!(stdout, "");
+    assert_eq!(code, 5);
+    assert!(
+        stderr.contains(r#"Invalid path expression near attempt to access element 0 of {"a":1}"#),
+        "stderr: {stderr:?}"
+    );
+    let (stdout, stderr, code) = run_jq_full(
+        &[
+            "-c",
+            r"path(.a as $x | reduce .[]? as $i (.; reduce (. as {a:$a} | .) as $y (.; .)))",
+        ],
+        Some(r#"{"a":1}"#),
+    )?;
+    assert_eq!(stdout, "");
+    assert_eq!(code, 5);
+    assert!(
+        stderr.contains(r#"Invalid path expression near attempt to access element "a" of {"a":1}"#),
+        "stderr: {stderr:?}"
+    );
+    Ok(())
+}
+
 /// #4486 (the first family): a caught pure navigation that is the last item of a `reduce` `UPDATE`
 /// comma emits nothing when it raises on the accumulator, so `(., (.a)?)` on `[true]` ends on the
 /// `.` before it, which is the register: `path()` is `[]`, `del` returns `null`, `=` writes. On an
