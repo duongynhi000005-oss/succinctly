@@ -134786,14 +134786,13 @@ fn test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489() -
             "",
             0,
         ),
-        // Still refused where jq answers (`[]`): a `limit` source (a `?//` chain beneath one that
-        // yields several outputs emitted an extra element when it was admitted). A change that
-        // admits it should move this row to `[]`. (The `reduce` twin is answered since #4613.)
+        // A `limit` source is answered since #4614 (it was refused while a `?//` chain beneath one
+        // that yields several outputs emitted an extra element; #4537 fixed that count).
         (
             "[[1],[1]]",
             r"path(. as $x | 1 | (foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x)",
-            "",
-            5,
+            "[]\n",
+            0,
         ),
         // A nested `foreach` source is answered since #4615.
         (
@@ -145707,4 +145706,48 @@ fn test_limit_of_a_chain_with_a_comma_sibling_counts_the_refused_emission_4663()
         assert_path_rows_both_routes_3749(&[(doc, program, stdout, stderr, code)])?;
     }
     Ok(())
+}
+
+/// #4614: a `foreach` source that reaches a bare-final `?//` chain through `first`, `limit`,
+/// `nth` or a handler-less `try` states the register on an untracked entry (#4489 left it refused
+/// with "Invalid path expression with result [[1],[1]]"). #4537 made the chain beneath a wrapper
+/// count its refused first emission, so the multi-output rows (`limit(2,1; ..)`, a comma sibling)
+/// keep jq's element count where the #4609 experiment gave one more. Every row captured from jq
+/// 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_wrapped_alt_chain_on_untracked_entry_states_the_register_4614() -> Result<()>
+{
+    let doc: &'static str = "[[1],[1]]";
+    let chain = "(.|.) as {a:$a} ?// $a | .";
+    for (wrapper, expected) in [
+        ("first(CHAIN)", "[]\n"),
+        ("limit(1; CHAIN)", "[]\n"),
+        ("nth(0; CHAIN)", "[]\n"),
+        ("nth(0,1; CHAIN)", "[]\n"),
+        ("limit(2; CHAIN)", "[]\n"),
+        ("limit(2,1; CHAIN)", "[]\n[]\n"),
+        ("limit(2; (CHAIN), 1)", "[]\n[]\n"),
+        ("limit(3; (CHAIN), 1)", "[]\n[]\n"),
+        ("first(try (CHAIN))", "[]\n"),
+        ("first((CHAIN)?)", "[]\n"),
+        // `nth(1; ..)` is past the chain's outputs: nothing.
+        ("nth(1; CHAIN)", ""),
+    ] {
+        let program: &'static str = Box::leak(
+            format!(
+                "path(. as $x | 1 | (foreach {} as $k (.; .; .)) | $x)",
+                wrapper.replace("CHAIN", chain)
+            )
+            .into_boxed_str(),
+        );
+        assert_path_rows_both_routes_3749(&[(doc, program, expected, "", 0)])?;
+    }
+    // The write twin: the chain's `$a` is not the register, `.a?` on it is empty, nothing deleted.
+    assert_path_rows_both_routes_3749(&[(
+        doc,
+        r"del(. as $x | 1 | (foreach first((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .)) | $x.a?)",
+        "[[1],[1]]\n",
+        "",
+        0,
+    )])
 }

@@ -702,10 +702,18 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   not navigate. Only a chain that ends in a bare `$var` is read (a chain of patterns alone either walks
   a step or raises), and only for a fold that is not inside another fold's body, where the source
   element's `Unmoved` is no evidence of a bare fallback (a whole-grid sample found a `try` in a
-  `foreach` UPDATE that answered `["a"]` where jq prints nothing, which this gate then dropped). Left refused: a source through `first`/`limit`/`nth` (a `?//` chain beneath one that
-  yields several outputs retries after the consumer's stop and emitted an extra element:
-  `foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three here, so the loss was
-  kept rather than traded for a wrong count). Since
+  `foreach` UPDATE that answered `["a"]` where jq prints nothing, which this gate then dropped). Since
+  [#4614](https://github.com/rust-works/succinctly/issues/4614) the gate also reads a source through
+  `first`, `limit`, `nth` (a literal or comma-of-literals count that cannot move the register) and a
+  handler-less `try`/`?`: #4609 had left them refused because a `?//` chain beneath a wrapper that yields
+  several outputs retried after the consumer's stop and emitted an extra element
+  (`foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three then), which
+  [#4537](https://github.com/rust-works/succinctly/issues/4537) fixed by counting the refused first
+  emission against the wrapper's count. Pinned by
+  `test_foreach_source_wrapped_alt_chain_on_untracked_entry_states_the_register_4614`; over the 62
+  first/limit/nth `?//` operands, `--stage-only` (113,000 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
+  MATCH went 109,387 to 111,619 and REFUSE_WRONG 18,168 to 15,936, with ACCEPT_WRONG (302) and DIFF
+  (1,130) unchanged and no regression. Since
   [#4615](https://github.com/rust-works/succinctly/issues/4615) the gate also reads through a call to a
   `def` with arguments (`def f(g): g; foreach f(CHAIN) ...`, a `def` written in the source too), through the
   argument it shares into the body, and through a nested `foreach` whose INIT, UPDATE and EXTRACT cannot
