@@ -47427,12 +47427,12 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// unmoved root branch), so the source as a whole is not the reason an untracked entry's
 /// emission cannot state the register. Only the bind itself is relaxed: its bound expression is
 /// a subexpression, and its body still has to be [`cannot_move_register`] or another such
-/// source. Read through a `label`, a plain `as`, an `if` and `last(f)`. Not through `first`,
-/// `limit` or `nth`: they answer the register correctly, but a `?//` chain beneath one that
-/// yields several outputs retries after the consumer's stop, and the fold then emitted an extra
-/// element (`foreach (limit(2,1; . as {a:$a} ?// $a | .))` is two results in jq, three here), a
-/// wrong answer where the loss was a refusal. Conservative: a `false` only leaves the source to
-/// the loss it had.
+/// source. Read through a `label`, a plain `as`, an `if`, `last(f)` and (#4614) `first`, `limit`
+/// and `nth` with a count that cannot move the register, and a handler-less `try`/`?`. They were
+/// left out while a `?//` chain beneath one that yields several outputs retried after the
+/// consumer's stop and emitted an extra element (`foreach (limit(2,1; . as {a:$a} ?// $a | .))`
+/// was three results where jq gives two); #4537 fixed that by counting the refused first emission
+/// against the count. Conservative: a `false` only leaves the source to the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
     let mut calls = SPINE_CALL_BUDGET;
     moves_register_only_by_binds(expr, &mut calls)
@@ -47525,6 +47525,22 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
                 && cannot_move_register(update)
                 && extract.as_deref().map_or(true, cannot_move_register)
                 && moves_register_only_by_binds(input, calls)
+        }
+        // #4614: `first`, `limit` and `nth` take their operand's outputs, whose register is the
+        // operand's own (#4537 made the chain beneath them count its refused emission).
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            moves_register_only_by_binds(inner, calls)
+        }
+        Expr::Limit { n, expr }
+        | Expr::NthExpr { n, expr }
+        | Expr::Builtin(Builtin::NthStream(n, expr))
+            if cannot_move_register(n) =>
+        {
+            moves_register_only_by_binds(expr, calls)
+        }
+        // `first(try CHAIN)`, `first(CHAIN?)`: a handler-less `try` emits what its body does.
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+            moves_register_only_by_binds(expr, calls)
         }
         // `last(f)` is a `reduce`, which backtracks `f`: the register is back where it entered.
         other if is_last_stage(other) => true,
