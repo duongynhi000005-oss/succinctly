@@ -134263,7 +134263,8 @@ fn test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in
 /// whole source of a `foreach`/`reduce` in a moved `reduce` body. jq runs them and their destructure
 /// of `.` raises because `.` is not the register; the register walk read both as opaque, so `del`,
 /// `=` and `|=` wrote through the answer. Controls: a truthy left, a body that does not raise and a
-/// branch that never runs raise nothing. Every row captured from jq 1.7.1; stdout and the exit
+/// branch that never runs raise nothing (a bare branch under `if`, `limit`, `first` or `nth` may never run, and
+/// is answered). Every row captured from jq 1.7.1; stdout and the exit
 /// status are pinned.
 #[test]
 fn test_reduce_body_source_destructuring_dot_behind_a_bare_alternative_or_handler_raises_4644(
@@ -134412,6 +134413,54 @@ fn test_reduce_body_source_destructuring_dot_behind_a_bare_alternative_or_handle
             r"path(. as $x | reduce .[]? as $i (.; reduce (try error catch (. as {b:$b}|.)) as $y (.; .)))",
             "",
             5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (false // (. as {b:$b} | .) // 3) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b} | .)) // 3) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (limit(1; ., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (if false then (false // (. as {b:$b} | .)) else . end) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (if .a then . else (false // (. as {b:$b} | .)) end) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (first(., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (nth(0; ., (false // (. as {b:$b} | .)))) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (limit(1; ., try error catch (. as {b:$b} | .))) as $y (.; .; .)))",
+            "[]\n",
+            0,
         ),
     ];
     for (doc, filter, stdout, code) in rows {

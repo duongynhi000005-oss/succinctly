@@ -53198,17 +53198,13 @@ fn caught_destructure_in_unrouted_body(
 /// brackets is answered everywhere else), so the source was driven by value. Read with the brackets
 /// dropped, for a moved body only.
 fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
-    // #4644: the same two run branches without the brackets: a `//` right operand behind a constant
-    // falsy left, and the handler of a `try` whose body only raises.
-    any_subexpr(source, &mut |e| match e {
-        Expr::Array(_) => true,
-        Expr::Alternative(left, _) => never_truthy(left),
-        Expr::Try {
-            expr,
-            catch: Some(_),
-        } => certainly_raises(expr),
-        _ => false,
-    }) && source_destructures_register(&drop_array_wrappers(source), true)
+    (any_subexpr(source, &mut |e| matches!(e, Expr::Array(_)))
+        && source_destructures_register(&drop_array_wrappers(source), true))
+        // #4644: the same two run branches with no brackets, where they are the whole source: that is
+        // the only place a branch is known to run (under an `if`, a `limit` or a `first` it may not).
+        || matches!(unwrap_paren(source), Expr::Alternative(..) | Expr::Try { catch: Some(_), .. })
+            && run_branch_of_bind_chain(source)
+                .is_some_and(|chain| source_destructures_register(chain, true))
 }
 
 /// `source` with every `[E]` (and, #4644, every bare `//` or `try ... catch` run branch) whose `E` is a plain bind chain replaced by `E`
@@ -53221,13 +53217,6 @@ fn drop_array_wrappers(source: &Expr) -> Expr {
             Some(chain) => drop_array_wrappers(chain),
             None => map_subexprs(source, &mut |child| drop_array_wrappers(child)),
         },
-        // #4644: a bare run branch, as the bracketed one above (`E` with no `[ ... ]` around it).
-        Expr::Alternative(..) | Expr::Try { catch: Some(_), .. } => {
-            match run_branch_of_bind_chain(source) {
-                Some(chain) => drop_array_wrappers(chain),
-                None => map_subexprs(source, &mut |child| drop_array_wrappers(child)),
-            }
-        }
         other => map_subexprs(other, &mut |child| drop_array_wrappers(child)),
     }
 }
@@ -53240,6 +53229,8 @@ fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
     match unwrap_paren(e) {
         _ if is_plain_bind_chain(e) => Some(e),
         Expr::Alternative(left, right) if never_truthy(left) => run_branch_of_bind_chain(right),
+        // `A // B` runs `A` first, so the run branch of `A` always runs (`(false // X) // 3`, #4644).
+        Expr::Alternative(left, _) => run_branch_of_bind_chain(left),
         Expr::Try {
             expr: body,
             catch: Some(handler),
