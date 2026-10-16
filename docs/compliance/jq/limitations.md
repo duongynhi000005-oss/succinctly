@@ -2481,9 +2481,18 @@ is the revert that established what the other one costs.
    at the end of the path (`Invalid path expression with result null`; `caught_foreign_destructure`, with the UPDATE marked by
    `fold_body::sole_update_foreach`; pinned by
    `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduce_4709`,
-   [#4709](https://github.com/rust-works/succinctly/issues/4709)). Still accepted: the same `try` when the `foreach` is not
-   the bare UPDATE (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .`, which jq refuses as well), and a `try` nested in
-   another (`try (try X)`). A condition that is not a pure function
+   [#4709](https://github.com/rust-works/succinctly/issues/4709)). The `foreach` may also head a pipe
+   (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .`, `| 1`): a pipe runs its later stages once per input, so an empty
+   `foreach` leaves the whole UPDATE empty (`update_head_foreach_source`; pinned by
+   `test_caught_foreign_marker_destructure_as_the_head_of_a_pipe_update_of_a_reduce_4724`,
+   [#4724](https://github.com/rust-works/succinctly/issues/4724)). Under a `foreach` instead of a `reduce` the empty UPDATE is no
+   state to refuse but no emission at all, and the `null` the empty step leaves is no register for the later steps either, so
+   the fold prints no path and a write hands the document back (`Flow::Exhausted`; pinned by
+   `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_foreach_4723`,
+   [#4723](https://github.com/rust-works/succinctly/issues/4723)). A comma beside the `foreach` in the UPDATE (`foreach ..., 1`) is no head:
+   the `1` still outputs, in both folds. Still accepted: a `foreach` source with a second output beside the
+   `try` (`foreach ((try ($x as {a:$a} | .)), 1) as $y (.; .; .)` under a `foreach` emits twice per step where jq once), and a
+   `try` nested in another (`try (try X)`). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks

@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, six x three x fifty-six x seven x thirteen.
+document, eight x six x a hundred and seventy x seven x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -19,6 +19,7 @@ ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that 
 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
                                                    [--only SUBSTR[,SUBSTR...]] [--only-source SUBSTR[,SUBSTR...]]
+                                                   [--only-context SUBSTR[,SUBSTR...]]
                                                    [--jobs N] [--wrapped | --deep]
 """
 import argparse
@@ -55,6 +56,11 @@ INNER = [
     ("fe", "foreach ({S}) as $y (.; .; .)"),
     ("fe-y", "foreach ({S}) as $y (.; $y; .)"),  # EXTRACT is the element: it is the register
     ("rd", "reduce ({S}) as $y (.; .)"),
+    # (#4724) the `foreach` heads its UPDATE: a pipe runs its later stages once per input, so an empty
+    # source leaves the whole UPDATE empty whatever the stage is; a comma beside it still outputs
+    ("fe-pipe", "foreach ({S}) as $y (.; .; .) | ."),
+    ("fe-pipe-1", "foreach ({S}) as $y (.; .; .) | 1"),
+    ("fe-comma-1", "foreach ({S}) as $y (.; .; .), 1"),
 ]
 SOURCES = [
     ("x-pat", "$x as {a:$a} | ."),
@@ -330,6 +336,7 @@ def main():
     ap.add_argument("--show", type=int, default=20, help="max rows printed per section")
     ap.add_argument("--only", default="", help="restrict to rows whose name contains this (comma-separated: any of)")
     ap.add_argument("--only-source", default="", help="restrict to sources whose name contains this (comma-separated: any of)")
+    ap.add_argument("--only-context", default="", help="restrict to write contexts whose name contains this (comma-separated: any of)")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument(
         "--wrapped",
@@ -355,6 +362,8 @@ def main():
         if args.only and not any(part in name for part in args.only.split(",")):
             continue
         if args.only_source and not any(part in sn for part in args.only_source.split(",")):
+            continue
+        if args.only_context and not any(part in cn for part in args.only_context.split(",")):
             continue
         prog = c.replace("{O}", o.replace("{I}", i.replace("{S}", s)))
         rows.append((name, sn, prog, doc))
