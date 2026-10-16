@@ -2772,15 +2772,18 @@ is the revert that established what the other one costs.
    (`path(foreach .a? as $k (.; .; try (foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))))` on `{"a":true}`).
    Pinned by
    `test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_4615`. Over the 170 `foreach` operands with a
-   `?//` source (`--stage-only --sample 40000 --seed 4615`, jq 1.7.1, candidate vs a `main` build): MATCH 36,171 -> 36,305,
-   REFUSE_WRONG 3,641 -> 3,507, ACCEPT_WRONG (93) and DIFF (122) unchanged, 0 regressions; a 60,027-row whole-grid sample
-   (`--stage-only --sample 60000 --seed 77`): MATCH 57,502 -> 57,521, REFUSE_WRONG 2,352 -> 2,333, ACCEPT_WRONG (41) and DIFF (130)
+   `?//` source (`--stage-only --sample 40000 --seed 4615`, jq 1.7.1, candidate vs a `main` build): MATCH 36,171 -> 36,232,
+   REFUSE_WRONG 3,641 -> 3,580, ACCEPT_WRONG (93) and DIFF (122) unchanged, 0 regressions; a 60,027-row whole-grid sample
+   (`--stage-only --sample 60000 --seed 77`): MATCH 57,502 -> 57,514, REFUSE_WRONG 2,352 -> 2,340, ACCEPT_WRONG (41) and DIFF (130)
    unchanged, 0 regressions.
    Still refused: the same source inside a `reduce` in a `foreach` UPDATE (`foreach (1,2) as $j (.; (reduce 1 as $m (.; CHAIN)); .)`),
    and a chain beneath `first`/`limit`/`nth` there. The sweep's first version read those too and a row came back as a wrong
    answer instead of a refusal (`foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on
    `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the stop emitting once more), so the nested read
-   (`source_moves_register_only_by_binds_uncounted`) leaves them out.
+   (`source_moves_register_only_by_binds_in_update`) leaves them out, and every bound expression and every stage before the last
+   must be the register itself: a chain over `$x` or `null` walks the register in jq (`["a"]` twice on a `null` document, where
+   this prints `[]` twice), so it stays refused on a non-`null` document, where it was refused before. On a `null` document the
+   `[]` twice is `main`'s own answer too (the top-level `foreach (null | CHAIN)` has it as well), unchanged by this.
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node

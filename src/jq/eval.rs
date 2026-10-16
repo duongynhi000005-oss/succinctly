@@ -47641,31 +47641,35 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// was three results where jq gives two); #4537 fixed that by counting the refused first emission
 /// against the count. Conservative: a `false` only leaves the source to the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
-    let mut calls = BindGate::new(true);
-    moves_register_only_by_binds(expr, &mut calls)
-}
-
-/// [`source_moves_register_only_by_binds`] without `first`/`limit`/`nth` (#4615): the source of a
-/// `foreach` inside another fold's body. A chain beneath one whose first alternative walks a step
-/// retried after the stop and emitted an extra element there (`foreach (1,2) as $i (.; foreach
-/// (first(CHAIN)) as $k (.; .; .); .)` on `{a:{b:1}}`: four paths where jq gives two), so they stay refused.
-fn source_moves_register_only_by_binds_uncounted(expr: &Expr) -> bool {
     let mut calls = BindGate::new(false);
     moves_register_only_by_binds(expr, &mut calls)
 }
 
-/// What [`moves_register_only_by_binds`] has left to spend, and whether it may read through a
-/// `first`/`limit`/`nth`.
+/// [`source_moves_register_only_by_binds`] for the source of a `foreach` that is the UPDATE of
+/// another `foreach` (#4615), which the enclosing fold reads the register statement of. Narrower:
+/// - no `first`/`limit`/`nth`: a chain beneath one whose first alternative walks a step retried
+///   after the stop and emitted an extra element there (`foreach (1,2) as $i (.; foreach
+///   (first(CHAIN)) as $k (.; .; .); .)` on `{a:{b:1}}`: four paths where jq gives two);
+/// - every bound expression and every stage before the last is the register itself: a chain over
+///   `$x` or `null` (`foreach ($x | CHAIN)`, `foreach (null | CHAIN)`) walks the register in jq, and
+///   the statement would name the entry (`["a"]` where this printed `[]`).
+fn source_moves_register_only_by_binds_in_update(expr: &Expr) -> bool {
+    let mut gate = BindGate::new(true);
+    moves_register_only_by_binds(expr, &mut gate)
+}
+
+/// What [`moves_register_only_by_binds`] has left to spend (`budget`), and whether it reads the
+/// narrower [`source_moves_register_only_by_binds_in_update`] shape (`inside_update`).
 struct BindGate {
-    calls: u32,
-    counting_wrappers: bool,
+    budget: u32,
+    inside_update: bool,
 }
 
 impl BindGate {
-    fn new(counting_wrappers: bool) -> Self {
+    fn new(inside_update: bool) -> Self {
         Self {
-            calls: SPINE_CALL_BUDGET,
-            counting_wrappers,
+            budget: SPINE_CALL_BUDGET,
+            inside_update,
         }
     }
 }
@@ -47680,17 +47684,29 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
         // `?//` restores the path and the bare alternative leaves the register alone. A chain that
         // ends in a pattern either walks a step or raises, so it is not read here (`cannot_move_register`
         // below sees an all-bare chain, and refuses the rest).
-        Expr::AsPattern { patterns, body, .. }
-            if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) =>
-        {
-            moves_register_only_by_binds(body, calls)
+        Expr::AsPattern {
+            expr: bound,
+            patterns,
+            body,
+            ..
+        } if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) => {
+            (!calls.inside_update || bind_hands_on_the_register(bound))
+                && moves_register_only_by_binds(body, calls)
         }
         Expr::As { body, .. } | Expr::Label { body, .. } => {
             moves_register_only_by_binds(body, calls)
         }
-        Expr::Pipe(stages) => stages
-            .iter()
-            .all(|stage| moves_register_only_by_binds(stage, calls)),
+        Expr::Pipe(stages) => stages.iter().enumerate().all(|(i, stage)| {
+            // A stage before the last one that re-roots the register (`null | CHAIN`) is not a bind.
+            (!calls.inside_update
+                || i + 1 == stages.len()
+                || matches!(
+                    unwrap_paren(stage),
+                    Expr::AsPattern { .. } | Expr::As { .. }
+                )
+                || yields_only_the_register(stage))
+                && moves_register_only_by_binds(stage, calls)
+        }),
         Expr::Comma(stages) => stages
             .iter()
             .all(|stage| moves_register_only_by_binds(stage, calls)),
@@ -47720,8 +47736,8 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
             frames,
             bound,
         } => {
-            calls.calls > 0 && {
-                calls.calls -= 1;
+            calls.budget > 0 && {
+                calls.budget -= 1;
                 probe_def_call(def, args, *frames, bound)
                     .is_ok_and(|body| moves_register_only_by_binds(&body, calls))
             }
@@ -47733,8 +47749,8 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
             then,
             bound,
         } => {
-            calls.calls > 0 && {
-                calls.calls -= 1;
+            calls.budget > 0 && {
+                calls.budget -= 1;
                 moves_register_only_by_binds(&bind_def(name, params, body, then, bound), calls)
             }
         }
@@ -47761,14 +47777,14 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
         // #4614: `first`, `limit` and `nth` take their operand's outputs, whose register is the
         // operand's own (#4537 made the chain beneath them count its refused emission).
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner))
-            if calls.counting_wrappers =>
+            if !calls.inside_update =>
         {
             moves_register_only_by_binds(inner, calls)
         }
         Expr::Limit { n, expr }
         | Expr::NthExpr { n, expr }
         | Expr::Builtin(Builtin::NthStream(n, expr))
-            if calls.counting_wrappers && cannot_move_register(n) =>
+            if !calls.inside_update && cannot_move_register(n) =>
         {
             moves_register_only_by_binds(expr, calls)
         }
@@ -59602,7 +59618,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // emission (a `foreach` inside another fold's body).
     let update_states_it = states_untracked
         && matches!(unwrap_paren(update), Expr::Foreach { .. })
-        && source_moves_register_only_by_binds_uncounted(update);
+        && source_moves_register_only_by_binds_in_update(update);
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
         let _after_the_loop = fold_body::restore(entry_marks);
         if register_unmoved && !branch.trackable {
@@ -59696,7 +59712,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && if entry_depth == 0 {
             source_moves_register_only_by_binds(input)
         } else {
-            update_of_stating_fold && source_moves_register_only_by_binds_uncounted(input)
+            update_of_stating_fold && source_moves_register_only_by_binds_in_update(input)
         };
     let update_stays_if_stated = update_states_it
         && init_keeps_register

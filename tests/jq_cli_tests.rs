@@ -153196,6 +153196,53 @@ fn test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_46
             "",
             5,
         ),
+        // Still refused where jq answers `[]` twice: a source that re-roots the register walks it in
+        // jq (`["a"]` twice on a `null` document), so the nested read leaves a chain over `$x` or
+        // `null` out. (On a `null` document these print `[]` twice on `main` as well.)
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ($x | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        // `limit` and `nth` are left out of the nested read as `first` is.
+        (
+            r#"[{"key":"a","value":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"[{"key":"a","value":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (nth(0; . as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "",
+            5,
+        ),
+        // A `limit`/`first` around the enclosing `foreach` is read as before (one result).
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | limit(1; foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | first(foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n",
+            0,
+        ),
         // Still refused where jq answers `[]` twice: a chain beneath `first` there came back as four
         // paths when it was read (the chain's retry after the stop emitted once more).
         (
