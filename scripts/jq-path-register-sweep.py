@@ -375,6 +375,25 @@ OPERANDS = [
     "(isempty(recurse) | not)",
     "(recurse and true)",
     "isempty(def f: recurse; f)",
+    # (#4706) the composed spellings #4698 left: a recursion's seed is its first output, at the
+    # register, so a verdict that stops there (`isempty`, `any` over `.`) leaves it whatever wraps it
+    # (`| not`, `and`, a `def`). The controls are the shapes decided on a descendant or after a
+    # navigating stage, which must keep the refusal jq's register makes.
+    "(any(recurse; .) | not)",
+    "(any(..; .) | not)",
+    "(isempty(..) | not)",
+    "(isempty(recurse) and true)",
+    "(true and isempty(recurse))",
+    "(isempty(def f: recurse; f) | not)",
+    "(isempty(1 | recurse) | not)",
+    "(isempty(recurse(.a?)) | not)",
+    "(isempty(.a | recurse) | not)",
+    "(isempty(.a? | recurse) | not)",
+    "(isempty(recurse | .a) | not)",
+    "(any(recurse(.a?); .) | not)",
+    "(any(recurse; true) | not)",
+    "(any(recurse; . == 1) | not)",
+    "(all(recurse; .) | not)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
