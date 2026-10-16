@@ -59342,9 +59342,21 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         .then(fold_body::acc_off_register);
                         // #4709: UPDATE is a `foreach` and nothing else, so its every output is the next
                         // state and an empty one leaves `null`.
+                        //
+                        // #4724: ...or a pipe headed by one: its later stages run once per output, so an
+                        // empty `foreach` leaves the whole UPDATE empty whatever they are. A comma beside
+                        // it (`foreach ..., 1`) is not that, and stays unmarked.
                         let _sole_update_foreach = match unwrap_paren(&substituted) {
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
                                 Some(fold_body::sole_update_foreach(input))
+                            }
+                            Expr::Pipe(stages) if S::TAG == EvalTag::Jq => {
+                                match stages.first().map(unwrap_paren) {
+                                    Some(Expr::Foreach { input, .. }) => {
+                                        Some(fold_body::sole_update_pipe_head(input))
+                                    }
+                                    _ => None,
+                                }
                             }
                             _ => None,
                         };
@@ -68963,7 +68975,7 @@ mod terminal_retry {
 /// which keeps the previous answer.
 #[cfg(feature = "std")]
 mod fold_body {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -68985,6 +68997,10 @@ mod fold_body {
         /// The body depth whose UPDATE is a bare `foreach` (#4709), and the address of that
         /// `foreach`'s source expression; `(0, 0)` for none.
         static SOLE_FOREACH: Cell<(u32, usize)> = const { Cell::new((0, 0)) };
+        /// The body depth whose UPDATE is a pipe headed by a `foreach` (#4724), and a copy of that
+        /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
+        /// no longer names it and the source is compared by value.
+        static SOLE_PIPE_HEAD: RefCell<Option<(u32, super::Expr)>> = const { RefCell::new(None) };
     }
 
     /// Restores the previous [`emissions_discarded`] mark.
@@ -69012,7 +69028,7 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize));
+    pub(crate) struct SoleGuard((u32, usize), Option<(u32, super::Expr)>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
@@ -69022,12 +69038,24 @@ mod fold_body {
     pub(crate) fn sole_update_foreach(source: &super::Expr) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
         SOLE_FOREACH.with(|a| a.set((depth() + 1, (source as *const super::Expr) as usize)));
-        SoleGuard(previous)
+        let previous_pipe = SOLE_PIPE_HEAD.with(|a| a.borrow_mut().take());
+        SoleGuard(previous, previous_pipe)
+    }
+
+    /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724): its
+    /// later stages run once per output, so an empty `foreach` leaves the whole UPDATE empty.
+    pub(crate) fn sole_update_pipe_head(source: &super::Expr) -> SoleGuard {
+        let previous = SOLE_FOREACH.with(Cell::get);
+        SOLE_FOREACH.with(|a| a.set((0, 0)));
+        let previous_pipe =
+            SOLE_PIPE_HEAD.with(|a| a.borrow_mut().replace((depth() + 1, source.clone())));
+        SoleGuard(previous, previous_pipe)
     }
 
     impl Drop for SoleGuard {
         fn drop(&mut self) {
             SOLE_FOREACH.with(|a| a.set(self.0));
+            SOLE_PIPE_HEAD.with(|a| *a.borrow_mut() = self.1.take());
         }
     }
 
@@ -69035,7 +69063,12 @@ mod fold_body {
     /// whose source is `source`.
     pub(crate) fn sole_update_foreach_here(source: &super::Expr) -> bool {
         depth() > 0
-            && SOLE_FOREACH.with(Cell::get) == (depth(), (source as *const super::Expr) as usize)
+            && (SOLE_FOREACH.with(Cell::get) == (depth(), (source as *const super::Expr) as usize)
+                || SOLE_PIPE_HEAD.with(|a| {
+                    a.borrow()
+                        .as_ref()
+                        .is_some_and(|(at, head)| *at == depth() && head == source)
+                }))
     }
 
     /// Restores the previous [`fresh_source`] mark.
@@ -69373,6 +69406,10 @@ mod fold_body {
     pub(crate) struct SoleGuard;
 
     pub(crate) fn sole_update_foreach(_source: &super::Expr) -> SoleGuard {
+        SoleGuard
+    }
+
+    pub(crate) fn sole_update_pipe_head(_source: &super::Expr) -> SoleGuard {
         SoleGuard
     }
 
