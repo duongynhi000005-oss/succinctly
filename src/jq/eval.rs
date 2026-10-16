@@ -54644,6 +54644,19 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && caught_foreign_destructure::<S>(source, ambient);
     let marker_destructures_unplaced_register =
         equal_verdict || foreign_verdict || caught_foreign_verdict;
+    // #4723: ...and of one that is the whole UPDATE of an enclosing `foreach`, no state at all: the
+    // loop emits nothing for the step.
+    //
+    // The `null` state a step that delivered nothing leaves behind does not change that: the bind
+    // is of a `$x` that is not the register whatever the state is.
+    if S::TAG == EvalTag::Jq
+        && foreach_source
+        && fold_body::depth() != 0
+        && fold_body::sole_update_foreach_in_loop_here(source)
+        && caught_foreign_destructure::<S>(source, ambient)
+    {
+        return Flow::Exhausted;
+    }
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
     // #4603: the `null`/boolean literals the register is not, which a destructure of raises.
@@ -59348,7 +59361,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // it (`foreach ..., 1`) is not that, and stays unmarked.
                         let _sole_update_foreach = match unwrap_paren(&substituted) {
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
-                                Some(fold_body::sole_update_foreach(input))
+                                Some(fold_body::sole_update_foreach(input, false))
                             }
                             Expr::Pipe(stages) if S::TAG == EvalTag::Jq => {
                                 match stages.first().map(unwrap_paren) {
@@ -60252,6 +60265,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             .then(fold_body::source_moved_inherited);
                         let inherits_moved_loop =
                             carries_dot && fold_body::foreach_body_moved_here();
+                        // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
+                        // emits, so an inner source that is empty leaves this one emitting nothing.
+                        let _sole_update_foreach = match unwrap_paren(&bound_update) {
+                            Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
+                                Some(fold_body::sole_update_foreach(input, true))
+                            }
+                            _ => None,
+                        };
                         let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                             if update_stays_if_stated {
                                 fold_body::foreach_body_stating()
@@ -68996,7 +69017,7 @@ mod fold_body {
         static DISCARD_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose UPDATE is a bare `foreach` (#4709), and the address of that
         /// `foreach`'s source expression; `(0, 0)` for none.
-        static SOLE_FOREACH: Cell<(u32, usize)> = const { Cell::new((0, 0)) };
+        static SOLE_FOREACH: Cell<(u32, usize, bool)> = const { Cell::new((0, 0, false)) };
         /// The body depth whose UPDATE is a pipe headed by a `foreach` (#4724), and a copy of that
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
@@ -69028,16 +69049,22 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize), Option<(u32, super::Expr)>);
+    pub(crate) struct SoleGuard((u32, usize, bool), Option<(u32, super::Expr)>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
     /// takes that fold's every output as its next state, so a `foreach` that emits nothing leaves
     /// the state `null`. The address identifies the fold; a source that was copied on the way
     /// down no longer matches it, which reads as not being that UPDATE.
-    pub(crate) fn sole_update_foreach(source: &super::Expr) -> SoleGuard {
+    pub(crate) fn sole_update_foreach(source: &super::Expr, in_foreach: bool) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
-        SOLE_FOREACH.with(|a| a.set((depth() + 1, (source as *const super::Expr) as usize)));
+        SOLE_FOREACH.with(|a| {
+            a.set((
+                depth() + 1,
+                (source as *const super::Expr) as usize,
+                in_foreach,
+            ));
+        });
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| a.borrow_mut().take());
         SoleGuard(previous, previous_pipe)
     }
@@ -69046,7 +69073,7 @@ mod fold_body {
     /// later stages run once per output, so an empty `foreach` leaves the whole UPDATE empty.
     pub(crate) fn sole_update_pipe_head(source: &super::Expr) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
-        SOLE_FOREACH.with(|a| a.set((0, 0)));
+        SOLE_FOREACH.with(|a| a.set((0, 0, false)));
         let previous_pipe =
             SOLE_PIPE_HEAD.with(|a| a.borrow_mut().replace((depth() + 1, source.clone())));
         SoleGuard(previous, previous_pipe)
@@ -69062,13 +69089,24 @@ mod fold_body {
     /// Whether the body being resolved is the one [`sole_update_foreach`] marked for the fold
     /// whose source is `source`.
     pub(crate) fn sole_update_foreach_here(source: &super::Expr) -> bool {
+        let (at, address, _) = SOLE_FOREACH.with(Cell::get);
         depth() > 0
-            && (SOLE_FOREACH.with(Cell::get) == (depth(), (source as *const super::Expr) as usize)
+            && ((at, address) == (depth(), (source as *const super::Expr) as usize)
                 || SOLE_PIPE_HEAD.with(|a| {
                     a.borrow()
                         .as_ref()
                         .is_some_and(|(at, head)| *at == depth() && head == source)
                 }))
+    }
+
+    /// [`sole_update_foreach_here`] when the enclosing fold is a `foreach` too (#4723): a source
+    /// that emits nothing then leaves that fold's UPDATE emitting nothing, where a `reduce` is left
+    /// with a `null` state.
+    pub(crate) fn sole_update_foreach_in_loop_here(source: &super::Expr) -> bool {
+        let (at, address, in_loop) = SOLE_FOREACH.with(Cell::get);
+        in_loop
+            && depth() > 0
+            && (at, address) == (depth(), (source as *const super::Expr) as usize)
     }
 
     /// Restores the previous [`fresh_source`] mark.
@@ -69405,12 +69443,16 @@ mod fold_body {
 
     pub(crate) struct SoleGuard;
 
-    pub(crate) fn sole_update_foreach(_source: &super::Expr) -> SoleGuard {
+    pub(crate) fn sole_update_foreach(_source: &super::Expr, _in_foreach: bool) -> SoleGuard {
         SoleGuard
     }
 
     pub(crate) fn sole_update_pipe_head(_source: &super::Expr) -> SoleGuard {
         SoleGuard
+    }
+
+    pub(crate) fn sole_update_foreach_in_loop_here(_source: &super::Expr) -> bool {
+        false
     }
 
     pub(crate) fn sole_update_foreach_here(_source: &super::Expr) -> bool {

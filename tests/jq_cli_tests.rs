@@ -76538,6 +76538,53 @@ fn test_foreach_update_composed_isempty_any_recurse_follows_jq_4706() -> Result<
     ])
 }
 
+/// #4723 (#4709's residual): a `foreach` whose UPDATE is a `foreach` and nothing else, over a source that is a
+/// `try`/`?` around the destructure of an outer `$x` that is not the register, emits nothing at each outer step
+/// (the pattern's step raises, the `try` catches it, the inner source is empty). The outer `foreach` therefore
+/// emits nothing; the resolver instead emitted its own accumulator once per step. A `reduce` outer is #4709's
+/// (its state is left `null`). Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_inner_foreach_over_caught_foreign_destructure_emits_nothing_4723(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "{\"a\":{\"b\":1}}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4720 (#4706's residual): a zero-arity `def` written inside a `foreach` UPDATE around a verdict was read
 /// only when its scope was exactly the one call (`def f: isempty(1); f`). With any other scope
 /// (`def f: isempty(1); (f | not)`) the UPDATE was refused although jq answers, and under `?` the stream
