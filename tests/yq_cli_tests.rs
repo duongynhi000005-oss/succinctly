@@ -20047,8 +20047,8 @@ mod meta_assign_798 {
 
     /// #4526: a right-hand side that produces no node -- an absent path, a container, no output at
     /// all -- takes the empty text, so it clears an existing comment, style or anchor and writes
-    /// nothing where there was none, as yq does. A scalar (`null` included), a literal `{}` and
-    /// the first node of several are nodes. Every row was captured from yq v4.53.3.
+    /// nothing where there was none, as yq does. A scalar (`null` included), an empty mapping the
+    /// expression builds and the first node of several are nodes. Every row was captured from yq v4.53.3.
     #[test]
     fn rhs_without_a_node_clears_the_slot_4526() -> Result<()> {
         for (filter, input, expected) in [
@@ -20127,13 +20127,28 @@ mod meta_assign_798 {
                 "# h\na: 1 # l\n# f\nb: 2\n",
                 "# h\na: 1\n# f\nb: 2\n",
             ),
-            // A node is written: `null`, a scalar, a literal `{}`, and the first node of several.
+            // A node is written: `null`, a scalar, a built `{}`, and the first node of several.
             (
                 ".a line_comment = null",
                 "a: 1\nb: 2\n",
                 "a: 1 # null\nb: 2\n",
             ),
             (".a line_comment = {}", "a: 1\nb: 2\n", "a: 1 # {}\nb: 2\n"),
+            (
+                ".a line_comment = ({} | .)",
+                "a: 1\nb: 2\n",
+                "a: 1 # {}\nb: 2\n",
+            ),
+            (
+                ".a line_comment = ({} + {})",
+                "a: 1\nb: 2\n",
+                "a: 1 # {}\nb: 2\n",
+            ),
+            (
+                ".a line_comment = {\"x\": 1}",
+                "a: 1 # old\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
             (
                 ".a line_comment = .b",
                 "a: 1\nb: null\n",

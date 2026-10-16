@@ -4128,7 +4128,7 @@ fn meta_rhs_text(input: &OwnedValue, value: &Expr, sink: &mut ErrorSink) -> Opti
 /// The outputs of a metadata write's right-hand side that yq reads as a node to take a text
 /// from (#4526). An absent path (`.a line_comment = .zz`) produces no node there, and neither does
 /// a container (`= .b` over a mapping or sequence, `= []`); `null`, a scalar
-/// and a literal `{}` (which yq reads as its text) are nodes. A member of a top-level `,` is
+/// and an empty mapping the expression builds (`{}`, which yq reads as its text) are nodes. A member of a top-level `,` is
 /// judged on its own, so `(.zz, "y")` writes `y`.
 ///
 /// A path-shaped member is told from the others by `path(MEMBER)` answering one path per output:
@@ -4153,14 +4153,17 @@ fn meta_rhs_nodes(current: &OwnedValue, value: &Expr, sink: &mut ErrorSink) -> V
             &Expr::Builtin(Builtin::Path(Box::new(member.clone()))),
         )
         .filter(|paths| paths.len() == outputs.len());
-        let literal_empty_object = matches!(member, Expr::Object(entries) if entries.is_empty());
         for (at, output) in outputs.into_iter().enumerate() {
             let present = paths.as_ref().map_or(true, |paths| {
                 meta_path_from_value(&paths[at], current)
                     .map_or(true, |path| owned_value_at(current, &path).is_some())
             });
+            // An empty mapping the expression builds (`{}`, `{} | .`, `{} + {}`) is a node whose
+            // text is `{}`; one read from the document, and every other container, is not.
+            let built_empty_mapping =
+                paths.is_none() && matches!(&output, OwnedValue::Object(map) if map.is_empty());
             let container = matches!(output, OwnedValue::Object(_) | OwnedValue::Array(_));
-            if present && (!container || literal_empty_object) {
+            if present && (!container || built_empty_mapping) {
                 nodes.push(output);
             }
         }
