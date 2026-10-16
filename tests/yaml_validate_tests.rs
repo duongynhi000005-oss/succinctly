@@ -346,3 +346,26 @@ fn test_yaml_validate_invalid_escape_multibyte_char_not_mojibake_1422() -> Resul
     );
     Ok(())
 }
+
+/// #4558: a second pair `:` before the next `,` (`{a: 1 b: 2}`, `[a: 1 b: 2]`) is a pair with no
+/// separator, which yq rejects and `yaml validate` used to accept. A `:` glued to the next value's
+/// text (`{x: :x}`, `{"a"::b}`) and a flow collection used as a key (`[{a: 1}: x]`) stay valid.
+#[test]
+fn test_yaml_validate_rejects_a_second_pair_colon_in_a_flow_item_4558() -> Result<()> {
+    for doc in ["{a: 1 b: 2}\n", "[a: 1 b: 2]\n", "k: {a: b c: 1}\n"] {
+        let (_stdout, _stderr, code) = run_validate_stdin(doc, &[])?;
+        assert_ne!(code, 0, "{doc:?}");
+    }
+    for doc in [
+        "{a: 1, b: 2}\n",
+        "{x: :x}\n",
+        "{\"a\"::b}\n",
+        "[{a: 1}: x]\n",
+        "{? a : b}\n",
+        "{a: {b: 1}}\n",
+    ] {
+        let (_stdout, stderr, code) = run_validate_stdin(doc, &[])?;
+        assert_eq!(code, 0, "{doc:?}: {stderr:?}");
+    }
+    Ok(())
+}

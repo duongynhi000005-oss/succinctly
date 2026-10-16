@@ -11514,17 +11514,26 @@ fn test_yaml_flow_explicit_key_colon_before_a_flow_indicator_is_content() -> Res
     // §7.3.3, under which `:` before `,`/`}`/`]` is the value indicator.
     //
     // The visible cost is spec example 7.3, YAML Test Suite case FRK4, whose
-    // first key the spec reads as `foo` and we now read as `foo :`. yq rejects
-    // that document outright, so there is no yq answer to agree with. FRK4 is a
-    // parses-only corpus case (`json: null`), so `yaml_test_suite`'s manifest
-    // will not notice the change — this assertion is the only guard. #402.
+    // first key the spec reads as `foo` and we read as `foo :`. yq rejects that
+    // document outright (its `: bar` entry has an empty key, #4558), and so do we
+    // now, so FRK4 sits in the known-failures manifest; the explicit key itself is
+    // pinned here against a document yq accepts. #402.
     let (stdout, exit_code) = run_yq_stdin(
+        ".",
+        "{\n  ? foo :,\n  x: 1\n}\n",
+        &["-o", "json", "-I", "0"],
+    )?;
+    assert_eq!(
+        exit_code, 0,
+        "an explicit key before a flow indicator parses"
+    );
+    assert_eq!(stdout.trim(), r#"{"foo :":null,"x":1}"#);
+    let (_stdout, exit_code) = run_yq_stdin(
         ".",
         "{\n  ? foo :,\n  : bar,\n}\n",
         &["-o", "json", "-I", "0"],
     )?;
-    assert_eq!(exit_code, 0, "FRK4 must still parse");
-    assert_eq!(stdout.trim(), r#"{"foo :":null,"":"bar"}"#);
+    assert_ne!(exit_code, 0, "FRK4 is rejected, as yq rejects it (#4558)");
     Ok(())
 }
 
@@ -69473,6 +69482,76 @@ fn test_comma_assignment_target_with_an_iterate_member_4401() -> Result<()> {
         run_jq_stdin_with_stderr("(.a[], .b[]) = 5", "{\"a\":[1]}", &["-c"])?;
     assert_eq!((code, stdout.as_str()), (5, ""), "{stderr:?}");
     assert!(stderr.contains("Cannot iterate over null"), "{stderr:?}");
+    Ok(())
+}
+
+/// #4558: in a flow collection a `:` straight before a flow indicator is key or item content in yq, not
+/// the pair's indicator -- `{a:}` is the key `a:` with no value, `[a:]` the one item `a:` -- where YAML
+/// 1.2 reads the `:` as the indicator (`{"a":null}`, `[{"a":null}]`). A `:` glued to text is an item
+/// (`[:x]`, `[:]`). An entry that opens with `:` followed by a blank (`[: x]`, `{: x}`) or any key that
+/// opens with `:` (`{:x}`, `{:}`) is an empty key yq rejects, although the spec allows it (corpus cases
+/// `CFD4`/`FRK4`/`NKF9` are in the known-failures manifest for that reason). Every row captured from yq
+/// v4.53.3 (Homebrew), the rejected ones for the exit status only.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_yaml_flow_colon_before_a_flow_indicator_is_content_4558() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        ("{a:}", "{\"a:\":null}\n"),
+        ("{a:,b:}", "{\"a:\":null,\"b:\":null}\n"),
+        ("[a:]", "[\"a:\"]\n"),
+        ("[1 b:]", "[\"1 b:\"]\n"),
+        ("[a, b:]", "[\"a\",\"b:\"]\n"),
+        ("[a:, b]", "[\"a:\",\"b\"]\n"),
+        ("{a:, b: 1}", "{\"a:\":null,\"b\":1}\n"),
+        ("{a: [b:]}", "{\"a\":[\"b:\"]}\n"),
+        ("- {a:}", "[{\"a:\":null}]\n"),
+        ("x: {a:}", "{\"x\":{\"a:\":null}}\n"),
+        ("x: [a:]", "{\"x\":[\"a:\"]}\n"),
+        ("[:x]", "[\":x\"]\n"),
+        ("[:]", "[\":\"]\n"),
+        ("[:, a]", "[\":\",\"a\"]\n"),
+        ("{a: 1}", "{\"a\":1}\n"),
+        ("[a: 1]", "[{\"a\":1}]\n"),
+        ("{a:1}", "{\"a:1\":null}\n"),
+        ("[a:1]", "[\"a:1\"]\n"),
+        ("{a: }", "{\"a\":null}\n"),
+        ("[a: ]", "[{\"a\":null}]\n"),
+        ("{a:b}", "{\"a:b\":null}\n"),
+        ("{\"a\":}", "{\"a\":null}\n"),
+        ("{a, b}", "{\"a\":null,\"b\":null}\n"),
+        ("[a:b]", "[\"a:b\"]\n"),
+        ("{a:b: 1}", "{\"a:b\":1}\n"),
+        ("[http://x]", "[\"http://x\"]\n"),
+        ("{? : x}", "{\"\":\"x\"}\n"),
+        ("{a: b:}", "{\"a\":\"b:\"}\n"),
+    ];
+    for &(doc, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "{doc:?}: {stderr:?}"
+        );
+    }
+    for doc in [
+        "[: x]",
+        "{: x}",
+        "{:x}",
+        "{:}",
+        "{: }",
+        "[: ]",
+        "[ : x ]",
+        "[a, : x]",
+        "{a: 1, : x}",
+        "k: [: x]",
+        "k: {: x}",
+        "{: , a}",
+        "{a: 1 b: 2}",
+        "[a: 1 b: 2]",
+    ] {
+        let (stdout, _stderr, code) = run_yq_stdin_with_stderr(".", doc, &["-o=json", "-I=0"])?;
+        assert_ne!(code, 0, "{doc:?} is rejected (stdout {stdout:?})");
+    }
     Ok(())
 }
 

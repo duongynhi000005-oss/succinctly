@@ -638,14 +638,21 @@ cost is spec example 7.3, corpus case `FRK4`:
 
 ```
 $ printf '{\n  ? foo :,\n  : bar,\n}\n' | succinctly yq -o=json -I=0 '.'
-{"foo :":null,"":"bar"}              # spec: key is `foo`; yq: rejects the document
+Error: YAML parse error: unexpected character ':' ... expected key in flow mapping
+                                     # spec: key is `foo`; yq: rejects the document
 ```
 
-`yq` rejects `FRK4` outright, so there is no `yq` answer to agree with there — only the rule
-it applies everywhere else. `FRK4` is a *parses-only* corpus case (`json: null`), so it still
-passes and the known-failures manifest cannot notice the change:
-`test_yaml_flow_explicit_key_colon_before_a_flow_indicator_is_content` in
-`tests/yq_cli_tests.rs` is the only guard.
+`yq` rejects `FRK4` outright, because the `: bar` entry has an empty key and a flow key cannot
+open with `:`. Since [#4558](https://github.com/rust-works/succinctly/issues/4558) `succinctly yq`
+rejects it too, which moves `FRK4` into the known-failures manifest (with `CFD4`,
+`[ : empty key ]`, and `NKF9`, an empty key in a flow mapping: all three are valid YAML 1.2 that
+yq refuses, and we follow yq). The `:` before a flow indicator is key or item content on both
+sides of that rule: `{a:}` is the key `a:` with no value and `[a:]` the one item `a:`
+(yq v4.53.3), where the spec reads the `:` as the pair's indicator. A `:` glued to text
+(`[:x]`, `[:]`) is still an item. `succinctly yaml validate` rejects a second pair `:` before the
+next `,` (`{a: 1 b: 2}`), which yq also rejects. Pinned by
+`test_yaml_flow_colon_before_a_flow_indicator_is_content_4558` and
+`test_yaml_validate_rejects_a_second_pair_colon_in_a_flow_item_4558`.
 
 The same change made `? ` a node marker in flow mappings rather than key text — `{? k : v}`
 used to key on `? k` — and stopped a space before a line break from aborting the key scan, so

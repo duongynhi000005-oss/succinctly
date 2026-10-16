@@ -1112,6 +1112,9 @@ impl<'a> Validator<'a> {
         // `expect_item` is true right after the open bracket or a comma: a comma
         // in that state is a leading/doubled comma (9MAG, CTN5).
         let mut expect_item = true;
+        // #4558: whether this item (since the last comma) already had its pair's `:`. A second one
+        // before the next `,` (`{a: 1 b: 2}`) is a pair with no separator, which yq rejects.
+        let mut colon_seen = false;
         loop {
             self.skip_flow_ws()?;
             match self.peek() {
@@ -1136,11 +1139,26 @@ impl<'a> Validator<'a> {
                     }
                     self.advance();
                     expect_item = true;
+                    colon_seen = false;
                 }
                 Some(b':') => {
+                    // A second indicator only: a `:` glued to its value is that value's text
+                    // (`{x: :x}`, `{"a"::b}`), as before.
+                    if colon_seen
+                        && matches!(
+                            self.peek_at(1),
+                            None | Some(b' ' | b'\t' | b'\n' | b'\r' | b',' | b']' | b'}')
+                        )
+                    {
+                        return Err(self.error(YamlValidationErrorKind::UnexpectedCharacter {
+                            expected: "',' or the closing bracket",
+                            found: ':',
+                        }));
+                    }
                     // Mapping value indicator; the value follows.
                     self.advance();
                     expect_item = false;
+                    colon_seen = true;
                 }
                 Some(b'[' | b'{') => {
                     self.scan_flow()?;

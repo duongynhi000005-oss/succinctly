@@ -5806,8 +5806,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // end-of-input or a flow indicator to be the pair's colon. The break
                     // is the same stop `parse_flow_unquoted_value` makes (#1960), so the
                     // two agree on `[a:\n 1]`; any other `:` is key content (`[x:y: 1]`).
-                    if Self::is_ws_break_or_eoi(next) || matches!(next, Some(b',' | b']' | b'}')) {
+                    if Self::is_ws_break_or_eoi(next) {
                         return true;
+                    }
+                    // #4558: a `:` straight before a flow indicator is key content in yq, not
+                    // the pair's colon (`[a:]` is the one item `a:`, `{a:}` the key `a:`), so
+                    // the item is not a pair.
+                    if matches!(next, Some(b',' | b']' | b'}')) {
+                        return false;
                     }
                     i += 1;
                 }
@@ -6217,6 +6223,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             first = false;
 
+            // #4558: an item that opens with a `:` and a blank (`[: x]`, `[a, : x]`) is an empty
+            // key yq rejects ("did not find expected node content"); a `:` straight before
+            // anything else is item text (`[:]`, `[:x]`).
+            if self.peek() == Some(b':') && Self::is_ws_break_or_eoi(self.peek_at(1)) {
+                return Err(self.err_unexpected_char(self.pos, "expected value in flow sequence"));
+            }
+
             // Check for explicit key `? key : value` in flow context. Both
             // lookaheads scan up to the element's own length, not O(1), so
             // they're hoisted into locals and reused below rather than
@@ -6549,6 +6562,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if explicit {
                 self.advance();
                 self.skip_flow_whitespace();
+            } else if self.peek() == Some(b':') {
+                // #4558: a key cannot open with `:` -- yq rejects `{: x}`, `{:x}`, `{:}` (an
+                // empty key is spelled `? : x`, handled above).
+                return Err(self.err_unexpected_char(self.pos, "expected key in flow mapping"));
             }
 
             // Parse key
@@ -6677,11 +6694,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         while let Some(b) = self.peek() {
             match b {
                 b',' | b'}' | b']' => break,
-                b':' if Self::is_ws_break_or_eoi(self.peek_at(1))
-                    || matches!(self.peek_at(1), Some(b',' | b'}' | b']')) =>
-                {
-                    break
-                }
+                b':' if Self::is_ws_break_or_eoi(self.peek_at(1)) => break,
+                // #4558: a `:` straight before a flow indicator is part of the key, as in
+                // yq (`{a:}` is the key `a:` with no value), like any other `:` that is not
+                // followed by a blank.
                 b':' => self.advance(),
                 b'#' => {
                     // # starts a comment only after s-separate-in-line (space or
@@ -9533,13 +9549,16 @@ mod tests {
 
     #[test]
     fn test_empty_key_in_flow_sequence() {
-        // CFD4: [ : empty key ]
+        // CFD4: [ : empty key ] is valid YAML 1.2, and real yq rejects it ("did not find expected
+        // node content"), so `succinctly yq` follows yq (#4558). A `:` glued to its text is an item.
         let yaml = b"- [ : empty key ]";
         let result = build_semi_index(yaml);
         assert!(
-            result.is_ok(),
-            "empty key in flow sequence should parse: {result:?}"
+            result.is_err(),
+            "an empty key in a flow sequence is rejected, as yq does: {result:?}"
         );
+        assert!(build_semi_index(b"- [:x]").is_ok());
+        assert!(build_semi_index(b"- [:]").is_ok());
     }
 
     #[test]
