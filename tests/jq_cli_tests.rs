@@ -74794,7 +74794,7 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
         ),
         (
             r"null",
-            r#"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; (5, .a))); $k))"#,
+            r"path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; (5, .a))); $k))",
             "",
             "Invalid path expression with result null",
             5,
