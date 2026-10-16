@@ -76538,6 +76538,60 @@ fn test_foreach_update_composed_isempty_any_recurse_follows_jq_4706() -> Result<
     ])
 }
 
+/// #4720 (#4706's residual): a zero-arity `def` written inside a `foreach` UPDATE around a verdict was read
+/// only when its scope was exactly the one call (`def f: isempty(1); f`). With any other scope
+/// (`def f: isempty(1); (f | not)`) the UPDATE was refused although jq answers, and under `?` the stream
+/// element was dropped. The body is now read once and a call in the scope answers as it does, a call as the
+/// operand of a verdict builtin as the body does (`def f: recurse; isempty(f)`). Every jq side captured from
+/// jq 1.7.1 on `[1]`.
+#[test]
+fn test_foreach_update_zero_arity_def_around_verdict_follows_jq_4720() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: isempty(1); (f | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: isempty(1); (f , f); $k))",
+            "[0]\n[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: recurse; isempty(f); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: recurse; (isempty(f) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; def f: 1; (any(f; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; def f: .a; (f | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4706: the spellings of [`test_foreach_update_composed_isempty_any_recurse_follows_jq_4706`] that stay
 /// refused where jq answers, because the admission cannot prove the verdict is decided on the recursion's
 /// seed: `any(recurse(f); .)` may go on past a falsy seed (`f` is any filter), and `any(recurse; true)` is not

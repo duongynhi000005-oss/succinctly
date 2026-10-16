@@ -889,6 +889,10 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   verdict that can end on a descendant -- `any(recurse(f); .)` (`recurse([1])` on `null` goes on past a falsy seed), `any(recurse; true)`
   (a `cond` other than `.`), `all(recurse; .)` (a truthy seed goes on) -- whose register has moved by then, and a composed verdict
   inside a `try` UPDATE (`try ((isempty(1) | not))` is refused on `main` as well; the `try` handling is not this gate's).
+  **Since [#4720](https://github.com/rust-works/succinctly/issues/4720)** a zero-arity `def` written inside the UPDATE is read through when its scope is more than the one call
+  (`def f: isempty(1); (f | not)`, `def f: recurse; (isempty(f) | not)`): its body is read once and a call answers as the body does. Pinned by
+  `test_foreach_update_zero_arity_def_around_verdict_follows_jq_4720`. **Still refused where jq answers**: a `def` called from the body of another `def`
+  (`def f: isempty(1); def g: f; (g | not)`).
   **Since [#4699](https://github.com/rust-works/succinctly/issues/4699)** a fold whose UPDATE is a verdict builtin, nested in another
   fold's UPDATE, leaves the register where it entered, as a neutral UPDATE does: `foreach .a? as $k (0; foreach (1,2) as $j (1;
   isempty(1); .); $k)` and the `reduce` spelling (`reduce (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)))`) answer as jq
