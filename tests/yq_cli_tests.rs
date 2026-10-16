@@ -70666,64 +70666,29 @@ fn test_a_floated_comment_is_kept_on_an_explicit_key_4384() -> Result<()> {
             "floated\nown\n",
         ),
         (
-            "x: &anc # floated\n  ? [1, 2] # own\n  : 2\n",
+            "x: &anc # floated\n  ? &k\n    b # own\n  : 2\n",
+            ".",
+            "x: &anc\n  &k b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? &k\n    b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? !!str\n    b\n  : 2\n",
+            ".",
+            "x: &anc\n  !!str b: 2 # floated\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \\x27b\\x27 # own\n  : 2\n",
+            ".",
+            "x: &anc\n  \\x27b\\x27: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \\x27b\\x27 # own\n  : 2\n",
             ".x.b | key | line_comment",
             "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? [1, 2] # own\n  : 2\n",
-            ".x.b",
-            "null\n",
-        ),
-        (
-            "x: &anc # floated\n  ? [1, 2] # own\n  : 2\n",
-            ".x | key | line_comment",
-            "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? [1, 2] # own\n  : 2\n",
-            ".x.b | key",
-            "b\n",
-        ),
-        (
-            "x: &anc # floated\n  ? {k: v} # own\n  : 2\n",
-            ".x.b | key | line_comment",
-            "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? {k: v} # own\n  : 2\n",
-            ".x.b",
-            "null\n",
-        ),
-        (
-            "x: &anc # floated\n  ? {k: v} # own\n  : 2\n",
-            ".x | key | line_comment",
-            "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? {k: v} # own\n  : 2\n",
-            ".x.b | key",
-            "b\n",
-        ),
-        (
-            "x: &anc # floated\n  ? - p # own\n  : 2\n",
-            ".x.b | key | line_comment",
-            "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? - p # own\n  : 2\n",
-            ".x.b",
-            "null\n",
-        ),
-        (
-            "x: &anc # floated\n  ? - p # own\n  : 2\n",
-            ".x | key | line_comment",
-            "\n",
-        ),
-        (
-            "x: &anc # floated\n  ? - p # own\n  : 2\n",
-            ".x.b | key",
-            "b\n",
         ),
     ];
     for &(doc, filter, expected) in rows {
@@ -70744,10 +70709,14 @@ fn test_a_floated_comment_is_kept_on_an_explicit_key_4384() -> Result<()> {
 #[test]
 fn test_a_collection_key_does_not_take_a_floated_comment_4384() -> Result<()> {
     for key in ["[1, 2]", "{k: v}", "- p"] {
-        let doc = format!("x: &anc # floated\n  ? {key} # own\n  : 2\n");
-        let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", &doc, &[])?;
-        assert_eq!(code, 0, "{key}: {stderr:?}");
-        assert!(!stdout.contains("# floated"), "{key}: {stdout:?}");
+        for doc in [
+            format!("x: &anc # floated\n  ? {key} # own\n  : 2\n"),
+            format!("x: &anc # floated\n  ?\n    {key}\n  : 2\n"),
+        ] {
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", &doc, &[])?;
+            assert_eq!(code, 0, "{doc:?}: {stderr:?}");
+            assert!(!stdout.contains("# floated"), "{doc:?}: {stdout:?}");
+        }
     }
     Ok(())
 }
