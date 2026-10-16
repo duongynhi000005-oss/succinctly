@@ -153078,6 +153078,271 @@ fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() ->
     Ok(())
 }
 
+/// #4615: a `foreach` whose source is a bare-final `?//` chain (or a nested `foreach` over one) is
+/// answered on an untracked entry when it is the UPDATE of another `foreach` (a fold inside another
+/// fold's body), as jq does: the gate that states the register was held to a top-level fold, and the
+/// enclosing fold's emission could not state it for an UPDATE that is itself a fold. The contrasts stay
+/// refused, as in jq: a chain with no bare alternative, and a body, EXTRACT or UPDATE that navigates
+/// (also behind a `try`, the row the #4609 whole-grid sample found). Every row captured from jq 1.7.1
+/// with `-c`.
+#[test]
+fn test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_4615() -> Result<()> {
+    const ROWS: &[(&str, &str, &str, i32)] = &[
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"del(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x.a?)",
+            "[[1],[1]]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x.a?)",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x.a?)",
+            "{}\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $i (.; .; .)) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $i (.; .; .)) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (foreach ((.|.) as {a:$a} ?// $a | .) as $i (.; .; .)) as $k (.; .; .)); .)) | $x)",
+            "[]\n[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .a)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .a)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .a)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .a)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a; .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; try ((foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a); .)) | $x)",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; try ((foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a); .)) | $x)",
+            "[\"a\",\"a\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; try ((foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | .a); .)) | $x)",
+            "",
+            0,
+        ),
+        // The same fold in an EXTRACT under a `try` is jq's error, and stays one: only the UPDATE of
+        // an enclosing `foreach` reads the statement (the whole-grid sample's wrong accept, `["a"]`).
+        (
+            r#"{"a":true}"#,
+            r"path(foreach .a? as $k (.; .; try (((foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))))))",
+            "",
+            5,
+        ),
+        // Still refused where jq answers `[]` twice: a source that re-roots the register walks it in
+        // jq (`["a"]` twice on a `null` document), so the nested read leaves a chain over `$x` or
+        // `null` out. (On a `null` document these print `[]` twice on `main` as well.)
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ($x | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)); .)) | $x)",
+            "",
+            5,
+        ),
+        // `limit` and `nth` are left out of the nested read as `first` is.
+        (
+            r#"[{"key":"a","value":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (limit(1; . as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "",
+            5,
+        ),
+        (
+            r#"[{"key":"a","value":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (nth(0; . as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "",
+            5,
+        ),
+        // A `limit`/`first` around the enclosing `foreach` is read as before (one result).
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | limit(1; foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(. as $x | 1 | first(foreach (1,2) as $j (.; foreach ((.|.) as {a:$a} ?// $a | .) as $k (.; .; .); .)) | $x)",
+            "[]\n",
+            0,
+        ),
+        // Still refused where jq answers `[]` twice: a chain beneath `first` there came back as four
+        // paths when it was read (the chain's retry after the stop emitted once more).
+        (
+            r#"[{"key":"a","value":1}]"#,
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "",
+            5,
+        ),
+    ];
+    for &(doc, filter, want_stdout, want_code) in ROWS {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            (want_stdout, want_code),
+            "`{filter}` on {doc}: stderr {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4663: `limit(n; (CHAIN), X)` as a `foreach` source. The refused first emission of the chain
 /// counts against `n` (jq's `limit` is a `label`/`break` the chain's `?//` retries past), so the
 /// sibling `X` is reached only when `n` is 3 or more: `n` = 1 and 2 print the register once, where

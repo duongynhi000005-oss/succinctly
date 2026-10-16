@@ -47641,31 +47641,72 @@ fn foreach_body_cannot_move(input: &Expr, init: &Expr, extract: Option<&Expr>) -
 /// was three results where jq gives two); #4537 fixed that by counting the refused first emission
 /// against the count. Conservative: a `false` only leaves the source to the loss it had.
 fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
-    let mut calls = SPINE_CALL_BUDGET;
+    let mut calls = BindGate::new(false);
     moves_register_only_by_binds(expr, &mut calls)
+}
+
+/// [`source_moves_register_only_by_binds`] for the source of a `foreach` that is the UPDATE of
+/// another `foreach` (#4615), which the enclosing fold reads the register statement of. Narrower:
+/// - no `first`/`limit`/`nth`: a chain beneath one whose first alternative walks a step retried
+///   after the stop and emitted an extra element there (`foreach (1,2) as $i (.; foreach
+///   (first(CHAIN)) as $k (.; .; .); .)` on `{a:{b:1}}`: four paths where jq gives two);
+/// - every bound expression and every stage before the last is the register itself: a chain over
+///   `$x` or `null` (`foreach ($x | CHAIN)`, `foreach (null | CHAIN)`) walks the register in jq, and
+///   the statement would name the entry (`["a"]` where this printed `[]`).
+fn source_moves_register_only_by_binds_in_update(expr: &Expr) -> bool {
+    let mut gate = BindGate::new(true);
+    moves_register_only_by_binds(expr, &mut gate)
+}
+
+/// What [`moves_register_only_by_binds`] has left to spend (`budget`), and whether it reads the
+/// narrower [`source_moves_register_only_by_binds_in_update`] shape (`inside_update`).
+struct BindGate {
+    budget: u32,
+    inside_update: bool,
+}
+
+impl BindGate {
+    fn new(inside_update: bool) -> Self {
+        Self {
+            budget: SPINE_CALL_BUDGET,
+            inside_update,
+        }
+    }
 }
 
 /// [`source_moves_register_only_by_binds`] for one node, with what is left of the budget for bodies
 /// read through a call ([`SPINE_CALL_BUDGET`]); past it the source is not read. The recursion is
 /// bounded without a depth of its own: the parser caps how deep a source nests, a call is read at most
 /// budget times, and a call or a shared argument checks the native stack first.
-fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
+fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
     match unwrap_paren(expr) {
         // A destructuring chain that ends in a bare `$var`: when every pattern before it raises,
         // `?//` restores the path and the bare alternative leaves the register alone. A chain that
         // ends in a pattern either walks a step or raises, so it is not read here (`cannot_move_register`
         // below sees an all-bare chain, and refuses the rest).
-        Expr::AsPattern { patterns, body, .. }
-            if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) =>
-        {
-            moves_register_only_by_binds(body, calls)
+        Expr::AsPattern {
+            expr: bound,
+            patterns,
+            body,
+            ..
+        } if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) => {
+            (!calls.inside_update || bind_hands_on_the_register(bound))
+                && moves_register_only_by_binds(body, calls)
         }
         Expr::As { body, .. } | Expr::Label { body, .. } => {
             moves_register_only_by_binds(body, calls)
         }
-        Expr::Pipe(stages) => stages
-            .iter()
-            .all(|stage| moves_register_only_by_binds(stage, calls)),
+        Expr::Pipe(stages) => stages.iter().enumerate().all(|(i, stage)| {
+            // A stage before the last one that re-roots the register (`null | CHAIN`) is not a bind.
+            (!calls.inside_update
+                || i + 1 == stages.len()
+                || matches!(
+                    unwrap_paren(stage),
+                    Expr::AsPattern { .. } | Expr::As { .. }
+                )
+                || yields_only_the_register(stage))
+                && moves_register_only_by_binds(stage, calls)
+        }),
         Expr::Comma(stages) => stages
             .iter()
             .all(|stage| moves_register_only_by_binds(stage, calls)),
@@ -47695,8 +47736,8 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
             frames,
             bound,
         } => {
-            *calls > 0 && {
-                *calls -= 1;
+            calls.budget > 0 && {
+                calls.budget -= 1;
                 probe_def_call(def, args, *frames, bound)
                     .is_ok_and(|body| moves_register_only_by_binds(&body, calls))
             }
@@ -47708,8 +47749,8 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
             then,
             bound,
         } => {
-            *calls > 0 && {
-                *calls -= 1;
+            calls.budget > 0 && {
+                calls.budget -= 1;
                 moves_register_only_by_binds(&bind_def(name, params, body, then, bound), calls)
             }
         }
@@ -47735,13 +47776,15 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut u32) -> bool {
         }
         // #4614: `first`, `limit` and `nth` take their operand's outputs, whose register is the
         // operand's own (#4537 made the chain beneath them count its refused emission).
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner))
+            if !calls.inside_update =>
+        {
             moves_register_only_by_binds(inner, calls)
         }
         Expr::Limit { n, expr }
         | Expr::NthExpr { n, expr }
         | Expr::Builtin(Builtin::NthStream(n, expr))
-            if cannot_move_register(n) =>
+            if !calls.inside_update && cannot_move_register(n) =>
         {
             moves_register_only_by_binds(expr, calls)
         }
@@ -59574,14 +59617,34 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4485: what follows the `foreach` runs outside its UPDATE and EXTRACT, which hold the marks
     // of the body while they emit.
     let entry_marks = fold_body::marks();
+    let entry_depth = fold_body::depth();
+    // #4615: the body this `foreach` is the UPDATE of reads the statement it makes.
+    let update_of_stating_fold = fold_body::foreach_body_stating_here();
+    // #4615: an UPDATE that is itself a `foreach` whose source moves the register only by a bind
+    // leaves it at the entry on the emissions that foreach states so, which the stage reads per
+    // emission (a `foreach` inside another fold's body).
+    let update_states_it = states_untracked
+        && matches!(unwrap_paren(update), Expr::Foreach { .. })
+        && source_moves_register_only_by_binds_in_update(update);
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
         let _after_the_loop = fold_body::restore(entry_marks);
         if register_unmoved && !branch.trackable {
             sink(branch.with_register(BranchRegister::Unmoved(Cow::Borrowed(value))))
         } else if states_untracked && !branch.trackable && branch.path.depth() == 0 {
+            // #4615: the step's emission is at the entry register when it says so itself.
+            let nested_says_entry = !update_states_it
+                || matches!(
+                    branch.register,
+                    BranchRegister::Unmoved(_) | BranchRegister::AtEntry
+                );
             let statement = match frame.register() {
-                Some(register) if step_at_entry.get() => {
+                Some(register) if step_at_entry.get() && nested_says_entry => {
                     BranchRegister::Unmoved(Cow::Owned(register.clone()))
+                }
+                // #4615: a fold inside another fold's body has no register of its own to state; its
+                // enclosing fold holds it, so the emission says it is where the fold entered.
+                None if step_at_entry.get() && update_of_stating_fold && nested_says_entry => {
+                    BranchRegister::AtEntry
                 }
                 _ => BranchRegister::LostSomewhere,
             };
@@ -59643,16 +59706,26 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // to its bare alternative on an entry that is not the register) still leaves the register at
     // the entry on an element that took no walk step ([`source_moves_register_only_by_binds`]).
     // The element says so itself, below.
-    // Not inside another fold's body, where the ambient register is not known to be jq's and the
-    // element's `Unmoved` is not evidence of a bare fallback (the whole-grid sample found a `try`
-    // in a `foreach` UPDATE that answered `["a"]` where jq prints nothing).
+    // #4615: also inside another fold's body. The statement an emission makes there is read by
+    // the enclosing fold, which accepts it only where its own UPDATE is this `foreach`
+    // (`update_states_it`); a `try` or a navigation around it never meets it as the register
+    // (the #4609 whole-grid sample's `try`-in-UPDATE row, which answered `["a"]` where jq prints
+    // nothing, is in the sweep's `untracked-foreach-update-try` context).
     let entry_stays_unless_source_walks = states_untracked
-        && fold_body::depth() == 0
         && init_keeps_register
         && !mentions_frozen_var
         && step_cannot_move
         && !input_cannot_move
-        && source_moves_register_only_by_binds(input);
+        && if entry_depth == 0 {
+            source_moves_register_only_by_binds(input)
+        } else {
+            update_of_stating_fold && source_moves_register_only_by_binds_in_update(input)
+        };
+    let update_stays_if_stated = update_states_it
+        && init_keeps_register
+        && !mentions_frozen_var
+        && input_cannot_move
+        && extract.map_or(true, cannot_move_register);
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
     // own trailing escape, which jq never reaches once a consumer has
@@ -59869,8 +59942,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let source_unmoved = entry_stays_unless_source_walks
                             && elem.register_path.is_none()
                             && matches!(elem.moved, MovedRegister::Unmoved);
-                        step_at_entry
-                            .set((entry_stays_at_register || source_unmoved) && walked.is_none());
+                        step_at_entry.set(
+                            (entry_stays_at_register || source_unmoved || update_stays_if_stated)
+                                && walked.is_none(),
+                        );
                         // #4129: this step's emissions state the entry when no walk step
                         // moved the register off it.
                         let update_states_entry =
@@ -60152,7 +60227,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let inherits_moved_loop =
                             carries_dot && fold_body::foreach_body_moved_here();
                         let _foreach_body = if input_cannot_move && !inherits_moved_loop {
-                            fold_body::foreach_body()
+                            if update_stays_if_stated {
+                                fold_body::foreach_body_stating()
+                            } else {
+                                fold_body::foreach_body()
+                            }
                         } else {
                             fold_body::foreach_body_moved()
                         };
@@ -68880,7 +68959,8 @@ mod fold_body {
         static OFF_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
         static MOVED: Cell<Moved> = const { Cell::new(Moved { depth: 0, onto_null: None }) };
-        /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none.
+        /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none, shifted left two:
+        /// bit 0 is the moved bit, bit 1 the stating bit.
         static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which a `reduce` source that certainly raises is being resolved
         /// (#4600), 0 for none.
@@ -69092,7 +69172,7 @@ mod fold_body {
     /// result back as the state and the register is restored on exit.
     pub(crate) fn foreach_body() -> LoopGuard {
         let previous = LOOP_DEPTH.with(Cell::get);
-        LOOP_DEPTH.with(|l| l.set((depth() + 1) << 1));
+        LOOP_DEPTH.with(|l| l.set((depth() + 1) << 2));
         LoopGuard(previous)
     }
 
@@ -69100,8 +69180,21 @@ mod fold_body {
     /// element, so `.` in UPDATE (the state) is a node it is not at. Bit 0 of the mark.
     pub(crate) fn foreach_body_moved() -> LoopGuard {
         let previous = LOOP_DEPTH.with(Cell::get);
-        LOOP_DEPTH.with(|l| l.set(((depth() + 1) << 1) | 1));
+        LOOP_DEPTH.with(|l| l.set(((depth() + 1) << 2) | 1));
         LoopGuard(previous)
+    }
+
+    /// [`foreach_body`] for the UPDATE of a `foreach` that reads the register statement of the
+    /// `foreach` that is its UPDATE (#4615). Bit 1 of the mark.
+    pub(crate) fn foreach_body_stating() -> LoopGuard {
+        let previous = LOOP_DEPTH.with(Cell::get);
+        LOOP_DEPTH.with(|l| l.set(((depth() + 1) << 2) | 2));
+        LoopGuard(previous)
+    }
+
+    /// Whether the body being resolved is a [`foreach_body_stating`] one.
+    pub(crate) fn foreach_body_stating_here() -> bool {
+        foreach_body_here() && LOOP_DEPTH.with(Cell::get) & 2 == 2
     }
 
     /// Marks the body about to be entered as a moved `foreach` body too when the body being resolved
@@ -69123,7 +69216,7 @@ mod fold_body {
 
     /// Whether the body being resolved is the one [`foreach_body`] marked.
     pub(crate) fn foreach_body_here() -> bool {
-        depth() > 0 && LOOP_DEPTH.with(Cell::get) >> 1 == depth()
+        depth() > 0 && LOOP_DEPTH.with(Cell::get) >> 2 == depth()
     }
 
     /// Whether the body being resolved is a [`foreach_body_moved`] one.
@@ -69249,6 +69342,14 @@ mod fold_body {
 
     pub(crate) fn foreach_body_moved_inherited() -> LoopGuard {
         LoopGuard
+    }
+
+    pub(crate) fn foreach_body_stating() -> LoopGuard {
+        LoopGuard
+    }
+
+    pub(crate) fn foreach_body_stating_here() -> bool {
+        false
     }
 
     pub(crate) fn foreach_body_moved_here() -> bool {
