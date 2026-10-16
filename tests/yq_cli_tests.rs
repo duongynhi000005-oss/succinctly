@@ -69093,6 +69093,237 @@ fn test_path_and_parent_under_a_root_level_owned_node_keep_their_prefix_3019() -
     Ok(())
 }
 
+/// #4401: a comma assignment target that holds an iterating member -- `(.a[], .b[]) = 5`, `(.a, .b[]) |= 7`
+/// -- raised `Cannot iterate over null` on an absent key, where yq vivifies the absent `.b` to `[]`, writes
+/// into its zero elements and never evaluates a right side no member needs; the same for a `select`
+/// member over an absent, `null` or empty `.a` (`(.a[] | select(. == 1)) = 9`: `{"a":[]}` on `a: null`).
+/// A comma that holds a static member now resolves member by member in yq mode, so the static `.b[]`
+/// reaches the writer verbatim as a lone `.b[] = v` does. `(.a[] | select(...)) = error("boom")` over a
+/// *scalar* `.a` still evaluates the right side (yq does not), a recorded residual, so that row is left
+/// out. Rows that error in yq (an erroring right side that some member needs) pin only that both raise
+/// `boom`. Every row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_comma_assignment_target_with_an_iterate_member_4401() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        ("a: []\n", "(.a[], .b[]) = 5", "{\"a\":[],\"b\":[]}\n", 0),
+        ("a: []\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: []\n", "(.a[], .b) = 5", "{\"a\":[],\"b\":5}\n", 0),
+        ("a: []\n", "(.a[], .b[]) |= 7", "{\"a\":[],\"b\":[]}\n", 0),
+        ("a: []\n", "(.a[], .b[]) += 1", "{\"a\":[],\"b\":[]}\n", 0),
+        (
+            "a: []\n",
+            "(.a[], .b[]) = error(\"boom\")",
+            "{\"a\":[],\"b\":[]}\n",
+            0,
+        ),
+        (
+            "a: []\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "{\"a\":[]}\n",
+            0,
+        ),
+        ("a: []\n", "(.a[] | select(. == 1)) = 9", "{\"a\":[]}\n", 0),
+        (
+            "a: []\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":[],\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        ("a: [1]\n", "(.a[], .b[]) = 5", "{\"a\":[5],\"b\":[]}\n", 0),
+        ("a: [1]\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: [1]\n", "(.a[], .b) = 5", "{\"a\":[5],\"b\":5}\n", 0),
+        ("a: [1]\n", "(.a[], .b[]) |= 7", "{\"a\":[7],\"b\":[]}\n", 0),
+        ("a: [1]\n", "(.a[], .b[]) += 1", "{\"a\":[2],\"b\":[]}\n", 0),
+        ("a: [1]\n", "(.a[], .b[]) = error(\"boom\")", "", 1),
+        (
+            "a: [1]\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "",
+            1,
+        ),
+        (
+            "a: [1]\n",
+            "(.a[] | select(. == 1)) = 9",
+            "{\"a\":[9]}\n",
+            0,
+        ),
+        (
+            "a: [1]\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":[1],\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        (
+            "a: [1, 2]\n",
+            "(.a[], .b[]) = 5",
+            "{\"a\":[5,5],\"b\":[]}\n",
+            0,
+        ),
+        ("a: [1, 2]\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        (
+            "a: [1, 2]\n",
+            "(.a[], .b) = 5",
+            "{\"a\":[5,5],\"b\":5}\n",
+            0,
+        ),
+        (
+            "a: [1, 2]\n",
+            "(.a[], .b[]) |= 7",
+            "{\"a\":[7,7],\"b\":[]}\n",
+            0,
+        ),
+        (
+            "a: [1, 2]\n",
+            "(.a[], .b[]) += 1",
+            "{\"a\":[2,3],\"b\":[]}\n",
+            0,
+        ),
+        ("a: [1, 2]\n", "(.a[], .b[]) = error(\"boom\")", "", 1),
+        (
+            "a: [1, 2]\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "",
+            1,
+        ),
+        (
+            "a: [1, 2]\n",
+            "(.a[] | select(. == 1)) = 9",
+            "{\"a\":[9,2]}\n",
+            0,
+        ),
+        (
+            "a: [1, 2]\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":[1,2],\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        (
+            "a: {x: 1}\n",
+            "(.a[], .b[]) = 5",
+            "{\"a\":{\"x\":5},\"b\":[]}\n",
+            0,
+        ),
+        ("a: {x: 1}\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        (
+            "a: {x: 1}\n",
+            "(.a[], .b) = 5",
+            "{\"a\":{\"x\":5},\"b\":5}\n",
+            0,
+        ),
+        (
+            "a: {x: 1}\n",
+            "(.a[], .b[]) |= 7",
+            "{\"a\":{\"x\":7},\"b\":[]}\n",
+            0,
+        ),
+        (
+            "a: {x: 1}\n",
+            "(.a[], .b[]) += 1",
+            "{\"a\":{\"x\":2},\"b\":[]}\n",
+            0,
+        ),
+        ("a: {x: 1}\n", "(.a[], .b[]) = error(\"boom\")", "", 1),
+        (
+            "a: {x: 1}\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "",
+            1,
+        ),
+        (
+            "a: {x: 1}\n",
+            "(.a[] | select(. == 1)) = 9",
+            "{\"a\":{\"x\":9}}\n",
+            0,
+        ),
+        (
+            "a: {x: 1}\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":{\"x\":1},\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        ("a: null\n", "(.a[], .b[]) = 5", "{\"a\":[],\"b\":[]}\n", 0),
+        ("a: null\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: null\n", "(.a[], .b) = 5", "{\"a\":[],\"b\":5}\n", 0),
+        ("a: null\n", "(.a[], .b[]) |= 7", "{\"a\":[],\"b\":[]}\n", 0),
+        ("a: null\n", "(.a[], .b[]) += 1", "{\"a\":[],\"b\":[]}\n", 0),
+        (
+            "a: null\n",
+            "(.a[], .b[]) = error(\"boom\")",
+            "{\"a\":[],\"b\":[]}\n",
+            0,
+        ),
+        (
+            "a: null\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "{\"a\":[]}\n",
+            0,
+        ),
+        (
+            "a: null\n",
+            "(.a[] | select(. == 1)) = 9",
+            "{\"a\":[]}\n",
+            0,
+        ),
+        (
+            "a: null\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":null,\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        ("a: 5\n", "(.a[], .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: 5\n", "(.a, .b[]) = 5", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: 5\n", "(.a[], .b) = 5", "{\"a\":5,\"b\":5}\n", 0),
+        ("a: 5\n", "(.a[], .b[]) |= 7", "{\"a\":5,\"b\":[]}\n", 0),
+        ("a: 5\n", "(.a[], .b[]) += 1", "{\"a\":5,\"b\":[]}\n", 0),
+        (
+            "a: 5\n",
+            "(.a[], .b[]) = error(\"boom\")",
+            "{\"a\":5,\"b\":[]}\n",
+            0,
+        ),
+        ("a: 5\n", "(.a[] | select(. == 1)) = 9", "{\"a\":5}\n", 0),
+        (
+            "a: 5\n",
+            "(.b[], .c[]) = 5",
+            "{\"a\":5,\"b\":[],\"c\":[]}\n",
+            0,
+        ),
+        ("b: [3]\n", "(.a[], .b[]) = 5", "{\"b\":[5],\"a\":[]}\n", 0),
+        ("b: [3]\n", "(.a, .b[]) = 5", "{\"b\":[5],\"a\":5}\n", 0),
+        ("b: [3]\n", "(.a[], .b) = 5", "{\"b\":5,\"a\":[]}\n", 0),
+        ("b: [3]\n", "(.a[], .b[]) |= 7", "{\"b\":[7],\"a\":[]}\n", 0),
+        ("b: [3]\n", "(.a[], .b[]) += 1", "{\"b\":[4],\"a\":[]}\n", 0),
+        ("b: [3]\n", "(.a[], .b[]) = error(\"boom\")", "", 1),
+        (
+            "b: [3]\n",
+            "(.a[] | select(. == 1)) = error(\"boom\")",
+            "{\"b\":[3],\"a\":[]}\n",
+            0,
+        ),
+        (
+            "b: [3]\n",
+            "(.a[] | select(. == 1)) = 9",
+            "{\"b\":[3],\"a\":[]}\n",
+            0,
+        ),
+        ("b: [3]\n", "(.b[], .c[]) = 5", "{\"b\":[5],\"c\":[]}\n", 0),
+    ];
+    for &(doc, filter, expected, code_wanted) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        if code_wanted == 0 {
+            assert_eq!(
+                (code, stdout.as_str()),
+                (0, expected),
+                "`{filter}` on {doc:?}: {stderr:?}"
+            );
+        } else {
+            assert_ne!(code, 0, "`{filter}` on {doc:?}");
+            assert!(stderr.contains("boom"), "`{filter}` on {doc:?}: {stderr:?}");
+        }
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and
