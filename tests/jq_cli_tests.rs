@@ -150663,6 +150663,52 @@ fn test_caught_foreign_marker_destructure_as_the_head_of_a_pipe_update_of_a_redu
     ])
 }
 
+/// #4730 (the outer-`?` residual of #4709/#4724): the refusal of a caught foreign-marker destructure is
+/// certain, so it is jq's own end-of-path `Invalid path expression`: a `?` around the `path()` catches it
+/// (`[]`), a `try` inside the `path()` does not. It was raised as the resolver's guess, which nothing
+/// catches. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_caught_foreign_marker_refusal_is_caught_by_an_outer_try_4730() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(try (.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))]",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"try path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
 /// #4709 (the `try`/`?` residual of #4604): a `try`/`?` (or a `catch empty`) around the destructure of a
 /// `$x` bound to another node, as the source of a `foreach` that is the whole UPDATE of a `reduce`. The
 /// pattern's step raises, the `try` catches it, the source is empty, the `foreach` emits nothing, the

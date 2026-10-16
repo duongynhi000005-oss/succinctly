@@ -55058,8 +55058,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // the register may be where the accumulator is, and the refusal stays the resolver's guess
         // that nothing catches.
         // #4709: ...and a caught destructure of a foreign marker is the `null` state itself.
+        //
+        // #4730: ...not a guess: the verdict is certain, so the refusal is jq's own end-of-path
+        // `Invalid path expression`, which no `try` inside the `path()` suppresses but one around it
+        // does -- `[path(... reduce ... foreach (try ($x as {a:$a} | .)) ...)?]` is `[]`.
         let refusal = if caught_foreign_verdict {
-            EvalError::invalid_path_expression_guessed(&OwnedValue::Null)
+            EvalError::invalid_path_expression(&OwnedValue::Null)
         } else {
             match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
                 Some(element) => {
