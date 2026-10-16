@@ -876,6 +876,10 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `?//` bind operand (`isempty(. as $q ?// $z | .)`: `isempty(g)` is `g | false`, so jq path-checks nothing `g` emits, and a body that
   steps nowhere raises nothing even where `.` is an accumulator that need not be the register). Pinned by
   `test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_follows_jq_4698`.
+  Only the bare spellings are fixed: `isempty(recurse)` composed (`(isempty(recurse) | not)`, `(recurse and true)`, `(any(recurse; .) | not)`)
+  or behind a `def` (`isempty(def f: recurse; f)`) is still refused where jq answers, and under `?`/`try` the refusal is swallowed
+  (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[]`, jq prints `[[0]]`): the static view
+  (`verdict_operand_leaves_register`) does not admit a recursion, whose later outputs do move the register.
   **Still refused where jq answers**: an EXTRACT that forks *and navigates after its first output*
   (`... try .a; (5, .a))`: the gate asks that the whole EXTRACT leave the register, and a navigating item does not),
   and a verdict over a fold inside a second

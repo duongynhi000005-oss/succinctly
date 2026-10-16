@@ -345,6 +345,14 @@ OPERANDS = [
     "isempty(. as $q ?// $z | .a?)",
     "isempty(. as $q ?// $z | (.a, 1))",
     "isempty(. as [$q] ?// $z | .a)",
+    "isempty((. as $q ?// $z | .) | .a)",
+    "any((. as $q ?// $z | .) | .a; .)",
+    "any(.a; recurse)",
+    "all(.a?; recurse)",
+    "any(.[]?; recurse)",
+    "(isempty(recurse) | not)",
+    "(recurse and true)",
+    "isempty(def f: recurse; f)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and

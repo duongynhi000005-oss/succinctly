@@ -74799,6 +74799,48 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
             "Invalid path expression with result null",
             5,
         ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; isempty((. as $q ?// $z | .) | .a); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"null",
+            r"[path(foreach .a? as $k (0; isempty((. as $q ?// $z | .) | .a); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; any(.a; recurse); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"null",
+            r"[path(foreach .a? as $k (0; any(.a; recurse); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a? as $k (0; all(.a?; recurse); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"null",
+            r"[path(foreach .a? as $k (0; all(.a?; recurse); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
 }
 
