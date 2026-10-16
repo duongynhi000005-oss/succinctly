@@ -2272,14 +2272,20 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
     fn walk<'e>(expr: &'e Expr, scope: &mut DefScope<'e>, out: &mut Vec<WriteTarget>) -> bool {
         match expr {
             // Only a plain `=` can be proved to write a constructed value:
-            // `|=`'s filter and a compound assign's operator both read the
-            // node already there, so their result is never wholly fresh.
+            // a compound assign's operator reads the node already there, so
+            // its result is never wholly fresh. `|=` is fresh when its filter
+            // is a closed literal (#4113): it reads nothing from the node, and
+            // yq treats `.a |= {"k": 3}` and `.a = {"k": 3}` alike (verified
+            // against v4.53.3 for object, array and scalar literals).
             Expr::Assign { path, value } => {
                 push(path, WriteKind::Set, is_closed_literal(value), out)
             }
-            Expr::Update { path, .. }
-            | Expr::CompoundAssign { path, .. }
-            | Expr::AlternativeAssign { path, .. } => push(path, WriteKind::Set, false, out),
+            Expr::Update { path, filter } => {
+                push(path, WriteKind::Set, is_closed_literal(filter), out)
+            }
+            Expr::CompoundAssign { path, .. } | Expr::AlternativeAssign { path, .. } => {
+                push(path, WriteKind::Set, false, out)
+            }
             Expr::Builtin(Builtin::Del(inner)) => push(inner, WriteKind::Del, false, out),
             // #2855: `sort_keys(f)` is a write (reorders `f`'s own mapping
             // entries in place) exactly like `|=`'s -- same `WriteKind::Set`,
@@ -2428,6 +2434,22 @@ fn resolve_index(idx: i64, len: usize) -> Option<usize> {
         idx as usize
     };
     (resolved < len).then_some(resolved)
+}
+
+/// Whether a `del()` in this filter removed object key `key` of the node being reconciled
+/// (#4113): a key that is also in the result was written again afterwards.
+fn key_deleted_here(targets: &[RelTarget<'_>], key: &str) -> bool {
+    targets.iter().any(|(steps, kind, _)| {
+        *kind == WriteKind::Del && matches!(steps, [PathStep::Key(k)] if k == key)
+    })
+}
+
+/// Whether one of `targets` (already narrowed to a child) writes a closed literal at the child
+/// itself.
+fn has_fresh_set_here(targets: &[RelTarget<'_>]) -> bool {
+    targets
+        .iter()
+        .any(|(steps, kind, fresh)| steps.is_empty() && *kind == WriteKind::Set && *fresh)
 }
 
 /// Narrow `targets` to those descending through object key `key`, dropping
@@ -2756,7 +2778,14 @@ fn reconcile_presentation_at_depth(
                 // field's own comment with its own key). See this function's
                 // doc comment for the object-side gap this leaves open.
                 let child_targets = descend_key(targets, k);
-                let child = match p_fields.get(k).filter(|_| !fresh_write) {
+                // #4113: a key this filter removed and wrote again is a new node, not the old
+                // one: it keeps none of the old key's properties (below), and a value built from
+                // a closed literal none of its presentation either.
+                let recreated = key_deleted_here(targets, k);
+                let child = match p_fields
+                    .get(k)
+                    .filter(|_| !(fresh_write || recreated && has_fresh_set_here(&child_targets)))
+                {
                     Some(p_v) => reconcile_presentation_at_depth(
                         p_v,
                         pristine_tree.field(k),
@@ -2786,7 +2815,7 @@ fn reconcile_presentation_at_depth(
                 if let CommentTree::Object(_, _, pristine_keys) = pristine_tree {
                     let carried = pristine_keys
                         .get(k)
-                        .filter(|_| !fresh_write)
+                        .filter(|_| !fresh_write && !recreated)
                         .and_then(|meta| meta.carried_over(matches!(r_v, OwnedValue::Null), true));
                     if let Some(meta) = carried {
                         key_comments.insert(k.clone(), meta);
@@ -12272,8 +12301,8 @@ mod tests {
         );
     }
 
-    /// Only a plain `=` can carry a provably constructed value. `|=` and the
-    /// compound assigns always read the node already there.
+    /// Only `=` and `|=` with a closed-literal right side can carry a provably constructed
+    /// value. The compound assigns always read the node already there.
     #[test]
     fn collect_write_targets_marks_closed_literal_writes_fresh_870() {
         let lit = || Expr::Literal(succinctly::jq::Literal::Int(1));
@@ -12294,10 +12323,19 @@ mod tests {
             }),
             Some(false)
         );
+        // `|=` is the same write as `=` when its filter is a closed literal (#4113), and reads
+        // the node already there otherwise.
         assert_eq!(
             fresh_of(&Expr::Update {
                 path: Box::new(Expr::Field("a".into())),
                 filter: Box::new(Expr::Array(Box::new(lit()))),
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            fresh_of(&Expr::Update {
+                path: Box::new(Expr::Field("a".into())),
+                filter: Box::new(Expr::Field("b".into())),
             }),
             Some(false)
         );

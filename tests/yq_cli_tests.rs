@@ -70046,6 +70046,362 @@ fn test_printing_a_sequence_item_by_itself_keeps_the_comment_after_its_dash_4256
     Ok(())
 }
 
+/// #4113: a key that a filter deletes and writes again is a new node, so it keeps none of the old
+/// key's properties -- anchor, tag, quoting, key comment -- and a closed literal written there
+/// carries none of the old value's presentation either. `|=` with a closed literal is the same
+/// write as `=` (yq treats them alike). Still different, not pinned: a value copied from another
+/// node (`.k = .j`, `.k as $x | del(.k) | .k = $x`) takes that node's presentation in yq, which
+/// the by-key reconciliation cannot see. Every row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        ("&a k: v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "&a k: v\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v\n",
+        ),
+        ("&a k: v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
+        (
+            "&a k: v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        ("&a k: v\nj: 1\n", "del(.k) | .k = [1]", "j: 1\nk:\n  - 1\n"),
+        ("&a k: v\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "&a k: v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("&a k: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("&a k: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("!Foo k: v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "!Foo k: v\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v\n",
+        ),
+        ("!Foo k: v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
+        (
+            "!Foo k: v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "!Foo k: v\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        ("!Foo k: v\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "!Foo k: v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("!Foo k: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("!Foo k: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k) | .k = 1",
+            "# c\nj: 1\nk: 1\n",
+        ),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k) | .k = \"w\"",
+            "# c\nj: 1\nk: w\n",
+        ),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "# c\nj: 1\nk: 2\n",
+        ),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k) | .k |= 5",
+            "# c\nj: 1\nk: 5\n",
+        ),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k, .j) | .k = 1",
+            "# c\nk: 1\n",
+        ),
+        ("\"k\": v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "\"k\": v\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v\n",
+        ),
+        ("\"k\": v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
+        (
+            "\"k\": v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "\"k\": v\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        ("\"k\": v\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "\"k\": v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("\"k\": v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("\"k\": v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("'k': v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "'k': v\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v\n",
+        ),
+        ("'k': v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
+        (
+            "'k': v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        ("'k': v\nj: 1\n", "del(.k) | .k = [1]", "j: 1\nk:\n  - 1\n"),
+        ("'k': v\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "'k': v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("'k': v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("'k': v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("? &a k\n: v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "? &a k\n: v\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v\n",
+        ),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k = \"w\"",
+            "j: 1\nk: w\n",
+        ),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        ("? &a k\n: v\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("? &a k\n: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("? &a k\n: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = 1",
+            "j: 1\nk: 1\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk:\n  x: 1\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = \"w\"",
+            "j: 1\nk: w\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = .j",
+            "j: 1\nk: 1\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k |= 5",
+            "j: 1\nk: 5\n",
+        ),
+        ("k: # kc\n  x: 1\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("&a k: {x: 1}\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: {x: 1}\n",
+        ),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k = \"w\"",
+            "j: 1\nk: w\n",
+        ),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        ("&a k: {x: 1}\nj: 1\n", "del(.k) | .k = .j", "j: 1\nk: 1\n"),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("&a k: {x: 1}\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("&a k: {x: 1}\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("a:\n  !Foo k: v\n", "del(.a.k) | .a.k = 1", "a:\n  k: 1\n"),
+        ("a:\n  !Foo k: v\n", ".a |= {\"k\": 3}", "a:\n  k: 3\n"),
+        (
+            "a:\n  !Foo k: v\n",
+            ".a |= {\"k\": 3, \"j\": 1}",
+            "a:\n  k: 3\n  j: 1\n",
+        ),
+        (
+            "a:\n  &z k: v\n  j: 1\n",
+            "del(.a.k) | .a.k = 1",
+            "a:\n  j: 1\n  k: 1\n",
+        ),
+        (
+            "a:\n  &z k: v\n  j: 1\n",
+            ".a |= {\"k\": 3}",
+            "a:\n  k: 3\n",
+        ),
+        (
+            "a:\n  &z k: v\n  j: 1\n",
+            ".a |= {\"k\": 3, \"j\": 1}",
+            "a:\n  k: 3\n  j: 1\n",
+        ),
+        ("&a k: v # lc\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        (
+            "&a k: v # lc\nj: 1\n",
+            ".k as $x | del(.k) | .k = $x",
+            "j: 1\nk: v # lc\n",
+        ),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k = \"w\"",
+            "j: 1\nk: w\n",
+        ),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k = [1]",
+            "j: 1\nk:\n  - 1\n",
+        ),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("&a k: v # lc\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("&a k: v # lc\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("k: &p v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
+        ("k: &p v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
+        (
+            "k: &p v\nj: 1\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "j: 1\nk:\n  y: 2\n",
+        ),
+        ("k: &p v\nj: 1\n", "del(.k) | .k = [1]", "j: 1\nk:\n  - 1\n"),
+        (
+            "k: &p v\nj: 1\n",
+            "del(.k) | .k = 1 | .k = 2",
+            "j: 1\nk: 2\n",
+        ),
+        ("k: &p v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
+        ("k: &p v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "a: # ac\n  k: v # kc\n  j: 1 # jc\nb: 1 # bc\n",
+            ".a |= {\"k\": 3, \"j\": 1}",
+            "a: # ac\n  k: 3\n  j: 1\nb: 1 # bc\n",
+        ),
+        (
+            "a: # ac\n  k: v # kc\n  j: 1 # jc\nb: 1 # bc\n",
+            ".a |= {\"k\": 3} + {\"z\": 1}",
+            "a: # ac\n  k: 3\n  z: 1\nb: 1 # bc\n",
+        ),
+        (
+            "a:\n  - 1 # c1\n  - 2 # c2\n",
+            ".a |= [2,1]",
+            "a:\n  - 2\n  - 1\n",
+        ),
+        (
+            "a:\n  - 1 # c1\n  - 2 # c2\n",
+            ".a |= [1] + [2]",
+            "a:\n  - 1\n  - 2\n",
+        ),
+        (
+            "a: &x\n  !Foo k: v\n",
+            ".a |= {\"k\": 3, \"j\": 1}",
+            "a: &x\n  k: 3\n  j: 1\n",
+        ),
+        (
+            "a: &x\n  !Foo k: v\n",
+            ".a |= {\"k\": {\"n\": 1}}",
+            "a: &x\n  k:\n    n: 1\n",
+        ),
+        (
+            "a: &x\n  !Foo k: v\n",
+            ".a |= {\"k\": 3} + {\"z\": 1}",
+            "a: &x\n  k: 3\n  z: 1\n",
+        ),
+        (
+            "a:\n  \"k\": 1 # c\n  ? &z j\n  : 2\n",
+            ".a |= {\"k\": 3, \"j\": 1}",
+            "a:\n  k: 3\n  j: 1\n",
+        ),
+        (
+            "a:\n  \"k\": 1 # c\n  ? &z j\n  : 2\n",
+            ".a |= {\"k\": {\"n\": 1}}",
+            "a:\n  k:\n    n: 1\n",
+        ),
+        (
+            "a:\n  \"k\": 1 # c\n  ? &z j\n  : 2\n",
+            ".a |= {\"k\": 3} + {\"z\": 1}",
+            "a:\n  k: 3\n  z: 1\n",
+        ),
+        ("&a k: v\nj: 1\n", ".k = 1", "&a k: 1\nj: 1\n"),
+        ("!Foo k: v\nj: 1\n", ".k = 2", "!Foo k: 2\nj: 1\n"),
+        ("&a k: v\nj: 1\n", "del(.j)", "&a k: v\n"),
+        ("&a k: v\nj: 1\n", "del(.k) | .j = 2", "j: 2\n"),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and

@@ -4626,8 +4626,12 @@ ruled out), even though real yq supports every one of them:
   on a container (`a: !!null [1]`) is dropped by `-P` and kept by the default route, where yq
   turns the value into `null` on both ([#4111](https://github.com/rust-works/succinctly/issues/4111)). A key's tag
   is also lost when a write copies the key from elsewhere (`.a = .b` over a tagged key in `.b`,
-  the same copy gap), and a key deleted and written again inherits its old anchor and tag
-  ([#4113](https://github.com/rust-works/succinctly/issues/4113)).
+  the same copy gap). A key deleted and written again in the same filter is a new node and keeps
+  none of the old key's anchor, tag, quoting or key comment, and a closed literal written there
+  none of the old value's presentation ([#4113](https://github.com/rust-works/succinctly/issues/4113));
+  `.a |= <closed literal>` is the same write as `=`, as in yq. Still not matched: a value copied from
+  another node (`del(.k) | .k = .j`, `.k as $x | del(.k) | .k = $x`) takes that node's comment and
+  anchor in yq, where the by-key reconciliation hands it the deleted key's.
 - **`anchor = "<name>"` with a name go-yaml's emitter refuses** raises real yq's exact
   `yaml: yaml: anchor value must contain valid characters only`. The accepted set is the
   measured one, not YAML 1.2's: printable ASCII except `,`/`[`/`]`/`{`/`}`/`:` and
