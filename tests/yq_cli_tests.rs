@@ -311,21 +311,21 @@ fn test_non_scalar_mapping_key_is_addressed_by_the_empty_string_2822() -> Result
 }
 
 /// #3479: after a write (or `-R`, `--slurp`) `succinctly yq` evaluates a
-/// value it re-indexed into throwaway JSON text, so `line`/`column` answer the
-/// fixed default `0` there, never a position inside that text. Real yq 4.53.3
-/// keeps the original node's position (`.c = 3 | .c | line` is `2`); the gap is
-/// recorded in `docs/compliance/yq/limitations.md`. These rows pin succinctly's
-/// current answers so moving the route onto the converged evaluator cannot turn
-/// them into plausible-looking synthetic positions (`1`).
+/// value it re-indexed into throwaway JSON text, so `line`/`column` must never
+/// answer a position inside that text (`1`). #3641 carries the original node's
+/// position through a write for the field read straight off the kept value, so
+/// `.c = 3 | .c | line` is yq's `2`; what is still positionless (the fields a
+/// `.[]` fans out to, and anything built) answers the fixed default `0`. The
+/// remaining gap is recorded in `docs/compliance/yq/limitations.md`.
 #[test]
 fn test_dom_route_cursor_metadata_is_positionless_3479() -> Result<()> {
     let input = "a: 1\nc: 2\n";
     for (filter, expected) in [
         (".c | line", "2\n"), // the cursor route, for contrast
-        (".c = 3 | .c | line", "0\n"),
-        (".c = 3 | .a | line", "0\n"),
-        (".c = 3 | .c | column", "0\n"),
-        (".c |= . + 1 | .c | line", "0\n"),
+        (".c = 3 | .c | line", "2\n"),
+        (".c = 3 | .a | line", "1\n"),
+        (".c = 3 | .c | column", "4\n"),
+        (".c |= . + 1 | .c | line", "2\n"),
         (".d = 3 | .d | line", "0\n"),
         (".c = 3 | .c | document_index", "0\n"),
         (".c = 3 | [.[] | line]", "- 0\n- 0\n"),
@@ -67413,6 +67413,641 @@ fn test_kept_value_metadata_neighbours_4711() -> Result<()> {
             (code, stdout.as_str()),
             (0, "\"\"\n"),
             "`{filter}` in jq mode"
+        );
+    }
+    Ok(())
+}
+
+/// #3641: the field of a value that kept its position (`.c = 3 | .c`, `.a | del(.b) | .c`,
+/// `sort_keys(.) | .b`) is the document's own node, so its line, column, anchor and line comment are
+/// that node's -- even where a write replaced its value (`.c = 3`: line 3, anchor `x`, comment `t`),
+/// and a field the write created (`.d = 3 | .d`), a field `del` removed, or a field of a sum
+/// (`. + {"c": 9} | .c`, the right operand's node) has none (and a sum's untouched fields
+/// answer `0` too, where yq keeps theirs: the safe side). The immediate field only: a field of a
+/// field (`.d.e` after `.d = {...}`) may come from what a write put there, and stays `0`. Every row
+/// captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_field_of_a_kept_value_keeps_its_node_metadata_3641() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .c | line", "3\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .c | column", "4\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .c | line_comment",
+            "\"t\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .a | line", "1\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .a | column", "4\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .a | anchor", "\"\"\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .a | line_comment",
+            "\"\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".a = 9 | .c | line", "3\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".a = 9 | .c | column", "4\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".a = 9 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".a = 9 | .c | line_comment",
+            "\"t\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".a = 9 | .a | line", "1\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".a = 9 | .a | column", "4\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".a = 9 | .a | anchor", "\"\"\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".a = 9 | .a | line_comment",
+            "\"\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", "del(.a) | .c | line", "3\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", "del(.a) | .c | column", "4\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "del(.a) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "del(.a) | .c | line_comment",
+            "\"t\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", "del(.a) | .a | line", "0\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", "del(.a) | .a | column", "0\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "del(.a) | .a | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "del(.a) | .a | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .c | line",
+            "3\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .c | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .a | line",
+            "1\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .a | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .a | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "sort_keys(.) | .a | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .c | line",
+            "3\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .c | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .a | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .a | column",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .a | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "pick([\"c\"]) | .a | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .c | line",
+            "3\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .c | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .a | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .a | column",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .a | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "omit([\"a\"]) | .a | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .c | line",
+            "3\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .c | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .a | line",
+            "1\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .a | column",
+            "4\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .a | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "map_values(.) | .a | line_comment",
+            "\"\"\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".d = 3 | .d | line", "0\n"),
+        ("a: 1\n# h\nc: &x 2 # t\n", "del(.c) | .c | line", "0\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            "del(.c) | .c | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ". + {\"c\": 9} | .c | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .c | tostring | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .c | line | line",
+            "0\n",
+        ),
+        ("a: 1\n# h\nc: &x 2 # t\n", ".c = 3 | .c | key", "\"c\"\n"),
+        (
+            "a: 1\n# h\nc: &x 2 # t\n",
+            ".c = 3 | .c | path",
+            "[\"c\"]\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .b | line",
+            "0\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .b | column",
+            "0\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .b | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | del(.b) | .d | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .b | line",
+            "4\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .b | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .b | line_comment",
+            "\"cb\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .b = 3 | .d | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .b | line",
+            "4\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .b | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .b | line_comment",
+            "\"cb\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .d = {\"e\": 7} | .d | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .b | line",
+            "4\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .b | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .b | line_comment",
+            "\"cb\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | sort_keys(.) | .d | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .b | line",
+            "4\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .b | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .b | line_comment",
+            "\"cb\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .z = 1 | .d | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .b | line",
+            "4\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .b | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .b | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .b | line_comment",
+            "\"cb\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .c | line",
+            "5\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .c | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .c | line_comment",
+            "\"cc\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .d | line",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .d | column",
+            "6\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .d | anchor",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
+            ".a | .c += [3] | .d | line_comment",
+            "\"\"\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
         );
     }
     Ok(())

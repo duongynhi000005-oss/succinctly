@@ -33671,8 +33671,12 @@ const META_ANCHOR: u8 = 1 << 2;
 const META_LINE_COMMENT: u8 = 1 << 3;
 /// The `head_comment`/`foot_comment` bit of [`OwnedIdentity::meta`].
 const META_HEAD_FOOT: u8 = 1 << 4;
+/// The children of the value are still the document's own nodes (#3641): a write, `del` or a
+/// reordering of keys hands yq's node on, so a field read from it answers from the field's node.
+const META_CHILD: u8 = 1 << 5;
 /// Every bit of [`OwnedIdentity::meta`]: the value is the node itself.
-const META_ALL: u8 = META_POS | META_STYLE | META_ANCHOR | META_LINE_COMMENT | META_HEAD_FOOT;
+const META_ALL: u8 =
+    META_POS | META_STYLE | META_ANCHOR | META_LINE_COMMENT | META_HEAD_FOOT | META_CHILD;
 
 impl<V: DocumentValue> Clone for OwnedIdentity<V> {
     fn clone(&self) -> Self {
@@ -33797,7 +33801,15 @@ impl<V: DocumentValue> OwnedIdentity<V> {
             // review).
             exact: false,
             root,
-            meta: 0,
+            // #3641: a field of a value whose children are still the document's own nodes is that
+            // node (its position, anchor and comments); style is a presentation of the container it
+            // was read from, and a child of a child (`.d.e` after `.d = {...}`) may come from what a
+            // write put there, so neither is carried.
+            meta: if self.ancestors.is_empty() && self.meta & META_CHILD != 0 {
+                self.meta & !(META_STYLE | META_CHILD)
+            } else {
+                0
+            },
         }
     }
 
@@ -35697,8 +35709,10 @@ fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
         Expr::Assign { .. }
         | Expr::Update { .. }
         | Expr::CompoundAssign { .. }
-        | Expr::AlternativeAssign { .. }
-        | Expr::Arithmetic { .. } => META_ALL,
+        | Expr::AlternativeAssign { .. } => META_ALL,
+        // #3641: `. + {"b": 9}` puts the right operand's node under `b`, which has no position
+        // (yq: `0`), so the fields of a sum are not the document's.
+        Expr::Arithmetic { .. } => META_ALL & !META_CHILD,
         Expr::Builtin(
             Builtin::Del(_)
             | Builtin::Sort
@@ -37189,10 +37203,25 @@ fn leaves_node_metadata_to_owned(stage: &Expr, rest: &[Expr]) -> bool {
 /// (`id.ancestors`) or the key `key` emitted (that is [`owned_identity_live_key_node`]'s), and
 /// still carries the metadata `bit` names.
 fn owned_identity_live_node<V: DocumentValue>(id: &OwnedIdentity<V>, bit: u8) -> Option<V::Cursor> {
-    if id.key_node || !id.ancestors.is_empty() || id.meta & bit == 0 {
+    if id.key_node || id.meta & bit == 0 {
         return None;
     }
-    id.base
+    match id.ancestors.as_slice() {
+        [] => id.base,
+        // #3641: the field `key` of the kept value, when both the value in hand and the document's
+        // node still have it (`del(.c) | .c` is an absent field, and a field the write created has
+        // no node of its own). The field keeps its node even where a write replaced its value.
+        [(parent, OwnedValue::String(key))] => {
+            parent.as_object()?.get(key.as_ref() as &str)?;
+            id.base?
+                .value()
+                .as_object()?
+                .find_cursor(key)
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    }
 }
 
 /// The live key-node cursor `id` stands at, if any (#2763) -- re-derived
