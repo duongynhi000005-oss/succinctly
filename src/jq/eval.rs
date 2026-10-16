@@ -31430,29 +31430,30 @@ fn is_plain_fan_out_path(path_expr: &Expr) -> bool {
     plain(path_expr) && any_subexpr(path_expr, &mut |e| matches!(e, Expr::Iterate))
 }
 
-/// Whether every `Field` step of the static path `path` that lands on a mapping in `doc` names a
-/// key it has (#2870). An index step descends when it is in range and ends the walk when it is not
-/// (the write pads there), and a field step onto anything but a mapping is not checked.
-fn fields_exist_along(doc: &OwnedValue, path: &Expr) -> bool {
+/// The static path `path` as `sort_keys(f)` writes it into `doc` without creating a field
+/// (#2870), or `None` when it writes nothing: a `Field` step must land on a mapping that has the
+/// key (a missing key, or `null` where the field would be created, ends the path with nothing
+/// written, as yq leaves it), and an index step that is past the end still pads but the walk stops
+/// there, so what follows it is not written (yq pads `.a[][5].b` and adds no `b`). A field step
+/// onto a scalar is not checked.
+fn without_vivified_fields(doc: &OwnedValue, path: &Expr) -> Option<Expr> {
     let mut steps = Vec::new();
     push_path_components(&mut steps, path);
     let mut at = Some(doc);
-    for step in &steps {
+    for (i, step) in steps.iter().enumerate() {
         let Some(value) = at else {
-            return true;
+            return Some(flatten_components(steps[..i].to_vec()));
         };
         at = match (unwrap_path_component(step).0, value) {
-            (Expr::Field(name), OwnedValue::Object(map)) => match map.get(name.as_str()) {
-                Some(child) => Some(child),
-                None => return false,
-            },
+            (Expr::Field(name), OwnedValue::Object(map)) => Some(map.get(name.as_str())?),
+            (Expr::Field(_), OwnedValue::Null) => return None,
             (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
                 array_slot(items.len(), *idx).and_then(|at| items.get(at))
             }
             _ => None,
         };
     }
-    true
+    Some(path.clone())
 }
 
 fn concrete_update_paths<S: EvalSemantics>(
@@ -31780,18 +31781,23 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             // (`sort_keys(.a[].b)` creates no `b` on an element without one); an index past the
             // end still pads, as it does there. A path that cannot be spelled out, and one with a
             // slice (whose no-op yq keeps), keeps the route it took before.
+            // Only a field step past the fan-out can vivify, so a path without one (the common
+            // `sort_keys(.[])`) skips the per-element spelling.
             let fans_out = prefix_len < steps.len()
                 && !steps
                     .iter()
-                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Slice { .. }));
+                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Slice { .. }))
+                && steps[prefix_len..]
+                    .iter()
+                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Field(_)));
             match fans_out
                 .then(|| concrete_update_paths::<S>(&path, &result))
                 .flatten()
             {
                 Some(concrete) => kept.extend(
                     concrete
-                        .into_iter()
-                        .filter(|concrete| fields_exist_along(&result, concrete)),
+                        .iter()
+                        .filter_map(|concrete| without_vivified_fields(&result, concrete)),
                 ),
                 None => kept.push(path),
             }

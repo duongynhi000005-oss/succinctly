@@ -58664,6 +58664,32 @@ fn test_yq_sort_keys_does_not_vivify_past_a_fanout_2870() -> Result<()> {
             "a:\n  - [{z: 1, y: 2}]\n  - []\n",
             r#"{"a":[[{"y":2,"z":1}],[null]]}"#,
         ),
+        // A `null` or scalar element is not given the field, and a padded index ends the path.
+        (
+            "sort_keys(.a[].b.z)",
+            "a:\n  - b: {z: 1, y: 2}\n  - null\n",
+            r#"{"a":[{"b":{"z":1,"y":2}},null]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n  - null\n",
+            r#"{"a":[{"b":{"y":2,"z":1}},null]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n  - 5\n",
+            r#"{"a":[{"b":{"y":2,"z":1}},5]}"#,
+        ),
+        (
+            "sort_keys(.a[][0].b)",
+            "a:\n  - [{z: 1}]\n  - []\n",
+            r#"{"a":[[{"z":1}],[null]]}"#,
+        ),
+        (
+            "sort_keys(.a[]?.b)",
+            "a:\n  - b: 1\n  - q: 3\n",
+            r#"{"a":[{"b":1},{"q":3}]}"#,
+        ),
     ] {
         let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
         assert_eq!((code, out.trim()), (0, expected), "[{filter}] {input:?}");
