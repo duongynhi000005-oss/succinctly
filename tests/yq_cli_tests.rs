@@ -31550,6 +31550,11 @@ fn test_4404_write_and_del_through_an_arrays_string_key() -> Result<()> {
         // Comma groups, in either order, and across fields.
         ("(.[\"1\"], .[\"2\"]) = 0", "[10,20,30]", "[10,0,0]"),
         ("del(.[\"1\"], .[\"0\"])", "[10,20,30]", "[30]"),
+        // A group mixing both spellings resolves every key against the array as it entered.
+        ("del(.[\"0\"], .[1])", "[10,20,30]", "[30]"),
+        ("del(.[1], .[\"0\"])", "[10,20,30]", "[30]"),
+        ("del(.[0], .[\"1\"])", "[10,20,30]", "[30]"),
+        ("del(.[\"2\"], .[0], .[\"1\"])", "[10,20,30]", "[]"),
         ("del(.a[\"1\"], .b)", r#"{"a":[1,2],"b":3}"#, r#"{"a":[1]}"#),
         (
             "del(.a[\"0\"], .a[\"1\"])",

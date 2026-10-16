@@ -27559,23 +27559,13 @@ fn yq_array_string_key_components(
                 match yq_field_name_as_index::<YqSemantics>(name) {
                     Some(idx) => {
                         out.get_or_insert_with(|| path.to_vec())[i] = OwnedValue::Int(idx);
-                        let resolved = if idx < 0 {
-                            items.len() as i64 + idx
-                        } else {
-                            idx
-                        };
-                        usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                        array_slot(items.len(), idx).and_then(|at| items.get(at))
                     }
                     None => None,
                 }
             }
             (Some(OwnedValue::Array(items)), OwnedValue::Int(idx)) => {
-                let resolved = if *idx < 0 {
-                    items.len() as i64 + idx
-                } else {
-                    *idx
-                };
-                usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                array_slot(items.len(), *idx).and_then(|at| items.get(at))
             }
             (Some(OwnedValue::Object(map)), OwnedValue::String(name)) => map.get(name.as_str()),
             _ => None,
@@ -27609,23 +27599,13 @@ fn yq_static_components_by_position<'c, S: EvalSemantics>(
                 (Some(OwnedValue::Array(items)), Some(idx)) => {
                     rewritten.get_or_insert_with(|| components.to_vec())[i] =
                         Expr::Index { idx, key: None };
-                    let resolved = if idx < 0 {
-                        items.len() as i64 + idx
-                    } else {
-                        idx
-                    };
-                    usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                    array_slot(items.len(), idx).and_then(|at| items.get(at))
                 }
                 _ => None,
             },
             Expr::Index { idx, .. } => match at {
                 Some(OwnedValue::Array(items)) => {
-                    let resolved = if *idx < 0 {
-                        items.len() as i64 + idx
-                    } else {
-                        *idx
-                    };
-                    usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                    array_slot(items.len(), *idx).and_then(|at| items.get(at))
                 }
                 _ => None,
             },
@@ -33708,12 +33688,7 @@ fn yq_index_steps_by_container<S: EvalSemantics>(
                     (Some(OwnedValue::Array(items)), Some(idx)) => {
                         rewritten.get_or_insert_with(|| steps.to_vec())[i] =
                             Expr::Index { idx, key: None };
-                        let resolved = if idx < 0 {
-                            items.len() as i64 + idx
-                        } else {
-                            idx
-                        };
-                        usize::try_from(resolved).ok().and_then(|i| items.get(i))
+                        array_slot(items.len(), idx).and_then(|at| items.get(at))
                     }
                     _ => None,
                 };
@@ -33727,12 +33702,7 @@ fn yq_index_steps_by_container<S: EvalSemantics>(
                     rewritten.get_or_insert_with(|| steps.to_vec())[i] = Expr::Field(text);
                 }
                 Some(OwnedValue::Array(items)) => {
-                    let resolved = if *idx < 0 {
-                        items.len() as i64 + idx
-                    } else {
-                        *idx
-                    };
-                    at = usize::try_from(resolved).ok().and_then(|i| items.get(i));
+                    at = array_slot(items.len(), *idx).and_then(|at| items.get(at));
                 }
                 _ => at = None,
             },
@@ -64182,18 +64152,12 @@ fn classify_static_component<'e, S: EvalSemantics>(
             OwnedValue::Object(_) => Ok(StaticAccess::Field(name.as_str())),
             OwnedValue::Null => Ok(StaticAccess::Null),
             // #4404 (yq): a name an array reads as the integer it spells is that element.
-            OwnedValue::Array(items) if yq_field_name_as_index::<S>(name).is_some() => {
-                let idx = yq_field_name_as_index::<S>(name).unwrap_or_default();
-                let resolved = if idx < 0 {
-                    items.len() as i64 + idx
-                } else {
-                    idx
-                };
-                Ok(usize::try_from(resolved)
-                    .ok()
-                    .filter(|&i| i < items.len())
-                    .map_or(StaticAccess::Null, StaticAccess::Index))
-            }
+            OwnedValue::Array(items) => match yq_field_name_as_index::<S>(name) {
+                Some(idx) => Ok(
+                    array_slot(items.len(), idx).map_or(StaticAccess::Null, StaticAccess::Index)
+                ),
+                None => Err(EvalError::cannot_index_with_field("array", name).into()),
+            },
             other => Err(EvalError::cannot_index_with_field(owned_type_name(other), name).into()),
         },
         Expr::Index { idx, .. } => match current {
@@ -77215,11 +77179,17 @@ fn delete_trie_apply(
     // arm no-ops through it (below), and the indices arm raises its own
     // type-mismatch error (a genuine yq-mode gap for a scalar root, #2106 --
     // `yq_mode` threaded through both trie walks for exactly that arm).
-    if !node.fields.is_empty() {
+    // #4404 (yq): names an array reads as the integers they spell are terminal indices of the
+    // same batch as its index edges, so `del(.["0"], .[1])` resolves both against the array as it
+    // entered.
+    let mut named_terminals = Vec::new();
+    if yq_mode && !node.fields.is_empty() && matches!(value, OwnedValue::Array(_)) {
+        (value, named_terminals) = delete_trie_array_by_names(value, trie, id)?;
+    } else if !node.fields.is_empty() {
         value = delete_trie_object(value, trie, id, yq_mode)?;
     }
-    if !node.indices.is_empty() {
-        value = delete_trie_array(value, trie, id, yq_mode)?;
+    if !node.indices.is_empty() || !named_terminals.is_empty() {
+        value = delete_trie_array(value, trie, id, yq_mode, &named_terminals)?;
     }
     Ok(value)
 }
@@ -77285,10 +77255,6 @@ fn delete_trie_object(
     // a no-op through the unvalidated root rather than the `unreachable!()`
     // that used to sit here and abort the process on this exact input
     // (#2049).
-    // #4404 (yq): names an array reads as the integers they spell delete those elements.
-    if yq_mode && matches!(value, OwnedValue::Array(_)) {
-        return delete_trie_array_by_names(value, trie, id);
-    }
     let Some(entries) = value.as_object_mut() else {
         return Ok(value);
     };
@@ -77334,14 +77300,14 @@ fn delete_trie_object(
 
 /// [`delete_trie_object`] for an array in yq mode (#4404): a `Field` edge whose name spells an
 /// integer ([`yq_parse_int64`]) is the element it names, as a read of the array by that string is
-/// (#4274). Continuations are walked first, against the array as it entered, and the terminal
-/// elements go in one batch, as [`delete_trie_array`] does for index edges; an edge whose name is
-/// no integer deletes nothing, as before.
+/// (#4274). Continuations are walked here, against the array as it entered; the terminal
+/// elements are handed back for [`delete_trie_array`] to delete in one batch with its own index
+/// edges. An edge whose name is no integer deletes nothing, as before.
 fn delete_trie_array_by_names(
     mut value: OwnedValue,
     trie: &DeleteTrie,
     id: u32,
-) -> Result<OwnedValue, EvalError> {
+) -> Result<(OwnedValue, Vec<OwnedValue>), EvalError> {
     let node = trie.node(id);
     for &slot in &node.field_groups {
         let (name, &child) = node
@@ -77357,11 +77323,7 @@ fn delete_trie_array_by_names(
         let OwnedValue::Array(arr) = &mut value else {
             break;
         };
-        let resolved = if idx < 0 { arr.len() as i64 + idx } else { idx };
-        match usize::try_from(resolved)
-            .ok()
-            .and_then(|at| arr.get_mut(at))
-        {
+        match array_slot(arr.len(), idx).and_then(|at| arr.get_mut(at)) {
             Some(target) => {
                 let old = core::mem::replace(target, OwnedValue::Null);
                 *target = delete_trie_apply(old, trie, child, true)?;
@@ -77375,11 +77337,7 @@ fn delete_trie_array_by_names(
         .filter(|(_, &child)| trie.node(child).terminal)
         .filter_map(|(name, _)| yq_field_name_as_index::<YqSemantics>(name).map(OwnedValue::Int))
         .collect();
-    if !doomed.is_empty() {
-        let key_refs: Vec<&OwnedValue> = doomed.iter().collect();
-        value = delete_keys(value, &key_refs, true)?;
-    }
-    Ok(value)
+    Ok((value, doomed))
 }
 
 /// jq's `jv_sort` order for two array `del()` continuation steps, used to
@@ -77417,6 +77375,8 @@ fn delete_trie_array(
     trie: &DeleteTrie,
     id: u32,
     yq_mode: bool,
+    // #4404: the terminal elements `Field` edges named by an integer string add to this node's own.
+    named_terminals: &[OwnedValue],
 ) -> Result<OwnedValue, EvalError> {
     let node = trie.node(id);
     // #2323: real yq auto-vivifies a `null` root into `[]` ahead of an
@@ -77698,7 +77658,7 @@ fn delete_trie_array(
     // `del(.[5], .[7])` comma-form reaching two or more terminal indices
     // here shares that same gate, and stays at the pre-#2305 no-op
     // behavior).
-    let doomed: Vec<OwnedValue> = node
+    let mut doomed: Vec<OwnedValue> = node
         .indices
         .iter()
         .filter(|(_, &child)| trie.node(child).terminal)
@@ -77707,6 +77667,7 @@ fn delete_trie_array(
             ArrayStep::Slice(s, e, _) => slice::literal_component(*s, *e),
         })
         .collect();
+    doomed.extend_from_slice(named_terminals);
     if !doomed.is_empty() {
         let key_refs: Vec<&OwnedValue> = doomed.iter().collect();
         value = delete_keys(value, &key_refs, yq_mode)?;
@@ -129720,7 +129681,7 @@ mod tests {
             idx: 2,
             key: Some(NumberKey::Literal(2.0, "2.0".into())),
         });
-        let err = delete_trie_array(OwnedValue::Int(5), &trie, DELETE_TRIE_ROOT, false)
+        let err = delete_trie_array(OwnedValue::Int(5), &trie, DELETE_TRIE_ROOT, false, &[])
             .expect_err("not an array");
         assert_eq!(err.message, "Cannot index number with number");
     }
@@ -129747,11 +129708,12 @@ mod tests {
             &trie,
             DELETE_TRIE_ROOT,
             false,
+            &[],
         )
         .expect_err("not an array");
         assert_eq!(err.message, "Cannot delete fields from string");
 
-        let err = delete_trie_array(OwnedValue::Bool(true), &trie, DELETE_TRIE_ROOT, false)
+        let err = delete_trie_array(OwnedValue::Bool(true), &trie, DELETE_TRIE_ROOT, false, &[])
             .expect_err("not an array");
         assert_eq!(err.message, "Cannot index boolean with object");
     }
@@ -129767,12 +129729,12 @@ mod tests {
     #[test]
     fn test_delete_trie_array_yq_mode_noop_scoped_to_index_step_2106() {
         let index_trie = one_step_trie(Expr::index(0));
-        let value = delete_trie_array(OwnedValue::Int(5), &index_trie, DELETE_TRIE_ROOT, true)
+        let value = delete_trie_array(OwnedValue::Int(5), &index_trie, DELETE_TRIE_ROOT, true, &[])
             .expect("index step scalar no-op in yq mode");
         assert_eq!(value, OwnedValue::Int(5));
 
         let slice_trie = one_step_trie(Expr::slice(Some(1), Some(3)));
-        let err = delete_trie_array(OwnedValue::Int(5), &slice_trie, DELETE_TRIE_ROOT, true)
+        let err = delete_trie_array(OwnedValue::Int(5), &slice_trie, DELETE_TRIE_ROOT, true, &[])
             .expect_err("slice step must still error even in yq mode");
         assert_eq!(err.message, "Cannot index number with object");
     }
