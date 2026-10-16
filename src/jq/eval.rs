@@ -54263,7 +54263,8 @@ fn body_names_a_param(def: &FuncDefData) -> bool {
 }
 
 /// Whether `e` emits exactly one output for each input it is given and moves no register: a literal,
-/// `not`, or a `select` of a literal that is truthy (#4703).
+/// `not`, or a `select` of a literal that is truthy (#4703). `select(.)` is admitted although it can emit
+/// nothing (#4739): the head's raise has already happened, and the route decides by the value.
 fn emits_once_stage(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity

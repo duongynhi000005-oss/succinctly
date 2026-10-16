@@ -77538,6 +77538,48 @@ fn test_foreach_source_always_run_branch_behind_select_dot_tail_4739() -> Result
             "",
             0,
         ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | if select(.) then 1 else 2 end) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | if select(.) then 1 else 2 end) as $y (.; .; .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | if . then select(.) else 3 end) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | if . then select(.) else 3 end) as $y (.; .; .))",
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select(.) | length) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | select(.) | length) as $y (.; .; .))",
+            "",
+            "",
+            0,
+        ),
     ])
 }
 
