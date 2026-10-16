@@ -2490,7 +2490,7 @@ is the revert that established what the other one costs.
    through a falsy `//`; pinned by
    `test_caught_leading_destructure_empties_a_foreach_source_in_a_moved_reduce_body_4704`). Still accepted there: the `$x`
    spellings (`false // ($x as {b:$b} | .)`, `try error catch ($x as {b:$b} | .)`), which are #4709's foreign-marker family, and a
-   wrapper whose handler is not `empty`. A navigation after `first(.)`, `limit(1; .)`, `nth(0; .)` or `first(., X)` raises too
+   wrapper whose handler is not the literal `empty` (`catch error`, which rethrows, and `catch ("x"|empty)`, which jq also refuses). A navigation after `first(.)`, `limit(1; .)`, `nth(0; .)` or `first(., X)` raises too
    ([#4685](https://github.com/rust-works/succinctly/issues/4685): `nested_source_navigates` reads past those stages as it does
    past `.`; pinned by `test_reduce_source_navigating_after_first_of_dot_in_a_moved_body_4685`), except behind a `try`/`?`,
    where `first(.) | try .a` keeps its answer (jq's) while `. | try .a` is refused. Still accepted where jq raises: the same

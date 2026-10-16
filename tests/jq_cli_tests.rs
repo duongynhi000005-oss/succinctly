@@ -136636,7 +136636,9 @@ fn test_foreach_source_destructuring_dot_behind_a_bare_alternative_or_handler_ra
 /// runs, and through `try (false // error) catch (. as {b:$b}|.)`, whose body raises as `error` does.
 /// The by-value drive answered `[]` and `del`/`|=` wrote through it. Controls: a truthy left of the
 /// `//`, a handler that emits, a body that is not a destructure of `.`, a `null` document (where the
-/// pattern step succeeds). The foreign `$x` spellings stay with #4709. Every row captured from jq
+/// pattern step succeeds). Wrappers nest (`try (try X catch empty) catch empty`, `(X?) // empty`, `false // X` under a `?`).
+/// The foreign `$x` spellings stay with #4709; a handler that rethrows (`catch error`) or empties
+/// without being `empty` is still answered. Every row captured from jq
 /// 1.7.1; stdout and the exit status are pinned.
 #[test]
 fn test_caught_leading_destructure_empties_a_foreach_source_in_a_moved_reduce_body_4704(
@@ -136708,6 +136710,30 @@ fn test_caught_leading_destructure_empties_a_foreach_source_in_a_moved_reduce_bo
         ("null", "(. as $x | reduce .[]? as $i (.; foreach (try error catch empty) as $y (.; .; .))) |= 1", "1\n", 0),
         ("null", "(. as $x | reduce .[]? as $i (.; foreach ((1 | . as {b:$b} | .)?) as $y (.; .; .))) |= 1", "1\n", 0),
         ("null", "(. as $x | reduce .[]? as $i (.; foreach (false // (try error catch empty)) as $y (.; .; .))) |= 1", "1\n", 0),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch empty) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (try ((. as {b:$b}|.)?) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (try (false // (. as {b:$b}|.)) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b}|.))?) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach ((. as {b:$b}|.)? // (. as {c:$c}|.)?) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // 1) as $y (.; .; .)))", "[]\n", 0),
+        ("{\"a\":true}", "path(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch .) catch empty) as $y (.; .; .)))", "[]\n", 0),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch empty) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (try ((. as {b:$b}|.)?) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (try (false // (. as {b:$b}|.)) catch empty) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b}|.))?) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach ((. as {b:$b}|.)? // (. as {c:$c}|.)?) as $y (.; .; .)))", "", 5),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // 1) as $y (.; .; .)))", "null\n", 0),
+        ("{\"a\":true}", "del(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch .) catch empty) as $y (.; .; .)))", "null\n", 0),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch empty) catch empty) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (try ((. as {b:$b}|.)?) catch empty) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // empty) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (try (false // (. as {b:$b}|.)) catch empty) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b}|.))?) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach ((. as {b:$b}|.)? // (. as {c:$c}|.)?) as $y (.; .; .))) |= 1", "", 5),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (((. as {b:$b}|.)?) // 1) as $y (.; .; .))) |= 1", "1\n", 0),
+        ("{\"a\":true}", "(. as $x | reduce .[]? as $i (.; foreach (try (try (. as {b:$b}|.) catch .) catch empty) as $y (.; .; .))) |= 1", "1\n", 0),
     ];
     for (doc, filter, stdout, code) in rows {
         let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;
