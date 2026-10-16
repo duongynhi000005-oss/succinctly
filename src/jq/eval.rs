@@ -50310,7 +50310,7 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             | Expr::Try {
                 expr: inner,
                 catch: None,
-            } => leaves(inner),
+            } => leaves(inner, def),
             // #4641: `and`/`or` are not subexps: `DUP; L; JUMP_F; POP; R`, so `R` runs from the
             // register `L` left, and the constant they emit is stated there. Both sides leaving
             // it where it entered leaves the whole there.
