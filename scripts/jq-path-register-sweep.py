@@ -489,6 +489,25 @@ OPERANDS = [
     "(reduce (. as [$a] | .) as $k (.; .))",
     "(reduce (. as {a:$a} | $a) as $k (.; .))",
     "try (foreach (. as {a:$a} | .) as $k (.; .; .)) catch 7",
+    # (#4677/#4682) a `//` right operand behind a constant-falsy left, the handler of a `try` that only
+    # raises, and the destructure in a `try` body, as the whole source of a `foreach`
+    "(foreach (false // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (null // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (empty // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach ((false|not|not) // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (false // false // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach ((false, null) // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach ((false, 1) // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach ((false // (. as {b:$b} | .)) | .) as $k (.; .; .))",
+    "(foreach (true // (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (try error catch (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (try error({a:1}) catch (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (try 1 catch (. as {b:$b} | .)) as $k (.; .; .))",
+    "(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .))",
+    "(foreach (try (. as [$a] | .) catch .) as $k (.; .; .))",
+    "(foreach (try (. as {a:$a} | .) catch empty) as $k (.; .; .))",
+    "(foreach (try (. as {a:$a} | .) catch 1) as $k (.; .; .))",
+    "(foreach (try (. as {a:$a} | .a) catch .) as $k (.; .; .))",
     # (#4129) a destructuring bind or fold under a `try` with a handler: the bind's source is a
     # subexpression, so only a producer in its *body* can state a register, and a fold whose
     # pattern destructures still leaves its entry register to the handler's output. The
