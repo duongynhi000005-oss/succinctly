@@ -150931,6 +150931,13 @@ fn test_foreach_source_def_call_with_falsy_argument_runs_the_alternative_branch_
             0,
         ),
         (
+            r#"{"a":{"c":1}}"#,
+            r"path(reduce 1 as $k (.; def f($x): $x // (. as {b:$b} | .); foreach f(false) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
             r"null",
             r"path(def f(g): g // (. as {b:$b} | .); foreach f(false) as $y (.; .; .))",
             "[\"b\"]\n",

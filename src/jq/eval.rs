@@ -54486,7 +54486,13 @@ fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
         // #4760: ...and a body `$x // BRANCH` whose argument for `$x` is a constant that is never
         // truthy: the call is `BRANCH`, which then names no parameter. Any other body that names one
         // stays opaque.
-        Expr::DefCall { def, args, .. } if !def.params.is_empty() && body_names_a_param(def) => {
+        //
+        // Not inside another fold's body: there a def-call run branch is routed differently from the
+        // same branch written inline (the zero-parameter arm above has the same gap), and a `reduce`
+        // body that jq answers was refused.
+        Expr::DefCall { def, args, .. }
+            if fold_body::depth() == 0 && !def.params.is_empty() && body_names_a_param(def) =>
+        {
             let Expr::Alternative(left, right) = unwrap_paren(&def.body) else {
                 return None;
             };
