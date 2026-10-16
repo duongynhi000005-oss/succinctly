@@ -40288,27 +40288,100 @@ fn emit_branches<'a>(
     Demand::Continue
 }
 
-/// Peel any wrapping `Expr::Paren` down to the inner expression — `(false)`
-/// and `false` are the same node for a caller that only cares about literal
-/// shape, not surface syntax (`Expr::Alternative`'s `#845` fix, below).
-/// The source of the `foreach` an UPDATE pipe begins with, looking through the stages that hand
-/// their input on untouched once (`.`), a `label` scope and nested pipes (#4732): the stages after
-/// it run once per output, so an empty `foreach` leaves the whole UPDATE empty.
-fn update_head_foreach(expr: &Expr) -> Option<&Expr> {
+/// What a fold UPDATE leaves behind when the `foreach` that heads it emits nothing (#4754).
+struct EmptiedUpdate<'a> {
+    /// The `foreach`'s source.
+    source: &'a Expr,
+    /// The literal a trailing `// LITERAL` falls back to: the UPDATE then emits that, not nothing.
+    fallback: Option<OwnedValue>,
+    /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
+    truthy: bool,
+}
+
+/// Whether `stage` hands its input on untouched, or emits nothing: `.` or `select(.)`.
+fn is_identity_or_select_dot(stage: &Expr) -> bool {
+    match unwrap_paren(stage) {
+        Expr::Identity => true,
+        Expr::Builtin(Builtin::Select(cond)) => matches!(unwrap_paren(cond), Expr::Identity),
+        _ => false,
+    }
+}
+
+/// The `foreach` an UPDATE is empty because of, looking through the stages that hand their input
+/// on once (`.`, `select(.)`), a `label` scope, nested pipes (#4732), a `try`/`?` (it catches
+/// nothing: the emptiness raises nothing) and an `// empty`, `// LITERAL` or `if . then FE else .
+/// end` around it (#4754): the stages after it run once per output, so an empty `foreach` leaves
+/// the whole UPDATE empty. `in_foreach` is a `foreach` UPDATE: a step that falls back to a value
+/// or reads the `null` an earlier empty step left behind emits it, so those shapes are left alone.
+fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(expr) {
-        Expr::Foreach { input, .. } => Some(input),
-        Expr::Label { body, .. } => update_head_foreach(body),
+        Expr::Foreach { input, .. } => Some(EmptiedUpdate {
+            source: input,
+            fallback: None,
+            truthy: false,
+        }),
+        Expr::Label { name, body } => match unwrap_paren(body) {
+            // `label $l | (FE, break $l)`: the break emits nothing either.
+            Expr::Comma(items) => {
+                let mut heads = items.iter().filter(|item| {
+                    !matches!(unwrap_paren(item), Expr::Break(n) if n == name)
+                        && !matches!(unwrap_paren(item), Expr::Builtin(Builtin::Empty))
+                });
+                let head = heads.next()?;
+                if heads.next().is_some() {
+                    return None;
+                }
+                emptied_update(head, in_foreach)
+            }
+            body => emptied_update(body, in_foreach),
+        },
         Expr::Pipe(stages) => {
             let mut rest = stages
                 .iter()
-                .map(unwrap_paren)
-                .skip_while(|e| matches!(e, Expr::Identity));
-            rest.next().and_then(update_head_foreach)
+                .skip_while(|stage| is_identity_or_select_dot(stage));
+            emptied_update(rest.next()?, in_foreach)
+        }
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => emptied_update(inner, in_foreach),
+        Expr::Try {
+            expr: inner,
+            catch: Some(handler),
+        } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => {
+            emptied_update(inner, in_foreach)
+        }
+        Expr::Alternative(left, right) => {
+            let mut emptied = emptied_update(left, in_foreach)?;
+            match unwrap_paren(right) {
+                Expr::Builtin(Builtin::Empty) => {}
+                Expr::Literal(literal) if !in_foreach => {
+                    emptied.fallback = Some(literal_to_owned(literal));
+                }
+                _ => return None,
+            }
+            Some(emptied)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } if !in_foreach
+            && matches!(unwrap_paren(cond), Expr::Identity)
+            && matches!(unwrap_paren(else_branch), Expr::Identity) =>
+        {
+            let mut emptied = emptied_update(then_branch, in_foreach)?;
+            emptied.truthy = true;
+            Some(emptied)
         }
         _ => None,
     }
 }
 
+/// Peel any wrapping `Expr::Paren` down to the inner expression — `(false)`
+/// and `false` are the same node for a caller that only cares about literal
+/// shape, not surface syntax (`Expr::Alternative`'s `#845` fix, below).
 fn unwrap_paren(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren(inner) => unwrap_paren(inner),
@@ -52124,18 +52197,38 @@ fn caught_foreign_destructure<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
 ) -> bool {
-    let inner = match unwrap_paren(source) {
-        Expr::Optional(inner)
-        | Expr::Try {
-            expr: inner,
-            catch: None,
-        } => inner,
-        Expr::Try {
-            expr: inner,
-            catch: Some(handler),
-        } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => inner,
-        _ => return false,
-    };
+    // #4754: through any number of them, and an `// empty` on the outside: each hands an empty
+    // operand on as empty.
+    let mut inner = source;
+    let mut caught = false;
+    loop {
+        inner = match unwrap_paren(inner) {
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            } => {
+                caught = true;
+                inner
+            }
+            Expr::Try {
+                expr: inner,
+                catch: Some(handler),
+            } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => {
+                caught = true;
+                inner
+            }
+            Expr::Alternative(left, right)
+                if matches!(unwrap_paren(right), Expr::Builtin(Builtin::Empty)) =>
+            {
+                left
+            }
+            _ => break,
+        };
+    }
+    if !caught {
+        return false;
+    }
     let bind = unwrap_paren(inner);
     let Expr::AsPattern { expr, patterns, .. } = bind else {
         return false;
@@ -54906,6 +54999,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4709: read before `source` is rebound below -- the mark is the address of the fold's own.
     let sole_update_fold =
         S::TAG == EvalTag::Jq && foreach_source && fold_body::sole_update_foreach_here(source);
+    // #4754: ...and what that UPDATE emits instead when the source is empty.
+    let (update_fallback, update_needs_truthy) = if sole_update_fold {
+        fold_body::sole_update_residue(source)
+    } else {
+        (None, false)
+    };
     let marker_ifs_resolved;
     let source = if S::TAG == EvalTag::Jq
         && any_subexpr(
@@ -55176,6 +55275,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let caught_foreign_verdict = sole_update_fold
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
+        && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
         && fold_body::depth() != 0
         && caught_foreign_destructure::<S>(source, ambient);
     let marker_destructures_unplaced_register =
@@ -55340,7 +55440,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // `Invalid path expression`, which no `try` inside the `path()` suppresses but one around it
         // does -- `[path(... reduce ... foreach (try ($x as {a:$a} | .)) ...)?]` is `[]`.
         let refusal = if caught_foreign_verdict {
-            EvalError::invalid_path_expression(&OwnedValue::Null)
+            // jq's own end-of-path refusal of the state the empty `foreach` left (#4730): it comes
+            // after the fold, so an outer `?` catches it and a `try` inside the UPDATE does not.
+            EvalError::invalid_path_expression(
+                update_fallback.as_ref().unwrap_or(&OwnedValue::Null),
+            )
         } else {
             match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
                 Some(element) => {
@@ -59930,10 +60034,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
                                 Some(fold_body::sole_update_foreach(input, false))
                             }
-                            e @ (Expr::Pipe(_) | Expr::Label { .. }) if S::TAG == EvalTag::Jq => {
-                                update_head_foreach(e)
-                                    .map(|input| fold_body::sole_update_pipe_head(input, false))
-                            }
+                            e if S::TAG == EvalTag::Jq => emptied_update(e, false).map(|emptied| {
+                                fold_body::sole_update_pipe_head(
+                                    emptied.source,
+                                    false,
+                                    emptied.fallback,
+                                    emptied.truthy,
+                                )
+                            }),
                             _ => None,
                         };
                         let step_reg = live_step_reg.filter(|_| update_at_register);
@@ -60834,10 +60942,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
                                 Some(fold_body::sole_update_foreach(input, true))
                             }
-                            e @ (Expr::Pipe(_) | Expr::Label { .. }) if S::TAG == EvalTag::Jq => {
-                                update_head_foreach(e)
-                                    .map(|input| fold_body::sole_update_pipe_head(input, true))
-                            }
+                            e if S::TAG == EvalTag::Jq => emptied_update(e, true).map(|emptied| {
+                                fold_body::sole_update_pipe_head(
+                                    emptied.source,
+                                    true,
+                                    emptied.fallback,
+                                    emptied.truthy,
+                                )
+                            }),
                             _ => None,
                         };
                         let _foreach_body = if input_cannot_move && !inherits_moved_loop {
@@ -69803,7 +69915,18 @@ mod fold_body {
         /// The body depth whose UPDATE is a pipe headed by a `foreach` (#4724), and a copy of that
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
-        static SOLE_PIPE_HEAD: RefCell<Option<(u32, super::Expr, bool)>> = const { RefCell::new(None) };
+        static SOLE_PIPE_HEAD: RefCell<Option<PipeHead>> = const { RefCell::new(None) };
+    }
+
+    /// The [`sole_update_pipe_head`] mark.
+    struct PipeHead {
+        depth: u32,
+        source: super::Expr,
+        in_foreach: bool,
+        /// The literal the UPDATE falls back to when the `foreach` is empty (#4754).
+        fallback: Option<super::OwnedValue>,
+        /// Whether the UPDATE is empty only while `.` is truthy (#4754).
+        truthy: bool,
     }
 
     /// Restores the previous [`emissions_discarded`] mark.
@@ -69831,7 +69954,7 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize, bool), Option<(u32, super::Expr, bool)>);
+    pub(crate) struct SoleGuard((u32, usize, bool), Option<PipeHead>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
@@ -69851,14 +69974,26 @@ mod fold_body {
         SoleGuard(previous, previous_pipe)
     }
 
-    /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724): its
-    /// later stages run once per output, so an empty `foreach` leaves the whole UPDATE empty.
-    pub(crate) fn sole_update_pipe_head(source: &super::Expr, in_foreach: bool) -> SoleGuard {
+    /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724), or
+    /// any wrapper around one that [`super::emptied_update`] sees through (#4754): its later
+    /// stages run once per output, so an empty `foreach` leaves the whole UPDATE empty (or on
+    /// `fallback`).
+    pub(crate) fn sole_update_pipe_head(
+        source: &super::Expr,
+        in_foreach: bool,
+        fallback: Option<super::OwnedValue>,
+        truthy: bool,
+    ) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
         SOLE_FOREACH.with(|a| a.set((0, 0, false)));
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| {
-            a.borrow_mut()
-                .replace((depth() + 1, source.clone(), in_foreach))
+            a.borrow_mut().replace(PipeHead {
+                depth: depth() + 1,
+                source: source.clone(),
+                in_foreach,
+                fallback,
+                truthy,
+            })
         });
         SoleGuard(previous, previous_pipe)
     }
@@ -69879,8 +70014,20 @@ mod fold_body {
                 || SOLE_PIPE_HEAD.with(|a| {
                     a.borrow()
                         .as_ref()
-                        .is_some_and(|(at, head, _)| *at == depth() && head == source)
+                        .is_some_and(|head| head.depth == depth() && head.source == *source)
                 }))
+    }
+
+    /// What the UPDATE marked by [`sole_update_pipe_head`] for the fold whose source is `source`
+    /// falls back to when that source is empty, and whether it is empty only while `.` is truthy
+    /// (#4754): `(None, false)` for the plain case.
+    pub(crate) fn sole_update_residue(source: &super::Expr) -> (Option<super::OwnedValue>, bool) {
+        SOLE_PIPE_HEAD.with(|a| {
+            a.borrow()
+                .as_ref()
+                .filter(|head| head.depth == depth() && head.source == *source)
+                .map_or((None, false), |head| (head.fallback.clone(), head.truthy))
+        })
     }
 
     /// [`sole_update_foreach_here`] when the enclosing fold is a `foreach` too (#4723): a source
@@ -69891,8 +70038,8 @@ mod fold_body {
         depth() > 0
             && ((in_loop && (at, address) == (depth(), (source as *const super::Expr) as usize))
                 || SOLE_PIPE_HEAD.with(|a| {
-                    a.borrow().as_ref().is_some_and(|(at, head, in_loop)| {
-                        *in_loop && *at == depth() && head == source
+                    a.borrow().as_ref().is_some_and(|head| {
+                        head.in_foreach && head.depth == depth() && head.source == *source
                     })
                 }))
     }
@@ -70235,8 +70382,17 @@ mod fold_body {
         SoleGuard
     }
 
-    pub(crate) fn sole_update_pipe_head(_source: &super::Expr, _in_foreach: bool) -> SoleGuard {
+    pub(crate) fn sole_update_pipe_head(
+        _source: &super::Expr,
+        _in_foreach: bool,
+        _fallback: Option<super::OwnedValue>,
+        _truthy: bool,
+    ) -> SoleGuard {
         SoleGuard
+    }
+
+    pub(crate) fn sole_update_residue(_source: &super::Expr) -> (Option<super::OwnedValue>, bool) {
+        (None, false)
     }
 
     pub(crate) fn sole_update_foreach_in_loop_here(_source: &super::Expr) -> bool {
