@@ -4373,6 +4373,28 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         is_null
     }
 
+    /// [`Self::following_value_is_null`] for a value that a block sequence at the owner's own
+    /// indent also fills: `? k` / `: &x` / `- item` is `{k: [item]}`, as `k: &x` / `- item` is
+    /// (#4736). Restores `self.pos` before returning.
+    fn following_value_is_null_unless_sequence_at(&mut self, indent: usize) -> bool {
+        let saved_pos = self.pos;
+        self.skip_to_eol();
+        self.skip_newlines();
+        let is_null = if self.peek().is_none() {
+            true
+        } else {
+            let next_indent = self.count_indent().unwrap_or(0);
+            let line_start = self.pos;
+            self.advance_by(next_indent);
+            let is_sequence =
+                matches!(self.peek(), Some(b'-')) && Self::is_ws_break_or_eoi(self.peek_at(1));
+            self.pos = line_start;
+            next_indent < indent || (next_indent == indent && !is_sequence)
+        };
+        self.pos = saved_pos;
+        is_null
+    }
+
     /// [`Self::following_value_is_null`]'s answer read straight off the
     /// next line when that line settles it by itself: ordinary content at
     /// some indent, or end of input. `None` when the next line is blank,
@@ -5399,7 +5421,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // own open and tripped a spurious cycle rejection. A tag with
             // nothing after it (`? e` / `: !!str`) needs the same treatment
             // so it resolves to `""` rather than being dropped (#224).
-            if had_property && self.following_value_is_null(indent) {
+            // A block sequence at the `:`'s own indent is the value, as it is for an ordinary
+            // `key:` entry (#4736).
+            if had_property && self.following_value_is_null_unless_sequence_at(indent) {
                 self.set_ib();
                 self.write_bp_open();
                 self.write_bp_close();

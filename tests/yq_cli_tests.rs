@@ -12043,6 +12043,45 @@ fn test_4532_explicit_key_content_on_the_next_line() -> Result<()> {
     Ok(())
 }
 
+/// #4736: an explicit value's anchor or tag, with the value left to the next line, takes a block
+/// sequence at the `:`'s own indent as its value, as `key: &x` / `- item` does for an ordinary
+/// entry. It used to read the value as `null` and drop the sequence. Each row was captured from yq
+/// v4.53.3.
+#[test]
+fn test_4736_explicit_value_property_then_same_indent_sequence() -> Result<()> {
+    for (input, expected) in [
+        ("? k\n: &x\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: !!seq\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x !!seq\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x # c\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x\n\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x\n  # c\n- item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x\n- item\n- two\n", r#"{"k":["item","two"]}"#),
+        ("? k\n: &x\n- item\nb: 1\n", r#"{"k":["item"],"b":1}"#),
+        ("? k\n: &x\n- item\n? j\n: v\n", r#"{"k":["item"],"j":"v"}"#),
+        (
+            "? k\n: &x\n- item\nz: *x\n",
+            r#"{"k":["item"],"z":["item"]}"#,
+        ),
+        ("m:\n  ? k\n  : &x\n  - item\n", r#"{"m":{"k":["item"]}}"#),
+        ("- ? k\n  : &x\n  - item\n", r#"[{"k":["item"]}]"#),
+        // An indented value, and the values that really are null.
+        ("? k\n: &x\n  - item\n", r#"{"k":["item"]}"#),
+        ("? k\n: &x\n  a: 1\n", r#"{"k":{"a":1}}"#),
+        ("? k\n: &x\n", r#"{"k":null}"#),
+        ("? k\n: &x\nb: 1\n", r#"{"k":null,"b":1}"#),
+        ("? k\n: !!str\n", r#"{"k":""}"#),
+        ("? k\n: !!str\nb: 1\n", r#"{"k":"","b":1}"#),
+        // Without a property it was already right.
+        ("? k\n:\n- item\n", r#"{"k":["item"]}"#),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
     // #1040's second (worse) repro: a field after the sequence used to
