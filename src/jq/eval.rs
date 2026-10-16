@@ -47803,6 +47803,43 @@ fn foreach_cannot_move_register(
         && extract.map_or(true, cannot_move_register)
 }
 
+/// [`cannot_move_register`] for a `reduce`/`foreach` whose UPDATE is a verdict builtin over
+/// operands that leave the register (#4699): `isempty(g)`, `any(g; c)` and `all(g; c)` state their
+/// answer at the register UPDATE entered with ([`verdict_builtin_leaves_register`], as
+/// [`FoldRegister::advance`] reads it), so the fold moves it no more than a neutral UPDATE does.
+/// Read by [`FoldRegister::advance`] for the enclosing fold's UPDATE, which otherwise lost the
+/// register at the nested fold and refused the enclosing EXTRACT's `$k` where jq answers. Jq mode
+/// only (ADR-0018).
+fn fold_with_verdict_update_leaves_register(expr: &Expr) -> bool {
+    match unwrap_paren(expr) {
+        Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update,
+            extract,
+        } => {
+            patterns_all_bare(patterns)
+                && cannot_move_register(input)
+                && cannot_move_register(init)
+                && verdict_builtin_leaves_register(update)
+                && extract.as_deref().map_or(true, cannot_move_register)
+        }
+        Expr::Reduce {
+            input,
+            patterns,
+            init,
+            update,
+        } => {
+            patterns_all_bare(patterns)
+                && cannot_move_register(input)
+                && cannot_move_register(init)
+                && verdict_builtin_leaves_register(update)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `expr` can never emit an output: its last stage is `error(..)`, so it
 /// either raises or, upstream, produces nothing (#3965).
 fn body_always_raises(expr: &Expr) -> bool {
@@ -50134,6 +50171,9 @@ impl FoldRegister {
             // `g` that emit a boolean once `g` has run and backtracked, so when neither operand
             // can move the register it is where UPDATE entered. Jq mode only (ADR-0018).
             || (S::TAG == EvalTag::Jq && verdict_builtin_leaves_register(update_expr))
+            // #4699: ...and a nested fold whose own UPDATE is one.
+            || (S::TAG == EvalTag::Jq
+                && fold_with_verdict_update_leaves_register(update_expr))
             // #3580: UPDATE could navigate, but this output is one it emitted
             // before it did (a recursion's seed, a caught body's handler): the
             // register is where UPDATE entered, which is `self`.

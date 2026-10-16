@@ -345,6 +345,28 @@ OPERANDS = [
     "isempty(. as $q ?// $z | .a?)",
     "isempty(. as $q ?// $z | (.a, 1))",
     "isempty(. as [$q] ?// $z | .a)",
+    # (#4699) a verdict builtin as the UPDATE of a fold that is itself in another fold's UPDATE: the
+    # nested fold's emission is no longer demoted (and the enclosing register lost) by an UPDATE that
+    # leaves the register where it entered. The controls that must keep their refusal: an operand that
+    # navigates, and the nested EXTRACT that reads the enclosing loop variable (#3984's withhold).
+    "foreach (1,2) as $j (1; isempty(1); .)",
+    "foreach (1,2) as $j (1; isempty(1); $j)",
+    "foreach (1,2) as $j (1; isempty(1); 5)",
+    "foreach (1,2) as $j (1; isempty(1); $k)",
+    "foreach (1,2) as $j (1; all(1; .); .)",
+    "foreach (1,2) as $j (1; any(1; .); 5)",
+    "foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); .)",
+    "foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k)",
+    "foreach (1,2) as $j (1; any(reduce (1,2) as $i (1; try .a); .); .)",
+    "foreach (1,2) as $j (1; isempty(foreach (1,2) as $i (1; try .a; $i)); .)",
+    "reduce (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)))",
+    "reduce (1,2) as $j (1; isempty(1))",
+    "foreach (1,2) as $j (1; isempty(.a); .)",
+    "foreach (1,2) as $j (1; isempty(.a?); .)",
+    "foreach (1,2) as $j (1; any(.[]?; .); 5)",
+    "reduce (1,2) as $j (1; any(.a; .))",
+    "foreach (1,2) as $j (1; (isempty(1), 1); .)",
+    "foreach (1,2) as $j (1; first(1); $k)",
     "isempty((. as $q ?// $z | .) | .a)",
     "any((. as $q ?// $z | .) | .a; .)",
     "any(.a; recurse)",
