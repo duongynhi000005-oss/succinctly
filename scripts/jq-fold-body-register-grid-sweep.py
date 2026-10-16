@@ -98,6 +98,11 @@ SOURCES = [
     ("sel-false-dotpat", "select(false) | . as {a:$a} | ."),
     ("sel-empty-dotpat", "select(empty) | . as {a:$a} | ."),
     ("sel-not-x-dotpat", "select($x|not) | . as {a:$a} | ."),
+    # (#4604) a pure condition over the marker decides by its value: a passing one hands the register on
+    ("sel-x-ne-null-dotpat", "select($x != null) | . as {a:$a} | ."),
+    ("sel-x-len-dotpat", "select(($x|length) > 0) | . as {a:$a} | ."),
+    ("sel-x-has-dotpat", "select($x|has(\"b\")) | . as {a:$a} | ."),
+    ("sel-x-ne-null-xpat", "select($x != null) | $x as {a:$a} | ."),
     ("sel-dot-opt-pat", "select(.) | (. as [$a] | .)?"),
     ("dot-opt-pat", "(. as [$a] | .)?"),
     # a `try`/`?` catches the pattern's type error (nothing moved the register) but not a success;
@@ -258,13 +263,19 @@ WRAPPED_CONTEXTS = [
     ("update-try", "(try (. as $x | {O})) |= 9"),
     ("path-nav-opt", "path((.a as $x | {O})?)"),
 ]
-# The ACCEPT_WRONG rows of these contexts still left (#4588): the body of a `reduce` whose source
-# moved the register, where the register is on an element and a marker may be that very node, and a
-# destructure of `.` behind a `select(f)` whose condition the markers do not decide (a `select($x|not)` on a falsy `$x` is decided since #4604). They count
-# against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
+# The ACCEPT_WRONG rows of these contexts still left (#4588): a `try`/`?` around the destructure of a `$x`
+# bound to another node, in the source of a `foreach` run by the UPDATE of a `reduce` whose own source cannot
+# move the register (`try-xpat`, `opt-xpat`, `try-chain`, `opt-chain` under `rd-lit`). The `try` catches the
+# pattern's raise, the fold's source is empty, the enclosing UPDATE emits nothing and the state is `null`, which
+# the end of the path refuses in jq (`with result null`); `foreign_register_markers` leaves a source holding a
+# `try`/`?` alone, since a fold that is not that UPDATE answers it. (An `empty` body or a bind
+# ahead of the destructure, a `select($x)` in front of it, and a `?//` chain of destructuring patterns over
+# the marker are decided since #4604.) The `bare-catch-error-*` and `try-body-dot-*` sources #4677/#4682 added are
+# open on `main` too (180 rows here; 352 more in the contexts outside this set make a run exit 1 there as well).
+# They count against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 36
+RESIDUAL_NAV_MAX = 198
 DOCS = [
     "null",
     "true",

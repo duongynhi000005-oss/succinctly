@@ -50948,7 +50948,8 @@ fn fold_source_register_markers<S: EvalSemantics>(
 /// moves nothing, and the caller knows the accumulator is truthy, so the stage after it meets the
 /// register where the one before it did (`select($x) | . as {a:$a} | .`); the spine reads only a
 /// `select` with a literal condition; `truthy` are the markers equal to the accumulator, whose truthiness
-/// that is (a marker that is not the register, [`foreign_register_markers`], has its own). Another
+/// that is (a marker that is not the register, [`foreign_register_markers`], has its own), and `passing`
+/// the conditions [`passing_marker_selects`] decided by the markers' values (#4604). Another
 /// condition may be false at run time (`select(.a)`, `select(empty)`), and then the destructure behind
 /// it never runs. Only for
 /// [`drive_fold_source_with`]'s loud refusal, which reads the copy and runs nothing on it; the
@@ -50957,23 +50958,51 @@ fn collapse_marker_pipes(
     source: &Expr,
     markers: &[*const Tracked],
     truthy: &[*const Tracked],
+    passing: &[Expr],
     selects: bool,
 ) -> Expr {
+    // #4604: a decided `select` is recognised on the text as written, before its own condition's leading
+    // `$x` stage is dropped below (`select(($x | length) > 0)` would read `select(length > 0)`).
+    let decided: Vec<bool> = match source {
+        Expr::Pipe(stages) if selects && !passing.is_empty() => stages
+            .iter()
+            .map(|stage| {
+                matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Select(cond))
+                    if passing.contains(cond))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mapped = map_subexprs(source, &mut |child| {
-        collapse_marker_pipes(child, markers, truthy, selects)
+        collapse_marker_pipes(child, markers, truthy, passing, selects)
     });
     match &mapped {
         Expr::Pipe(stages) if stages.len() > 1 => {
             let headed = matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                 if markers.contains(&Rc::as_ptr(m)));
-            let drops = |e: &Expr| selects && is_register_truthy_select(e, truthy);
-            if !headed && !stages.iter().any(drops) {
+            // `map_subexprs` keeps a pipe's stages one for one; were it ever not to, nothing is read as decided.
+            let decided = if decided.len() == stages.len() {
+                decided
+            } else {
+                Vec::new()
+            };
+            let drops = |at: usize, e: &Expr| {
+                selects
+                    && (decided.get(at).copied().unwrap_or(false)
+                        || is_register_truthy_select(e, truthy))
+            };
+            if !headed
+                && !stages
+                    .iter()
+                    .enumerate()
+                    .any(|(at, stage)| drops(at, stage))
+            {
                 return mapped;
             }
             let kept: Vec<Expr> = stages
                 .iter()
                 .enumerate()
-                .filter(|(at, stage)| (*at != 0 || !headed) && !drops(stage))
+                .filter(|(at, stage)| (*at != 0 || !headed) && !drops(*at, stage))
                 .map(|(_, stage)| stage.clone())
                 .collect();
             if kept.is_empty() {
@@ -51282,14 +51311,15 @@ fn bind_sources_that_always_emit_as_null(source: &Expr) -> Expr {
 /// (`(.a | select(.zz)) as $y | $x as P`), `empty`, a nested `foreach` or a `label` all skip the
 /// destructure behind them, and jq answers (#4588 review). The refusal of a marker that is not the
 /// register is read from the source's text, so it reads only a source that cannot do that.
-fn source_always_reaches_destructure(source: &Expr) -> bool {
+fn source_always_reaches_destructure(source: &Expr, passing: &[Expr]) -> bool {
     let emitting_sources_read = bind_sources_that_always_emit_as_null(source);
     !any_subexpr(&emitting_sources_read, &mut |e| match e {
         Expr::Builtin(Builtin::Select(cond)) => {
             (!matches!(
                 unwrap_paren(cond),
                 Expr::Identity | Expr::TrackedVar(_) | Expr::Literal(_)
-            ) && !negated_falsy_marker(unwrap_paren(cond)))
+            ) && !negated_falsy_marker(unwrap_paren(cond))
+                && !passing.contains(cond))
                 || matches!(
                     unwrap_paren(cond),
                     Expr::Literal(Literal::Null | Literal::Bool(false))
@@ -51329,6 +51359,24 @@ fn empty_bind_bodies_as_identity(source: &Expr) -> Expr {
             patterns: patterns.clone(),
             body: Box::new(Expr::Identity),
         },
+        // #4604: only the last stage of a pipe: a bind in an earlier stage that emits nothing keeps the
+        // stages after it from running (`(. as {a:$q} | empty) | $x as [$a] | .` raises nothing in jq).
+        Expr::Pipe(stages) => {
+            let last = stages.len().saturating_sub(1);
+            Expr::pipe(
+                stages
+                    .iter()
+                    .enumerate()
+                    .map(|(at, stage)| {
+                        if at == last {
+                            empty_bind_bodies_as_identity(stage)
+                        } else {
+                            stage.clone()
+                        }
+                    })
+                    .collect(),
+            )
+        }
         other => map_subexprs(other, &mut |child| empty_bind_bodies_as_identity(child)),
     }
 }
@@ -51351,12 +51399,14 @@ fn foreign_in_off_body<S: EvalSemantics>(ambient: &FoldSourceAmbient<'_>) -> boo
 /// that backtracks it. Empty in the body of a `reduce` whose source moved the register, where the
 /// register is on an element and the ambient position is not its own, and unless the source holds
 /// a destructuring bind. Each is paired with whether it holds a truthy value, which a `select`
-/// on it needs ([`collapse_marker_pipes`]).
+/// on it needs ([`collapse_marker_pipes`]). `passing` are the `select` conditions decided by the
+/// markers' values ([`passing_marker_selects`]), which skip nothing ([`source_always_reaches_destructure`]).
 fn foreign_register_markers<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
+    passing: &[Expr],
 ) -> Vec<(*const Tracked, bool)> {
-    foreign_register_markers_with::<S>(source, ambient, false)
+    foreign_register_markers_with::<S>(source, ambient, false, passing)
 }
 
 /// [`foreign_register_markers`], where `off_body` says the accumulator is provably not jq's
@@ -51367,13 +51417,16 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
     off_body: bool,
+    passing: &[Expr],
 ) -> Vec<(*const Tracked, bool)> {
     let mut markers = Vec::new();
     // #4621: off the register a `?//` chain of destructuring alternatives raises as a single pattern
     // does: each alternative's step raises on a marker bound elsewhere, the next is tried, and the
     // last one's raise stands. A chain with a bare `$var` alternative runs it without a step.
+    // #4604: and the same in any body, where the marker is provably elsewhere: the pattern's step
+    // is path-checked against the register whatever the accumulator is.
     let pattern_destructures = |patterns: &[Pattern]| {
-        routes_destructuring(patterns) || (off_body && patterns_all_destructuring_chain(patterns))
+        routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns)
     };
     if S::TAG != EvalTag::Jq
         || fold_body::source_moved_here()
@@ -51400,9 +51453,8 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         matches!(e, Expr::Builtin(Builtin::Select(_)))
     });
     // An `empty` body of a bind runs after the pattern's step, so it skips nothing in front of it
-    // (#4626); read it as `.` for the off-body route only, which pins it.
-    let bodies_read;
-    let source = if off_body {
+    // (#4626); read it as `.` (off-body route, #4626, and #4604's marker route).
+    if off_body {
         // A `try` with no handler (or a `?`) swallows the raise and a handler that emits nothing
         // leaves the source empty: jq answers both.
         let expr_destructures = |e: &Expr| {
@@ -51428,12 +51480,10 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         }) {
             return markers;
         }
-        bodies_read = empty_bind_bodies_as_identity(source);
-        &bodies_read
-    } else {
-        source
-    };
-    if !source_always_reaches_destructure(source) {
+    }
+    let bodies_read = empty_bind_bodies_as_identity(source);
+    let source = &bodies_read;
+    if !source_always_reaches_destructure(source, passing) {
         return markers;
     }
     any_subexpr(source, &mut |e| {
@@ -52813,6 +52863,7 @@ impl<'e> RegisterSpine<'e> {
                         || (patterns_all_destructuring_chain(patterns)
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
+                                || fold_body::acc_off_register_here()
                                 || (self.through_reduce
                                     && (fold_body::source_moved_here()
                                         || fold_body::foreach_body_here()))))
@@ -53334,8 +53385,7 @@ fn routes_fresh_destructuring(patterns: &[Pattern]) -> bool {
 /// from a guess once INIT has navigated (`(.[]; ...)`, `(.a; ...)`), so it would
 /// not retry and would raise where jq answers. The price is that such a chain is
 /// still accepted by value where jq raises in every alternative, except for a `$x`
-/// bound elsewhere in a body whose accumulator is off the register
-/// ([`foreign_register_markers_with`], #4621).
+/// bound elsewhere than the register ([`foreign_register_markers_with`], #4621, #4604).
 fn routes_destructuring(patterns: &[Pattern]) -> bool {
     matches!(patterns, [pattern] if !matches!(pattern, Pattern::Var(_)))
 }
@@ -53890,6 +53940,71 @@ fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
     }
 }
 
+/// Whether `cond` is a `select` condition [`decide_marker_selects`] can decide from the markers it names:
+/// a closed, pure, single-output function of at least one bound marker (`$x != null`,
+/// `($x | length) > 0`, `$x | has("b")`), and not the bare `$x` or `$x | not` the collapse reads as the
+/// marker's own truthiness (#4604).
+fn is_decidable_marker_condition(cond: &Expr) -> bool {
+    /// Pure and single-output; `dot_known` says `.` is a value in hand (after a stage), not the
+    /// accumulator the condition is run on.
+    fn pure(e: &Expr, dot_known: bool) -> bool {
+        match e {
+            Expr::Literal(_) | Expr::TrackedVar(_) => true,
+            Expr::Identity | Expr::Not | Expr::Field(_) => dot_known,
+            Expr::Builtin(Builtin::Length | Builtin::Type | Builtin::IsNull) => dot_known,
+            Expr::Builtin(Builtin::Has(key)) => dot_known && matches!(**key, Expr::Literal(_)),
+            Expr::Paren(inner) => pure(inner, dot_known),
+            Expr::Pipe(stages) => {
+                let mut known = dot_known;
+                stages.iter().all(|stage| {
+                    let ok = pure(stage, known);
+                    known = true;
+                    ok
+                })
+            }
+            Expr::Compare { left, right, .. } => pure(left, dot_known) && pure(right, dot_known),
+            _ => false,
+        }
+    }
+    let names_a_marker = any_subexpr(cond, &mut |e| matches!(e, Expr::TrackedVar(_)));
+    let bare = match unwrap_paren(cond) {
+        Expr::TrackedVar(_) => true,
+        Expr::Pipe(stages) => {
+            matches!(stages.as_slice(), [head, Expr::Not] if matches!(unwrap_paren(head), Expr::TrackedVar(_)))
+        }
+        _ => false,
+    };
+    names_a_marker && !bare && pure(cond, false)
+}
+
+/// The conditions of the `select(c)` stages of `source` that [`is_decidable_marker_condition`] admits and
+/// that yield one truthy output, which pass the register on (#4604).
+fn passing_marker_selects<S: EvalSemantics>(source: &Expr) -> Vec<Expr> {
+    let mut passing = Vec::new();
+    any_subexpr(source, &mut |e| {
+        if let Expr::Builtin(Builtin::Select(cond)) = e {
+            if is_decidable_marker_condition(cond) {
+                let mut outputs = Vec::new();
+                let flow = eval_each_owned::<S>(
+                    cond,
+                    &OwnedValue::Null,
+                    false,
+                    Reentry::REBUILT,
+                    &mut |out| {
+                        outputs.push(out.is_truthy());
+                        Demand::Continue
+                    },
+                );
+                if let (Flow::Exhausted, [true]) = (flow, outputs.as_slice()) {
+                    passing.push((**cond).clone());
+                }
+            }
+        }
+        false
+    });
+    passing
+}
+
 fn drive_fold_source_with<S: EvalSemantics>(
     source: &Expr,
     foreach_source: bool,
@@ -53907,6 +54022,14 @@ fn drive_fold_source_with<S: EvalSemantics>(
         &marker_ifs_resolved
     } else {
         source
+    };
+    // #4604: a `select(f($x))` whose condition is a pure function of the bound markers decides by their
+    // values, as the `if` above does: one that passes hands the register on, as `select($x)` of a truthy
+    // marker does ([`collapse_marker_pipes`]).
+    let passing_selects = if S::TAG == EvalTag::Jq {
+        passing_marker_selects::<S>(source)
+    } else {
+        Vec::new()
     };
     // #2159: see [`is_fold_source_navigation`] for what counts. #3726: so does a
     // construct jq refuses outright in path position ([`live_path_refusal`]) --
@@ -53974,10 +54097,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // passes it on ([`collapse_marker_pipes`]); a falsy one passes nothing and the destructure never
     // runs. A `foreach` source in a moved body is refused with or without a `try`: the caught raise
     // leaves its source empty, the enclosing `reduce` UPDATE emits nothing and its state is `null`.
-    let select_passes = refusal_eligible
-        && !matches!(ambient.value, OwnedValue::Bool(false))
-        && has_select_stage(source)
-        && (foreach_source || try_free());
+    let select_stage_passes = || {
+        !matches!(ambient.value, OwnedValue::Bool(false))
+            && has_select_stage(source)
+            && (foreach_source || try_free())
+    };
+    let select_passes = refusal_eligible && select_stage_passes();
     let unplaced_markers = if refusal_eligible {
         unplaced_register_markers::<S>(source, ambient)
     } else {
@@ -53996,9 +54121,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::depth() != 0
         && try_free()
     {
-        foreign_register_markers::<S>(source, ambient)
+        foreign_register_markers::<S>(source, ambient, &passing_selects)
     } else if off_body {
-        foreign_register_markers_with::<S>(source, ambient, true)
+        foreign_register_markers_with::<S>(source, ambient, true, &passing_selects)
     } else {
         Vec::new()
     };
@@ -54027,7 +54152,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
     }
     let pruned = prunable.then(|| {
         prune_caught_destructures(
-            &collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, select_passes),
+            &collapse_marker_pipes(
+                source,
+                &unplaced_markers,
+                &truthy_markers,
+                &passing_selects,
+                select_passes,
+            ),
             ambient.value,
             &unplaced_markers,
         )
@@ -54044,7 +54175,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 && select_passes
                 && pruned.is_none()
                 && source_destructures_register(
-                    &collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, true),
+                    &collapse_marker_pipes(
+                        source,
+                        &unplaced_markers,
+                        &truthy_markers,
+                        &passing_selects,
+                        true,
+                    ),
                     true,
                 )));
     // #4505: inside another fold's body `.` is not known to be the register, but a `$x` marker
@@ -54074,7 +54211,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                                 if unplaced_markers.contains(&Rc::as_ptr(m))))
                 });
             let collapsed = (pruned.is_none() && headed).then(|| {
-                collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, select_passes)
+                collapse_marker_pipes(source, &unplaced_markers, &truthy_markers, &passing_selects, select_passes)
             });
             source_destructures_register_with(
                 collapsed.as_ref().or(pruned.as_ref()).unwrap_or(source),
@@ -54089,6 +54226,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4626: off the register the pattern's raise is caught by a `try ... catch H` whose handler
     // emits ([`foreign_register_markers_with`] admits no other), and the fold's emission of its
     // accumulator then raises: read the body with the handler's `try` dropped.
+    // #4604: ...and the same where the accumulator is the register ([`fold_body::acc_is_register_here`]),
+    // which `refusal_eligible` leaves out: the foreign marker's own step raises there as well.
+    let foreign_select_passes = select_passes
+        || (S::TAG == EvalTag::Jq
+            && ambient.trackable
+            && !matches!(ambient.value, OwnedValue::Null)
+            && select_stage_passes());
     let foreign_verdict = !foreign_markers.is_empty() && {
         let handlers_dropped;
         let foreign_source = if off_body {
@@ -54097,12 +54241,39 @@ fn drive_fold_source_with<S: EvalSemantics>(
         } else {
             source
         };
-        let plain = collapse_marker_pipes(foreign_source, &foreign_markers, &[], false);
+        let plain = collapse_marker_pipes(
+            foreign_source,
+            &foreign_markers,
+            &[],
+            &passing_selects,
+            false,
+        );
         source_destructures_register_with(&plain, true, foreign_markers.clone(), false)
-            || (foreach_source && select_passes && {
-                let selected =
-                    collapse_marker_pipes(foreign_source, &foreign_markers, &truthy_markers, true);
+            || (foreign_select_passes && {
+                let selected = collapse_marker_pipes(
+                    foreign_source,
+                    &foreign_markers,
+                    &truthy_markers,
+                    &passing_selects,
+                    true,
+                );
+                // #4604: dropping the `select` also exposes a destructure of `.`, which a `reduce`
+                // source backtracks and answers, as does a `foreach` one where the accumulator is
+                // the register: only a destructure of a marker is read there.
                 source_destructures_register_with(&selected, true, foreign_markers, false)
+                    && ((foreach_source && select_passes)
+                        || !source_destructures_register_with(
+                            &collapse_marker_pipes(
+                                foreign_source,
+                                &[],
+                                &truthy_markers,
+                                &passing_selects,
+                                true,
+                            ),
+                            true,
+                            Vec::new(),
+                            false,
+                        ))
             })
     };
     let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
@@ -58779,6 +58950,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // ([`RegisterSpine::reach_node`]'s `foreach_body_here` clause).
                         let _loop_inherited = (carries_dot && fold_body::foreach_body_moved_here())
                             .then(fold_body::foreach_body_moved_inherited);
+                        // #4694: ...and an accumulator the body provably holds off the register
+                        // ([`fold_body::acc_off_register`]) is still off it in a nested `reduce` that
+                        // carries `.` through and hands its state back: every step runs on that node.
+                        let _acc_off_inherited = (carries_dot
+                            && fold_body::acc_off_register_here()
+                            && patterns_all_bare(patterns)
+                            && update_returns_its_input(update))
+                        .then(fold_body::acc_off_register);
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -59119,6 +59298,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4130: everything in the loop body but the pattern walk, judged once: an untracked
     // entry's emission is at the entry register when this holds and the step walked nothing.
     let input_cannot_move = cannot_move_register(input);
+    // #4694: see `resolve_reduce`'s `carries_dot`.
+    let carries_dot =
+        S::TAG == EvalTag::Jq && input_cannot_move && matches!(unwrap_paren(init), Expr::Identity);
     let entry_stays_at_register = states_untracked
         && init_keeps_register
         && !mentions_frozen_var
@@ -59628,7 +59810,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _acc_off_register =
                             (state_off_register && !live_stepped && _acc_is_register.is_none())
                                 .then(fold_body::acc_off_register);
-                        let _foreach_body = if input_cannot_move {
+                        // #4694: a `foreach` that carries `.` through (its source cannot move the register
+                        // and its INIT is `.`) runs its UPDATE on the state its enclosing body handed it,
+                        // which a moved body's register is still not at: the marks `resolve_reduce` passes
+                        // on (#4651), taken before this body's own mark replaces the one they read.
+                        let _source_moved_inherited = (carries_dot && fold_body::depth() > 0)
+                            .then(fold_body::source_moved_inherited);
+                        let inherits_moved_loop =
+                            carries_dot && fold_body::foreach_body_moved_here();
+                        let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                             fold_body::foreach_body()
                         } else {
                             fold_body::foreach_body_moved()

@@ -145482,6 +145482,543 @@ fn test_two_alternative_chain_foreach_in_a_carrying_reduce_in_a_moved_fold_body_
     ])
 }
 
+/// #4694 (family 1): the two-destructuring-alternative `?//` chain as a `foreach` source in the UPDATE of a
+/// `reduce` that carries `.` through, entered with `.` an untracked built value (`{a:{b:1}} | ...`). `.` is
+/// not the register there, so the chain's first step fails `path_intact`, the second alternative's step
+/// fails the same way, and the raise stands (a `null`/`true` document included: the built value is not
+/// identical to it). It was answered (`[]`, and `del` wrote). A single-pattern spelling raised already, and
+/// the same fold where `.` is the register answers. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_two_alternative_chain_foreach_in_a_carrying_reduce_behind_an_untracked_stage_4694(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"true",
+            r"path(. as $x | {a:{b:1}} | (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | {a:{b:1}} | (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | [1] | (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1]",
+            5,
+        ),
+        (
+            r"null",
+            r"del(. as $x | {a:{b:1}} | ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) and (.a)?) | $x.a?)",
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (reduce 1 as $j (.; foreach ((.|.) as [$a] | .) as $k (.; .; .))) | $x)",
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[true]",
+            r"del((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4694 (family 2): the same fold, inside a `try` beside an `or`, in the UPDATE of a `reduce` whose INIT is a
+/// computed container. The chain raises on that container at the first step (`[]` is not the register), the
+/// `try` swallows it, the state becomes `null`, and the second step's `or` result is a computed boolean that
+/// `path()` refuses. It was answered (`[]`). With INIT `.` (the register itself) and without the `or`
+/// the same program answers. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_two_alternative_chain_foreach_in_a_carrying_reduce_under_try_in_a_computed_accumulator_4694(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(reduce (1,2) as $k ([]; try ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) or .b?)))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $k ([]; try (true and (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $k (.; try ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))) or .b?)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $k ([]; try ((reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))))))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4694 (family 3): a `foreach` whose source cannot move the register and whose INIT is `.` carries its
+/// enclosing body's moved-register mark into its UPDATE, as a nested `reduce` does (#4651): `.` there is the
+/// outer state, which a `reduce`/`foreach` source that navigated left the register off. Both the chain
+/// itself and a carrying `reduce` around it raise (`del` deleted the document). Where nothing moved the
+/// register (a literal outer source) `.` is the register: the `reduce` UPDATE that holds the carrying
+/// `reduce` answers, and a top-level `foreach` UPDATE is refused at its emission. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_two_alternative_chain_in_a_carrying_foreach_in_a_moved_fold_body_4694() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[true]",
+            r"del(reduce .[]? as $k (.; foreach 1 as $j (.; (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))); .)))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(reduce .[]? as $k (.; foreach 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .); .)))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach .[]? as $k (.; foreach 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .); .); .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach .[]? as $k (.; foreach 1 as $j (.; (reduce 1 as $m (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))); .); .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach .[]? as $k (.; foreach 1 as $j (.; foreach 1 as $i (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .); .); .); .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"path(foreach 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .); .))",
+            "",
+            "Invalid path expression with result [true]",
+            5,
+        ),
+        (
+            r"[true]",
+            r"del(reduce 1 as $k (.; foreach 1 as $j (.; (reduce 1 as $j (.; foreach ((.|.) as {a:$a} ?// [$a] | .) as $k (.; .; .))); .)))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4604 (the marker-certification half): a `$x` bound to a node that is not the register
+/// (`.a as $x |`), destructured by the source of a fold inside another fold's body, raises at the
+/// pattern's first step in jq whatever the pattern's body is. A body that is `empty`, or a bind ahead of
+/// the destructure whose own body is, does not skip that step, so the fold is refused as it is for a body
+/// that emits (`xpat-arr-empty`, `bind-*-xpat-empty` of `scripts/jq-fold-body-register-grid-sweep.py`);
+/// these were answered (`[]`, `del` wrote). A `try ... catch` that swallows the raise is still answered (its
+/// row prints nothing and exits 0), and so is an earlier pipe stage that emits nothing before the destructure
+/// is reached (the last row). The exit code is jq's on every row; the message of the refusal is the
+/// resolver's guess ("with result"), so those rows pin the shared prefix. Every row is a live jq 1.7.1
+/// capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreign_marker_destructure_with_an_empty_body_in_a_fold_body_raises_4604() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x as [$a] | empty) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; reduce ($x as [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x as [$a] | empty | 5) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ((1,2) as $q | $x as [$a] | empty) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ({a:1} as $q | $x as [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ([select(false)] as $q | $x as [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($i as $q | $x as [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | empty) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ([1] as $q | $x as {a:$a} ?// [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | empty) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (try ($x as [$a] | empty) catch .) as $y (.; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (.[]? as $q | $x as [$a] | empty) as $y (.; .); .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [true]",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ((. as {a:$q} | empty) | $x as [$a] | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4604: `select($x)` or `$x | select(.)` in front of the destructure of a foreign `$x`, as the source of
+/// a `reduce` (or of a `foreach` inside a `reduce` UPDATE, where the accumulator is the register): the
+/// marker is truthy, the `select` passes it on, and the pattern's step raises. A `reduce` source
+/// backtracks a destructure of `.` and a `foreach` one in a `reduce` UPDATE does not move the register
+/// the fold restores, so the same shape destructuring `.` is answered, as jq does (the control rows). Every
+/// row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_select_on_a_foreign_marker_then_destructure_raises_for_a_reduce_source_4604() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (select($x) | $x as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select($x) | $x as {a:$a} | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; reduce (select($x) | $x as {a:$a} | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; reduce (select($x) | $x as {a:$a} | .) as $y (.; .))) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x | select(.) | . as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x | select(.) | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach ($x | select(.) | . as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select($x) | . as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x) | . as {a:$a} | .) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select(.) | . as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4604: a `?//` chain of destructuring patterns over a foreign `$x` raises in every alternative, so the
+/// last one's error stands, wherever the body is (it was read so only where the accumulator is off the
+/// register, #4621). A bare `$var` alternative runs without a step and does not raise (the last row). Every
+/// row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_alternative_chain_over_a_foreign_marker_in_a_fold_body_raises_4604() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach ($x as {a:$a} ?// [$a] | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .))) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select($x) | $x as {a:$a} ?// [$a] | .) as $y (.; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as {a:$a} ?// $b | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4604: a `select(c)` whose condition is a pure function of the bound markers (`$x != null`,
+/// `($x | length) > 0`, `$x | has("b")`) decides by their values: one that passes hands the register on, so
+/// the destructure behind it runs and raises (a foreign `$x`'s own step, or a destructure of `.` where the
+/// fold does not backtrack it). They were opaque conditions, read as possibly skipping it, and were answered.
+/// A condition that fails passes nothing and jq answers (the last two rows). The exit code is jq's on every
+/// row; refusals carry the resolver's guessed message, so those rows pin the shared prefix. Every row is a
+/// live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (select($x != null) | $x as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x != null) | $x as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (select(($x|length) > 0) | . as {a:$a} | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (select(($x|length) > 0) | . as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x|has("b")) | . as {a:$a} | .) as $y (.; .; .)))"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"del(.a as $x | reduce (1,2) as $i (.; foreach (select($x|has("b")) | . as {a:$a} | .) as $y (.; .; .)))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"(.a as $x | reduce (1,2) as $i (.; foreach (select($x|has("b")) | . as {a:$a} | .) as $y (.; .; .))) |= 9"#,
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(.a as $x | reduce (1,2) as $i (.; foreach (select($x|has("zz")) | . as {a:$a} | .) as $y (.; .; .)))"#,
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; reduce (select($x == null) | $x as {a:$a} | .) as $y (.; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4597 (the rest): a `reduce` source whose pipe stage generates a freshly built item next to the
 /// register (`({a:1}, .)`) meets that item at the destructure that follows, wherever the register is.
 /// The wrappers that hand their operand's outputs on are read as they generate: `try`/`?` every item,

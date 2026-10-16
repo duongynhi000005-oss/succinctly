@@ -2437,8 +2437,21 @@ is the revert that established what the other one costs.
    `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). A `select($x)` in front of a destructure of `.` passes the register on by `$x`'s own truthiness whatever node it is bound to
    (since [#4604](https://github.com/rust-works/succinctly/issues/4604) any truthy marker is read, not only one equal to the
    accumulator; pinned by `test_reduce_body_select_on_a_truthy_marker_then_destructure_raises_4604`; the refusal is the resolver's guess, so an enclosing `?`/`try` around the whole fold does not catch it where jq's own error is caught, as for the plain `. as [$a]` form). An `if $x`/`if $x|not` on a bound marker runs one branch, fixed by `$x`'s value, so the source is read with the taken branch
-   (`resolve_marker_ifs`; pinned by `test_fold_source_if_on_a_marker_reads_the_taken_branch_4604`). Still accepted: that moved body
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604), the marker-certification part: a bare `$x` destructure, `select($x|not)` on a `null` document)). A
+   (`resolve_marker_ifs`; pinned by `test_fold_source_if_on_a_marker_reads_the_taken_branch_4604`). A `$x` bound to another node is also read when the pattern's body is `empty` (the step runs before the body; a bind ahead
+   of it whose own body is `empty` is read as `.`), when a `select($x)` or `$x | select(.)` stands in front of it in a
+   `reduce` source or a `foreach` source under a `reduce` UPDATE (only a destructure of the marker is read there: a `reduce`
+   backtracks a destructure of `.`), for a `?//` chain of destructuring patterns in any body (every alternative's step
+   raises; a bare `$var` alternative runs without one), and behind a `select(f($x))` whose pure single-output condition
+   decides by the marker's value (`$x != null`, `($x | length) > 0`, `$x | has("b")`; `passing_marker_selects`). Pinned by
+   `test_foreign_marker_destructure_with_an_empty_body_in_a_fold_body_raises_4604`,
+   `test_select_on_a_foreign_marker_then_destructure_raises_for_a_reduce_source_4604`,
+   `test_alternative_chain_over_a_foreign_marker_in_a_fold_body_raises_4604` and
+   `test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604`
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)). Still accepted: a `try`/`?` around the destructure in the
+   source of a `foreach` run by the UPDATE of a `reduce` whose own source cannot move the register (18 rows of the grid): the
+   `try` catches the raise, the enclosing UPDATE emits nothing and the state is `null`, which jq refuses at the end of the
+   path, while `foreign_register_markers` leaves a source holding a `try`/`?` alone. A condition that is not a pure function
+   of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by
