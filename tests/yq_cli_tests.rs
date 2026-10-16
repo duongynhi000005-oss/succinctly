@@ -66763,6 +66763,418 @@ fn test_map_over_an_empty_container_keeps_its_position_3450() -> Result<()> {
     Ok(())
 }
 
+/// #4696: a value that is still the node it came from -- `map(.)` over an empty container or a
+/// scalar, a write, `del`, `sort`, `. + {}` -- answers `line`/`column` from that node, as yq does,
+/// where `path`/`key`/`parent` already did (#3450). A stage that builds a node (`tostring`,
+/// `length`, `to_entries`, `[.]`, `unique`, `reverse`) keeps its position for those and has none of
+/// its own to report: `0`. `map` over a non-empty container or an alias of one detaches, `min`/`max`
+/// pick a child and answer its line, and a `line` after `line` is a fresh scalar's. Input that came
+/// from JSON answers `0` for all of them. Every row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_kept_value_answers_line_and_column_from_its_node_4696() -> Result<()> {
+    let rows: &[(&str, &str, &[&str], &str)] = &[
+        (
+            "x: 1\n\na: []\n",
+            ".a | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: {}\n",
+            ".a | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: &x {}\nb: *x\n",
+            ".b | map(.) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: {<<: {}}\n",
+            ".a | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: 7\n",
+            ".a | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | map(.) | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: &x [1]\nb: *x\n",
+            ".b | map(.) | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | .b = 3 | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | .b |= 5 | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | . + {} | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | . * {} | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | sort_keys(.) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | map_values(.) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | pick([\"b\"]) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | omit([\"b\"]) | line",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | sort | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | sort_by(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | flatten | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | del(.[0]) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | . + [] | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | tostring | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | length | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | to_entries | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | [.] | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | unique | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | reverse | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: []\n",
+            ".a | map(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: {}\n",
+            ".a | map(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: &x {}\nb: *x\n",
+            ".b | map(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: {<<: {}}\n",
+            ".a | map(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: 7\n",
+            ".a | map(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | map(.) | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: &x [1]\nb: *x\n",
+            ".b | map(.) | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | .b = 3 | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | .b |= 5 | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | . + {} | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | . * {} | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | sort_keys(.) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | map_values(.) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | pick([\"b\"]) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | omit([\"b\"]) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | sort | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | sort_by(.) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | flatten | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | del(.[0]) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | . + [] | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | tostring | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | length | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | to_entries | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | [.] | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | unique | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | reverse | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | min | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | max | column",
+            &["-o=json", "-I=0"],
+            "5\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | tostring | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | line | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | line | key",
+            &["-o=json", "-I=0"],
+            "\"a\"\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | line, column",
+            &["-o=json", "-I=0"],
+            "4\n1\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            "[.a | del(.b) | line]",
+            &["-o=json", "-I=0"],
+            "[4]\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | sort_keys(.) | column",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: {}\n",
+            ".a | map(.) | line | . + 1",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "{\"c\":{}}",
+            ".c | map(.) | line",
+            &["-p=json", "-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "{\"c\":{}}",
+            ".c | del(.k) | column",
+            &["-p=json", "-o=json", "-I=0"],
+            "0\n",
+        ),
+    ];
+    for &(doc, filter, args, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and
