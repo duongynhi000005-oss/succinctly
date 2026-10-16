@@ -557,7 +557,11 @@ data that nothing in the query touched — and a comparison against the literal 
 holds is `false`. It is not rule 4(a): yq's own output is readable; the divergence is chosen
 because matching corrupts data. The same integer in a *YAML* document is exact in both tools
 (`a: 999999999999999999` with `.a + 1` is `1000000000000000000`), so the divergence is the JSON
-decoder's alone. Pinned, with the `2^53`, `2^62` and `i64::MAX` boundaries and the YAML control, in
+decoder's alone (a `.json` file read without `-p json` rounds in yq and stays exact here as well). A
+value past `i64::MAX` is clamped to `9223372036854775807` by both tools, so it agrees. The same holds
+for negatives and on every route that prints or writes: the streaming print, `-o yaml`, `-P` and a
+write that leaves the integer alone (`.[3] = 0`). Pinned, with the `2^53`, `2^62` and `i64::MAX`
+boundaries, those routes and the YAML control, in
 `test_json_integer_past_2_pow_53_keeps_its_exact_digits_3605`.
 
 ## Input-spec divergences (below ADR-0018's scope)

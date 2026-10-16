@@ -68183,7 +68183,8 @@ fn test_field_of_a_kept_value_keeps_its_node_metadata_3641() -> Result<()> {
 /// rewrites a number the document spelled exactly on every print and write; the divergence is recorded
 /// in `docs/compliance/yq/limitations.md` (ADR-0018 rule 4(b)). These rows pin succinctly's answers
 /// (not yq's, which differ on every row but the in-range ones), so a later change to the integer path
-/// cannot round them silently, around `2^53`, `2^62` and `i64::MAX`. The YAML control agrees with yq.
+/// cannot round them silently, around `2^53`, `2^62` and `i64::MAX`, for negatives, and on the print,
+/// YAML-output, `-P` and write routes. The YAML control agrees with yq.
 #[test]
 fn test_json_integer_past_2_pow_53_keeps_its_exact_digits_3605() -> Result<()> {
     let rows: &[(&str, &str, &str)] = &[
@@ -68205,6 +68206,29 @@ fn test_json_integer_past_2_pow_53_keeps_its_exact_digits_3605() -> Result<()> {
             (code, stdout.as_str()),
             (0, expected),
             "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    // Negative integers, a value past `i64` (which both tools clamp to `i64::MAX`, so it agrees), and
+    // the routes that print or write: the streaming print, YAML output, `-P`, and a write that leaves
+    // the other elements alone (yq rounds each of them; the exact digits are what a round trip keeps).
+    let doc = "[999999999999999999,-999999999999999999,9223372036854775808,-9223372036854775808]";
+    let rows: &[(&str, &[&str], &str)] = &[
+        (".", &["-o=json", "-I=0"], "[999999999999999999,-999999999999999999,9223372036854775807,-9223372036854775808]\n"),
+        (".", &["-o=yaml"], "- 999999999999999999\n- -999999999999999999\n- 9223372036854775807\n- -9223372036854775808\n"),
+        (".", &["-o=json", "-I=0", "-P"], "[999999999999999999,-999999999999999999,9223372036854775807,-9223372036854775808]\n"),
+        (".[3] = 0", &["-o=json", "-I=0"], "[999999999999999999,-999999999999999999,9223372036854775807,0]\n"),
+        (".[3] = 0", &["-o=yaml"], "- 999999999999999999\n- -999999999999999999\n- 9223372036854775807\n- 0\n"),
+        (".[] | tostring", &["-o=json", "-I=0"], "\"999999999999999999\"\n\"-999999999999999999\"\n\"9223372036854775807\"\n\"-9223372036854775808\"\n"),
+        ("map(. + 0)", &["-o=json", "-I=0"], "[999999999999999999,-999999999999999999,9223372036854775807,-9223372036854775808]\n"),
+    ];
+    for &(filter, args, expected) in rows {
+        let mut full = vec!["-p=json"];
+        full.extend_from_slice(args);
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &full)?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` {args:?}: {stderr:?}"
         );
     }
     // The same integer in a YAML document is exact in yq too, so it agrees there.
