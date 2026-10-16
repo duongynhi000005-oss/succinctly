@@ -880,10 +880,15 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   or behind a `def` (`isempty(def f: recurse; f)`) is still refused where jq answers, and under `?`/`try` the refusal is swallowed
   (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[]`, jq prints `[[0]]`): the static view
   (`verdict_operand_leaves_register`) does not admit a recursion, whose later outputs do move the register.
+  **Since [#4699](https://github.com/rust-works/succinctly/issues/4699)** a fold whose UPDATE is a verdict builtin, nested in another
+  fold's UPDATE, leaves the register where it entered, as a neutral UPDATE does: `foreach .a? as $k (0; foreach (1,2) as $j (1;
+  isempty(1); .); $k)` and the `reduce` spelling (`reduce (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)))`) answer as jq
+  does; the enclosing fold's `advance` reads the nested UPDATE
+  (`fold_over_verdict_update_cannot_move_register`). Pinned by `test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699`.
   **Still refused where jq answers**: an EXTRACT that forks *and navigates after its first output*
   (`... try .a; (5, .a))`: the gate asks that the whole EXTRACT leave the register, and a navigating item does not),
-  and a verdict over a fold inside a second
-  fold's UPDATE or a `foreach`'s loop body (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`);
+  and a nested fold whose EXTRACT is the enclosing loop variable after a caught navigation
+  (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`, which is the next paragraph's withhold);
   a nested fold that
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
