@@ -662,8 +662,10 @@ $ printf '?\n- item\n' | yq -o=json -I=0 .
   rejecting it here would stop the conformance suite's 6PBE parsing at all.
 - **A key whose content starts on the next line** (`?` / `  k`) is read like one that starts on the
   `?` line (#4532): `?` / `  k` / `x: 1` is `{"k":null,"x":1}` and `?` / `  k` / `- item` is an
-  error, as in yq. One spelling is not: node properties alone on that line (`?` / `  &a` / `  k`)
-  still leave the key content to the main loop, which takes the next entry for its value.
+  error, as in yq. The content takes the same checks as on the `?` line, gaps included (`? : v` and
+  `?` / `  : v` are `{"":null,...}` here where yq rejects them). One spelling is not read that
+  way: node properties alone on that line (`?` / `  &a` / `  k`) still leave the key content to
+  the main loop, which takes the next entry for its value.
 - **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is an error
   here as in yq (#4530).
 

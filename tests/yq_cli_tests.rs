@@ -12013,6 +12013,7 @@ fn test_4532_explicit_key_content_on_the_next_line() -> Result<()> {
         // Blank and comment lines before the content, and properties on it.
         ("?\n\n  k\n: v\n", r#"{"k":"v"}"#),
         ("?\n# c\n  k\n: v\n", r#"{"k":"v"}"#),
+        ("?\n  # c\n  k\nx: 1\n", r#"{"k":null,"x":1}"#),
         ("?\n  &a k\n: v\nb: *a\n", r#"{"k":"v","b":"k"}"#),
         ("?\n  !!str k\nx: 1\n", r#"{"k":null,"x":1}"#),
         ("? &a\n  k\nz: 1\n", r#"{"k":null,"z":1}"#),
