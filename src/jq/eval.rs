@@ -54015,15 +54015,43 @@ fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
         Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
             within_def_call_budget_with(|| bare_run_branch_of_source(&def.body, try_body))
         }
+        // #4716: ...and so does a call with arguments, when the body names none of its parameters:
+        // the arguments are then never run, and the body is what the call is.
+        Expr::DefCall { def, .. } if !def.params.is_empty() && !body_names_a_param(def) => {
+            within_def_call_budget_with(|| bare_run_branch_of_source(&def.body, try_body))
+        }
         _ => None,
     }
+}
+
+/// Whether the body of `def` mentions one of its parameters, as `g` or `$g` (#4716).
+fn body_names_a_param(def: &FuncDefData) -> bool {
+    any_subexpr(&def.body, &mut |e| match e {
+        Expr::Var(name) | Expr::FuncCall { name, .. } => {
+            def.params.iter().any(|param| match param {
+                Param::Bare(p) | Param::Dollar(p) => p == name,
+            })
+        }
+        _ => false,
+    })
 }
 
 /// Whether `e` emits exactly one output for each input it is given and moves no register: a literal,
 /// `not`, or a `select` of a literal that is truthy (#4703).
 fn emits_once_stage(e: &Expr) -> bool {
     match unwrap_paren(e) {
-        Expr::Identity | Expr::Literal(_) | Expr::Not | Expr::Builtin(Builtin::Length) => true,
+        Expr::Identity
+        | Expr::Literal(_)
+        | Expr::Not
+        | Expr::Builtin(Builtin::Length | Builtin::ToString) => true,
+        // #4716: an `if` whose condition and both branches emit once does too.
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            emits_once_stage(cond) && emits_once_stage(then_branch) && emits_once_stage(else_branch)
+        }
         Expr::Builtin(Builtin::Select(cond)) => {
             matches!(
                 unwrap_paren(cond),
@@ -54063,6 +54091,11 @@ fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
             expr: body,
             catch: Some(handler),
         } if certainly_raises(body) => run_branch_of_bind_chain(handler),
+        // #4716: the left operand of a `//` is read as a whole source is: a pipe or comma headed by
+        // a run branch, and a call of a zero-parameter `def` whose body is one.
+        Expr::Pipe(_) | Expr::Comma(_) | Expr::DefCall { .. } => {
+            bare_run_branch_of_source(e, false)
+        }
         _ => None,
     }
 }
@@ -54102,7 +54135,13 @@ fn emits_a_message_once(e: &Expr) -> bool {
         Expr::Identity | Expr::Array(_) | Expr::Literal(_) => true,
         // an object whose keys are literal and whose values are such messages: one output
         Expr::Object(entries) => entries.iter().all(|entry| {
-            matches!(entry.key, ObjectKey::Literal(_)) && emits_a_message_once(&entry.value)
+            // #4716: a computed key that is a literal emits once too (`{("a"):.}`).
+            let key_once = match &entry.key {
+                ObjectKey::Literal(_) => true,
+                ObjectKey::Expr(key) => matches!(unwrap_paren(key), Expr::Literal(_)),
+                _ => false,
+            };
+            key_once && emits_a_message_once(&entry.value)
         }),
         _ => false,
     }
