@@ -69307,6 +69307,50 @@ fn test_comma_assignment_target_with_an_iterate_member_4401() -> Result<()> {
             0,
         ),
         ("b: [3]\n", "(.b[], .c[]) = 5", "{\"b\":[5],\"c\":[]}\n", 0),
+        (
+            "a: []\n",
+            "(.a[3][] | select(. == 1)) = 9",
+            "{\"a\":[null,null,null,[]]}\n",
+            0,
+        ),
+        (
+            "a:\n  c: 1\n",
+            "(.a.b[] | select(. == 1)) = 9",
+            "{\"a\":{\"c\":1,\"b\":[]}}\n",
+            0,
+        ),
+        (
+            "a: {}\n",
+            "(.a.b[] | select(. == 1)) = 9",
+            "{\"a\":{\"b\":[]}}\n",
+            0,
+        ),
+        (
+            "a: 1\nn: [1]\n",
+            "((.a[], .b[]), .n) = 9",
+            "{\"a\":1,\"n\":9,\"b\":[]}\n",
+            0,
+        ),
+        (
+            "a: [1]\nn: 1\n",
+            "(.a[], [.n][0], .z) = 7",
+            "{\"a\":[7],\"n\":1,\"z\":7}\n",
+            0,
+        ),
+        (
+            "a: [1]\nn: 1\n",
+            "(.a[], [.n][0]) = 7",
+            "{\"a\":[7],\"n\":1}\n",
+            0,
+        ),
+        (
+            "a: &x [1]\nb: *x\n",
+            "(.b[] | select(. == 1)) = 9",
+            "{\"a\":[9],\"b\":[9]}\n",
+            0,
+        ),
+        ("a: 5\n", ".a[] |= 9", "{\"a\":5}\n", 0),
+        ("a: null\n", ".a[] |= 9", "{\"a\":[]}\n", 0),
     ];
     for &(doc, filter, expected, code_wanted) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
@@ -69321,6 +69365,11 @@ fn test_comma_assignment_target_with_an_iterate_member_4401() -> Result<()> {
             assert!(stderr.contains("boom"), "`{filter}` on {doc:?}: {stderr:?}");
         }
     }
+    // jq mode is unchanged: the same target raises, as jq does.
+    let (stdout, stderr, code) =
+        run_jq_stdin_with_stderr("(.a[], .b[]) = 5", "{\"a\":[1]}", &["-c"])?;
+    assert_eq!((code, stdout.as_str()), (5, ""), "{stderr:?}");
+    assert!(stderr.contains("Cannot iterate over null"), "{stderr:?}");
     Ok(())
 }
 

@@ -66100,6 +66100,8 @@ fn is_identity_stage(expr: &Expr) -> bool {
 /// comma, `.[]` or a slice anywhere inside one). Such a member that fails resolves to *no* target,
 /// exactly; a fan-out may have written some of its targets before the failing one, and yq writes
 /// all of the others, so a target that fans out keeps the loud refusal rather than a partial write.
+/// (A comma that holds a *static* member is split before it ever fails, #4401, and each member then
+/// faces this question on its own.)
 fn recoverable_write_members(expr: &Expr) -> Option<&[Expr]> {
     if !is_yq_grammar_write_target(expr) {
         return None;
@@ -66153,7 +66155,7 @@ fn is_yq_grammar_write_target(expr: &Expr) -> bool {
 
 /// The resolved write targets of `PATH[] | select(...)...` when `PATH` ends on nothing to iterate in
 /// yq (#4401), `None` when the ordinary resolution applies: `PATH` a chain of static fields and
-/// indexes, then one `.[]`, then only `select`s, over a value that is absent or `null` (the target
+/// indexes, then one `.[]`, then at least one `select` and only `select`s, over a value that is absent or `null` (the target
 /// is the static `PATH[]`, which the writer vivifies to `[]` and writes into zero elements, as it
 /// does for a lone `.a[] = v`) or a scalar (no target at all: yq leaves the document alone).
 fn iterate_of_nothing_target(expr: &Expr, input: &OwnedValue) -> Option<Vec<Expr>> {
@@ -66174,6 +66176,7 @@ fn iterate_of_nothing_target(expr: &Expr, input: &OwnedValue) -> Option<Vec<Expr
         || !stages[..at]
             .iter()
             .all(|stage| matches!(unwrap_paren(stage), Expr::Field(_) | Expr::Index { .. }))
+        || stages[at + 1..].is_empty()
         || !stages[at + 1..]
             .iter()
             .all(|stage| matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Select(_))))

@@ -2397,7 +2397,9 @@ resolves member by member in yq mode (so `.b[]` over an absent `.b` is the stati
 `.b[] = v` is: vivify `b: []`, write into zero elements, never read an erroring RHS), and
 `PATH[] | select(...)` over an absent, `null` or scalar `PATH` is that static `PATH[]` (absent,
 `null`) or no target at all (a scalar). Still open: `(.a[] | select(. == 1)) = error("boom")` over
-a *scalar* `.a`, which evaluates the RHS where yq does not. An index past the end of an
+a *scalar* `.a`, which evaluates the RHS where yq does not, and a comma whose members are pipes
+ending in a `select` over nothing (`(.a[] | select(. == 1), .b[] | select(. == 2)) = 7` raises
+`Cannot iterate over null` where yq writes `.a` and vivifies `b: []`). An index past the end of an
 array, or into `null`, before the `Iterate` pads like yq (`.a[3][] = v` on `a: []`). Plain `|=` doesn't share this
 mechanism at all and turned out to have a separate, more severe divergence (a hard error
 instead of missing autovivification) — see
