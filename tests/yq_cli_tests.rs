@@ -67247,6 +67247,68 @@ fn test_kept_value_answers_line_and_column_from_its_node_4696() -> Result<()> {
     Ok(())
 }
 
+/// #4711: the style, anchor and comments of a kept value -- the sequel to #4696, which settled
+/// `line`/`column` -- come from the node the value stands at, per getter, where yq hands them on:
+/// every stage that keeps the line keeps these too, except that a write which fills an *empty* flow
+/// container makes it block (`.b = 3` on `{}`, `. + []` and `del(.[0])` on `[]`, but `del(.b)` on `{}`
+/// and `. * {}` keep the flow style), and the merge `*` drops the anchor. `unique`, `reverse` and
+/// `to_entries` (and `unique_by`) are the partial ones: a node of their own at line `0` that still
+/// carries the line comment, and the style bar `to_entries`. `length` and the head/foot
+/// comments of those partial stages are nothing. Left out because they are still wrong: `tostring`'s
+/// style (`double`) and `map` over a non-empty flow container, which keeps its style. Columns are
+/// `[style, anchor, line_comment, head_comment, foot_comment]`; every row captured from yq v4.53.3
+/// (Homebrew).
+#[test]
+fn test_kept_value_answers_style_anchor_and_comments_4711() -> Result<()> {
+    let getters = [
+        "style",
+        "anchor",
+        "line_comment",
+        "head_comment",
+        "foot_comment",
+    ];
+    let rows: &[(&str, &str, [&str; 5])] = &[
+        ("# top\nx: 1\n\n# head\na: &anc\n  # in\n  b: 1  # cb\n  c: [1, 2]  # cc\n# foot\nz: *anc\n", "del(.b)", ["\"\"\n", "\"anc\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("# top\nx: 1\n\n# head\na: &anc\n  # in\n  b: 1  # cb\n  c: [1, 2]  # cc\n# foot\nz: *anc\n", ".b = 3", ["\"\"\n", "\"anc\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("# top\nx: 1\n\n# head\na: &anc\n  # in\n  b: 1  # cb\n  c: [1, 2]  # cc\n# foot\nz: *anc\n", ". * {}", ["\"\"\n", "\"\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("# top\nx: 1\n\n# head\na: &anc\n  # in\n  b: 1  # cb\n  c: [1, 2]  # cc\n# foot\nz: *anc\n", ". + {}", ["\"\"\n", "\"anc\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("# top\nx: 1\n\n# head\na: &anc\n  # in\n  b: 1  # cb\n  c: [1, 2]  # cc\n# foot\nz: *anc\n", "sort_keys(.)", ["\"\"\n", "\"anc\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "sort", ["\"flow\"\n", "\"\"\n", "\"trailing\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "unique", ["\"flow\"\n", "\"\"\n", "\"trailing\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "reverse", ["\"flow\"\n", "\"\"\n", "\"trailing\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "to_entries", ["\"\"\n", "\"\"\n", "\"trailing\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "flatten(1)", ["\"flow\"\n", "\"\"\n", "\"trailing\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: [3, 1, 2]  # trailing\n# foot\n", "length", ["\"\"\n", "\"\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: 7  # sev\n# foot\n", "map(.)", ["\"\"\n", "\"\"\n", "\"sev\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# head\na: 7  # sev\n# foot\n", ". + 1", ["\"\"\n", "\"\"\n", "\"sev\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: []  # e\n", "map(.)", ["\"flow\"\n", "\"\"\n", "\"e\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: []  # e\n", ". + []", ["\"\"\n", "\"\"\n", "\"e\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: []  # e\n", "del(.[0])", ["\"\"\n", "\"\"\n", "\"e\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: []  # e\n", "sort", ["\"flow\"\n", "\"\"\n", "\"e\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# h\na: {}  # e2\n", ".b = 3", ["\"\"\n", "\"\"\n", "\"e2\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# h\na: {}  # e2\n", "del(.b)", ["\"flow\"\n", "\"\"\n", "\"e2\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# h\na: {}  # e2\n", ". * {}", ["\"flow\"\n", "\"\"\n", "\"e2\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\n# h\na: {}  # e2\n", "map(.)", ["\"flow\"\n", "\"\"\n", "\"e2\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: {b: 1, c: 2}  # flowmap\n", ".c = 1", ["\"flow\"\n", "\"\"\n", "\"flowmap\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: {b: 1, c: 2}  # flowmap\n", "del(.b)", ["\"flow\"\n", "\"\"\n", "\"flowmap\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: &s [3, 1, 2]\nz: *s\n", "sort", ["\"flow\"\n", "\"s\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+        ("x: 1\n\na: &s [3, 1, 2]\nz: *s\n", "unique_by(.)", ["\"flow\"\n", "\"\"\n", "\"\"\n", "\"\"\n", "\"\"\n"]),
+    ];
+    for &(doc, stage, expected) in rows {
+        for (getter, expected) in getters.iter().zip(expected) {
+            let filter = format!(".a | {stage} | {getter}");
+            let (stdout, stderr, code) =
+                run_yq_stdin_with_stderr(&filter, doc, &["-o=json", "-I=0"])?;
+            assert_eq!(
+                (code, stdout.as_str()),
+                (0, expected),
+                "`{filter}` on {doc:?}: {stderr:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and

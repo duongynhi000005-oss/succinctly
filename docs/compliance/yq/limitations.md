@@ -4972,21 +4972,26 @@ Three narrower residuals of the same fix, each captured live from v4.53.3:
   answered only the key-node case, because only it is what `key` emits. On `a:\n  b: 1\n`,
   `.a | del(.b) | line`, `.a | .b = 3 | line` and `.a | key as $k | . | line` are all `2` in yq
   (the line `.a` itself stands on) and were `0` here.
-  [#4696](https://github.com/rust-works/succinctly/issues/4696) settles it for `line` and
-  `column` in `succinctly yq`, for the stages that hand yq's own node on: a write (`=`, `|=`,
-  the compound forms), `del`, `sort`, `sort_by`, `flatten`, `flatten(n)`, `shuffle`, `to_number`,
-  `sort_keys`, `map_values`, `pick`,
-  `omit`, arithmetic on the node (`. + {}`, `. * {}`) and `map` where it keeps the node (an
-  empty container, a scalar), plus the stages that pass their input through (`select`, ...).
-  The list is an allow-list (`stage_keeps_node_metadata`): a stage that builds a fresh node
-  (`tostring`, `length`, `to_entries`, `[.]`, `unique`, `unique_by`, `reverse`, `type`, `tag`,
-  `not`, `any`/`all`, `group_by`) keeps the position `path`/`key`/`parent` read and reports
-  `0`, in yq and here, and a stage nobody has captured falls back to the `0` an owned value
-  always answered. `succinctly jq` is unchanged (`line` is not jq's). What is still `0` here
-  and not in yq: `style`, `anchor` and the comments of a kept value (yq resets them where it
-  keeps the line -- `.a = 1` on a flow `{}` is block, `. * {}` drops the anchor), a `line`
-  nested in a comma, an operand or a body (`(line, column)`), and the child of a written value
-  (`.a | (.b = 3 | .b) | line` is `4` in yq).
+  [#4696](https://github.com/rust-works/succinctly/issues/4696) settled it for `line` and
+  `column` in `succinctly yq` and [#4711](https://github.com/rust-works/succinctly/issues/4711)
+  for `style`, `anchor` and the comments, for the stages that hand yq's own node on: a write
+  (`=`, `|=`, the compound forms), `del`, `sort`, `sort_by`, `flatten`, `flatten(n)`, `shuffle`,
+  `to_number`, `sort_keys`, `map_values`, `pick`, `omit`, arithmetic on the node (`. + {}`,
+  `. * {}`) and `map` where it keeps the node (an empty container, a scalar), plus the stages
+  that pass their input through (`select`, ...). The list is an allow-list
+  (`stage_keeps_node_metadata`), one bit per getter: a stage that builds a fresh node
+  (`tostring`, `length`, `[.]`, `type`, `tag`, `not`, `any`/`all`, `group_by`) keeps the position
+  `path`/`key`/`parent` read and reports `0`/`""`, in yq and here; `unique`, `unique_by` and
+  `reverse` report line `0` but keep the style and the line comment, and `to_entries` the line
+  comment; and a stage nobody has captured falls back to what an owned value always answered.
+  yq also resets two things on the way, which are modelled: a write that fills an *empty* flow
+  container makes it block (`.b = 3` on `{}`, `. + []` and `del(.[0])` on `[]`; `del(.b)` on
+  `{}`, `. * {}` and `-` keep it), and the merge `*`/`*=` drops the anchor. `succinctly jq` is
+  unchanged (`line` and the rest are not jq's). What is still `0`/`""` here and not in yq: the
+  style of `tostring` (`double`) and of `map` over a non-empty flow container (yq keeps it), a
+  getter nested in a comma, an operand or a body (`(line, column)`), and the child of a written
+  value (`.a | (.b = 3 | .b) | line` is `4` in yq; tracked in
+  [#4712](https://github.com/rust-works/succinctly/issues/4712)).
 
 ### Standalone comments print on both routes now (#2795, #798)
 

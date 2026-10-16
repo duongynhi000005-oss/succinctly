@@ -92,8 +92,8 @@ use super::eval::{
 #[cfg(test)]
 use super::expr::FuncDefBound;
 use super::expr::{
-    ArithSettleMemo, AssignOp, BindOrigin, BoundBody, Builtin, CompareOp, Expr, FormatType,
-    FuncDefData, Literal, NumberKey, ObjectEntry, ObjectKey, Pattern, StringPart,
+    ArithOp, ArithSettleMemo, AssignOp, BindOrigin, BoundBody, Builtin, CompareOp, Expr,
+    FormatType, FuncDefData, Literal, NumberKey, ObjectEntry, ObjectKey, Pattern, StringPart,
 };
 use super::slice::{literal_component_from_values, slice_str, SliceBounds};
 use super::value::{owned_value_eq, subarray_indices, NumberRepr, OwnedValue};
@@ -12468,7 +12468,7 @@ fn eval_single_pipe<S: EvalSemantics, V: DocumentValue>(
     //
     // #4696: a top-level `line`/`column` after a stage that keeps the node's position is the other
     // reader the route answers (a kept value's own node), so it admits the pipe too.
-    let reads_position = !needs_path && reads_node_position(exprs);
+    let reads_position = !needs_path && reads_node_metadata(exprs) != 0;
     debug_assert!(
         needs_path || reads_position || !owned_identity_pipe_applies(exprs),
         "owned_identity_pipe_applies is true for a pipe with no path-context stage (#3822)"
@@ -15952,7 +15952,7 @@ fn identity_from_origin<V: DocumentValue>(
             key_node: *key_node,
             exact: *exact,
             root: *root,
-            meta: false,
+            meta: 0,
         }),
         BindOrigin::Owned {
             base: Some((node, document)),
@@ -15972,7 +15972,7 @@ fn identity_from_origin<V: DocumentValue>(
                 key_node: *key_node,
                 exact: *exact,
                 root: *root,
-                meta: false,
+                meta: 0,
             })
         }
     }
@@ -18225,7 +18225,7 @@ fn eval_each_pipe_generic<S: EvalSemantics, V: DocumentValue>(
     // #4696: or a `line`/`column` in `rest` after a stage that keeps the node's position, which a
     // kept value answers from its own node.
     let identity_from_first = cursor.filter(|_| {
-        ((reads_node_position(rest) && leaves_node_position_to_owned(first))
+        (leaves_node_metadata_to_owned(first, rest)
             || (needs_path && rest.iter().any(needs_path_context)))
             && !path_context_is_navigational(first)
             && !path_context_stage_preserves_node(first)
@@ -33612,15 +33612,30 @@ struct OwnedIdentity<V: DocumentValue> {
     /// v4.53.3, where `.a.b | key | path` is still `["a","b"]` and
     /// `.a.b | key | tostring | key` is `"b"` again).
     key_node: bool,
-    /// The value still carries `base`'s source line and column (#4696), as in yq, where a stage
-    /// that mutates a node in place or copies it hands on the node (`del(.b)`, `sort`, `.a = 1`,
-    /// `. + {}`), while one that builds a fresh node (`tostring`, `length`, `[.]`, `to_entries`)
-    /// keeps its position (`path`, `key`, `parent`: the reason it is still `base`) and loses them. Set by
-    /// [`OwnedIdentity::kept`] and cleared by [`OwnedIdentity::detached`], by every child
-    /// position, and by [`OwnedIdentity::rebuilt_by`] for a stage
-    /// [`stage_keeps_node_metadata`] does not admit.
-    meta: bool,
+    /// Which of `base`'s node metadata the value still carries (#4696, #4711), as `META_*` bits:
+    /// its source line and column, style, anchor and comments, as in yq, where a stage that
+    /// mutates a node in place or copies it hands on the node (`del(.b)`, `sort`, `.a = 1`,
+    /// `. + {}`), while one that builds a fresh node (`tostring`, `length`, `[.]`) keeps its
+    /// position (`path`, `key`, `parent`: the reason it is still `base`) and loses them. A few
+    /// stages keep some and not others (`unique` keeps the style and the line comment, not the
+    /// line). Set to all of them by [`OwnedIdentity::kept`] and cleared by
+    /// [`OwnedIdentity::detached`], by every child position, and, bit by bit, by
+    /// [`OwnedIdentity::rebuilt_by`] per [`stage_keeps_node_metadata`].
+    meta: u8,
 }
+
+/// The `line`/`column` bit of [`OwnedIdentity::meta`].
+const META_POS: u8 = 1;
+/// The `style` bit of [`OwnedIdentity::meta`].
+const META_STYLE: u8 = 1 << 1;
+/// The `anchor` bit of [`OwnedIdentity::meta`].
+const META_ANCHOR: u8 = 1 << 2;
+/// The `line_comment` bit of [`OwnedIdentity::meta`].
+const META_LINE_COMMENT: u8 = 1 << 3;
+/// The `head_comment`/`foot_comment` bit of [`OwnedIdentity::meta`].
+const META_HEAD_FOOT: u8 = 1 << 4;
+/// Every bit of [`OwnedIdentity::meta`]: the value is the node itself.
+const META_ALL: u8 = META_POS | META_STYLE | META_ANCHOR | META_LINE_COMMENT | META_HEAD_FOOT;
 
 impl<V: DocumentValue> Clone for OwnedIdentity<V> {
     fn clone(&self) -> Self {
@@ -33651,7 +33666,7 @@ impl<V: DocumentValue> OwnedIdentity<V> {
             key_node: false,
             exact: true,
             root: fresh_owned_root(),
-            meta: true,
+            meta: META_ALL,
         }
     }
 
@@ -33663,7 +33678,7 @@ impl<V: DocumentValue> OwnedIdentity<V> {
             key_node: false,
             exact: false,
             root: fresh_owned_root(),
-            meta: false,
+            meta: 0,
         }
     }
 
@@ -33679,17 +33694,42 @@ impl<V: DocumentValue> OwnedIdentity<V> {
     /// The same position holding a fresh scalar or array the pipe built (`path`, `file_index`,
     /// `filename`): no longer the node, so no source line or column of its own (#4696).
     fn without_meta(mut self) -> Self {
-        self.meta = false;
+        self.meta = 0;
         self
     }
 
     /// [`OwnedIdentity::rebuilt`] by `stage` (#4696): the value is a new one at the same position,
-    /// and it keeps the node's metadata only if `stage` is one yq hands the node itself through.
+    /// and it keeps the node's metadata only as far as `stage` is one yq hands the node itself
+    /// through ([`stage_keeps_node_metadata`]), less the two things yq resets on the way (#4711):
+    /// a write that fills an *empty* flow container is block ([`stage_clears_empty_flow_style`]),
+    /// and the merge `*`/`*=` drops the anchor.
     fn rebuilt_by(self, stage: &Expr) -> Self {
-        let keeps = stage_keeps_node_metadata(stage);
+        let mut keeps = stage_keeps_node_metadata(stage);
+        if keeps & META_STYLE != 0
+            && self
+                .base_empty_container()
+                .is_some_and(|is_sequence| stage_clears_empty_flow_style(stage, is_sequence))
+        {
+            keeps &= !META_STYLE;
+        }
+        if stage_merges_node(stage) {
+            keeps &= !META_ANCHOR;
+        }
         let mut rebuilt = self.rebuilt();
         rebuilt.meta &= keeps;
         rebuilt
+    }
+
+    /// Whether `base` is a mapping or sequence with no members: `Some(true)` for a sequence.
+    fn base_empty_container(&self) -> Option<bool> {
+        let node = self.base?.value();
+        if node.as_array().is_some_and(|items| items.is_empty()) {
+            Some(true)
+        } else if node.as_object().is_some_and(|fields| fields.is_empty()) {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     /// The [`RootWitness`] an expression evaluated over this identity's value
@@ -33734,7 +33774,7 @@ impl<V: DocumentValue> OwnedIdentity<V> {
             // review).
             exact: false,
             root,
-            meta: false,
+            meta: 0,
         }
     }
 
@@ -34702,7 +34742,7 @@ fn owned_identity_pipe_applies(exprs: &[Expr]) -> bool {
             continue;
         }
         let rest = &exprs[i + 1..];
-        let reads_position = reads_node_position(rest) && leaves_node_position_to_owned(stage);
+        let reads_position = leaves_node_metadata_to_owned(stage, rest);
         if !rest.iter().any(needs_path_context) && !reads_position {
             return false;
         }
@@ -35612,43 +35652,80 @@ fn owned_identity_after_stage<S: EvalSemantics, V: DocumentValue>(
     }))
 }
 
-/// Whether the value `stage` hands on is, in yq, the node it was given or a copy of it that keeps
-/// its source line and column (#4696) -- as opposed to a node the builtin
-/// builds (`tostring`, `length`, `to_entries`, `[.]`), which keeps the position `path`/`key`/
-/// `parent` read but has none of its own to report (`line` is `0`).
+/// Which of the node's metadata ([`OwnedIdentity::meta`] bits) the value `stage` hands on keeps:
+/// all of it where yq hands the node it was given on, or a copy of it (#4696, #4711), and none
+/// where the builtin builds a node (`tostring`, `length`, `[.]`, `group_by`, `type`, `tag`, `not`,
+/// `any`/`all`, `filter`), which keeps the position `path`/`key`/`parent` read but has no source
+/// line of its own to report (`line` is `0`).
 ///
 /// An allow-list, deliberately: a stage not named here falls back to what an owned value always
 /// answered (`0`, `""`), so a builtin nobody has captured cannot start reporting a node's
-/// position it does not keep. Every entry was captured from yq v4.53.3 over a mapping, a
-/// sequence, an empty container, a scalar and an alias (`test_kept_value_answers_line_and_column_from_its_node_4696`),
-/// and the stages left out are the ones that came back `0`: `unique`, `unique_by`, `reverse`,
-/// `to_entries`, `filter`, `group_by`, `type`, `tag`, `length`, `not`, `any`/`all`, `[.]` and
-/// `tostring`.
-fn stage_keeps_node_metadata(stage: &Expr) -> bool {
-    stage_passes_input_through(stage)
-        || matches!(
-            strip_parens(stage),
-            Expr::Assign { .. }
-                | Expr::Update { .. }
-                | Expr::CompoundAssign { .. }
-                | Expr::AlternativeAssign { .. }
-                | Expr::Arithmetic { .. }
-                | Expr::Builtin(
-                    Builtin::Del(_)
-                        | Builtin::Sort
-                        | Builtin::SortBy(_)
-                        | Builtin::SortKeys(_)
-                        | Builtin::SortKeysOneLevel
-                        | Builtin::MapValues(_)
-                        | Builtin::Flatten
-                        | Builtin::FlattenDepth(_)
-                        | Builtin::Shuffle
-                        | Builtin::ToNumber
-                        | Builtin::Map(_)
-                        | Builtin::Pick(_)
-                        | Builtin::Omit(_)
-                )
-        )
+/// metadata it does not keep. Every entry was captured from yq v4.53.3 over a mapping, a
+/// sequence, an empty container, a scalar, an alias, a flow and a commented node
+/// (`test_kept_value_answers_line_and_column_from_its_node_4696`,
+/// `test_kept_value_answers_style_anchor_and_comments_4711`). `unique`, `reverse` and
+/// `to_entries` are the partial ones: a fresh node at line `0` that still carries the line
+/// comment (and, for the first two, the style).
+fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
+    if stage_passes_input_through(stage) {
+        return META_ALL;
+    }
+    match strip_parens(stage) {
+        Expr::Assign { .. }
+        | Expr::Update { .. }
+        | Expr::CompoundAssign { .. }
+        | Expr::AlternativeAssign { .. }
+        | Expr::Arithmetic { .. } => META_ALL,
+        Expr::Builtin(
+            Builtin::Del(_)
+            | Builtin::Sort
+            | Builtin::SortBy(_)
+            | Builtin::SortKeys(_)
+            | Builtin::SortKeysOneLevel
+            | Builtin::MapValues(_)
+            | Builtin::Flatten
+            | Builtin::FlattenDepth(_)
+            | Builtin::Shuffle
+            | Builtin::ToNumber
+            | Builtin::Map(_)
+            | Builtin::Pick(_)
+            | Builtin::Omit(_),
+        ) => META_ALL,
+        Expr::Builtin(Builtin::Unique | Builtin::UniqueBy(_) | Builtin::Reverse) => {
+            META_STYLE | META_LINE_COMMENT
+        }
+        Expr::Builtin(Builtin::ToEntries) => META_LINE_COMMENT,
+        _ => 0,
+    }
+}
+
+/// Whether `stage`, run over an *empty* container (a sequence if `is_sequence`), leaves it block
+/// style where it was flow (#4711). Captured from yq v4.53.3 on `[]` and `{}`: a write that adds
+/// to it clears the style (`.b = 3`, `.b |= 5`, `.[0] = 9`, `. + {}`, `. + []`, `. += {}`), and
+/// so does `del(.[0])` on an empty *sequence* -- while `del(.[0])` and `del(.b)` on `{}`, the
+/// merge `*`/`*=`, `-` and the reorderings (`sort`, `map_values`) keep it.
+fn stage_clears_empty_flow_style(stage: &Expr, is_sequence: bool) -> bool {
+    match strip_parens(stage) {
+        Expr::Assign { .. } | Expr::Update { .. } | Expr::AlternativeAssign { .. } => true,
+        Expr::CompoundAssign { op, .. } => matches!(op, AssignOp::Add),
+        Expr::Arithmetic { op, .. } => matches!(op, ArithOp::Add),
+        Expr::Builtin(Builtin::Del(_)) => is_sequence,
+        _ => false,
+    }
+}
+
+/// Whether `stage` is the merge `*`/`*=` (#4711): the merged copy does not carry the anchor.
+fn stage_merges_node(stage: &Expr) -> bool {
+    matches!(
+        strip_parens(stage),
+        Expr::Arithmetic {
+            op: ArithOp::Mul(_),
+            ..
+        } | Expr::CompoundAssign {
+            op: AssignOp::Mul(_),
+            ..
+        }
+    )
 }
 
 /// Whether `stage` emits its input itself, not a value built from it
@@ -37019,38 +37096,47 @@ fn node_metadata_getter(stage: &Expr) -> Option<&Builtin> {
     }
 }
 
-/// Whether a top-level stage of `stages` is `line` or `column` (#4696): the readers of a position
-/// that are not path context ([`needs_path_context`]), yet whose answer after a stage that left
-/// the cursor domain is the kept identity's node, not the `0` an owned value defaults to.
-/// Shallow on purpose: a getter nested in an operand or a body is not seen (the same residual
-/// `key | <metadata>` has inside a bounded consumer), and the walk costs one match per stage.
-///
-/// `style`, `anchor` and the comments are not read from a kept value: yq resets them where it
-/// keeps the line (`.a = 1` on a flow `{}` is block, `. * {}` drops the anchor), which
-/// [`stage_keeps_node_metadata`]'s allow-list does not model.
-fn reads_node_position(stages: &[Expr]) -> bool {
-    stages.iter().any(|stage| {
-        matches!(
-            strip_parens(stage),
-            Expr::Builtin(Builtin::Line | Builtin::Column)
-        )
-    })
+/// The [`OwnedIdentity::meta`] bit a node-metadata getter reads, `0` for any other builtin.
+fn node_getter_meta_bit(builtin: &Builtin) -> u8 {
+    match builtin {
+        Builtin::Line | Builtin::Column => META_POS,
+        Builtin::Style => META_STYLE,
+        Builtin::Anchor => META_ANCHOR,
+        Builtin::LineComment => META_LINE_COMMENT,
+        Builtin::HeadComment | Builtin::FootComment => META_HEAD_FOOT,
+        _ => 0,
+    }
 }
 
-/// Whether a pipe that leaves the cursor domain at `stage` and reads `line`/`column` afterwards
-/// is the owned identity route's (#4696): `stage` is one whose output keeps the node's position
-/// ([`stage_keeps_node_metadata`]; `map` is on it for the empty container or scalar it hands on as
-/// the node itself, and detaches the rest). Any other stage keeps the route it had -- `min`/`max` pick a child the cursor
-/// route already answers the line of, and `tostring`/`length` answer `0` there as yq does.
-fn leaves_node_position_to_owned(stage: &Expr) -> bool {
-    stage_keeps_node_metadata(stage)
+/// The [`OwnedIdentity::meta`] bits the top-level stages of `stages` read (#4696, #4711): the
+/// readers of a node that are not path context ([`needs_path_context`]), yet whose answer after
+/// a stage that left the cursor domain is the kept identity's node, not the `0`/`""` an owned
+/// value defaults to. Shallow on purpose: a getter nested in an operand or a body is not seen
+/// (the same residual `key | <metadata>` has inside a bounded consumer), and the walk costs one
+/// match per stage.
+fn reads_node_metadata(stages: &[Expr]) -> u8 {
+    stages
+        .iter()
+        .fold(0, |bits, stage| match strip_parens(stage) {
+            Expr::Builtin(builtin) => bits | node_getter_meta_bit(builtin),
+            _ => bits,
+        })
+}
+
+/// Whether a pipe that leaves the cursor domain at `stage` and reads, afterwards, node metadata
+/// `stage` hands on (#4696, #4711) is the owned identity route's. Any other stage keeps the
+/// route it had -- `min`/`max` pick a child the cursor route already answers the line of, and
+/// `tostring`/`length` answer `0` there as yq does.
+fn leaves_node_metadata_to_owned(stage: &Expr, rest: &[Expr]) -> bool {
+    stage_keeps_node_metadata(stage) & reads_node_metadata(rest) != 0
 }
 
 /// The cursor a *kept* owned value stands at (#4696): the node whose position `id` models, when
 /// the value is that node itself or the rebuilt value at its place and not a child of it
-/// (`id.ancestors`) or the key `key` emitted (that is [`owned_identity_live_key_node`]'s).
-fn owned_identity_live_node<V: DocumentValue>(id: &OwnedIdentity<V>) -> Option<V::Cursor> {
-    if id.key_node || !id.ancestors.is_empty() || !id.meta {
+/// (`id.ancestors`) or the key `key` emitted (that is [`owned_identity_live_key_node`]'s), and
+/// still carries the metadata `bit` names.
+fn owned_identity_live_node<V: DocumentValue>(id: &OwnedIdentity<V>, bit: u8) -> Option<V::Cursor> {
+    if id.key_node || !id.ancestors.is_empty() || id.meta & bit == 0 {
         return None;
     }
     id.base
@@ -37128,8 +37214,8 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
         // answered here (ADR-0018 -- the allow-list was captured from yq, not from a reference
         // that has these builtins).
         let kept_node = || {
-            (S::TAG == EvalTag::Yq && matches!(builtin, Builtin::Line | Builtin::Column))
-                .then(|| owned_identity_live_node(&id))
+            (S::TAG == EvalTag::Yq)
+                .then(|| owned_identity_live_node(&id, node_getter_meta_bit(builtin)))
                 .flatten()
         };
         if let Some(c) = owned_identity_live_key_node(&id).or_else(kept_node) {
@@ -37148,7 +37234,7 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
                 // yq v4.53.3). And a fresh scalar: its own `line` is `0`
                 // (#4696).
                 let mut next = id.clone().with_key_node(false);
-                next.meta = false;
+                next.meta = 0;
                 match eval_owned_identity_stages::<S, V>(
                     rest,
                     Cow::Owned(output),
