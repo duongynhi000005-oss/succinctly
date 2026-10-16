@@ -73984,6 +73984,102 @@ fn test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499()
     ])
 }
 
+/// #4499: a `foreach` that is another fold's whole `UPDATE` reads that fold's frozen `$var`
+/// against jq's register. The outer `SOURCE` (`.a`) leaves the register on `.a`, nothing in the
+/// inner fold's `INIT` or source moves it, and `$w` is that node, so `$w|.b` navigates it and the
+/// paths are `["a","b"]`. The inner fold's own register is untracked and #3984 withholds it from a
+/// fold that mentions a marker, so the row was refused (and, once only the first gate was lifted,
+/// silently empty: the `try` swallowed a refusal against a register known by value but not by
+/// position). The enclosing fold's step register now reaches the inner one with its position.
+/// Every jq side captured from jq 1.7.1.
+#[test]
+fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // The caught step, the un-`try`'d step, a miss and an optional step all navigate the register.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; $w|.b; .); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.c); .); .))",
+            "[\"a\",\"c\"]\n[\"a\",\"c\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b?); .); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        // The marker in the inner EXTRACT rather than its UPDATE.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; .; try ($w|.b)); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        // The write forms land on the register's child, or refuse as jq does.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .)) |= 9",
+            "{\"a\":{\"b\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .)] = 9",
+            "",
+            "Invalid path expression with result [1,1]",
+            5,
+        ),
+    ])
+}
+
+/// #4499: what the nested-fold admission above leaves refused, pinned so it stays loud. A frozen
+/// `$var` in the inner fold's `INIT` makes the accumulator the register itself, which the admission
+/// does not model (jq prints `["a","b"]`): a refusal that is loud, never a silently empty stream.
+/// A fold that is a comma sibling of the outer `UPDATE` keeps the register withheld too (jq prints
+/// `["a","b"]` twice, then raises on the sibling).
+#[test]
+fn test_foreach_that_is_a_fold_update_keeps_init_marker_and_comma_sibling_refused_4499(
+) -> Result<()> {
+    for filter in [
+        r"path(foreach .a as $w (.; foreach (1,2) as $i ($w; try .b; .); .))",
+        r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":{"b":1}}"#))?;
+        assert_eq!(code, 5, "{filter}: {stderr}");
+        assert_eq!(stdout, "", "{filter}");
+        assert!(
+            stderr.contains("Invalid path expression"),
+            "{filter}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
 /// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
 /// emission carries is where the pattern walk and `UPDATE` left it. It is the entry's when the
 /// step took no walk step (a bare `$var`, or the bare alternative a failed destructure's
@@ -76553,10 +76649,11 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
 /// UPDATE), so the enclosing EXTRACT's `$k` was refused where jq
 /// answers (and under `?` the refusal was swallowed and the stream dropped). A `foreach`/`reduce` whose UPDATE is an
 /// `isempty`/`any`/`all` over operands that leave the register leaves it too ([`fold_with_verdict_update_leaves_register`]).
-/// Every jq side captured from jq 1.7.1 on `null`. The last rows are controls kept refused: an operand that navigates (jq
-/// refuses too) and, on a document whose `.a` is not `null`, a nested EXTRACT that reads the enclosing loop variable after
-/// a caught navigation (#3984's withhold, which jq answers). On `null` that loop variable is a `null` marker, the register
-/// by kind (#4756), so the withhold is lifted and jq's answer is given.
+/// Every jq side captured from jq 1.7.1 on `null`. The last rows are controls kept refused (an operand that navigates; jq
+/// refuses too), then a nested EXTRACT that reads the enclosing loop variable after a caught navigation. #3984's withhold
+/// refused that one where jq answers; on `null` the loop variable is a `null` marker, the register by kind (#4756), and on
+/// any document the inner `foreach` is the outer fold's whole UPDATE with no `$k` in its INIT or source (#4499), so jq's
+/// answer is given.
 #[test]
 fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -76742,14 +76839,14 @@ fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()
             "",
             0,
         ),
-        // ...on a document whose `.a` is not `null` the register is not that `null`, so the
-        // withhold stays and jq's answer is still refused.
+        // ...and on a document whose `.a` is not `null`, where the register is not that `null`
+        // marker, the enclosing step's register reaches the inner fold (#4499).
         (
             r#"{"a":1}"#,
             r"path(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k))",
+            "[\"a\"]\n[\"a\"]\n",
             "",
-            "Invalid path expression near attempt to access element",
-            5,
+            0,
         ),
     ])
 }

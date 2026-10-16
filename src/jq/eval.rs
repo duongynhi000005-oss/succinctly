@@ -49908,6 +49908,10 @@ struct FoldRegister {
     /// stage left it -- an `and`/`or` right operand after a left operand that navigated --
     /// and INIT cannot have moved it. Read through [`FoldRegister::live_register`].
     live_register_known: bool,
+    /// #4499: the live register [`FoldRegister::live_register`] is stated exactly -- value and
+    /// position, the enclosing fold's step register's -- for a `foreach` that is that fold's whole
+    /// UPDATE, so a body nested in this one may read a frozen `$var` marker against it.
+    positioned: bool,
 }
 
 impl FoldRegister {
@@ -49950,6 +49954,11 @@ impl FoldRegister {
         )
     }
 
+    /// #4499: whether this untracked register is one the frame states exactly, value and position.
+    fn register_is_positioned(&self) -> bool {
+        self.live_register().is_some() && self.frame.at.is_some()
+    }
+
     /// Whether the value jq's register holds is known to be `null`: the live register an untracked
     /// stage still holds ([`Self::live_register`]), otherwise the fold's own register value when
     /// that is tracked. Not an untracked register's placeholder value.
@@ -49984,6 +49993,7 @@ impl FoldRegister {
                 trackable: true,
                 frame: self.frame.clone(),
                 live_register_known: false,
+                positioned: false,
             })
     }
 
@@ -50024,6 +50034,7 @@ impl FoldRegister {
                 trackable: true,
                 frame: frame.extend(&init_branch.path),
                 live_register_known: false,
+                positioned: false,
             }
         } else {
             Self {
@@ -50040,6 +50051,7 @@ impl FoldRegister {
                 // #3999: INIT that cannot move the register leaves it where the stage
                 // holding this fold left it, and the frame carries its value.
                 live_register_known: init_keeps_register,
+                positioned: false,
             }
         };
         (reg, acc)
@@ -50301,7 +50313,17 @@ impl FoldRegister {
             && self
                 .live_register()
                 .is_some_and(|live| !matches!(live, OwnedValue::Null));
-        let update_frame = if self.trackable {
+        let positioned = S::TAG == EvalTag::Jq
+            && !self.trackable
+            && self.positioned
+            && self.register_is_positioned()
+            && !fans_out(expr);
+        let live_register = if positioned {
+            self.live_register()
+        } else {
+            live_register
+        };
+        let update_frame = if self.trackable || positioned {
             self.frame.clone()
         } else {
             self.frame.unknown()
@@ -50382,7 +50404,10 @@ impl FoldRegister {
             // `try` catches -- `(foreach .a as $w (0; try (($w | .c | .z),
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
-            let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
+            let carries = S::TAG == EvalTag::Jq
+                && self.trackable
+                && !tr
+                && (!fans_out(expr) || is_sole_update_foreach(expr));
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)
@@ -50624,6 +50649,7 @@ impl FoldRegister {
                 trackable: true,
                 frame: fold_frame.extend(&branch.path),
                 live_register_known: false,
+                positioned: false,
             }
         } else if let Some(register) = branch
             .register
@@ -50639,6 +50665,7 @@ impl FoldRegister {
                 trackable: true,
                 frame: fold_frame.extend(&branch.path),
                 live_register_known: false,
+                positioned: false,
             }
         } else if neutral_leaves_register(update_expr)
             // #4488: a `reduce` UPDATE backtracks its source, its pattern's steps and every one of
@@ -50678,6 +50705,7 @@ impl FoldRegister {
                 trackable: self.trackable,
                 frame: self.frame.clone(),
                 live_register_known: self.live_register_known,
+                positioned: self.positioned,
             }
         } else {
             // #3775: keep where the register stood entering UPDATE. jq's
@@ -50721,6 +50749,7 @@ impl FoldRegister {
                 trackable: false,
                 frame,
                 live_register_known: false,
+                positioned: false,
             }
         }
     }
@@ -59098,6 +59127,7 @@ fn foreach_step_register<S: EvalSemantics>(
             trackable: walked_reg.is_input,
             frame: frame.extend(&walked_reg.path),
             live_register_known: false,
+            positioned: false,
         };
         let at_register =
             register_identical::<S>(&step_reg.value, &step_reg.frame, state, state_snapshot)
@@ -59118,6 +59148,7 @@ fn foreach_step_register<S: EvalSemantics>(
                 trackable: true,
                 frame: frame.extend(path),
                 live_register_known: false,
+                positioned: false,
             };
             let at_register =
                 register_identical::<S>(&step_reg.value, &step_reg.frame, state, state_snapshot)
@@ -59141,6 +59172,7 @@ fn foreach_step_register<S: EvalSemantics>(
                 trackable: true,
                 frame: frame.extend(path),
                 live_register_known: false,
+                positioned: false,
             };
             let at_register =
                 register_identical::<S>(&step_reg.value, &step_reg.frame, state, state_snapshot)
@@ -59159,6 +59191,7 @@ fn foreach_step_register<S: EvalSemantics>(
                 trackable: false,
                 frame: reg.frame.unknown(),
                 live_register_known: false,
+                positioned: false,
             },
             false,
         ),
@@ -59231,6 +59264,7 @@ fn foreach_step_register<S: EvalSemantics>(
                 trackable: reg.trackable,
                 frame: reg.frame.clone(),
                 live_register_known: reg.live_register_known,
+                positioned: reg.positioned,
             },
             state_at_register || reg.identical::<S>(state, state_snapshot, S::TAG == EvalTag::Jq),
         ),
@@ -60625,7 +60659,20 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         let (mut reg, mut state) =
             FoldRegister::enter(init_branch, value, trackable, init_keeps_register, frame);
         if mentions_frozen_var {
-            reg.withhold_untracked_register(head_is_null_or_marker(input)); // #3984
+            // #4499: ...unless the register is the enclosing fold's step register, stated by value
+            // and position, and this `foreach` is that fold's whole UPDATE: a frozen `$var` in its
+            // UPDATE or EXTRACT then certifies against it exactly, as in the enclosing fold's own
+            // body. One in INIT or the source is the accumulator (or the element) itself, which
+            // this does not model: that stays withheld.
+            if S::TAG == EvalTag::Jq
+                && reg.register_is_positioned()
+                && fold_body::sole_update_foreach_here(input)
+                && !fold_mentions_frozen_var(patterns, &[input, init])
+            {
+                reg.positioned = true;
+            } else {
+                reg.withhold_untracked_register(head_is_null_or_marker(input)); // #3984
+            }
         }
 
         // #2031/#2388: see `resolve_reduce`'s identical derivation —
@@ -67592,6 +67639,12 @@ fn raise_free_identity_passthrough(expr: &Expr, wide: bool) -> bool {
 /// equal document node -- `del(.k | ... as $v | $v | .b)` wrote where jq
 /// refuses. So the widened arms admit marker-free shapes only; a marker
 /// source keeps the pre-#3279 grammar.
+/// #4499: whether `expr` is a `foreach` that is the whole UPDATE of the fold being resolved
+/// ([`fold_body::sole_update_foreach_here`]).
+fn is_sole_update_foreach(expr: &Expr) -> bool {
+    matches!(unwrap_paren(expr), Expr::Foreach { input, .. } if fold_body::sole_update_foreach_here(input))
+}
+
 fn mentions_marker(expr: &Expr) -> bool {
     crate::jq::walk::any_subexpr(expr, &mut |e| matches!(e, Expr::TrackedVar(_)))
 }
@@ -140617,6 +140670,7 @@ mod tests {
             trackable: true,
             frame: Frame::at(1, Rc::clone(path)),
             live_register_known: false,
+            positioned: false,
         };
         let a = PathPrefix::extend(&PathPrefix::root(), field("a"));
         let a_optional =

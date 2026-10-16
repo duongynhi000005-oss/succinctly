@@ -803,12 +803,12 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `test_fold_comma_sibling_and_deep_nested_fold_follow_live_null_register_4499`. Over the 20
   operands added to `scripts/jq-path-register-sweep.py` for it (`--stage-only`, 17,163 rows) ACCEPT_WRONG
   went 2 to 0 and DIFF 43 to 1, with no regression and all 210 flips to MATCH, and a seeded 40,027-row
-  sample of all 474 fold operands moved 160 rows, all to MATCH. **Still divergent**
-  ([#4499](https://github.com/rust-works/succinctly/issues/4499), narrowed): a nested fold that reads
-  an outer frozen `$var` (`foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .)`, #3984
-  withholds the register) and `isempty(FOLD)` (the operand's fold still counts as fanning out) lose the
-  caught step or refuse where jq answers; a fold sibling that reads a frozen `$var` is kept out of the
-  uniform siblings for the same reason.
+  sample of all 474 fold operands moved 160 rows, all to MATCH. **Since the nested-fold `$var` change
+  ([#4499](https://github.com/rust-works/succinctly/issues/4499), below)** a `foreach` that is another fold's whole
+  `UPDATE` and reads that fold's frozen `$var` in its own `UPDATE`/`EXTRACT` answers as jq does; the `isempty(FOLD)` row
+  was closed before it. **Still divergent**: a fold *sibling* (a comma) or a fold in an `EXTRACT` that reads a frozen
+  `$var` stays out of the uniform siblings (a refusal, never a silent drop), and so does a `$var` in the inner fold's
+  `INIT` or source.
 
   **Since [#4527](https://github.com/rust-works/succinctly/issues/4527) and
   [#4539](https://github.com/rust-works/succinctly/issues/4539)** a destructuring pattern's computed key that is an
@@ -904,19 +904,25 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   on `null` is `[]`, jq prints `[["a"],["a"]]`), as on `main`.
   **Still refused where jq answers**: an EXTRACT that forks *and navigates after its first output*
   (`... try .a; (5, .a))`: the gate asks that the whole EXTRACT leave the register, and a navigating item does not),
-  and a nested fold whose EXTRACT is the enclosing loop variable after a caught navigation
-  (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`, which is the next paragraph's withhold);
-  a nested fold that
-  reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
-  `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
-  the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly
-  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it). Two gates stack
-  (found by experiment while fixing #4706, not shipped): `fans_out_with` counts the marker-reading fold, so the outer UPDATE's frame
-  carries no register, and `FoldRegister::resolve_sink` hands an *untracked* fold register's body `Frame::unknown()` (no position, no
-  register) after a review found fabricated writes when the untracked value was read as the register. Lifting only the first made the
-  inner `try ($w|.b)` refuse against a register the frame knew by value but not by position, and the `try` swallowed it: the loud
-  error became a silently empty stream, the worse direction. Closing the row needs the register's *position* (the `$w` marker's
-  origin) carried through an untracked fold register.
+  (a nested fold whose EXTRACT is the enclosing loop variable after a caught navigation,
+  `foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`, was refused here and answers as jq does
+  since #4499, below);
+  a nested fold that reads an outer frozen `$var` in a position the next paragraph does not admit.
+  **Since [#4499](https://github.com/rust-works/succinctly/issues/4499)** a `foreach` that is another fold's *whole*
+  `UPDATE` reads that fold's frozen `$var` in its own `UPDATE` or `EXTRACT` (`path(foreach .a as $w (.; foreach (1,2) as $i
+  (1; try ($w|.b); .); .))` on `{"a":{"b":1}}` prints `["a","b"]` twice, as jq does, and `del`/`|=` of it write `.a.b`).
+  Two gates stacked (#3984's `withhold_untracked_register` on a fold that mentions a marker, and `fans_out_with` counting it
+  so the enclosing step's frame carried no register), and `FoldRegister::resolve_sink` gave an untracked fold register's
+  body `Frame::unknown()`, so lifting only the first turned the loud refusal into a silently empty stream. The enclosing
+  fold's step register now reaches the inner fold with its value *and* position (`FoldRegister::positioned`), so a `$w`
+  marker certifies against it exactly and the `try` swallows only what jq's does. The admission is deliberately narrow:
+  the inner fold must be the enclosing `foreach`/`reduce`'s whole `UPDATE` (`fold_body::sole_update_foreach_here`; the
+  same shapes in an `EXTRACT`, as a comma sibling, behind a `try`, or under a stage keep #3984's withhold, which
+  `jq-nested-fold-frozen-var-sweep.py` pins), and a `$var` in its `INIT` or source (`foreach (1,2) as $i ($w; try .b; .)`,
+  where the accumulator *is* the register) stays refused. Over `scripts/jq-nested-fold-outer-var-sweep.py` (3,600 rows) 893
+  rows flipped to MATCH, with no ACCEPT_WRONG, no lost match and no new DIFF; the 48 DIFF rows left are exit-5 rows
+  whose pre-error stdout already differed on `main`. A `reduce` as the inner fold is not admitted (its `UPDATE` carries no
+  sole-`UPDATE` mark).
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare
