@@ -4968,11 +4968,24 @@ Three narrower residuals of the same fix, each captured live from v4.53.3:
 - Metadata through a *constructed* container is the container's, not the key's:
   `map_values(key | line)` is `a: 1` in yq and `a: 0` here, as are
   `to_entries[0].key | line` and `[.a | key] | .[0] | line`.
-- The wider question this issue does not settle: whether an ordinary owned value that
-  *kept* its position answers metadata from it. On `a:\n  b: 1\n`, `.a | del(.b) | line`,
-  `.a | .b = 3 | line` and `.a | key as $k | . | line` are all `2` in yq (the line `.a`
-  itself stands on) and `0` here. Only the key-node case is answered, because only it is
-  what `key` emits.
+- Whether an ordinary owned value that *kept* its position answers metadata from it. #2763
+  answered only the key-node case, because only it is what `key` emits. On `a:\n  b: 1\n`,
+  `.a | del(.b) | line`, `.a | .b = 3 | line` and `.a | key as $k | . | line` are all `2` in yq
+  (the line `.a` itself stands on) and were `0` here.
+  [#4696](https://github.com/rust-works/succinctly/issues/4696) settles it for `line` and
+  `column` in `succinctly yq`, for the stages that hand yq's own node on: a write (`=`, `|=`,
+  the compound forms), `del`, `sort`, `sort_by`, `flatten`, `sort_keys`, `map_values`, `pick`,
+  `omit`, arithmetic on the node (`. + {}`, `. * {}`) and `map` where it keeps the node (an
+  empty container, a scalar), plus the stages that pass their input through (`select`, ...).
+  The list is an allow-list (`stage_keeps_node_metadata`): a stage that builds a fresh node
+  (`tostring`, `length`, `to_entries`, `[.]`, `unique`, `unique_by`, `reverse`, `type`, `tag`,
+  `not`, `any`/`all`, `group_by`) keeps the position `path`/`key`/`parent` read and reports
+  `0`, in yq and here, and a stage nobody has captured falls back to the `0` an owned value
+  always answered. `succinctly jq` is unchanged (`line` is not jq's). What is still `0` here
+  and not in yq: `style`, `anchor` and the comments of a kept value (yq resets them where it
+  keeps the line -- `.a = 1` on a flow `{}` is block, `. * {}` drops the anchor), a `line`
+  nested in a comma, an operand or a body (`(line, column)`), and the child of a written value
+  (`.a | (.b = 3 | .b) | line` is `4` in yq).
 
 ### Standalone comments print on both routes now (#2795, #798)
 
