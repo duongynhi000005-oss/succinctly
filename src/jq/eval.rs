@@ -31430,6 +31430,32 @@ fn is_plain_fan_out_path(path_expr: &Expr) -> bool {
     plain(path_expr) && any_subexpr(path_expr, &mut |e| matches!(e, Expr::Iterate))
 }
 
+/// The static path `path` as `sort_keys(f)` writes it into `doc` without creating a field
+/// (#2870), or `None` when it writes nothing: a `Field` step must land on a mapping that has the
+/// key (a missing key, or `null` where the field would be created, ends the path with nothing
+/// written, as yq leaves it), and an index step that is past the end still pads but the walk stops
+/// there, so what follows it is not written (yq pads `.a[][5].b` and adds no `b`). A field step
+/// onto a scalar is not checked.
+fn without_vivified_fields(doc: &OwnedValue, path: &Expr) -> Option<Expr> {
+    let mut steps = Vec::new();
+    push_path_components(&mut steps, path);
+    let mut at = Some(doc);
+    for (i, step) in steps.iter().enumerate() {
+        let Some(value) = at else {
+            return Some(flatten_components(steps[..i].to_vec()));
+        };
+        at = match (unwrap_path_component(step).0, value) {
+            (Expr::Field(name), OwnedValue::Object(map)) => Some(map.get(name.as_str())?),
+            (Expr::Field(_), OwnedValue::Null) => return None,
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                array_slot(items.len(), *idx).and_then(|at| items.get(at))
+            }
+            _ => None,
+        };
+    }
+    Some(path.clone())
+}
+
 fn concrete_update_paths<S: EvalSemantics>(
     path_expr: &Expr,
     doc: &OwnedValue,
@@ -31734,9 +31760,10 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // *prefix* existing is enough -- `update_path`'s own native per-element
     // fan-out below decides the rest.
     if skip_absent_paths {
-        paths.retain(|path| {
+        let mut kept = vec_with_capacity(paths.len());
+        for path in paths {
             let mut steps = Vec::new();
-            push_path_components(&mut steps, path);
+            push_path_components(&mut steps, &path);
             let prefix_len = steps
                 .iter()
                 .position(|s| {
@@ -31746,8 +31773,36 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     )
                 })
                 .unwrap_or(steps.len());
-            navigate_read_only(&result, &steps[..prefix_len])
-        });
+            if !navigate_read_only(&result, &steps[..prefix_len]) {
+                continue;
+            }
+            // #2870: past a fan-out the paths are spelled out per element, and an element
+            // that lacks a *field* the path names is left alone, as yq leaves it
+            // (`sort_keys(.a[].b)` creates no `b` on an element without one); an index past the
+            // end still pads, as it does there. A path that cannot be spelled out, and one with a
+            // slice (whose no-op yq keeps), keeps the route it took before.
+            // Only a field step past the fan-out can vivify, so a path without one (the common
+            // `sort_keys(.[])`) skips the per-element spelling.
+            let fans_out = prefix_len < steps.len()
+                && !steps
+                    .iter()
+                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Slice { .. }))
+                && steps[prefix_len..]
+                    .iter()
+                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Field(_)));
+            match fans_out
+                .then(|| concrete_update_paths::<S>(&path, &result))
+                .flatten()
+            {
+                Some(concrete) => kept.extend(
+                    concrete
+                        .iter()
+                        .filter_map(|concrete| without_vivified_fields(&result, concrete)),
+                ),
+                None => kept.push(path),
+            }
+        }
+        paths = kept;
     }
     // #1351: redirect through aliases. `|=` is the one operator whose
     // *terminal* alias position is also redirected, and only when the filter
