@@ -77481,6 +77481,66 @@ fn test_foreach_source_always_run_branch_neighbours_follow_jq_4716() -> Result<(
     ])
 }
 
+/// #4739 (a residual of #4716): the always-run branch of a falsy-`//` foreach source behind a non-constant
+/// `| select(.)` tail. It emits nothing for a falsy output, but the head's destructure of `.` has already
+/// moved the register, so it raises on a truthy document (`{"a":true}`) and answers on `null`; a head that
+/// ends in `$b` (not the register) is unaffected. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_always_run_branch_behind_select_dot_tail_4739() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select(.)) as $y (.; .; .)) |= 9",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | $b)) | select(.)) as $y (.; .; .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the

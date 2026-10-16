@@ -2511,7 +2511,7 @@ is the revert that established what the other one costs.
    `scripts/jq-fold-body-register-grid-sweep.py`), and, tracked as [#4716](https://github.com/rust-works/succinctly/issues/4716),
    the same branch as the left operand of another `//`, behind a `tostring` or `if` tail, behind a computed-key object message,
    or in a `def` with a parameter, and an object-message `try` source followed by a tail that emits nothing. In a moved
-   `reduce` body the new shapes raise with a different message than jq's. A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
+   `reduce` body the new shapes raise with a different message than jq's. A non-constant `| select(.)` tail is read too (#4739); a `def` whose body names its parameter is still accepted ([#4760](https://github.com/rust-works/succinctly/issues/4760)). A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
    body raises too ([#4667](https://github.com/rust-works/succinctly/issues/4667): these emit their comma's first leaf only, so
    they hand the register on as `.` does, `takes_only_an_identity_leaf`; pinned by
    `test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667`), also when the wrapper is nested in another

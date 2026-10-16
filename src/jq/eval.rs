@@ -54283,6 +54283,9 @@ fn emits_once_stage(e: &Expr) -> bool {
                 unwrap_paren(cond),
                 Expr::Literal(literal) if !matches!(literal, Literal::Null | Literal::Bool(false))
             ) || matches!(unwrap_paren(cond), Expr::Array(_))
+                // #4739: `select(.)` emits nothing for a falsy output, and the head's raise has already
+                // happened by then; the route the source is sent to decides by the value.
+                || matches!(unwrap_paren(cond), Expr::Identity)
                 || (matches!(unwrap_paren(cond), Expr::Object(_)) && is_constant_construction(cond))
         }
         _ => false,
