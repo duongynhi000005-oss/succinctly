@@ -65895,6 +65895,29 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
     };
     let mut branches = match resolve_terminal::<S>(expr, input, false, untracked) {
         Ok(branches) => branches,
+        // #4360: a step applied to a value that is not a path (`del((.l + [3])[0])`,
+        // `del([.n][0])`) finds nothing to delete in yq, which leaves the document alone; the
+        // targets the other branches of `expr` resolved before it still go, and a root among them
+        // is not one (it is the document, which only a root target of its own deletes).
+        Err((_, EvalEscape::Error(e)))
+            if S::TAG == EvalTag::Yq
+                && e.is_untracked_navigation_error()
+                && recoverable_write_members(expr).is_some() =>
+        {
+            // The members of a comma are resolved one by one, and one that fails the same way adds
+            // no target (`del([.n][0], .n)` still deletes `.n`, as yq does); a lone failing target
+            // leaves the document alone.
+            let members = recoverable_write_members(expr).unwrap_or_default();
+            let mut gathered = Vec::new();
+            for member in members {
+                match resolve_terminal::<S>(member, input, false, Untracked::KeepInOrder) {
+                    Ok(branches) => gathered.extend(branches),
+                    Err((_, EvalEscape::Error(e))) if e.is_untracked_navigation_error() => {}
+                    Err((_, escape)) => return Err(escape),
+                }
+            }
+            gathered
+        }
         Err((_prefix, escape)) => return Err(escape),
     };
     if S::TAG != EvalTag::Yq {
@@ -66112,6 +66135,62 @@ fn is_identity_stage(expr: &Expr) -> bool {
 /// which is also where #1651's document-root short-circuit and #1764's
 /// no-`Untracked::Skip` exception now live. Everything below therefore
 /// always takes the `path()`/`=`/`|=` reading of both.
+/// The members a failed write target `expr` is recovered from (#4360): `expr` itself, or the members
+/// of its top-level comma, when it is a [`is_yq_grammar_write_target`] and no member fans out (a
+/// comma, `.[]` or a slice anywhere inside one). Such a member that fails resolves to *no* target,
+/// exactly; a fan-out may have written some of its targets before the failing one, and yq writes
+/// all of the others, so a target that fans out keeps the loud refusal rather than a partial write.
+fn recoverable_write_members(expr: &Expr) -> Option<&[Expr]> {
+    if !is_yq_grammar_write_target(expr) {
+        return None;
+    }
+    let members = match unwrap_paren(expr) {
+        Expr::Comma(members) => members.as_slice(),
+        _ => core::slice::from_ref(expr),
+    };
+    let fans_out = |member: &Expr| {
+        any_subexpr(member, &mut |node| {
+            matches!(node, Expr::Comma(_) | Expr::Iterate | Expr::Slice { .. })
+        })
+    };
+    members
+        .iter()
+        .all(|member| !fans_out(member))
+        .then_some(members)
+}
+
+/// Whether every node of the write target `expr` is a construct yq's own grammar accepts (#4360): a
+/// path step, a literal, a constructor, arithmetic and the handful of builtins that compute a value.
+/// A target that holds a jq-only construct (`foreach`, `reduce`, `try`, `getpath`, `as`) has no yq
+/// oracle to read a no-op from, and keeps the refusal -- a silent no-op there would hide a wrong
+/// acceptance.
+fn is_yq_grammar_write_target(expr: &Expr) -> bool {
+    !any_subexpr(expr, &mut |node| {
+        !matches!(
+            node,
+            Expr::Identity
+                | Expr::Field(_)
+                | Expr::Index { .. }
+                | Expr::Slice { .. }
+                | Expr::Iterate
+                | Expr::Literal(_)
+                | Expr::Paren(_)
+                | Expr::Pipe(_)
+                | Expr::Comma(_)
+                | Expr::Array(_)
+                | Expr::Object(_)
+                | Expr::Arithmetic { .. }
+                | Expr::Builtin(
+                    Builtin::Length
+                        | Builtin::Keys
+                        | Builtin::KeysUnsorted
+                        | Builtin::ToEntries
+                        | Builtin::ToString
+                )
+        )
+    })
+}
+
 fn resolve_dynamic_indexes<S: EvalSemantics>(
     expr: &Expr,
     input: &OwnedValue,
@@ -66125,6 +66204,32 @@ fn resolve_dynamic_indexes<S: EvalSemantics>(
         Demand::Continue
     }) {
         Ok(()) => Ok(out),
+        // #4360: a step applied to a value that is not a path (`(. + "x")[1]`, `(.l + [3])[0]`,
+        // `{"q": .n}.q`, `[.n][0]`) finds nothing to write through in yq, so the write is a no-op and
+        // the document comes back; jq raises its `Invalid path expression` for the same text. What the
+        // other branches of the target resolved before the failing one is still written.
+        Err(EvalEscape::Error(e))
+            if S::TAG == EvalTag::Yq
+                && e.is_untracked_navigation_error()
+                && recoverable_write_members(expr).is_some() =>
+        {
+            // A comma goes on to its later members (`(.a, [.n][0], .s) = 7` writes `.a` and `.s`):
+            // each is resolved on its own, and a member that fails the same way adds nothing.
+            match unwrap_paren(expr) {
+                Expr::Comma(members) => {
+                    out.clear();
+                    for member in members {
+                        match resolve_dynamic_indexes::<S>(member, input, defer_trailing_iterate) {
+                            Ok(paths) => out.extend(paths),
+                            Err((_, escape)) => return Err((out, escape)),
+                        }
+                    }
+                    Ok(out)
+                }
+                // One target with no fan-out: it failed, so there is none.
+                _ => Ok(Vec::new()),
+            }
+        }
         Err(e) => Err((out, e)),
     }
 }
@@ -140152,24 +140257,19 @@ mod tests {
         }
     }
 
-    /// yq mode is untouched (#3037): real yq's assignment through a
-    /// variable is a no-op that prints the document unchanged, where
-    /// succinctly refuses loudly -- a pre-existing divergence in the safe
-    /// direction. The promotion is jq-only so it stays a refusal rather
-    /// than becoming a write yq does not perform. (The CLI-route twin is
-    /// `test_navigated_bind_yq_mode_unchanged_3037` in `jq_cli_tests.rs`;
-    /// this entry point takes the eager evaluator, which never carried a
-    /// bind's node identity in either mode.)
+    /// yq mode is untouched by the promotion (#3037), which is jq-only: real yq's assignment through
+    /// a variable is a no-op that prints the document unchanged, and this entry point now answers
+    /// that way (#4360: a step applied to a value that is not a path finds nothing to write
+    /// through) instead of the refusal it gave before, so the promotion cannot become a write yq
+    /// does not perform. (The CLI-route twin, `test_navigated_bind_yq_mode_unchanged_3037` in
+    /// `jq_cli_tests.rs`, takes the cursor evaluator, which still refuses: the safe direction.)
     #[test]
     fn test_yq_mode_navigated_bind_unchanged_3037() {
         yq_query!(
             br#"{"a":{"b":1}}"#,
             r".a as $y | .a | ($y.b) = 9",
-            QueryResult::Error(e) | QueryResult::Partial(_, Control::Error(e)) => {
-                assert_eq!(
-                    e.message,
-                    r#"Invalid path expression near attempt to access element "b" of {"b":1}"#
-                );
+            QueryResult::Owned(value) => {
+                assert_eq!(format!("{value:?}"), r#"Object({"b": NumberLiteral(Int(1), "1")})"#);
             }
         );
     }

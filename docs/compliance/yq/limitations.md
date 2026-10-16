@@ -2218,6 +2218,39 @@ does not cover (a derived or bound sibling, so the group refuses) is still skipp
 other literal is parentless and ordered by the rule above: `true | del(null)`,
 `{a: {b: 1}} | .a.b |= del(null)` and `[null, 1] | map(del(null))` leave their input unchanged.
 
+### A write whose left side steps into a value that is not a path is a no-op ([#4360](https://github.com/rust-works/succinctly/issues/4360)); a bare computed `del()` target still refuses
+
+The #1764 rule above covers a branch that *ends* on a computed value. A branch that *steps into*
+one -- an index or a field applied to a sum, a constructor or a builtin's result -- raised jq's
+`Invalid path expression near attempt to access element ...` in yq mode, where yq finds nothing to
+write through and returns the document unchanged, exit 0 (`=`, `|=`, `+=` and `del()`; jq mode
+raises, as jq does). Against yq v4.53.3 on `{"a":{"b":1},"s":"xyz","n":5,"l":[1,2]}`:
+
+```bash
+$ yq -p=json -o=json -I=0 '(.l + [3])[0] = 5'          # {"a":{"b":1},"s":"xyz","n":5,"l":[1,2]}
+$ yq -p=json -o=json -I=0 '[.n][0] |= 5'               # unchanged
+$ yq -p=json -o=json -I=0 'del({"q": .n}.q)'           # unchanged
+$ yq -p=json -o=json -I=0 '(.a, [.n][0], .s) = 7'      # {"a":7,"s":7,"n":5,"l":[1,2]}
+$ yq -p=json -o=json -I=0 'del([.n][0], .n)'           # {"a":{"b":1},"s":"xyz","l":[1,2]}
+```
+
+The members of a top-level comma are resolved one by one once one of them fails this way, so the
+later ones still take the write or the delete. The conversion is exact or absent: it applies only
+to a target built from constructs yq's own grammar accepts (path steps, literals, constructors,
+arithmetic, `length`, `keys`, `to_entries`, `tostring`) in which no member fans out (a comma, `.[]`
+or a slice inside one). A `foreach`, `reduce`, `try`, `getpath` or `as` inside the target is a
+jq-only construct with no yq oracle, and a member that fans out may have resolved some targets
+before the failing step while yq writes all the others, so both keep the refusal rather than a
+silent partial write (pinned by `test_yq_mode_getpath_register_unchanged_2896` and its siblings).
+Still refused: `(.m[] | (.x, [.x][0])) = 9` and `del(.a, (.s, [.n][0]))` (a nested comma or an
+iterate over a failing step: yq writes every other target), a dynamic index or a `?` on the
+failing step (`(.l + [3])[.n] = 5`, `(.l + [3])[0]? = 5`), a bare computed `del()` target --
+`del((1 + 2))` is a no-op in yq, `del(.s + "x")` deletes `.s` there (yq reads the sum as its left
+operand) -- and, on the CLI's cursor route, a variable-bound target (`.a as $y | .a | ($y.b) = 9`:
+the eager evaluator and the library entry answer yq's unchanged document, the cursor route still
+refuses); the `//=` spelling is not yq's at all.
+Pinned in `test_write_through_a_computed_left_side_is_a_noop_4360`.
+
 ### `del()` with a field key against a scalar root: errors instead of no-op
 
 Deleting a field key from a scalar document raises `Cannot index <type> with string
