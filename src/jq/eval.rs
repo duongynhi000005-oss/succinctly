@@ -51267,14 +51267,56 @@ fn source_destructures_fresh(
     walk.reach(source) == Reach::Destructures
 }
 
-/// Whether a `foreach` source starts from a `null` literal or a `$x` marker (#4756): jq's register
-/// is `jv_identical` to either by kind when it is `null`, so the `.` after it is that register.
+/// Whether a `foreach` source is a plain `?//` chain behind a `null` literal or a `$x` marker
+/// (#4756): `null | (.|.) as {a:$a} ?// $a | .`, `$x | CHAIN`, `$x as {b:$b} ?// $b | .`. jq's
+/// register is `jv_identical` to either head by kind when it is `null`, so the chain's first
+/// alternative walks it. Only a chain that cannot take its fallback alternative: literal keys over
+/// bare `$var`s (`null | .a` succeeds) and a body that is `.`. A key that raises, or a body that
+/// errors or is cut short (`first`/`limit`), retries onto the bare alternative, which leaves the
+/// register at the root, and the register handling this enables does not model that row.
 fn head_is_null_or_marker(source: &Expr) -> bool {
-    match unwrap_paren(source) {
-        Expr::Pipe(stages) => stages.first().is_some_and(head_is_null_or_marker),
-        Expr::AsPattern { expr, .. } => head_is_null_or_marker(expr),
-        Expr::Literal(Literal::Null) | Expr::TrackedVar(_) => true,
+    fn leaf(e: &Expr) -> bool {
+        matches!(
+            unwrap_paren(e),
+            Expr::Literal(Literal::Null) | Expr::TrackedVar(_)
+        )
+    }
+    fn identities(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Identity => true,
+            Expr::Pipe(stages) => stages.iter().all(identities),
+            _ => false,
+        }
+    }
+    fn plain(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(_) => true,
+            Pattern::Object(entries) => entries.iter().all(|entry| {
+                matches!(entry.key, ObjectKey::Literal(_))
+                    && entry.bind.is_none()
+                    && matches!(entry.pattern, Pattern::Var(_))
+            }),
+            Pattern::Array(_) => false,
+        }
+    }
+    let chain = |e: &Expr, headed: bool| match unwrap_paren(e) {
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } => {
+            matches!(unwrap_paren(body), Expr::Identity)
+                && patterns.iter().all(plain)
+                && if headed { identities(expr) } else { leaf(expr) }
+        }
         _ => false,
+    };
+    match unwrap_paren(source) {
+        Expr::Pipe(stages) => match stages.as_slice() {
+            [head, rest] => leaf(head) && chain(rest, true),
+            _ => false,
+        },
+        other => chain(other, false),
     }
 }
 
