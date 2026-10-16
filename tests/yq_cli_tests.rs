@@ -58697,6 +58697,107 @@ fn test_yq_sort_keys_does_not_vivify_past_a_fanout_2870() -> Result<()> {
     Ok(())
 }
 
+/// #4055: yq's `min`/`max` over an array are not jq's total order. A scan from the first element that
+/// replaces the pick only on a strictly smaller (larger) one, so a tie keeps the first; numbers and
+/// strings (bytewise) compare; a `null` element never takes part; booleans, containers and mixed
+/// kinds are refused with yq's wording. An empty array prints nothing (#4236). Each row was captured
+/// from yq v4.53.3.
+#[test]
+fn test_4055_min_max_follow_yqs_comparator() -> Result<()> {
+    for (array, min, max) in [
+        ("[1,2,3]", "1", "3"),
+        ("[3,1,2]", "1", "3"),
+        ("[1.5,2,0.5]", "0.5", "2"),
+        ("[\"a\",\"b\"]", "\"a\"", "\"b\""),
+        ("[\"b\",\"a\"]", "\"a\"", "\"b\""),
+        ("[\"10\",\"9\"]", "\"10\"", "\"9\""),
+        ("[\"B\",\"a\",\"C\"]", "\"B\"", "\"a\""),
+        ("[-1,-2]", "-2", "-1"),
+        ("[10,9.5]", "9.5", "10"),
+        ("[1,1.0]", "1", "1"),
+        ("[1.0,1]", "1.0", "1.0"),
+        ("[null]", "null", "null"),
+        ("[null,null]", "null", "null"),
+        ("[null,1]", "null", "null"),
+        ("[1,null]", "1", "1"),
+        ("[\"a\",null]", "\"a\"", "\"a\""),
+        ("[null,\"a\"]", "null", "null"),
+        ("[1,null,0]", "0", "1"),
+        ("[3,null,2]", "2", "3"),
+        ("[\"b\",null,\"a\"]", "\"a\"", "\"b\""),
+        ("[null,\"b\",\"a\"]", "null", "null"),
+        ("[true]", "true", "true"),
+        ("[true,null]", "true", "true"),
+        ("[null,true]", "null", "null"),
+    ] {
+        for (builtin, expected) in [("min", min), ("max", max)] {
+            let filter = format!("{array} | {builtin}");
+            let (out, code) = run_yq_stdin(&filter, "x: 1\n", &["-o=json", "-I=0"])?;
+            assert_eq!((code, out.trim()), (0, expected), "[{filter}]");
+        }
+    }
+    for (array, message) in [
+        ("[2,\"10\",3]", "!!str not yet supported for comparison"),
+        ("[\"a\",1]", "!!int not yet supported for comparison"),
+        ("[true,1]", "!!int not yet supported for comparison"),
+        ("[1,true]", "!!bool not yet supported for comparison"),
+        ("[true,false]", "!!bool not yet supported for comparison"),
+        ("[true,true]", "!!bool not yet supported for comparison"),
+        ("[1,2,\"a\"]", "!!str not yet supported for comparison"),
+        ("[1,\"a\",null]", "!!str not yet supported for comparison"),
+        ("[true,\"a\"]", "!!str not yet supported for comparison"),
+        ("[\"a\",true]", "!!bool not yet supported for comparison"),
+        ("[[1],[2]]", "arrays not yet supported for comparison"),
+        (
+            "[{\"a\":1},{\"a\":2}]",
+            "maps not yet supported for comparison",
+        ),
+        ("[1,[2]]", "arrays not yet supported for comparison"),
+        ("[null,[1]]", "arrays not yet supported for comparison"),
+        ("[2,[1],3]", "arrays not yet supported for comparison"),
+        ("[1,2,{\"a\":1}]", "maps not yet supported for comparison"),
+        ("[[1],1]", "!!seq ([0]) cannot be subtracted from !!int"),
+        (
+            "[{\"a\":1},1]",
+            "!!map ([0]) cannot be subtracted from !!int",
+        ),
+        ("[[1],null]", "!!seq ([0]) cannot be subtracted from !!null"),
+        ("[[1],2,3]", "!!seq ([0]) cannot be subtracted from !!int"),
+    ] {
+        for builtin in ["min", "max"] {
+            let filter = format!("{array} | {builtin}");
+            let (out, err, code) =
+                run_yq_stdin_with_stderr(&filter, "x: 1\n", &["-o=json", "-I=0"])?;
+            assert_eq!((code, out.as_str()), (1, ""), "[{filter}]");
+            assert!(err.contains(message), "[{filter}] stderr: {err:?}");
+        }
+    }
+    let (out, code) = run_yq_stdin("[] | min", "x: 1\n", &["-o=json", "-I=0"])?;
+    assert_eq!((code, out.as_str()), (0, ""));
+
+    // Document-sourced arrays take the cursor route and agree.
+    let doc = "a: [3, 1, 2]\nc: [1, a]\ne: [1, null, 0]\nf: [null, 5]\nj: [b, a, c]\n";
+    for (filter, expected) in [
+        (".a | min", "1"),
+        (".a | max", "3"),
+        (".e | min", "0"),
+        (".e | max", "1"),
+        (".f | min", "null"),
+        (".j | min", "\"a\""),
+        (".j | max", "\"c\""),
+    ] {
+        let (out, code) = run_yq_stdin(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.trim()), (0, expected), "[{filter}]");
+    }
+    let (out, err, code) = run_yq_stdin_with_stderr(".c | min", doc, &["-o=json", "-I=0"])?;
+    assert_eq!((code, out.as_str()), (1, ""));
+    assert!(
+        err.contains("!!str not yet supported for comparison"),
+        "{err:?}"
+    );
+    Ok(())
+}
+
 /// #2631's fix (jq mode only, see `jq_cli_tests.rs`) routes an in-range but
 /// past-`2^53` `i64` `+`/`-`/`*` result through `OwnedValue::Float` instead
 /// of keeping the exact `OwnedValue::Int` -- gated on `S::OVERFLOW_WRAPS`,
