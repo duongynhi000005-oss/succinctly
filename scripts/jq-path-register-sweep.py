@@ -317,6 +317,34 @@ OPERANDS = [
     "any(reduce (1,2) as $i (1; try .a); .)",
     "all(reduce (1,2) as $i (1; try .a); .)",
     "all(foreach (1,2) as $i (1; try .a; $i); .)",
+    # (#4698) the residuals #4661 left: a foreach operand whose EXTRACT forks (a comma, a raise, a
+    # `try ... catch`), a `recurse` generator (jq takes its seed first, at the register), a `?//` bind
+    # operand (its outputs are thrown away, so a body that steps nowhere raises nothing), and the
+    # controls that must keep their refusal (a forking EXTRACT that navigates, a `?//` body that
+    # navigates, a recurse step that navigates before the verdict).
+    "isempty(foreach (1,2) as $i (1; try .a; ($i, 5)))",
+    "isempty(foreach (1,2) as $i (1; try .a; ($i, error(\"x\"))))",
+    "isempty(foreach (1,2) as $i (1; try .a; (try error(\"x\") catch 5)))",
+    "isempty(foreach (1,2) as $i (null; try .a; (5, 6)))",
+    "any(foreach (1,2) as $i (1; try .a; ($i, 5)); .)",
+    "isempty(foreach (1,2) as $i (1; try .a; (5, .a)))",
+    "isempty(foreach (1,2) as $i (1; try .a; (.a, 5)))",
+    "isempty(foreach (1,2) as $i (1; try .a; ($i, error(\"x\") | .a)))",
+    "any(recurse; .)",
+    "all(recurse; .)",
+    "isempty(recurse)",
+    "isempty(..)",
+    "any(..; .)",
+    "isempty(recurse(.a?))",
+    "isempty(recurse | .a)",
+    "isempty(. as $q ?// $z | .)",
+    "isempty(. as [$q] ?// $z | .)",
+    "isempty(. as {a:$q} ?// $z | .)",
+    "isempty(. as $q ?// $z | (1, .))",
+    "any(. as $q ?// $z | .; .)",
+    "isempty(. as $q ?// $z | .a?)",
+    "isempty(. as $q ?// $z | (.a, 1))",
+    "isempty(. as [$q] ?// $z | .a)",
     # (#3757) a `cond` outside the by-value allowlist is resolved as `gen | cond`
     # in jq mode: the stage rules for `select`/`first`, a navigating chain, an
     # update assignment and `unique_by` (which raises on a computed element), and
