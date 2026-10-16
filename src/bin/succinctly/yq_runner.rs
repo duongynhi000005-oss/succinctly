@@ -2109,6 +2109,9 @@ struct WriteTarget {
     /// have inherited no presentation from anything. See
     /// [`is_closed_literal`].
     fresh: bool,
+    /// The written value is another node of the document (`= .j`, `= $x`), not a closed literal:
+    /// in yq it brings that node's own presentation along (#4113).
+    copies: bool,
 }
 
 /// Collect the [`PathStep`]s of a *static* navigation chain, returning
@@ -2248,22 +2251,32 @@ fn is_closed_literal(expr: &Expr) -> bool {
 /// rejected by [`static_path_steps`] instead of being resolved against a
 /// document that may already be stale.
 fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
-    fn push(lhs: &Expr, kind: WriteKind, fresh: bool, out: &mut Vec<WriteTarget>) -> bool {
+    fn push(
+        lhs: &Expr,
+        kind: WriteKind,
+        (fresh, copies): (bool, bool),
+        out: &mut Vec<WriteTarget>,
+    ) -> bool {
         match lhs {
-            Expr::Paren(inner) => push(inner, kind, fresh, out),
+            Expr::Paren(inner) => push(inner, kind, (fresh, copies), out),
             // `del(.arr[0], .arr[2])` removes both, and each branch is a
             // path of its own — a generator is only valid on a `del`'s
             // left, never an assignment's, so this arm is gated on `Del`
             // rather than accepting `.a, .b = 1`.
             Expr::Comma(branches) if kind == WriteKind::Del => {
-                branches.iter().all(|b| push(b, kind, fresh, out))
+                branches.iter().all(|b| push(b, kind, (fresh, copies), out))
             }
             _ => {
                 let mut path = Vec::new();
                 if !static_path_steps(lhs, &mut path) {
                     return false;
                 }
-                out.push(WriteTarget { path, kind, fresh });
+                out.push(WriteTarget {
+                    path,
+                    kind,
+                    fresh,
+                    copies,
+                });
                 true
             }
         }
@@ -2271,16 +2284,28 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
 
     fn walk<'e>(expr: &'e Expr, scope: &mut DefScope<'e>, out: &mut Vec<WriteTarget>) -> bool {
         match expr {
-            // Only a plain `=` can be proved to write a constructed value:
-            // `|=`'s filter and a compound assign's operator both read the
-            // node already there, so their result is never wholly fresh.
+            // Only `=` and `|=` can be proved to write a constructed value, and only with a
+            // closed-literal right side: a compound assign's operator reads the node already
+            // there, so its result is never wholly fresh. `|=` with a closed literal reads
+            // nothing from the node (#4113), and yq treats `.a |= {"k": 3}` and
+            // `.a = {"k": 3}` alike (verified against v4.53.3 for object, array and scalar
+            // literals). `fresh` does not change how a kind change treats an alias mark, which
+            // looks only at whether the position is a write target. An `=` whose right side is
+            // not closed is a `copies` write: the node it copies brings its presentation.
             Expr::Assign { path, value } => {
-                push(path, WriteKind::Set, is_closed_literal(value), out)
+                let closed = is_closed_literal(value);
+                push(path, WriteKind::Set, (closed, !closed), out)
             }
-            Expr::Update { path, .. }
-            | Expr::CompoundAssign { path, .. }
-            | Expr::AlternativeAssign { path, .. } => push(path, WriteKind::Set, false, out),
-            Expr::Builtin(Builtin::Del(inner)) => push(inner, WriteKind::Del, false, out),
+            Expr::Update { path, filter } => push(
+                path,
+                WriteKind::Set,
+                (is_closed_literal(filter), false),
+                out,
+            ),
+            Expr::CompoundAssign { path, .. } | Expr::AlternativeAssign { path, .. } => {
+                push(path, WriteKind::Set, (false, false), out)
+            }
+            Expr::Builtin(Builtin::Del(inner)) => push(inner, WriteKind::Del, (false, false), out),
             // #2855: `sort_keys(f)` is a write (reorders `f`'s own mapping
             // entries in place) exactly like `|=`'s -- same `WriteKind::Set`,
             // never fresh, since it only reorders what's already there. A
@@ -2288,7 +2313,9 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
             // a write; it always raises at evaluation, so it's treated the
             // same as `Expr::Identity` above -- no target, but not a reason
             // to give up on the whole expression's write analysis either.
-            Expr::Builtin(Builtin::SortKeys(Some(path))) => push(path, WriteKind::Set, false, out),
+            Expr::Builtin(Builtin::SortKeys(Some(path))) => {
+                push(path, WriteKind::Set, (false, false), out)
+            }
             Expr::Builtin(Builtin::SortKeys(None)) => true,
             // `setpath(["a", 0]; v)` / `delpaths([["a", 0]])` name their
             // paths as array literals (#1351 made both alias-sensitive, so
@@ -2304,6 +2331,7 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
                     path: steps,
                     kind: WriteKind::Set,
                     fresh: is_closed_literal(value),
+                    copies: !is_closed_literal(value),
                 });
                 true
             }
@@ -2328,6 +2356,7 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
                     path: steps,
                     kind: WriteKind::Del,
                     fresh: false,
+                    copies: false,
                 });
                 true
             }
@@ -2417,7 +2446,7 @@ fn collect_write_targets(expr: &Expr) -> Option<Vec<WriteTarget>> {
 /// A write path, relative to the node currently being reconciled, paired
 /// with what the write did there and whether its value was constructed
 /// outright (#870).
-type RelTarget<'t> = (&'t [PathStep], WriteKind, bool);
+type RelTarget<'t> = (&'t [PathStep], WriteKind, bool, bool);
 
 /// Turn a jq index (possibly negative) into a slot of a `len`-element
 /// container, matching `numeric_key_to_index`'s from-the-end convention.
@@ -2430,13 +2459,37 @@ fn resolve_index(idx: i64, len: usize) -> Option<usize> {
     (resolved < len).then_some(resolved)
 }
 
+/// Whether a `del()` in this filter removed object key `key` of the node being reconciled
+/// (#4113): a key that is also in the result was written again afterwards.
+fn key_deleted_here(targets: &[RelTarget<'_>], key: &str) -> bool {
+    targets.iter().any(|(steps, kind, ..)| {
+        *kind == WriteKind::Del && matches!(steps, [PathStep::Key(k)] if k == key)
+    })
+}
+
+/// Whether one of `targets` (already narrowed to a child) writes a closed literal at the child
+/// itself.
+fn has_fresh_set_here(targets: &[RelTarget<'_>]) -> bool {
+    targets
+        .iter()
+        .any(|(steps, kind, fresh, _)| steps.is_empty() && *kind == WriteKind::Set && *fresh)
+}
+
+/// Whether one of `targets` (already narrowed to a child) writes another node of the document at
+/// the child itself (`= .j`, `= $x`), which brings that node's presentation along in yq (#4113).
+fn has_copy_here(targets: &[RelTarget<'_>]) -> bool {
+    targets
+        .iter()
+        .any(|(steps, kind, _, copies)| steps.is_empty() && *kind == WriteKind::Set && *copies)
+}
+
 /// Narrow `targets` to those descending through object key `key`, dropping
 /// that step (#870).
 fn descend_key<'t>(targets: &[RelTarget<'t>], key: &str) -> Vec<RelTarget<'t>> {
     targets
         .iter()
-        .filter_map(|(steps, kind, fresh)| match steps.split_first() {
-            Some((PathStep::Key(k), rest)) if k == key => Some((rest, *kind, *fresh)),
+        .filter_map(|(steps, kind, fresh, copies)| match steps.split_first() {
+            Some((PathStep::Key(k), rest)) if k == key => Some((rest, *kind, *fresh, *copies)),
             _ => None,
         })
         .collect()
@@ -2447,9 +2500,9 @@ fn descend_key<'t>(targets: &[RelTarget<'t>], key: &str) -> Vec<RelTarget<'t>> {
 fn descend_index<'t>(targets: &[RelTarget<'t>], index: usize, len: usize) -> Vec<RelTarget<'t>> {
     targets
         .iter()
-        .filter_map(|(steps, kind, fresh)| match steps.split_first() {
+        .filter_map(|(steps, kind, fresh, copies)| match steps.split_first() {
             Some((PathStep::Index(n), rest)) if resolve_index(*n, len) == Some(index) => {
-                Some((rest, *kind, *fresh))
+                Some((rest, *kind, *fresh, *copies))
             }
             _ => None,
         })
@@ -2473,9 +2526,9 @@ fn array_sources(
 ) -> Vec<Option<usize>> {
     let wholesale = targets
         .iter()
-        .find(|(steps, kind, _)| steps.is_empty() && *kind == WriteKind::Set);
+        .find(|(steps, kind, ..)| steps.is_empty() && *kind == WriteKind::Set);
 
-    if let Some((_, _, fresh)) = wholesale {
+    if let Some((_, _, fresh, _)) = wholesale {
         // A closed literal built every element here, so none of them can
         // have inherited anything: `.arr = ["p","q"]` prints two bare
         // scalars in real yq even where the old slots were quoted and
@@ -2527,7 +2580,7 @@ fn array_sources(
     // of index 1's. The removed set is known exactly, so the remap is too.
     let mut removed: Vec<usize> = targets
         .iter()
-        .filter_map(|(steps, kind, _)| match (steps, kind) {
+        .filter_map(|(steps, kind, ..)| match (steps, kind) {
             ([PathStep::Index(n)], WriteKind::Del) => resolve_index(*n, p_items.len()),
             _ => None,
         })
@@ -2720,7 +2773,7 @@ fn reconcile_presentation(
 ) -> CommentTree {
     let relative: Vec<RelTarget<'_>> = targets
         .iter()
-        .map(|t| (t.path.as_slice(), t.kind, t.fresh))
+        .map(|t| (t.path.as_slice(), t.kind, t.fresh, t.copies))
         .collect();
     reconcile_presentation_at_depth(pristine_value, pristine_tree, result_value, &relative, 0)
 }
@@ -2745,9 +2798,7 @@ fn reconcile_presentation_at_depth(
             // A closed literal built every field here, so none of them can
             // have inherited anything: real yq prints `.o = {"a": "1"}` with
             // no comment on `a`, even where the value is unchanged.
-            let fresh_write = targets
-                .iter()
-                .any(|(steps, kind, fresh)| steps.is_empty() && *kind == WriteKind::Set && *fresh);
+            let fresh_write = has_fresh_set_here(targets);
             for (k, r_v) in r_fields {
                 // Object children are otherwise matched by key: a key names
                 // the same node before and after a write however the map is
@@ -2756,7 +2807,15 @@ fn reconcile_presentation_at_depth(
                 // field's own comment with its own key). See this function's
                 // doc comment for the object-side gap this leaves open.
                 let child_targets = descend_key(targets, k);
-                let child = match p_fields.get(k).filter(|_| !fresh_write) {
+                // #4113: a key this filter removed and wrote again is a new node, not the old
+                // one: it keeps none of the old key's properties (below) and nothing beneath
+                // it, unless the write copied another node onto it (`= .j`, `= $x`), whose own
+                // presentation then comes along.
+                let recreated = key_deleted_here(targets, k);
+                let child = match p_fields
+                    .get(k)
+                    .filter(|_| !fresh_write && (!recreated || has_copy_here(&child_targets)))
+                {
                     Some(p_v) => reconcile_presentation_at_depth(
                         p_v,
                         pristine_tree.field(k),
@@ -2786,7 +2845,7 @@ fn reconcile_presentation_at_depth(
                 if let CommentTree::Object(_, _, pristine_keys) = pristine_tree {
                     let carried = pristine_keys
                         .get(k)
-                        .filter(|_| !fresh_write)
+                        .filter(|_| !fresh_write && !recreated)
                         .and_then(|meta| meta.carried_over(matches!(r_v, OwnedValue::Null), true));
                     if let Some(meta) = carried {
                         key_comments.insert(k.clone(), meta);
@@ -2905,9 +2964,7 @@ fn written_scalar_leaf(
         !same_scalar(pristine_value, result_value),
         // A closed literal written right here (`.a = true`) brings its own text, even
         // when the value is the one the node already had (#3028).
-        targets
-            .iter()
-            .any(|(steps, kind, fresh)| steps.is_empty() && *kind == WriteKind::Set && *fresh),
+        has_fresh_set_here(targets),
         pristine_value,
         result_value,
     ))
@@ -12140,7 +12197,7 @@ mod tests {
         let pristine = [OwnedValue::Int(1), OwnedValue::Int(2), OwnedValue::Int(3)];
         let result = [OwnedValue::Int(2), OwnedValue::Int(3), OwnedValue::Int(9)];
         let steps = [PathStep::Index(0)];
-        let targets = [(&steps[..], WriteKind::Del, false)];
+        let targets = [(&steps[..], WriteKind::Del, false, false)];
         assert_eq!(
             array_sources(&pristine, &result, &targets),
             vec![Some(0), Some(1), Some(2)]
@@ -12272,8 +12329,8 @@ mod tests {
         );
     }
 
-    /// Only a plain `=` can carry a provably constructed value. `|=` and the
-    /// compound assigns always read the node already there.
+    /// Only `=` and `|=` with a closed-literal right side can carry a provably constructed
+    /// value. The compound assigns always read the node already there.
     #[test]
     fn collect_write_targets_marks_closed_literal_writes_fresh_870() {
         let lit = || Expr::Literal(succinctly::jq::Literal::Int(1));
@@ -12294,10 +12351,19 @@ mod tests {
             }),
             Some(false)
         );
+        // `|=` is the same write as `=` when its filter is a closed literal (#4113), and reads
+        // the node already there otherwise.
         assert_eq!(
             fresh_of(&Expr::Update {
                 path: Box::new(Expr::Field("a".into())),
                 filter: Box::new(Expr::Array(Box::new(lit()))),
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            fresh_of(&Expr::Update {
+                path: Box::new(Expr::Field("a".into())),
+                filter: Box::new(Expr::Field("b".into())),
             }),
             Some(false)
         );
