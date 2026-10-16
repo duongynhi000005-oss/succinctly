@@ -144307,7 +144307,8 @@ fn test_two_alternative_chain_in_a_carrying_foreach_in_a_moved_fold_body_4694() 
 /// the destructure whose own body is, does not skip that step, so the fold is refused as it is for a body
 /// that emits (`xpat-arr-empty`, `bind-*-xpat-empty` of `scripts/jq-fold-body-register-grid-sweep.py`);
 /// these were answered (`[]`, `del` wrote). A `try ... catch` that swallows the raise is still answered (its
-/// row prints nothing and exits 0). The exit code is jq's on every row; the message of the refusal is the
+/// row prints nothing and exits 0), and so is an earlier pipe stage that emits nothing before the destructure
+/// is reached (the last row). The exit code is jq's on every row; the message of the refusal is the
 /// resolver's guess ("with result"), so those rows pin the shared prefix. Every row is a live jq 1.7.1
 /// capture.
 #[test]
@@ -144404,6 +144405,13 @@ fn test_foreign_marker_destructure_with_an_empty_body_in_a_fold_body_raises_4604
             "",
             "Invalid path expression near attempt to access element 0 of [true]",
             5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ((. as {a:$q} | empty) | $x as [$a] | .) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
         ),
     ])
 }

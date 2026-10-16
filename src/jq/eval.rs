@@ -50935,6 +50935,12 @@ fn collapse_marker_pipes(
         Expr::Pipe(stages) if stages.len() > 1 => {
             let headed = matches!(unwrap_paren(&stages[0]), Expr::TrackedVar(m)
                 if markers.contains(&Rc::as_ptr(m)));
+            // `map_subexprs` keeps a pipe's stages one for one; were it ever not to, nothing is read as decided.
+            let decided = if decided.len() == stages.len() {
+                decided
+            } else {
+                Vec::new()
+            };
             let drops = |at: usize, e: &Expr| {
                 selects
                     && (decided.get(at).copied().unwrap_or(false)
@@ -51308,6 +51314,24 @@ fn empty_bind_bodies_as_identity(source: &Expr) -> Expr {
             patterns: patterns.clone(),
             body: Box::new(Expr::Identity),
         },
+        // #4604: only the last stage of a pipe: a bind in an earlier stage that emits nothing keeps the
+        // stages after it from running (`(. as {a:$q} | empty) | $x as [$a] | .` raises nothing in jq).
+        Expr::Pipe(stages) => {
+            let last = stages.len().saturating_sub(1);
+            Expr::pipe(
+                stages
+                    .iter()
+                    .enumerate()
+                    .map(|(at, stage)| {
+                        if at == last {
+                            empty_bind_bodies_as_identity(stage)
+                        } else {
+                            stage.clone()
+                        }
+                    })
+                    .collect(),
+            )
+        }
         other => map_subexprs(other, &mut |child| empty_bind_bodies_as_identity(child)),
     }
 }
@@ -51330,7 +51354,8 @@ fn foreign_in_off_body<S: EvalSemantics>(ambient: &FoldSourceAmbient<'_>) -> boo
 /// that backtracks it. Empty in the body of a `reduce` whose source moved the register, where the
 /// register is on an element and the ambient position is not its own, and unless the source holds
 /// a destructuring bind. Each is paired with whether it holds a truthy value, which a `select`
-/// on it needs ([`collapse_marker_pipes`]).
+/// on it needs ([`collapse_marker_pipes`]). `passing` are the `select` conditions decided by the
+/// markers' values ([`passing_marker_selects`]), which skip nothing ([`source_always_reaches_destructure`]).
 fn foreign_register_markers<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
@@ -54011,10 +54036,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // passes it on ([`collapse_marker_pipes`]); a falsy one passes nothing and the destructure never
     // runs. A `foreach` source in a moved body is refused with or without a `try`: the caught raise
     // leaves its source empty, the enclosing `reduce` UPDATE emits nothing and its state is `null`.
-    let select_passes = refusal_eligible
-        && !matches!(ambient.value, OwnedValue::Bool(false))
-        && has_select_stage(source)
-        && (foreach_source || try_free());
+    let select_stage_passes = || {
+        !matches!(ambient.value, OwnedValue::Bool(false))
+            && has_select_stage(source)
+            && (foreach_source || try_free())
+    };
+    let select_passes = refusal_eligible && select_stage_passes();
     let unplaced_markers = if refusal_eligible {
         unplaced_register_markers::<S>(source, ambient)
     } else {
@@ -54143,9 +54170,8 @@ fn drive_fold_source_with<S: EvalSemantics>(
     let foreign_select_passes = select_passes
         || (S::TAG == EvalTag::Jq
             && ambient.trackable
-            && !matches!(ambient.value, OwnedValue::Null | OwnedValue::Bool(false))
-            && has_select_stage(source)
-            && (foreach_source || try_free()));
+            && !matches!(ambient.value, OwnedValue::Null)
+            && select_stage_passes());
     let foreign_verdict = !foreign_markers.is_empty() && {
         let handlers_dropped;
         let foreign_source = if off_body {
