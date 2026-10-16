@@ -3501,8 +3501,47 @@ fn distinct_key_cursors_checked<V: DocumentValue>(
     collapse: bool,
 ) -> Result<Vec<V::Cursor>, EvalError> {
     let mut out = Vec::new();
-    walk_distinct_keys_checked::<V>(fields, collapse, |cursor| out.push(cursor))?;
+    walk_distinct_keys_checked::<V>(fields, collapse, |_, cursor| out.push(cursor))?;
     Ok(out)
+}
+
+/// What `keys_unsorted[]` hands on for a whole object (#1629): the key cursors, or -- when any key's
+/// bytes were substituted by the document's reader (#4741) -- every key as an owned value, so a
+/// consumer that decodes the elements as *values* does not refuse the substituted one.
+fn distinct_keys_checked_result<V: DocumentValue, S: EvalSemantics>(
+    fields: &V::Fields,
+    collapse: bool,
+) -> GenericResult<V> {
+    let mut cursors = Vec::new();
+    let mut substituted: Vec<Option<String>> = Vec::new();
+    let mut any = false;
+    let walked = walk_distinct_keys_checked::<V>(fields, collapse, |key, cursor| {
+        let text = key.substituted_key_text();
+        any |= text.is_some();
+        substituted.push(text);
+        cursors.push(cursor);
+    });
+    if let Err(err) = walked {
+        return GenericResult::Error(err);
+    }
+    if cursors.is_empty() {
+        return GenericResult::None;
+    }
+    if !any {
+        return GenericResult::ManyCursor(cursors);
+    }
+    let owned: Result<Vec<OwnedValue>, EvalError> = cursors
+        .iter()
+        .zip(substituted)
+        .map(|(cursor, text)| match text {
+            Some(text) => Ok(OwnedValue::String(text.into())),
+            None => to_owned_cursor::<S, _>(cursor),
+        })
+        .collect();
+    match owned {
+        Ok(values) => GenericResult::ManyOwned(values),
+        Err(err) => GenericResult::Error(err),
+    }
 }
 
 /// [`distinct_key_cursors_checked`]'s check-only sibling, for a caller that
@@ -3518,7 +3557,22 @@ fn keys_are_well_formed<V: DocumentValue>(
     fields: &V::Fields,
     collapse: bool,
 ) -> Result<(), EvalError> {
-    walk_distinct_keys_checked::<V>(fields, collapse, |_cursor| {})
+    walk_distinct_keys_checked::<V>(fields, collapse, |_, _| {})
+}
+
+/// One `keys_unsorted` element handed on as a result: the key's cursor, or its owned text when the
+/// reader substituted the key's bytes (#4741).
+fn key_element<V: DocumentValue>(key: &V, cursor: V::Cursor) -> GenericResult<V> {
+    match key.substituted_key_text() {
+        Some(text) => GenericResult::Owned(OwnedValue::String(text.into())),
+        None => GenericResult::OneCursor(cursor),
+    }
+}
+
+/// [`key_element`] for a cursor whose key value is not at hand: it is read back from the cursor.
+fn key_element_of_cursor<V: DocumentValue>(cursor: V::Cursor) -> GenericResult<V> {
+    let key = cursor.value();
+    key_element::<V>(&key, cursor)
 }
 
 /// Shared walk behind [`distinct_key_cursors_checked`] and
@@ -3537,14 +3591,14 @@ fn keys_are_well_formed<V: DocumentValue>(
 fn walk_distinct_keys_checked<V: DocumentValue>(
     fields: &V::Fields,
     collapse: bool,
-    mut on_cursor: impl FnMut(V::Cursor),
+    mut on_cursor: impl FnMut(&V, V::Cursor),
 ) -> Result<(), EvalError> {
     let mut cursors = DistinctKeyCursors::new(fields, collapse);
     for (key, cursor) in cursors.by_ref() {
         if key_is_malformed(&key) {
             return Err(fields.malformed_member_error());
         }
-        on_cursor(cursor);
+        on_cursor(&key, cursor);
     }
     if cursors.is_malformed() {
         return Err(fields.malformed_member_error());
@@ -3754,7 +3808,11 @@ impl<V: DocumentValue> LazySource<V> {
                     if key_is_malformed(&key) {
                         return Err(keys.malformed_member_error());
                     }
-                    Some(LazyElem::Cursor(cursor))
+                    match key.substituted_key_text() {
+                        // #4741: a JSON key whose bytes were substituted reads as that text.
+                        Some(text) => Some(LazyElem::Owned(OwnedValue::String(text.into()))),
+                        None => Some(LazyElem::Cursor(cursor)),
+                    }
                 }
                 None if keys.is_malformed() => return Err(keys.malformed_member_error()),
                 None => None,
@@ -10649,11 +10707,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
         // whole object to collect every cursor, so the #1194/#1677 checks
         // (`distinct_key_cursors_checked`) ride along for free -- same
         // reasoning as `Builtin::Length`'s arm above.
-        Expr::Iterate if !sorted => match distinct_key_cursors_checked::<V>(&fields, collapse) {
-            Ok(cursors) if cursors.is_empty() => GenericResult::None,
-            Ok(cursors) => GenericResult::ManyCursor(cursors),
-            Err(err) => GenericResult::Error(err),
-        },
+        Expr::Iterate if !sorted => distinct_keys_checked_result::<V, S>(&fields, collapse),
         // `.[0]` is `first` by another spelling, so it takes
         // the `Builtin::First` arm's reasoning below rather
         // than the general positional one: collapsing keeps a
@@ -10665,7 +10719,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
         // (#1599 -- #1514 moved the probe off the guard, but
         // left this spelling paying it).
         Expr::Index { idx, .. } if !sorted && *idx == 0 => match fields.uncons_key() {
-            Some((_, key_cursor, _)) => GenericResult::OneCursor(key_cursor),
+            Some((key, key_cursor, _)) => key_element::<V>(&key, key_cursor),
             None => GenericResult::Owned(OwnedValue::Null),
         },
         // #1629: a negative index always has to walk the whole object
@@ -10697,7 +10751,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
                     }
                     let target = usize::try_from(resolved).ok();
                     match target.and_then(|t| cursors.into_iter().nth(t)) {
-                        Some(cursor) => GenericResult::OneCursor(cursor),
+                        Some(cursor) => key_element_of_cursor::<V>(cursor),
                         None => GenericResult::Owned(OwnedValue::Null),
                     }
                 }
@@ -10717,7 +10771,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
             let collapsed = collapsed_fields_if(&fields, collapse);
             if let Some(eff) = collapsed {
                 match eff.into_iter().nth(*idx as usize) {
-                    Some(field) => GenericResult::OneCursor(field.key_cursor),
+                    Some(field) => key_element::<V>(&field.key, field.key_cursor),
                     None => GenericResult::Owned(OwnedValue::Null),
                 }
             } else {
@@ -10727,14 +10781,14 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
                 let mut i = 0usize;
                 while let Some((field, rest)) = current.uncons() {
                     if i == target {
-                        found = Some(field.key_cursor);
+                        found = Some((field.key, field.key_cursor));
                         break;
                     }
                     current = rest;
                     i += 1;
                 }
                 match found {
-                    Some(c) => GenericResult::OneCursor(c),
+                    Some((key, c)) => key_element::<V>(&key, c),
                     None => GenericResult::Owned(OwnedValue::Null),
                 }
             }
@@ -10749,7 +10803,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
         // strictly more than the answer itself. See
         // `docs/compliance/jq/limitations.md`.
         Expr::Builtin(Builtin::First) if !sorted => match fields.uncons() {
-            Some((field, _)) => GenericResult::OneCursor(field.key_cursor),
+            Some((field, _)) => key_element::<V>(&field.key, field.key_cursor),
             None => GenericResult::Owned(OwnedValue::Null),
         },
         // The other positional arm: the last field *is*
@@ -11472,6 +11526,9 @@ fn each_lazy_keys_iterate_sink<S: EvalSemantics, V: DocumentValue>(
             cursors.by_ref().map(|(value, cursor)| {
                 if key_is_malformed(&value) {
                     Err(Control::Error(fields.malformed_member_error()))
+                } else if let Some(text) = value.substituted_key_text() {
+                    // #4741: a JSON key whose bytes were substituted reads as that text.
+                    Ok(GenericItem::Owned(OwnedValue::String(text.into())))
                 } else {
                     Ok(GenericItem::OneCursorValue(cursor, value))
                 }

@@ -39716,6 +39716,41 @@ fn test_pjson_invalid_utf8_key_is_substituted_for_yaml_output_4536() -> Result<(
     Ok(())
 }
 
+/// #4741: the elements of `keys` -- key cursors, not values -- read as the substituted text when
+/// they are read back as values too (`.[0]`, `[keys[]]`, `map`, `join`, `sort`, `length`), where they
+/// raised the value decode error. Each row was captured from yq v4.53.3.
+#[test]
+fn test_pjson_invalid_utf8_keys_read_back_as_values_4741() -> Result<()> {
+    let input = b"{\"x\xe4y\":1,\"b\":2}";
+    for (filter, expected) in [
+        ("keys | .[0]", "x\u{fffd}y\n"),
+        ("keys | .[1]", "b\n"),
+        ("keys | .[-1]", "b\n"),
+        ("keys | .[-2]", "x\u{fffd}y\n"),
+        ("[keys[]]", "- x\u{fffd}y\n- b\n"),
+        ("keys | .[]", "x\u{fffd}y\nb\n"),
+        ("keys | map(.)", "- x\u{fffd}y\n- b\n"),
+        ("keys | join(\",\")", "x\u{fffd}y,b\n"),
+        ("keys | sort", "- b\n- x\u{fffd}y\n"),
+        ("keys | reverse", "- b\n- x\u{fffd}y\n"),
+        ("[keys[] | length]", "- 5\n- 1\n"),
+        ("keys | .[0] | length", "5\n"),
+        ("[keys[] | select(. == \"b\")]", "- b\n"),
+        ("keys | length", "2\n"),
+        ("to_entries | map(.key)", "- x\u{fffd}y\n- b\n"),
+    ] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(filter, input, &["-p", "json"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "[{filter}]");
+        assert_eq!(out, expected, "[{filter}]");
+    }
+    // A bad *value* is still refused when it is printed.
+    let (_, err, code) =
+        run_yq_stdin_bytes_with_stderr("[.[]]", b"{\"x\xe4y\":\"v\xe4\"}", &["-p", "json"])?;
+    assert_eq!(code, 1);
+    assert!(err.contains("invalid UTF-8"), "{err:?}");
+    Ok(())
+}
+
 /// #4536: the substituted key is the key's name for everything that addresses it -- lookup, `has`,
 /// `del`, a write (DOM route, `-P`), `pick` -- in a nested mapping and in a sequence element, and two
 /// keys that differ only in their bad bytes both print and both count, as in yq. Each row was
