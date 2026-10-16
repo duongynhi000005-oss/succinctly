@@ -2483,9 +2483,11 @@ is the revert that established what the other one costs.
    `null` (`foreach (null as {b:$b} | .) as $y (.a; .; .)` on `{"a":null}`: `["a"]` for jq's `["a","b"]`). The resolver does
    not place any step from a `null` register below the root (`foreach (null | .b) as $y (.a; .; .)` is refused on `main` too),
    so routing that source would refuse what the by-value drive answers (`reduce (null as {b:$b} | .) as $y (.a; .)` is `["a"]`);
-   it is the same gap for every source shape and stays open on [#4648](https://github.com/rust-works/succinctly/issues/4648).
+   it is the same gap for every source shape and stays open on [#4707](https://github.com/rust-works/succinctly/issues/4707), with a
+   literal `null` destructure ending on a fresh value read by an EXTRACT `$y` three folds deep (`[]` for jq's `["b"]`).
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family (`--deep` adds the three-fold nests of
-   [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build). Outside a fold body, a bound expression
+   [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build; its wrong accepts on `main` are
+   [#4708](https://github.com/rust-works/succinctly/issues/4708)). Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
