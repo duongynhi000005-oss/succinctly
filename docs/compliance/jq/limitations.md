@@ -721,8 +721,9 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (foreach f((.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)` and the same chain as the source of a nested
   `foreach` are jq's `[]` (both refused "with result [[1],[1]]"). The call is read as
   `update_navigates_within` reads one, from the same bound-body cache, under the spine's call budget
-  (`SPINE_CALL_BUDGET`), which bounds how often a recursive body is read (past it the source is refused, as before). Not read: the `reduce` twin
-  of either, and the same sources inside another fold's body (what #4485's paragraph below leaves). A
+  (`SPINE_CALL_BUDGET`), which bounds how often a recursive body is read (past it the source is refused, as before). The same sources as the UPDATE of another `foreach` are read too (below).
+  Not read: the `reduce` twin of either, and a source inside a `reduce`, or a `foreach` UPDATE that is not
+  the `foreach` itself. A
   `null` source on a `null` document is unchanged: the first alternative *succeeds* there and
   jq's path is `["a"]`, which was already a `DIFF` on `main`. Pinned by
   `test_foreach_source_alt_chain_on_untracked_entry_states_the_register_4489`. Over the 91 `foreach`
@@ -2756,11 +2757,30 @@ is the revert that established what the other one costs.
    contexts (`--stage-only --seed 4486`) was swept on its own: MATCH 56,864 -> 56,865, ACCEPT_WRONG (79) and REFUSE_WRONG (3,018) unchanged, 0
    regressions (DIFF 66 -> 65); 380 `def`-with-literal-parameter programs in jq value mode, jq path mode and `yq` mode print byte-identical output on `main` and the
    candidate. `scripts/jq-bind-origin-fuzz.py` (6,000
-   programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **What it leaves**: the `foreach`-inside-another-fold-body
-   rows of #4615 (`foreach (1,2) as $j (.; (foreach CHAIN as $k (.; .; .)); .)` on an untracked entry, still refused where jq answers):
-   lifting #4489's `fold_body::depth() == 0` gate alone does not place them, the refusal then comes from the outer
-   `foreach`'s own emission, whose UPDATE is the nested fold (`step_cannot_move` is false, so the outer emission cannot state the
-   register), and stating it there is the `try`-in-UPDATE row #4609's whole-grid sample found. Filed separately.
+   programs, `--fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only. **A `foreach` inside another `foreach`'s UPDATE** (#4615's last shape:
+   `foreach (1,2) as $j (.; (foreach CHAIN as $k (.; .; .)); .)` on an untracked entry, jq's `[] []`, refused before) is
+   answered now. Two things refused it. The #4489 gate was held to `fold_body::depth() == 0` (the `try`-in-UPDATE row of
+   #4609's whole-grid sample), and the *outer* `foreach`'s emission could not state the register at all: its UPDATE is a
+   fold, so `step_cannot_move` is false, and the inner fold has no register of its own to state (its frame holds none).
+   The enclosing `foreach` whose UPDATE is such a `foreach` (`update_states_it`: a source that moves the register only by a
+   bind, with a source and EXTRACT that cannot move it) marks that body (`fold_body::foreach_body_stating`), and only a
+   `foreach` resolved in a marked body lifts the depth gate; it emits `BranchRegister::AtEntry` where it has no register
+   of its own (or the register, where its frame holds one) on a step that stayed at the entry, and the enclosing
+   `foreach` states the register only on an emission that arrives with that statement, a loss otherwise. That is what
+   keeps the `try`-in-UPDATE hazard out: a first version lifted the gate for every nested `foreach`, and the whole-grid
+   sample found the same operand in a `foreach` EXTRACT under a `try` answering `["a"]` where jq raises
+   (`path(foreach .a? as $k (.; .; try (foreach ((.|.) as {a:$a} ?// $a | $a) as $k (.; $k; .))))` on `{"a":true}`).
+   Pinned by
+   `test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_4615`. Over the 170 `foreach` operands with a
+   `?//` source (`--stage-only --sample 40000 --seed 4615`, jq 1.7.1, candidate vs a `main` build): MATCH 36,171 -> 36,305,
+   REFUSE_WRONG 3,641 -> 3,507, ACCEPT_WRONG (93) and DIFF (122) unchanged, 0 regressions; a 60,027-row whole-grid sample
+   (`--stage-only --sample 60000 --seed 77`): MATCH 57,502 -> 57,521, REFUSE_WRONG 2,352 -> 2,333, ACCEPT_WRONG (41) and DIFF (130)
+   unchanged, 0 regressions.
+   Still refused: the same source inside a `reduce` in a `foreach` UPDATE (`foreach (1,2) as $j (.; (reduce 1 as $m (.; CHAIN)); .)`),
+   and a chain beneath `first`/`limit`/`nth` there. The sweep's first version read those too and a row came back as a wrong
+   answer instead of a refusal (`foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on
+   `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the stop emitting once more), so the nested read
+   (`source_moves_register_only_by_binds_uncounted`) leaves them out.
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node
