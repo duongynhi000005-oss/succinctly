@@ -67309,6 +67309,115 @@ fn test_kept_value_answers_style_anchor_and_comments_4711() -> Result<()> {
     Ok(())
 }
 
+/// #4711, the shapes the table above cannot spell: a write that adds no member leaves an empty flow
+/// container flow (`.[] = 1` iterates nothing), the emptiness that matters is the container the write
+/// *ran over* (`del(.[0]) | .[0] = 5` fills a container the first stage emptied), `*` drops the anchor
+/// of a mapping merge but not of scalars or of `*=`, head/foot comments of a kept node, and the
+/// neighbouring routes (`key`, `select`, a fan-out) that must go on answering as before. `succinctly
+/// jq` is untouched. Every yq row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_kept_value_metadata_neighbours_4711() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        ("x: 1\n\na: []  # e\n", ".a | .[] = 1 | style", "\"flow\"\n"),
+        (
+            "x: 1\n\na: []  # e\n",
+            ".a | .[] |= . + 1 | style",
+            "\"flow\"\n",
+        ),
+        (
+            "x: 1\n\na: [1]  # e\n",
+            ".a | del(.[0]) | .[0] = 5 | style",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n\na: [1]  # e\n",
+            ".a | del(.[0]) | style",
+            "\"flow\"\n",
+        ),
+        (
+            "x: 1\n\na: []  # e\n",
+            ".a | . + [1] | del(.[0]) | style",
+            "\"\"\n",
+        ),
+        ("x: 1\n\na: &n 5\nz: *n\n", ".a | . * 2 | anchor", "\"n\"\n"),
+        (
+            "x: 1\n\na: &n {k: 1}\nz: *n\n",
+            ".a | .k *= 2 | anchor",
+            "\"n\"\n",
+        ),
+        (
+            "x: 1\n\na: &n {k: 1}\nz: *n\n",
+            ".a | . * {} | anchor",
+            "\"\"\n",
+        ),
+        ("x: 1\n\na: {b: 1}  # c\n", ".a | key | anchor", "\"\"\n"),
+        (
+            "x: 1\n\na: [3]  # c\n",
+            ".a | select(.) | style",
+            "\"flow\"\n",
+        ),
+        (
+            "u:\n  - {b: 1, c: 2}  # c\n",
+            ".u[] | del(.b) | style",
+            "\"flow\"\n",
+        ),
+        (
+            "u:\n  - {b: 1, c: 2}  # c\n",
+            ".u[] | del(.b) | line_comment",
+            "\"c\"\n",
+        ),
+        (
+            "a:\n  # h\n  - {y: 1, x: 1}\n  # f\n",
+            ".a[0] | del(.y) | head_comment",
+            "\"h\"\n",
+        ),
+        (
+            "a:\n  # h\n  - {y: 1, x: 1}\n  # f\n",
+            ".a[0] | del(.y) | foot_comment",
+            "\"f\"\n",
+        ),
+        (
+            "a:\n  # h\n  - 5\n  # f\n",
+            ".a[0] | . + 1 | head_comment",
+            "\"h\"\n",
+        ),
+        (
+            "a:\n  # h\n  - 5\n  # f\n",
+            ".a[0] | tostring | head_comment",
+            "\"\"\n",
+        ),
+        (
+            "x: 1\n\na: &n {k: 1}\nz: *n\n",
+            ".a | . *= {} | anchor",
+            "\"\"\n",
+        ),
+        ("x: 1\n\na: {}\n", ".a | . += {} | style", "\"\"\n"),
+        ("x: 1\n\na: []\n", ".a | .[] += 1 | style", "\"flow\"\n"),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    // `succinctly jq` has no node to hand on: the getters keep answering their defaults.
+    for filter in [
+        ".a | map(.) | style",
+        ".a | del(.[0]) | line_comment",
+        ".a | sort | anchor",
+    ] {
+        let (stdout, code) = run_jq_stdin(filter, "{\"a\":[1]}", &["-c"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, "\"\"\n"),
+            "`{filter}` in jq mode"
+        );
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and

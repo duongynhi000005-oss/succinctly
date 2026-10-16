@@ -12468,7 +12468,7 @@ fn eval_single_pipe<S: EvalSemantics, V: DocumentValue>(
     //
     // #4696: a top-level `line`/`column` after a stage that keeps the node's position is the other
     // reader the route answers (a kept value's own node), so it admits the pipe too.
-    let reads_position = !needs_path && reads_node_metadata(exprs) != 0;
+    let reads_position = !needs_path && reads_any_node_metadata(exprs);
     debug_assert!(
         needs_path || reads_position || !owned_identity_pipe_applies(exprs),
         "owned_identity_pipe_applies is true for a pipe with no path-context stage (#3822)"
@@ -33624,6 +33624,43 @@ struct OwnedIdentity<V: DocumentValue> {
     meta: u8,
 }
 
+/// What a stage's input was, as far as yq's style and anchor resets care (#4711).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeShape {
+    EmptySequence,
+    EmptyMapping,
+    Mapping,
+    Other,
+}
+
+impl NodeShape {
+    fn of_owned(value: &OwnedValue) -> Self {
+        match (value.as_array(), value.as_object()) {
+            (Some(items), _) if items.is_empty() => Self::EmptySequence,
+            (_, Some(fields)) if fields.is_empty() => Self::EmptyMapping,
+            (_, Some(_)) => Self::Mapping,
+            _ => Self::Other,
+        }
+    }
+
+    fn of_document<D: DocumentValue>(value: &D) -> Self {
+        match (value.as_array(), value.as_object()) {
+            (Some(items), _) if items.is_empty() => Self::EmptySequence,
+            (_, Some(fields)) if fields.is_empty() => Self::EmptyMapping,
+            (_, Some(_)) => Self::Mapping,
+            _ => Self::Other,
+        }
+    }
+
+    fn is_empty_container(self) -> bool {
+        matches!(self, Self::EmptySequence | Self::EmptyMapping)
+    }
+
+    fn is_mapping(self) -> bool {
+        matches!(self, Self::EmptyMapping | Self::Mapping)
+    }
+}
+
 /// The `line`/`column` bit of [`OwnedIdentity::meta`].
 const META_POS: u8 = 1;
 /// The `style` bit of [`OwnedIdentity::meta`].
@@ -33701,35 +33738,21 @@ impl<V: DocumentValue> OwnedIdentity<V> {
     /// [`OwnedIdentity::rebuilt`] by `stage` (#4696): the value is a new one at the same position,
     /// and it keeps the node's metadata only as far as `stage` is one yq hands the node itself
     /// through ([`stage_keeps_node_metadata`]), less the two things yq resets on the way (#4711):
-    /// a write that fills an *empty* flow container is block ([`stage_clears_empty_flow_style`]),
-    /// and the merge `*`/`*=` drops the anchor.
-    fn rebuilt_by(self, stage: &Expr) -> Self {
+    /// a write that fills an *empty* flow container makes it block
+    /// ([`stage_clears_empty_flow_style`]), and the merge `*` of mappings drops the anchor.
+    /// `input` is the shape of the value `stage` ran over -- not `base`, which an earlier stage
+    /// may have emptied or filled -- and `output` what it produced.
+    fn rebuilt_by(self, stage: &Expr, input: NodeShape, output: &OwnedValue) -> Self {
         let mut keeps = stage_keeps_node_metadata(stage);
-        if keeps & META_STYLE != 0
-            && self
-                .base_empty_container()
-                .is_some_and(|is_sequence| stage_clears_empty_flow_style(stage, is_sequence))
-        {
+        if keeps & META_STYLE != 0 && stage_clears_empty_flow_style(stage, input, output) {
             keeps &= !META_STYLE;
         }
-        if stage_merges_node(stage) {
+        if stage_merges_mappings(stage) && input.is_mapping() {
             keeps &= !META_ANCHOR;
         }
         let mut rebuilt = self.rebuilt();
         rebuilt.meta &= keeps;
         rebuilt
-    }
-
-    /// Whether `base` is a mapping or sequence with no members: `Some(true)` for a sequence.
-    fn base_empty_container(&self) -> Option<bool> {
-        let node = self.base?.value();
-        if node.as_array().is_some_and(|items| items.is_empty()) {
-            Some(true)
-        } else if node.as_object().is_some_and(|fields| fields.is_empty()) {
-            Some(false)
-        } else {
-            None
-        }
     }
 
     /// The [`RootWitness`] an expression evaluated over this identity's value
@@ -35647,7 +35670,7 @@ fn owned_identity_after_stage<S: EvalSemantics, V: DocumentValue>(
         // the few that hand their input on untouched.
         _ if stage_passes_input_through(stage) => placed,
         _ => placed
-            .rebuilt_by(stage)
+            .rebuilt_by(stage, NodeShape::of_owned(value), output)
             .with_key_node(rule == OwnedIdentityRule::KeyNode),
     }))
 }
@@ -35699,33 +35722,52 @@ fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
     }
 }
 
-/// Whether `stage`, run over an *empty* container (a sequence if `is_sequence`), leaves it block
-/// style where it was flow (#4711). Captured from yq v4.53.3 on `[]` and `{}`: a write that adds
-/// to it clears the style (`.b = 3`, `.b |= 5`, `.[0] = 9`, `. + {}`, `. + []`, `. += {}`), and
-/// so does `del(.[0])` on an empty *sequence* -- while `del(.[0])` and `del(.b)` on `{}`, the
-/// merge `*`/`*=`, `-` and the reorderings (`sort`, `map_values`) keep it.
-fn stage_clears_empty_flow_style(stage: &Expr, is_sequence: bool) -> bool {
+/// Whether `stage`, run over `input` and producing `output`, leaves an *empty* flow container
+/// block style (#4711). Captured from yq v4.53.3 on `[]` and `{}`: a write that adds to it clears
+/// the style (`.b = 3`, `.b |= 5`, `.[0] = 9`, `. + {}`, `. + []`, `. += {}`), but one that adds
+/// nothing keeps it (`.[] = 1` and `.[] |= . + 1` iterate no member); `del(.[0])` on an empty
+/// *sequence* clears it, while `del(.[0])` and `del(.b)` on `{}`, the merge `*`/`*=`, `-` and the
+/// reorderings (`sort`, `map_values`) keep it.
+fn stage_clears_empty_flow_style(stage: &Expr, input: NodeShape, output: &OwnedValue) -> bool {
+    if !input.is_empty_container() {
+        return false;
+    }
+    let output_has_members = || {
+        output.as_array().is_some_and(|items| !items.is_empty())
+            || output.as_object().is_some_and(|fields| !fields.is_empty())
+    };
     match strip_parens(stage) {
-        Expr::Assign { .. } | Expr::Update { .. } | Expr::AlternativeAssign { .. } => true,
-        Expr::CompoundAssign { op, .. } => matches!(op, AssignOp::Add),
+        Expr::Assign { .. } | Expr::Update { .. } | Expr::AlternativeAssign { .. } => {
+            output_has_members()
+        }
+        // `. += {}` fills or not alike, as the arithmetic `+` does; `.[] += 1` only
+        // clears when something was written.
+        Expr::CompoundAssign { op, path, .. } => {
+            matches!(op, AssignOp::Add)
+                && (output_has_members() || matches!(strip_parens(path), Expr::Identity))
+        }
         Expr::Arithmetic { op, .. } => matches!(op, ArithOp::Add),
-        Expr::Builtin(Builtin::Del(_)) => is_sequence,
+        Expr::Builtin(Builtin::Del(_)) => input == NodeShape::EmptySequence,
         _ => false,
     }
 }
 
-/// Whether `stage` is the merge `*`/`*=` (#4711): the merged copy does not carry the anchor.
-fn stage_merges_node(stage: &Expr) -> bool {
-    matches!(
-        strip_parens(stage),
+/// Whether `stage` is the merge `*` of a node with something (#4711): the merged copy of a
+/// mapping does not carry the anchor, whether spelled `. * {}` or `. *= {}`, where `*` of
+/// scalars and a `*=` into a child (`.k *= 2`) keep it (captured from yq v4.53.3).
+fn stage_merges_mappings(stage: &Expr) -> bool {
+    match strip_parens(stage) {
         Expr::Arithmetic {
             op: ArithOp::Mul(_),
             ..
-        } | Expr::CompoundAssign {
+        } => true,
+        Expr::CompoundAssign {
             op: AssignOp::Mul(_),
+            path,
             ..
-        }
-    )
+        } => matches!(strip_parens(path), Expr::Identity),
+        _ => false,
+    }
 }
 
 /// Whether `stage` emits its input itself, not a value built from it
@@ -37123,12 +37165,23 @@ fn reads_node_metadata(stages: &[Expr]) -> u8 {
         })
 }
 
+/// Whether any top-level stage of `stages` is a node-metadata getter: [`reads_node_metadata`]
+/// without the fold, for the gate that only asks whether there is one.
+fn reads_any_node_metadata(stages: &[Expr]) -> bool {
+    stages.iter().any(|stage| match strip_parens(stage) {
+        Expr::Builtin(builtin) => node_getter_meta_bit(builtin) != 0,
+        _ => false,
+    })
+}
+
 /// Whether a pipe that leaves the cursor domain at `stage` and reads, afterwards, node metadata
 /// `stage` hands on (#4696, #4711) is the owned identity route's. Any other stage keeps the
 /// route it had -- `min`/`max` pick a child the cursor route already answers the line of, and
 /// `tostring`/`length` answer `0` there as yq does.
 fn leaves_node_metadata_to_owned(stage: &Expr, rest: &[Expr]) -> bool {
-    stage_keeps_node_metadata(stage) & reads_node_metadata(rest) != 0
+    // The stage first: it is a single match, and almost every pipe's stage keeps nothing.
+    let keeps = stage_keeps_node_metadata(stage);
+    keeps != 0 && keeps & reads_node_metadata(rest) != 0
 }
 
 /// The cursor a *kept* owned value stands at (#4696): the node whose position `id` models, when
@@ -37999,7 +38052,11 @@ fn owned_identity_leaving_cursor<S: EvalSemantics, V: DocumentValue>(
         // `select`/`objects`/`debug`: the copy this stage handed on *is*
         // the cursor's own value to jq, so the node witness stays.
         OwnedIdentityRule::Keeps if stage_passes_input_through(stage) => Ok(Some(id)),
-        OwnedIdentityRule::Keeps => Ok(Some(id.rebuilt_by(stage))),
+        OwnedIdentityRule::Keeps => Ok(Some(id.rebuilt_by(
+            stage,
+            NodeShape::of_document(&cursor.value()),
+            output,
+        ))),
         // #2471: `key` at the cursor boundary -- the emitted key stands
         // where the node stood, flagged so a second `key` emits nothing.
         OwnedIdentityRule::KeyNode => Ok(Some(id.rebuilt().with_key_node(true))),
