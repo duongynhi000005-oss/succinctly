@@ -25321,6 +25321,17 @@ fn path_step_generic<S: EvalSemantics, V: DocumentValue, T: StepTrail<V>>(
         Expr::Paren(inner) => {
             path_step_generic::<S, V, T>(inner, node, path, collapse_duplicate_keys, out)
         }
+        // #4404 (yq): a name an array reads as the integer it spells steps as that index.
+        Expr::Field(name)
+            if matches!(node, PathNode::At(c) if c.value().as_array().is_some())
+                && crate::jq::eval::yq_field_name_as_index::<S>(name).is_some() =>
+        {
+            let idx = crate::jq::eval::yq_field_name_as_index::<S>(name).unwrap_or_default();
+            if let Some(next) = path_index_step_generic::<S, V, T>(idx, None, node, path)? {
+                out.push(next);
+            }
+            Ok(())
+        }
         Expr::Field(name) => {
             if let Some(next) = path_field_step_generic::<S, V, T>(name, node, path)? {
                 out.push(next);

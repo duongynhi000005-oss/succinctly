@@ -31524,6 +31524,109 @@ fn test_delpaths_noop_on_scalar_root_2106() -> Result<()> {
     Ok(())
 }
 
+/// #4404: a string key an array reads as an integer (#4274) addresses that element in a write and a
+/// delete too, through every route -- a plain assignment, `|=`, a compound assignment, `del()`, a
+/// comma group, a computed key, a mid-chain step, a nested array, a metadata write -- on JSON and on
+/// YAML input; a string that is no integer keeps the error. Each row was captured from yq v4.53.3.
+#[test]
+fn test_4404_write_and_del_through_an_arrays_string_key() -> Result<()> {
+    let json = ["-p=json", "-o=json", "-I=0"];
+    for (filter, input, expected) in [
+        (".[\"1\"] = 9", "[10,20,30]", "[10,9,30]"),
+        (".[\"1\"] |= . + 1", "[10,20,30]", "[10,21,30]"),
+        (".[\"1\"] += 5", "[10,20,30]", "[10,25,30]"),
+        (".[\"1\"] -= 1", "[10,20,30]", "[10,19,30]"),
+        ("del(.[\"1\"])", "[10,20,30]", "[10,30]"),
+        (".a[\"1\"] = 7", r#"{"a":[1,2]}"#, r#"{"a":[1,7]}"#),
+        ("del(.a[\"0\"])", r#"{"a":[1,2]}"#, r#"{"a":[2]}"#),
+        // Spellings `parseInt64` accepts: a sign, a leading zero, a radix prefix, a negative.
+        (".[\"-1\"] = 9", "[10,20,30]", "[10,20,9]"),
+        (".[\"01\"] = 9", "[10,20,30]", "[10,9,30]"),
+        (".[\"0x1\"] = 9", "[10,20,30]", "[10,9,30]"),
+        (".[\"+1\"] = 9", "[10,20,30]", "[10,9,30]"),
+        // Past the end an assignment pads, as a numeric index does; a delete pads too.
+        (".[\"5\"] = 9", "[10,20,30]", "[10,20,30,null,null,9]"),
+        ("del(.[\"5\"])", "[10,20,30]", "[10,20,30,null,null]"),
+        // Comma groups, in either order, and across fields.
+        ("(.[\"1\"], .[\"2\"]) = 0", "[10,20,30]", "[10,0,0]"),
+        ("del(.[\"1\"], .[\"0\"])", "[10,20,30]", "[30]"),
+        // A group mixing both spellings resolves every key against the array as it entered.
+        ("del(.[\"0\"], .[1])", "[10,20,30]", "[30]"),
+        ("del(.[1], .[\"0\"])", "[10,20,30]", "[30]"),
+        ("del(.[0], .[\"1\"])", "[10,20,30]", "[30]"),
+        ("del(.[\"2\"], .[0], .[\"1\"])", "[10,20,30]", "[]"),
+        ("del(.a[\"1\"], .b)", r#"{"a":[1,2],"b":3}"#, r#"{"a":[1]}"#),
+        (
+            "del(.a[\"0\"], .a[\"1\"])",
+            r#"{"a":[1,2],"b":3}"#,
+            r#"{"a":[],"b":3}"#,
+        ),
+        (
+            "del(.a[\"0\"][\"1\"], .a[\"1\"][\"0\"])",
+            r#"{"a":[[1,2],[3,4]]}"#,
+            r#"{"a":[[1],[4]]}"#,
+        ),
+        // Computed keys and nested steps.
+        (".[(\"1\")] = 9", "[10,20,30]", "[10,9,30]"),
+        ("\"1\" as $k | .[$k] = 9", "[10,20,30]", "[10,9,30]"),
+        ("\"1\" as $k | del(.[$k])", "[10,20,30]", "[10,30]"),
+        (
+            ".a[\"1\"][\"0\"] = 7",
+            r#"{"a":[[1],[2]]}"#,
+            r#"{"a":[[1],[7]]}"#,
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &json)?;
+        assert_eq!((code, out.trim()), (0, expected), "[{filter}] {input}");
+    }
+
+    // YAML input, mid-chain steps and a metadata write.
+    for (filter, input, expected) in [
+        (".a[\"1\"] = 9", "a:\n  - 1\n  - 2\n", "{\"a\":[1,9]}"),
+        ("del(.a[\"0\"])", "a:\n  - 1\n  - 2\n", "{\"a\":[2]}"),
+        (
+            ".a[\"-1\"] |= . + 10",
+            "a:\n  - 1\n  - 2\n",
+            "{\"a\":[1,12]}",
+        ),
+        (
+            ".a[\"1\"].x = 9",
+            "a:\n  - x: 1\n  - x: 2\n",
+            "{\"a\":[{\"x\":1},{\"x\":9}]}",
+        ),
+        (
+            "del(.a[\"1\"].x, .a[\"0\"])",
+            "a:\n  - x: 1\n  - x: 2\n",
+            "{\"a\":[{}]}",
+        ),
+        (
+            ".a[\"1\"] line_comment = \"hi\"",
+            "a: [1, 2]\n",
+            "{\"a\":[1,2]}",
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.trim()), (0, expected), "[{filter}] {input:?}");
+    }
+    let (out, code) = run_yq_stdin(".a[\"1\"] line_comment = \"hi\"", "a:\n  - 1\n  - 2\n", &[])?;
+    assert_eq!((code, out.as_str()), (0, "a:\n  - 1\n  - 2 # hi\n"));
+
+    // A string no integer spells still raises, and a numeric index on a YAML mapping still
+    // deletes nothing (an `!!int` key, #2353).
+    for filter in [
+        ".[\"x\"] = 9",
+        ".[\"1.0\"] = 9",
+        "del(.[\"x\"])",
+        ".[\"-5\"] = 9",
+    ] {
+        let (out, code) = run_yq_stdin(filter, "[10,20,30]", &json)?;
+        assert_eq!((code, out.as_str()), (1, ""), "[{filter}]");
+    }
+    let (out, code) = run_yq_stdin("del(.a[1])", "a:\n  1: x\n  2: y\n", &["-o=json", "-I=0"])?;
+    assert_eq!((code, out.trim()), (0, r#"{"a":{"1":"x","2":"y"}}"#));
+    Ok(())
+}
+
 /// #2353: a wrong-*kind* delete key against a genuine `Object` root (not a
 /// scalar -- #2106's own territory above) also no-ops in yq mode, both for
 /// `del()`'s static-integer index and `delpaths()`'s equivalent JSON
