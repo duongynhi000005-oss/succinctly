@@ -5713,7 +5713,11 @@ impl<W> Copy for YamlField<'_, W> {}
 /// (#2822); a scalar that is not a string never matches.
 fn field_key_is_named<W: AsRef<[u64]>>(key: &YamlValue<'_, W>, name: &str) -> bool {
     match key {
-        YamlValue::String(key) => key.as_str().is_ok_and(|k| k == name),
+        YamlValue::String(key) => match key.as_str() {
+            Ok(k) => k == name,
+            // A JSON key with invalid UTF-8 is addressed by its substituted text (#4536).
+            Err(_) => json_key_with_replacement_chars(key).is_some_and(|k| k == name),
+        },
         YamlValue::Mapping(_) | YamlValue::Sequence(_) => name.is_empty(),
         _ => false,
     }

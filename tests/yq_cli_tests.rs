@@ -39274,6 +39274,54 @@ fn test_pjson_invalid_utf8_key_is_substituted_for_yaml_output_4536() -> Result<(
     Ok(())
 }
 
+/// #4536: the substituted key is the key's name for everything that addresses it -- lookup, `has`,
+/// `del`, a write (DOM route, `-P`), `pick` -- in a nested mapping and in a sequence element, and two
+/// keys that differ only in their bad bytes both print and both count, as in yq. Each row was
+/// captured from yq v4.53.3.
+#[test]
+fn test_pjson_invalid_utf8_key_is_addressable_by_its_substituted_name_4536() -> Result<()> {
+    let input = b"{\"x\xe4y\":1,\"b\":2}";
+    for (filter, expected) in [
+        (".[\"x\\ufffdy\"]", "1\n"),
+        (".[\"x\\ufffdy\"] | key", "x\u{fffd}y\n"),
+        ("has(\"x\\ufffdy\")", "true\n"),
+        ("del(.[\"x\\ufffdy\"])", "b: 2\n"),
+        (".[\"x\\ufffdy\"] = 7", "x\u{fffd}y: 7\nb: 2\n"),
+        (".a = 1", "x\u{fffd}y: 1\nb: 2\na: 1\n"),
+        ("pick([\"x\\ufffdy\"])", "x\u{fffd}y: 1\n"),
+        ("sort_keys(.)", "b: 2\nx\u{fffd}y: 1\n"),
+        ("map_values(. + 1)", "x\u{fffd}y: 2\nb: 3\n"),
+    ] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(filter, input, &["-p", "json"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "[{filter}]");
+        assert_eq!(out, expected, "[{filter}]");
+    }
+    let (out, _, code) = run_yq_stdin_bytes_with_stderr(".", input, &["-p", "json", "-P"])?;
+    assert_eq!((code, out.as_str()), (0, "x\u{fffd}y: 1\nb: 2\n"));
+
+    for (filter, input, expected) in [
+        (".", &b"{\"a\":{\"x\xe4y\":1}}"[..], "a:\n  x\u{fffd}y: 1\n"),
+        (".a", &b"{\"a\":{\"x\xe4y\":1}}"[..], "x\u{fffd}y: 1\n"),
+        (".", &b"[{\"x\xe4y\":1}]"[..], "- x\u{fffd}y: 1\n"),
+        (".[0]", &b"[{\"x\xe4y\":1}]"[..], "x\u{fffd}y: 1\n"),
+        // Two keys that differ only in their bad bytes spell the same text; both stay.
+        (
+            ".",
+            &b"{\"x\xe4y\":1,\"x\xe5y\":2}"[..],
+            "x\u{fffd}y: 1\nx\u{fffd}y: 2\n",
+        ),
+        ("length", &b"{\"x\xe4y\":1,\"x\xe5y\":2}"[..], "2\n"),
+        // A key with an escape next to the bad byte, and a key that needs quoting afterwards.
+        (".", &b"{\"a\\u00e9\xe4\":1}"[..], "a\u{e9}\u{fffd}: 1\n"),
+        (".", &b"{\"x\xe4:\":1}"[..], "'x\u{fffd}:': 1\n"),
+    ] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(filter, input, &["-p", "json"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "[{filter}] {input:?}");
+        assert_eq!(out, expected, "[{filter}] {input:?}");
+    }
+    Ok(())
+}
+
 /// Genuine YAML keeps #1242's unconditional rejection whatever the output, and
 /// valid JSON is untouched.
 #[test]
