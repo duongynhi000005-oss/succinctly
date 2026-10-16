@@ -149829,6 +149829,75 @@ fn test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604() ->
     ])
 }
 
+/// #4724 (the pipe residual of #4709): the same caught foreign-marker destructure when the `foreach` heads a pipe
+/// that is the UPDATE of a `reduce`. The later stages run once per output, so the empty `foreach` leaves the
+/// whole UPDATE empty and the state `null`, which the end of the path refuses; it was answered (`[]`, and `del`
+/// wrote). A comma beside the `foreach` is not that (`, 1` emits), and a handler that emits is answered. Every row
+/// is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_caught_foreign_marker_destructure_as_the_head_of_a_pipe_update_of_a_reduce_4724(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | 1))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | . | .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .)) = 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .)) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .), 1))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .) | .))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4709 (the `try`/`?` residual of #4604): a `try`/`?` (or a `catch empty`) around the destructure of a
 /// `$x` bound to another node, as the source of a `foreach` that is the whole UPDATE of a `reduce`. The
 /// pattern's step raises, the `try` catches it, the source is empty, the `foreach` emits nothing, the

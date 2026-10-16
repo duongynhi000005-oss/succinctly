@@ -2481,9 +2481,12 @@ is the revert that established what the other one costs.
    at the end of the path (`Invalid path expression with result null`; `caught_foreign_destructure`, with the UPDATE marked by
    `fold_body::sole_update_foreach`; pinned by
    `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduce_4709`,
-   [#4709](https://github.com/rust-works/succinctly/issues/4709)). Still accepted: the same `try` when the `foreach` is not
-   the bare UPDATE (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .`, which jq refuses as well), and a `try` nested in
-   another (`try (try X)`). A condition that is not a pure function
+   [#4709](https://github.com/rust-works/succinctly/issues/4709)). A pipe headed by that `foreach` is the same UPDATE
+   (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .`: the later stages run once per output, so an empty `foreach` leaves it
+   empty; `fold_body::sole_update_pipe_head`, pinned by
+   `test_caught_foreign_marker_destructure_as_the_head_of_a_pipe_update_of_a_reduce_4724`,
+   [#4724](https://github.com/rust-works/succinctly/issues/4724)); a comma beside it (`, 1`) is not, and is answered. Still
+   accepted: a `try` nested in another (`try (try X)`). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
