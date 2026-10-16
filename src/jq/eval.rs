@@ -51626,6 +51626,40 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     markers
 }
 
+/// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
+/// destructure of a `$x` that [`foreign_register_markers`] proves is not the register (#4709): the
+/// pattern's step raises, the `try` catches it and `source` is empty. Of a `foreach` that is the
+/// whole UPDATE of an enclosing `reduce`, that leaves the reduce's state `null` (the caller's
+/// check). A source with another output, or a stage ahead of the bind, is left alone.
+fn caught_foreign_destructure<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+) -> bool {
+    let inner = match unwrap_paren(source) {
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => inner,
+        Expr::Try {
+            expr: inner,
+            catch: Some(handler),
+        } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => inner,
+        _ => return false,
+    };
+    let bind = unwrap_paren(inner);
+    let Expr::AsPattern { expr, patterns, .. } = bind else {
+        return false;
+    };
+    let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
+        return false;
+    };
+    (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
+        && foreign_register_markers::<S>(bind, ambient, &[])
+            .iter()
+            .any(|(foreign, _)| *foreign == Rc::as_ptr(marker))
+}
+
 /// Calls `visit` with each variable `pattern` binds, in order. One traversal for
 /// [`collect_pattern_var_names`] (owned) and the spine walk (borrowed).
 fn visit_pattern_names<'e>(pattern: &'e Pattern, visit: &mut impl FnMut(&'e str)) {
@@ -54220,6 +54254,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
     relocate_base: Option<&Rc<PathPrefix>>,
     step: &mut dyn FnMut(FoldSourceValue) -> Demand,
 ) -> Flow {
+    // #4709: read before `source` is rebound below -- the mark is the address of the fold's own.
+    let sole_update_fold =
+        S::TAG == EvalTag::Jq && foreach_source && fold_body::sole_update_foreach_here(source);
     let marker_ifs_resolved;
     let source = if S::TAG == EvalTag::Jq
         && any_subexpr(
@@ -54484,7 +54521,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
                         ))
             })
     };
-    let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
+    // #4709: a `try`/`?` around the destructure of a foreign marker catches the raise and leaves the
+    // source empty, which the enclosing `reduce` UPDATE (this fold, whole) turns into a `null` state
+    // that the end of the path refuses.
+    let caught_foreign_verdict = sole_update_fold
+        && ambient.trackable
+        && !matches!(ambient.value, OwnedValue::Null)
+        && fold_body::depth() != 0
+        && caught_foreign_destructure::<S>(source, ambient);
+    let marker_destructures_unplaced_register =
+        equal_verdict || foreign_verdict || caught_foreign_verdict;
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
     // #4603: the `null`/boolean literals the register is not, which a destructure of raises.
@@ -54619,11 +54665,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // state is refused at the end of the path, outside any `try` around the fold. Anywhere else
         // the register may be where the accumulator is, and the refusal stays the resolver's guess
         // that nothing catches.
-        let refusal = match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
-            Some(element) => {
-                EvalError::invalid_path_expression_near_access(&element, ambient.value)
+        // #4709: ...and a caught destructure of a foreign marker is the `null` state itself.
+        let refusal = if caught_foreign_verdict {
+            EvalError::invalid_path_expression_guessed(&OwnedValue::Null)
+        } else {
+            match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
+                Some(element) => {
+                    EvalError::invalid_path_expression_near_access(&element, ambient.value)
+                }
+                None => EvalError::invalid_path_expression_guessed(ambient.value),
             }
-            None => EvalError::invalid_path_expression_guessed(ambient.value),
         };
         return Flow::Escaped(Control::Error(refusal));
     }
@@ -59176,6 +59227,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && patterns_all_bare(patterns)
                             && update_returns_its_input(update))
                         .then(fold_body::acc_off_register);
+                        // #4709: UPDATE is a `foreach` and nothing else, so its every output is the next
+                        // state and an empty one leaves `null`.
+                        let _sole_update_foreach = match unwrap_paren(&substituted) {
+                            Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
+                                Some(fold_body::sole_update_foreach(input))
+                            }
+                            _ => None,
+                        };
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -68773,6 +68832,9 @@ mod fold_body {
         /// The body depth at which a verdict builtin discards the operand being resolved (#4698),
         /// 0 for none.
         static DISCARD_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth whose UPDATE is a bare `foreach` (#4709), and the address of that
+        /// `foreach`'s source expression; `(0, 0)` for none.
+        static SOLE_FOREACH: Cell<(u32, usize)> = const { Cell::new((0, 0)) };
     }
 
     /// Restores the previous [`emissions_discarded`] mark.
@@ -68797,6 +68859,33 @@ mod fold_body {
     /// Whether the body being resolved is the one [`emissions_discarded`] marked.
     pub(crate) fn emissions_discarded_here() -> bool {
         depth() > 0 && DISCARD_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`sole_update_foreach`] mark.
+    pub(crate) struct SoleGuard((u32, usize));
+
+    /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
+    /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
+    /// takes that fold's every output as its next state, so a `foreach` that emits nothing leaves
+    /// the state `null`. The address identifies the fold; a source that was copied on the way
+    /// down no longer matches it, which reads as not being that UPDATE.
+    pub(crate) fn sole_update_foreach(source: &super::Expr) -> SoleGuard {
+        let previous = SOLE_FOREACH.with(Cell::get);
+        SOLE_FOREACH.with(|a| a.set((depth() + 1, (source as *const super::Expr) as usize)));
+        SoleGuard(previous)
+    }
+
+    impl Drop for SoleGuard {
+        fn drop(&mut self) {
+            SOLE_FOREACH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`sole_update_foreach`] marked for the fold
+    /// whose source is `source`.
+    pub(crate) fn sole_update_foreach_here(source: &super::Expr) -> bool {
+        depth() > 0
+            && SOLE_FOREACH.with(Cell::get) == (depth(), (source as *const super::Expr) as usize)
     }
 
     /// Restores the previous [`fresh_source`] mark.
@@ -69107,6 +69196,16 @@ mod fold_body {
     }
 
     pub(crate) fn foreach_body_moved_here() -> bool {
+        false
+    }
+
+    pub(crate) struct SoleGuard;
+
+    pub(crate) fn sole_update_foreach(_source: &super::Expr) -> SoleGuard {
+        SoleGuard
+    }
+
+    pub(crate) fn sole_update_foreach_here(_source: &super::Expr) -> bool {
         false
     }
 

@@ -149695,6 +149695,185 @@ fn test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604() ->
     ])
 }
 
+/// #4709 (the `try`/`?` residual of #4604): a `try`/`?` (or a `catch empty`) around the destructure of a
+/// `$x` bound to another node, as the source of a `foreach` that is the whole UPDATE of a `reduce`. The
+/// pattern's step raises, the `try` catches it, the source is empty, the `foreach` emits nothing, the
+/// `reduce` state becomes `null` and the end of the path refuses it (`Invalid path expression with result
+/// null`, exit 5, for `path`, `del`, `|=` and `=` alike). It was answered (`[]`; `del` wrote). A `?//` chain
+/// of destructuring patterns raises in every alternative; a scalar marker raises a type error the `try`
+/// catches as well. The controls are answered by jq: a handler that emits, a second output beside the
+/// `try`, a `reduce` source (which emits its state), the marker that *is* the register, a chain ending on a
+/// bare `$b`, a `null` document and a `reduce` over no elements (UPDATE never runs). Every row is a live jq 1.7.1
+/// capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduce_4709(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as [$a] | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach ((try ($x as {a:$a} | .) catch (empty))) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try (. as {z:$z} | $x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (($x as {a:$a} | .)?) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch empty) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (($x as {a:$a} ?// [$a] | .)?) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":[true]}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as [$a] | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as [$a] | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) = 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach ((try ($x as {a:$a} | .)), 1) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce (try ($x as {a:$a} | .)) as $y (.; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} ?// $b | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce empty as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4597 (the rest): a `reduce` source whose pipe stage generates a freshly built item next to the
 /// register (`({a:1}, .)`) meets that item at the destructure that follows, wherever the register is.
 /// The wrappers that hand their operand's outputs on are read as they generate: `try`/`?` every item,

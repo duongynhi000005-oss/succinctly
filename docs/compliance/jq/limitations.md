@@ -2470,10 +2470,15 @@ is the revert that established what the other one costs.
    `test_select_on_a_foreign_marker_then_destructure_raises_for_a_reduce_source_4604`,
    `test_alternative_chain_over_a_foreign_marker_in_a_fold_body_raises_4604` and
    `test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604`
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604)). Still accepted: a `try`/`?` around the destructure in the
-   source of a `foreach` run by the UPDATE of a `reduce` whose own source cannot move the register (18 rows of the grid): the
-   `try` catches the raise, the enclosing UPDATE emits nothing and the state is `null`, which jq refuses at the end of the
-   path, while `foreign_register_markers` leaves a source holding a `try`/`?` alone. A condition that is not a pure function
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)). A `try`/`?` (or `try ... catch empty`) that is the whole
+   source of a `foreach` which is the whole UPDATE of a `reduce`, around the destructure of such a marker, is refused too: the
+   `try` catches the raise, the source is empty, the `foreach` emits nothing and the `reduce` state is `null`, which jq refuses
+   at the end of the path (`Invalid path expression with result null`; `caught_foreign_destructure`, with the UPDATE marked by
+   `fold_body::sole_update_foreach`; pinned by
+   `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduce_4709`,
+   [#4709](https://github.com/rust-works/succinctly/issues/4709)). Still accepted: the same `try` when the `foreach` is not
+   the bare UPDATE (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .`, which jq refuses as well), and a `try` nested in
+   another (`try (try X)`). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks

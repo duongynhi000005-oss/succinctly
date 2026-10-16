@@ -263,19 +263,15 @@ WRAPPED_CONTEXTS = [
     ("update-try", "(try (. as $x | {O})) |= 9"),
     ("path-nav-opt", "path((.a as $x | {O})?)"),
 ]
-# The ACCEPT_WRONG rows of these contexts still left (#4588): a `try`/`?` around the destructure of a `$x`
-# bound to another node, in the source of a `foreach` run by the UPDATE of a `reduce` whose own source cannot
-# move the register (`try-xpat`, `opt-xpat`, `try-chain`, `opt-chain` under `rd-lit`). The `try` catches the
-# pattern's raise, the fold's source is empty, the enclosing UPDATE emits nothing and the state is `null`, which
-# the end of the path refuses in jq (`with result null`); `foreign_register_markers` leaves a source holding a
-# `try`/`?` alone, since a fold that is not that UPDATE answers it. (An `empty` body or a bind
-# ahead of the destructure, a `select($x)` in front of it, and a `?//` chain of destructuring patterns over
-# the marker are decided since #4604.) The `bare-catch-error-*` and `try-body-dot-*` sources #4677/#4682 added are
-# open on `main` too (180 rows here; 352 more in the contexts outside this set make a run exit 1 there as well).
-# They count against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
+# The ACCEPT_WRONG rows of these contexts still left (#4588): the `bare-catch-error-*` and `try-body-dot-*`
+# sources #4677/#4682 added, open on `main` too (180 rows here; 352 more in the contexts outside this set make a run
+# exit 1 there as well). They count against a lost match against `--base` like any row, but an ACCEPT_WRONG in them
+# does not fail the run. (An `empty` body or a bind ahead of the destructure, a `select($x)` in front of it, and a
+# `?//` chain of destructuring patterns over the marker are decided since #4604; a `try`/`?` around the destructure
+# of a `$x` bound to another node, as the whole source of a `foreach` that is the whole UPDATE of a `reduce`, since #4709.)
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 198
+RESIDUAL_NAV_MAX = 180
 DOCS = [
     "null",
     "true",
