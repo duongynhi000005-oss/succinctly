@@ -12065,6 +12065,18 @@ fn test_4736_explicit_value_property_then_same_indent_sequence() -> Result<()> {
         ),
         ("m:\n  ? k\n  : &x\n  - item\n", r#"{"m":{"k":["item"]}}"#),
         ("- ? k\n  : &x\n  - item\n", r#"[{"k":["item"]}]"#),
+        // Items that are themselves nested, mappings, aliases or explicit keys.
+        ("? k\n: &x\n- - a\n  - b\n- c\n", r#"{"k":[["a","b"],"c"]}"#),
+        (
+            "? k\n: &x\n- a: 1\n  b: 2\n- c\n",
+            r#"{"k":[{"a":1,"b":2},"c"]}"#,
+        ),
+        ("? k\n: &x\n- 1\n? j\n: *x\n", r#"{"k":[1],"j":[1]}"#),
+        (
+            "- ? k\n  : &x\n  - 1\n- ? j\n  : &y\n  - 2\n",
+            r#"[{"k":[1]},{"j":[2]}]"#,
+        ),
+        ("? k\n: &x\n- ? a\n  : b\n", r#"{"k":[{"a":"b"}]}"#),
         // An indented value, and the values that really are null.
         ("? k\n: &x\n  - item\n", r#"{"k":["item"]}"#),
         ("? k\n: &x\n  a: 1\n", r#"{"k":{"a":1}}"#),
