@@ -2513,7 +2513,7 @@ is the revert that established what the other one costs.
    accepted there: a `try` body that is a `?//` chain, a body whose raise is a `//` right operand (both lose matches in
    `scripts/jq-fold-body-register-grid-sweep.py`), and, tracked as [#4716](https://github.com/rust-works/succinctly/issues/4716),
    the same branch as the left operand of another `//`, behind a `tostring` or `if` tail, behind a computed-key object message,
-   or in a `def` with a parameter, and an object-message `try` source followed by a tail that emits nothing. In a moved
+   or in a `def` with a parameter (#4760 tracks the one whose body names its parameter; a non-constant `| select(.)` tail is read since #4739), and an object-message `try` source followed by a tail that emits nothing. In a moved
    `reduce` body the new shapes raise with a different message than jq's. A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
    body raises too ([#4667](https://github.com/rust-works/succinctly/issues/4667): these emit their comma's first leaf only, so
    they hand the register on as `.` does, `takes_only_an_identity_leaf`; pinned by
