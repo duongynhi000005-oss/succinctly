@@ -2474,7 +2474,16 @@ is the revert that established what the other one costs.
    `test_reduce_body_source_destructuring_dot_behind_an_alternative_or_handler_in_an_array_raises_4635`; the same two shapes
    *without* the brackets are still accepted,
    [#4644](https://github.com/rust-works/succinctly/issues/4644)), but a `$x` marker destructured there is the
-   #4604 family. A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
+   #4604 family. That run branch is also read as the head of a pipe whose later stages each emit once (`| select(true)`, `| not`,
+   `| length`, a literal), as the first item of a comma (literals ahead of it emit first and move nothing), as the body of a
+   `def` with no parameters, and behind an `error` whose message is `.`, an array or an object of such, for a `foreach` source
+   ([#4703](https://github.com/rust-works/succinctly/issues/4703): `bare_run_branch_of_source`, `emits_once_stage`,
+   `emits_a_message_once`; pinned by `test_foreach_source_run_branch_behind_tail_comma_def_and_computed_error_4703`). Still
+   accepted there: a `try` body that is a `?//` chain, a body whose raise is a `//` right operand (both lose matches in
+   `scripts/jq-fold-body-register-grid-sweep.py`), and, tracked as [#4716](https://github.com/rust-works/succinctly/issues/4716),
+   the same branch as the left operand of another `//`, behind a `tostring` or `if` tail, behind a computed-key object message,
+   or in a `def` with a parameter, and an object-message `try` source followed by a tail that emits nothing. In a moved
+   `reduce` body the new shapes raise with a different message than jq's. A `reduce` source that destructures `.` behind `first(., X)`, `limit(1; ., X)` or `nth(0; ., X)` in that moved
    body raises too ([#4667](https://github.com/rust-works/succinctly/issues/4667): these emit their comma's first leaf only, so
    they hand the register on as `.` does, `takes_only_an_identity_leaf`; pinned by
    `test_reduce_source_first_of_register_comma_in_a_moved_body_raises_4667`), also when the wrapper is nested in another
