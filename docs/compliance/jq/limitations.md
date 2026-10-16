@@ -868,8 +868,21 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   fold reads the register a verdict's answer states (`isempty`, `any` and `all` count as producers of that statement, as a `catch`
   handler does). Pinned by `test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_register_follows_jq_4661`. The
   `foreach` half is gated: the EXTRACT must leave the register where UPDATE put it (`cannot_move_register`) and be a single
-  computed output. **Still refused where jq answers** (unchanged by it, identical on `main`): an EXTRACT that forks (`... try .a; ($i, 5))`, `...; (try error("x") catch 5))`),
-  `isempty(recurse)` / `any(recurse; .)` and `isempty(. as $q ?// $z | .)` as the UPDATE, and a verdict over a fold inside a second
+  computed output.
+  **Since [#4698](https://github.com/rust-works/succinctly/issues/4698)** three more operand shapes answer as jq does: an EXTRACT that
+  forks (`... try .a; ($i, 5))`, `...; ($i, error("x")))`, `...; (try error("x") catch 5))` -- its first branch reaches the emission
+  as the EXTRACT's own entry register, which the single-output spelling already stated), a `recurse` generator
+  (`isempty(recurse)`, `any(recurse; .)`, `isempty(..)`: jq takes the seed first, at the register, and the verdict stops there), and a
+  `?//` bind operand (`isempty(. as $q ?// $z | .)`: `isempty(g)` is `g | false`, so jq path-checks nothing `g` emits, and a body that
+  steps nowhere raises nothing even where `.` is an accumulator that need not be the register). Pinned by
+  `test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_follows_jq_4698`.
+  Only the bare spellings are fixed: `isempty(recurse)` composed (`(isempty(recurse) | not)`, `(recurse and true)`, `(any(recurse; .) | not)`)
+  or behind a `def` (`isempty(def f: recurse; f)`) is still refused where jq answers, and under `?`/`try` the refusal is swallowed
+  (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[]`, jq prints `[[0]]`): the static view
+  (`verdict_operand_leaves_register`) does not admit a recursion, whose later outputs do move the register.
+  **Still refused where jq answers**: an EXTRACT that forks *and navigates after its first output*
+  (`... try .a; (5, .a))`: the gate asks that the whole EXTRACT leave the register, and a navigating item does not),
+  and a verdict over a fold inside a second
   fold's UPDATE or a `foreach`'s loop body (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`);
   a nested fold that
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints

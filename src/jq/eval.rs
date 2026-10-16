@@ -46237,6 +46237,8 @@ fn resolve_isempty_sink<'a, S: EvalSemantics>(
 ) -> ResolveFlow {
     // Every output of `g` is `false` (`target_truthy`), the identity element `true`.
     let mut delivery = AnswerDelivery::new(sink, false);
+    // #4698: `g | false` throws what `g` emits away; jq checks none of it.
+    let _discarded = fold_body::emissions_discarded();
     let flow = resolve_node_sink::<S>(
         gen,
         value,
@@ -46592,6 +46594,9 @@ fn register_after_parts<'a>(
     } else {
         match register {
             BranchRegister::Unmoved(register) => BranchRegister::Unmoved(register),
+            BranchRegister::AtEntry => frame.register().map_or(BranchRegister::None, |reg| {
+                BranchRegister::Unmoved(Cow::Owned(reg.clone()))
+            }),
             // #4660: a verdict builtin over operands that leave the register hands its boolean on
             // at the register it entered with ([`verdict_builtin_leaves_register`]).
             _ if cannot_move_register(expr) || verdict_builtin_leaves_register(expr) => {
@@ -55678,7 +55683,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                 // output in a fold source, where jq answers `[]`.
                                 if S::TAG == EvalTag::Jq
                                     && (fold_body::depth() == 0
-                                        || fold_body::acc_is_register_here())
+                                        || fold_body::acc_is_register_here()
+                                        || fold_body::emissions_discarded_here())
                                     && body_performs_no_step(&substituted)
                                 {
                                     match sink(seed) {
@@ -55751,7 +55757,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         if S::TAG == EvalTag::Jq
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
-                                || fold_body::fresh_source_here())
+                                || fold_body::fresh_source_here()
+                                || fold_body::emissions_discarded_here())
                             && !seed.trackable
                             && body_performs_no_step(&substituted)
                         {
@@ -59567,7 +59574,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
                                     if extract_moved
                                         && !branch.trackable
-                                        && matches!(branch.register, BranchRegister::None)
+                                        && matches!(
+                                            branch.register,
+                                            BranchRegister::None | BranchRegister::AtEntry
+                                        )
                                         && *branch.path == *extract_reg.path
                                     {
                                         emit(branch.with_register(BranchRegister::Unmoved(
@@ -68352,6 +68362,33 @@ mod fold_body {
         /// The body depth at which a `reduce` source that certainly raises is being resolved
         /// (#4600), 0 for none.
         static FRESH_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth at which a verdict builtin discards the operand being resolved (#4698),
+        /// 0 for none.
+        static DISCARD_DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Restores the previous [`emissions_discarded`] mark.
+    pub(crate) struct DiscardGuard(u32);
+
+    /// Marks the operand about to be resolved (at this body depth) as one whose emissions are
+    /// thrown away: `isempty(g)` is `g | false`, so jq path-checks nothing `g` hands on, only the
+    /// register its steps left. A body that performs no step therefore raises nothing even where `.`
+    /// may not be the register ([`emissions_discarded_here`]).
+    pub(crate) fn emissions_discarded() -> DiscardGuard {
+        let previous = DISCARD_DEPTH.with(Cell::get);
+        DISCARD_DEPTH.with(|a| a.set(depth()));
+        DiscardGuard(previous)
+    }
+
+    impl Drop for DiscardGuard {
+        fn drop(&mut self) {
+            DISCARD_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`emissions_discarded`] marked.
+    pub(crate) fn emissions_discarded_here() -> bool {
+        depth() > 0 && DISCARD_DEPTH.with(Cell::get) == depth()
     }
 
     /// Restores the previous [`fresh_source`] mark.
@@ -68672,6 +68709,16 @@ mod fold_body {
     }
 
     pub(crate) fn fresh_source_here() -> bool {
+        false
+    }
+
+    pub(crate) struct DiscardGuard;
+
+    pub(crate) fn emissions_discarded() -> DiscardGuard {
+        DiscardGuard
+    }
+
+    pub(crate) fn emissions_discarded_here() -> bool {
         false
     }
 
