@@ -6545,6 +6545,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     break;
                 }
             }
+            let first_entry = first;
             first = false;
 
             // `? ` is a node marker, not key text: consume it *before* the interest bit
@@ -6562,9 +6563,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if explicit {
                 self.advance();
                 self.skip_flow_whitespace();
-            } else if self.peek() == Some(b':') {
-                // #4558: a key cannot open with `:` -- yq rejects `{: x}`, `{:x}`, `{:}` (an
-                // empty key is spelled `? : x`, handled above).
+            } else if self.peek() == Some(b':')
+                && (first_entry || Self::is_ws_break_or_eoi(self.peek_at(1)))
+            {
+                // #4558: yq rejects an empty key -- the first entry opening with `:` (`{: x}`,
+                // `{:x}`, `{:}`), or any entry opening with `:` and a blank (`{a: 1, : x}`). A
+                // later entry opening with `:` and text is that key (`{a: 1, :x}` is `":x"`).
+                // An empty key is spelled `? : x`, handled above.
                 return Err(self.err_unexpected_char(self.pos, "expected key in flow mapping"));
             }
 
@@ -6745,9 +6750,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 b' ' | b'\t' => {
                     // Check if whitespace is followed by a delimiter
                     let mut lookahead = self.pos + 1;
+                    // #4558: a `:` is the pair's indicator only when a blank, a break or the end
+                    // follows it; before a flow indicator it is key content (`{a :}` is `a :`).
+                    let colon_ends_key = |at: usize| {
+                        self.input[at] == b':'
+                            && Self::is_ws_break_or_eoi(self.input.get(at + 1).copied())
+                    };
                     while lookahead < self.input.len() {
                         match self.input[lookahead] {
                             b' ' | b'\t' => lookahead += 1,
+                            b':' if !colon_ends_key(lookahead) => {
+                                self.advance();
+                                break;
+                            }
                             b':' | b',' | b'}' | b']' => {
                                 // Whitespace before delimiter - stop here
                                 break;
@@ -6764,10 +6779,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         }
                     }
                     if lookahead == self.input.len()
-                        || matches!(
-                            self.input[lookahead],
-                            b':' | b',' | b'}' | b']' | b'\n' | b'\r'
-                        )
+                        || (self.input[lookahead] == b':' && colon_ends_key(lookahead))
+                        || matches!(self.input[lookahead], b',' | b'}' | b']' | b'\n' | b'\r')
                     {
                         break;
                     }

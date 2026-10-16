@@ -650,7 +650,14 @@ yq refuses, and we follow yq). The `:` before a flow indicator is key or item co
 sides of that rule: `{a:}` is the key `a:` with no value and `[a:]` the one item `a:`
 (yq v4.53.3), where the spec reads the `:` as the pair's indicator. A `:` glued to text
 (`[:x]`, `[:]`) is still an item. `succinctly yaml validate` rejects a second pair `:` before the
-next `,` (`{a: 1 b: 2}`), which yq also rejects. Pinned by
+next `,` (`{a: 1 b: 2}`), which yq also rejects. An empty key
+is rejected for the first entry opening with `:` (`{:x}`, `{:}`) and for any entry opening with
+`:` and a blank (`{a: 1, : x}`); a later entry opening with `:` and text is that key
+(`{a: 1, :x}` is `":x"`), and a space before the `:` keeps it content (`{a :}` is `a :`).
+`succinctly yaml validate` stays on the spec for empty keys (`[ : x ]` is valid YAML 1.2, corpus
+case `CFD4`), so it accepts what `succinctly yq` refuses there. Still different from yq: `[? : x]`
+and `[a, ? : x]` (yq rejects), `[&x :]` (yq: an empty key with a null value) and `{a: :}`/`[a: :]`
+(yq rejects a bare `:` value). Pinned by
 `test_yaml_flow_colon_before_a_flow_indicator_is_content_4558` and
 `test_yaml_validate_rejects_a_second_pair_colon_in_a_flow_item_4558`.
 

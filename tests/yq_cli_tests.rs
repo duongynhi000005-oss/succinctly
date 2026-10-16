@@ -69489,7 +69489,9 @@ fn test_comma_assignment_target_with_an_iterate_member_4401() -> Result<()> {
 /// the pair's indicator -- `{a:}` is the key `a:` with no value, `[a:]` the one item `a:` -- where YAML
 /// 1.2 reads the `:` as the indicator (`{"a":null}`, `[{"a":null}]`). A `:` glued to text is an item
 /// (`[:x]`, `[:]`). An entry that opens with `:` followed by a blank (`[: x]`, `{: x}`) or any key that
-/// opens with `:` (`{:x}`, `{:}`) is an empty key yq rejects, although the spec allows it (corpus cases
+/// opens with `:` (`{:x}`, `{:}`) is an empty key yq rejects -- but only the *first* entry
+/// opening with `:` and text (`{a: 1, :x}` is the key `":x"`) -- and a space before the `:` keeps it key
+/// content too (`{a :}` is the key `a :`), although the spec allows it (corpus cases
 /// `CFD4`/`FRK4`/`NKF9` are in the known-failures manifest for that reason). Every row captured from yq
 /// v4.53.3 (Homebrew), the rejected ones for the exit status only.
 #[test]
@@ -69524,6 +69526,23 @@ fn test_yaml_flow_colon_before_a_flow_indicator_is_content_4558() -> Result<()> 
         ("[http://x]", "[\"http://x\"]\n"),
         ("{? : x}", "{\"\":\"x\"}\n"),
         ("{a: b:}", "{\"a\":\"b:\"}\n"),
+        ("{a: 1, :x}", "{\"a\":1,\":x\":null}\n"),
+        ("{a: 1, :x: 2}", "{\"a\":1,\":x\":2}\n"),
+        ("{a: 1, :}", "{\"a\":1,\":\":null}\n"),
+        ("{a, :x}", "{\"a\":null,\":x\":null}\n"),
+        ("- {a: 1, :x}", "[{\"a\":1,\":x\":null}]\n"),
+        ("{a: 1,\n :x}", "{\"a\":1,\":x\":null}\n"),
+        ("{a :}", "{\"a :\":null}\n"),
+        ("{a :, b: 1}", "{\"a :\":null,\"b\":1}\n"),
+        ("{a : }", "{\"a\":null}\n"),
+        ("{a : 1}", "{\"a\":1}\n"),
+        ("{a b :}", "{\"a b :\":null}\n"),
+        ("[a :]", "[\"a :\"]\n"),
+        ("[a :, b]", "[\"a :\",\"b\"]\n"),
+        ("{a: 1, :, b}", "{\"a\":1,\":\":null,\"b\":null}\n"),
+        ("{a: 1, b :}", "{\"a\":1,\"b :\":null}\n"),
+        ("[a :b]", "[\"a :b\"]\n"),
+        ("{a :b}", "{\"a :b\":null}\n"),
     ];
     for &(doc, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", doc, &["-o=json", "-I=0"])?;
@@ -69548,6 +69567,10 @@ fn test_yaml_flow_colon_before_a_flow_indicator_is_content_4558() -> Result<()> 
         "{: , a}",
         "{a: 1 b: 2}",
         "[a: 1 b: 2]",
+        "{:x, a: 1}",
+        "{ :x}",
+        "{a: 1, : x}",
+        "{a, : x}",
     ] {
         let (stdout, _stderr, code) = run_yq_stdin_with_stderr(".", doc, &["-o=json", "-I=0"])?;
         assert_ne!(code, 0, "{doc:?} is rejected (stdout {stdout:?})");
