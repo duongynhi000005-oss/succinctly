@@ -153687,3 +153687,72 @@ fn test_foreach_update_verdict_next_to_a_navigating_verdict_keeps_the_leading_re
         ),
     ])
 }
+
+/// #4732 (the shapes #4724 left): the caught foreign-marker destructure in a `foreach` source that is reached
+/// through a `.` stage, a `label` scope or a nested pipe, as the UPDATE of a `reduce` (the empty `foreach` leaves
+/// the state `null`, which the end of the path refuses) or of a `foreach` (the loop emits nothing for the step).
+/// They were answered (`[]`, and `del`/`|=` wrote). A comma beside the `foreach` is not that. Every row is a live
+/// jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_caught_foreign_marker_destructure_behind_identity_and_label_in_an_update_4732() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1,2) as $i (.; label $l | foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; . | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; (. | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) | .))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1,2) as $i (.; . | foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; . | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; label $l | foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .; .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; (. | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 1))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; (. | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 1; .))",
+            "[]\n",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
+}

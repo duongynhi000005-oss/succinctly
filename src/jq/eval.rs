@@ -40139,6 +40139,24 @@ fn emit_branches<'a>(
 /// Peel any wrapping `Expr::Paren` down to the inner expression — `(false)`
 /// and `false` are the same node for a caller that only cares about literal
 /// shape, not surface syntax (`Expr::Alternative`'s `#845` fix, below).
+/// The source of the `foreach` an UPDATE pipe begins with, looking through the stages that hand
+/// their input on untouched once (`.`), a `label` scope and nested pipes (#4732): the stages after
+/// it run once per output, so an empty `foreach` leaves the whole UPDATE empty.
+fn update_head_foreach(expr: &Expr) -> Option<&Expr> {
+    match unwrap_paren(expr) {
+        Expr::Foreach { input, .. } => Some(input),
+        Expr::Label { body, .. } => update_head_foreach(body),
+        Expr::Pipe(stages) => {
+            let mut rest = stages
+                .iter()
+                .map(unwrap_paren)
+                .skip_while(|e| matches!(e, Expr::Identity));
+            rest.next().and_then(update_head_foreach)
+        }
+        _ => None,
+    }
+}
+
 fn unwrap_paren(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren(inner) => unwrap_paren(inner),
@@ -59520,13 +59538,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
                                 Some(fold_body::sole_update_foreach(input, false))
                             }
-                            Expr::Pipe(stages) if S::TAG == EvalTag::Jq => {
-                                match stages.first().map(unwrap_paren) {
-                                    Some(Expr::Foreach { input, .. }) => {
-                                        Some(fold_body::sole_update_pipe_head(input))
-                                    }
-                                    _ => None,
-                                }
+                            e @ (Expr::Pipe(_) | Expr::Label { .. }) if S::TAG == EvalTag::Jq => {
+                                update_head_foreach(e)
+                                    .map(|input| fold_body::sole_update_pipe_head(input, false))
                             }
                             _ => None,
                         };
@@ -60427,6 +60441,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _sole_update_foreach = match unwrap_paren(&bound_update) {
                             Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
                                 Some(fold_body::sole_update_foreach(input, true))
+                            }
+                            e @ (Expr::Pipe(_) | Expr::Label { .. }) if S::TAG == EvalTag::Jq => {
+                                update_head_foreach(e)
+                                    .map(|input| fold_body::sole_update_pipe_head(input, true))
                             }
                             _ => None,
                         };
@@ -69393,7 +69411,7 @@ mod fold_body {
         /// The body depth whose UPDATE is a pipe headed by a `foreach` (#4724), and a copy of that
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
-        static SOLE_PIPE_HEAD: RefCell<Option<(u32, super::Expr)>> = const { RefCell::new(None) };
+        static SOLE_PIPE_HEAD: RefCell<Option<(u32, super::Expr, bool)>> = const { RefCell::new(None) };
     }
 
     /// Restores the previous [`emissions_discarded`] mark.
@@ -69421,7 +69439,7 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize, bool), Option<(u32, super::Expr)>);
+    pub(crate) struct SoleGuard((u32, usize, bool), Option<(u32, super::Expr, bool)>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
@@ -69443,11 +69461,13 @@ mod fold_body {
 
     /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724): its
     /// later stages run once per output, so an empty `foreach` leaves the whole UPDATE empty.
-    pub(crate) fn sole_update_pipe_head(source: &super::Expr) -> SoleGuard {
+    pub(crate) fn sole_update_pipe_head(source: &super::Expr, in_foreach: bool) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
         SOLE_FOREACH.with(|a| a.set((0, 0, false)));
-        let previous_pipe =
-            SOLE_PIPE_HEAD.with(|a| a.borrow_mut().replace((depth() + 1, source.clone())));
+        let previous_pipe = SOLE_PIPE_HEAD.with(|a| {
+            a.borrow_mut()
+                .replace((depth() + 1, source.clone(), in_foreach))
+        });
         SoleGuard(previous, previous_pipe)
     }
 
@@ -69467,7 +69487,7 @@ mod fold_body {
                 || SOLE_PIPE_HEAD.with(|a| {
                     a.borrow()
                         .as_ref()
-                        .is_some_and(|(at, head)| *at == depth() && head == source)
+                        .is_some_and(|(at, head, _)| *at == depth() && head == source)
                 }))
     }
 
@@ -69476,9 +69496,13 @@ mod fold_body {
     /// with a `null` state.
     pub(crate) fn sole_update_foreach_in_loop_here(source: &super::Expr) -> bool {
         let (at, address, in_loop) = SOLE_FOREACH.with(Cell::get);
-        in_loop
-            && depth() > 0
-            && (at, address) == (depth(), (source as *const super::Expr) as usize)
+        depth() > 0
+            && ((in_loop && (at, address) == (depth(), (source as *const super::Expr) as usize))
+                || SOLE_PIPE_HEAD.with(|a| {
+                    a.borrow().as_ref().is_some_and(|(at, head, in_loop)| {
+                        *in_loop && *at == depth() && head == source
+                    })
+                }))
     }
 
     /// Restores the previous [`fresh_source`] mark.
@@ -69819,7 +69843,7 @@ mod fold_body {
         SoleGuard
     }
 
-    pub(crate) fn sole_update_pipe_head(_source: &super::Expr) -> SoleGuard {
+    pub(crate) fn sole_update_pipe_head(_source: &super::Expr, _in_foreach: bool) -> SoleGuard {
         SoleGuard
     }
 
