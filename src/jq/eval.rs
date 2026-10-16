@@ -53921,7 +53921,7 @@ fn run_branch_of_bind_chain(e: &Expr) -> Option<&Expr> {
 }
 
 /// Whether `e` raises whenever it runs: `error`, `error(literal)`, or those after stages that each
-/// emit exactly once (`.`, a literal). Not [`body_always_raises`], which also admits an `error` that
+/// emit exactly once (`.`, a literal), or such an `e` as the branch `false // e` runs (#4704). Not [`body_always_raises`], which also admits an `error` that
 /// an earlier stage emitting nothing never reaches (`select(false) | error`): a handler behind that
 /// one never runs, and jq answers (#4635).
 fn certainly_raises(e: &Expr) -> bool {
@@ -53937,6 +53937,9 @@ fn certainly_raises(e: &Expr) -> bool {
         Expr::Pipe(stages) => stages
             .split_last()
             .is_some_and(|(last, earlier)| earlier.iter().all(emits_once) && raises(last)),
+        // #4704: `A // B` runs `B` when `A` has no truthy output, so a falsy constant `A` raises
+        // exactly when `B` does (`false // error`).
+        Expr::Alternative(left, right) if never_truthy(left) => certainly_raises(right),
         other => raises(other),
     }
 }
@@ -54167,6 +54170,47 @@ fn passing_marker_selects<S: EvalSemantics>(source: &Expr) -> Vec<Expr> {
         false
     });
     passing
+}
+
+/// #4704: whether `source` emits nothing in the body of a `reduce` whose source moved the register,
+/// because the destructure of `.` it begins with raises there ([`leading_destructure_of_dot_element`])
+/// and a `?`, a `try` or a `try ... catch empty` around it swallows the raise: `(. as {b:$b} | .)?`,
+/// `try (. as {a:$a} | .) catch empty`, and either one as the branch `false // X` runs. A `foreach`
+/// source that emits nothing makes the enclosing `reduce` UPDATE emit nothing, whose `null` state jq
+/// refuses at the end of the path; a handler that emits (`catch .`) is a source of its own.
+fn caught_leading_destructure_emits_nothing(source: &Expr) -> bool {
+    // Whether `body` raises in a moved body: it begins with the destructure of `.`, or is the branch
+    // `false // X` runs and that does.
+    fn raises(body: &Expr) -> bool {
+        match unwrap_paren(body) {
+            Expr::Alternative(left, right) if never_truthy(left) => raises(right),
+            other => leading_destructure_of_dot_element(other).is_some(),
+        }
+    }
+    // Whether `body` yields nothing once the wrapper around it swallows its raise.
+    let silent = |body: &Expr| raises(body) || caught_leading_destructure_emits_nothing(body);
+    match unwrap_paren(source) {
+        Expr::Optional(body)
+        | Expr::Try {
+            expr: body,
+            catch: None,
+        } => silent(body),
+        Expr::Try {
+            expr: body,
+            catch: Some(handler),
+        } => matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) && silent(body),
+        // `A // B` yields B's outputs when A has none, and none when B has none either.
+        Expr::Alternative(left, right) => {
+            if never_truthy(left) {
+                caught_leading_destructure_emits_nothing(right)
+            } else {
+                caught_leading_destructure_emits_nothing(left)
+                    && (matches!(unwrap_paren(right), Expr::Builtin(Builtin::Empty))
+                        || caught_leading_destructure_emits_nothing(right))
+            }
+        }
+        _ => false,
+    }
 }
 
 fn drive_fold_source_with<S: EvalSemantics>(
@@ -54550,6 +54594,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // own "with result" refusal does for a `.` body. A `null` ambient is left to the
     // resolver's own `null` clause (#4007): on a `null` document the register really is
     // that `null`, and jq answers.
+    // #4704: the raise is swallowed, so the source is empty and the enclosing UPDATE's `null` state
+    // is the register jq refuses at the end of the path. Nothing to drive.
+    if foreach_source
+        && in_moved_body
+        && refusal_eligible
+        && fold_body::depth() != 0
+        && caught_leading_destructure_emits_nothing(source)
+    {
+        return Flow::Exhausted;
+    }
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
         && ambient.trackable
