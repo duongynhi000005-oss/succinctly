@@ -70048,10 +70048,11 @@ fn test_printing_a_sequence_item_by_itself_keeps_the_comment_after_its_dash_4256
 
 /// #4113: a key that a filter deletes and writes again is a new node, so it keeps none of the old
 /// key's properties -- anchor, tag, quoting, key comment -- and a closed literal written there
-/// carries none of the old value's presentation either. `|=` with a closed literal is the same
-/// write as `=` (yq treats them alike). Still different, not pinned: a value copied from another
-/// node (`.k = .j`, `.k as $x | del(.k) | .k = $x`) takes that node's presentation in yq, which
-/// the by-key reconciliation cannot see. Every row captured from yq v4.53.3 (Homebrew).
+/// carries none of the old value's presentation either, nor does a write beneath it (`del(.m) |
+/// .m.x = 5`) or a compound one (`.k += "z"`). `|=` with a closed literal is the same write as `=`
+/// (yq treats them alike). Still different, not pinned: a value copied from another node (`.k = .j`,
+/// `.k as $x | del(.k) | .k = $x`) takes that node's presentation in yq, which the by-key
+/// reconciliation cannot see. Every row captured from yq v4.53.3 (Homebrew).
 #[test]
 fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113() -> Result<()> {
     let rows: &[(&str, &str, &str)] = &[
@@ -70076,6 +70077,12 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("&a k: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("&a k: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("&a k: v\nj: 1\n", "del(.k) | .k += \"z\"", "j: 1\nk: z\n"),
+        (
+            "&a k: v\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         ("!Foo k: v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         (
             "!Foo k: v\nj: 1\n",
@@ -70101,6 +70108,12 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("!Foo k: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("!Foo k: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("!Foo k: v\nj: 1\n", "del(.k) | .k += \"z\"", "j: 1\nk: z\n"),
+        (
+            "!Foo k: v\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         (
             "# c\nk: v # lc\nj: 1\n",
             "del(.k) | .k = 1",
@@ -70125,6 +70138,11 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
             "# c\nk: v # lc\nj: 1\n",
             "del(.k, .j) | .k = 1",
             "# c\nk: 1\n",
+        ),
+        (
+            "# c\nk: v # lc\nj: 1\n",
+            "del(.k) | .k += \"z\"",
+            "# c\nj: 1\nk: z\n",
         ),
         ("\"k\": v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         (
@@ -70151,6 +70169,12 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("\"k\": v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("\"k\": v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("\"k\": v\nj: 1\n", "del(.k) | .k += \"z\"", "j: 1\nk: z\n"),
+        (
+            "\"k\": v\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         ("'k': v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         (
             "'k': v\nj: 1\n",
@@ -70172,6 +70196,8 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("'k': v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("'k': v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("'k': v\nj: 1\n", "del(.k) | .k += \"z\"", "j: 1\nk: z\n"),
+        ("'k': v\nj: 1\n", "del(.k) | .k.z = 1", "j: 1\nk:\n  z: 1\n"),
         ("? &a k\n: v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         (
             "? &a k\n: v\nj: 1\n",
@@ -70201,6 +70227,54 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("? &a k\n: v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("? &a k\n: v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k += \"z\"",
+            "j: 1\nk: z\n",
+        ),
+        (
+            "? &a k\n: v\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
+        (
+            "m:\n  x: 1 # xc\n  y: 2\n",
+            "del(.m) | .m.x = 5",
+            "m:\n  x: 5\n",
+        ),
+        (
+            "m:\n  x: 1 # xc\n  y: 2\n",
+            "del(.m.x) | .m.x += 1",
+            "m:\n  y: 2\n  x: 1\n",
+        ),
+        ("k: !Bar v # kc\n", "del(.k) | .k = 1", "k: 1\n"),
+        ("k: !Bar v # kc\n", "del(.k) | .k = \"w\"", "k: w\n"),
+        (
+            "k: !Bar v # kc\n",
+            "del(.k) | .k = {\"y\": 2}",
+            "k:\n  y: 2\n",
+        ),
+        ("k: !Bar v # kc\n", "del(.k) | .k = [1]", "k:\n  - 1\n"),
+        ("k: !Bar v # kc\n", "del(.k) | .k = 1 | .k = 2", "k: 2\n"),
+        ("k: !Bar v # kc\n", "del(.k) | .k |= 5", "k: 5\n"),
+        ("k: !Bar v # kc\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("k: !Bar v # kc\n", "del(.k) | .k += \"z\"", "k: z\n"),
+        ("k: !Bar v # kc\n", "del(.k) | .k.z = 1", "k:\n  z: 1\n"),
+        (
+            "j: [1, 2] # jc\nk: 1\n",
+            "del(.j) | .j[0] = 5",
+            "k: 1\nj:\n  - 5\n",
+        ),
+        (
+            "j: [1, 2] # jc\nk: 1\n",
+            "del(.j) | .j += [3]",
+            "k: 1\nj:\n  - 3\n",
+        ),
+        (
+            "k: &x\n  p: 1 # c\nj: *x\n",
+            "del(.k, .j) | .k = 1",
+            "k: 1\n",
+        ),
         (
             "k: # kc\n  x: 1\nj: 1\n",
             "del(.k) | .k = 1",
@@ -70242,6 +70316,16 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
             "j: 1\nk: 5\n",
         ),
         ("k: # kc\n  x: 1\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k += \"z\"",
+            "j: 1\nk: z\n",
+        ),
+        (
+            "k: # kc\n  x: 1\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         ("&a k: {x: 1}\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         (
             "&a k: {x: 1}\nj: 1\n",
@@ -70271,6 +70355,16 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("&a k: {x: 1}\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("&a k: {x: 1}\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k += \"z\"",
+            "j: 1\nk: z\n",
+        ),
+        (
+            "&a k: {x: 1}\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         ("a:\n  !Foo k: v\n", "del(.a.k) | .a.k = 1", "a:\n  k: 1\n"),
         ("a:\n  !Foo k: v\n", ".a |= {\"k\": 3}", "a:\n  k: 3\n"),
         (
@@ -70321,6 +70415,16 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("&a k: v # lc\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("&a k: v # lc\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k += \"z\"",
+            "j: 1\nk: z\n",
+        ),
+        (
+            "&a k: v # lc\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         ("k: &p v\nj: 1\n", "del(.k) | .k = 1", "j: 1\nk: 1\n"),
         ("k: &p v\nj: 1\n", "del(.k) | .k = \"w\"", "j: 1\nk: w\n"),
         (
@@ -70336,6 +70440,12 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ),
         ("k: &p v\nj: 1\n", "del(.k) | .k |= 5", "j: 1\nk: 5\n"),
         ("k: &p v\nj: 1\n", "del(.k, .j) | .k = 1", "k: 1\n"),
+        ("k: &p v\nj: 1\n", "del(.k) | .k += \"z\"", "j: 1\nk: z\n"),
+        (
+            "k: &p v\nj: 1\n",
+            "del(.k) | .k.z = 1",
+            "j: 1\nk:\n  z: 1\n",
+        ),
         (
             "a: # ac\n  k: v # kc\n  j: 1 # jc\nb: 1 # bc\n",
             ".a |= {\"k\": 3, \"j\": 1}",
@@ -70390,6 +70500,7 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
         ("!Foo k: v\nj: 1\n", ".k = 2", "!Foo k: 2\nj: 1\n"),
         ("&a k: v\nj: 1\n", "del(.j)", "&a k: v\n"),
         ("&a k: v\nj: 1\n", "del(.k) | .j = 2", "j: 2\n"),
+        ("k: !Bar v # kc\n", ".k += \"z\"", "k: !Bar vz # kc\n"),
     ];
     for &(doc, filter, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
