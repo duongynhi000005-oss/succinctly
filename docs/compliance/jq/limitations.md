@@ -2558,15 +2558,36 @@ is the revert that established what the other one costs.
    the nested fold needs of it, that it is not `null`. On a `null` register a literal `null` destructured in a fold's source *is* the
    register, so its pattern steps move jq's register (`null | path(foreach (null as {b:$b} | .) as $y (.; .; .))` is
    `["b"]`); the fold's source is routed to the resolver for it (`NotRegister::at_null`) rather than driven by value, which
-   left the register at the root (`[]`). Still answered at the root where jq answers below it: a fold whose INIT navigated onto a
-   `null` (`foreach (null as {b:$b} | .) as $y (.a; .; .)` on `{"a":null}`: `["a"]` for jq's `["a","b"]`). The resolver does
-   not place any step from a `null` register below the root (`foreach (null | .b) as $y (.a; .; .)` is refused on `main` too),
-   so routing that source would refuse what the by-value drive answers (`reduce (null as {b:$b} | .) as $y (.a; .)` is `["a"]`);
-   it is the same gap for every source shape and stays open on [#4707](https://github.com/rust-works/succinctly/issues/4707), with a
-   literal `null` destructure ending on a fresh value read by an EXTRACT `$y` three folds deep (`[]` for jq's `["b"]`).
+   left the register at the root (`[]`). That holds below the root too
+   ([#4707](https://github.com/rust-works/succinctly/issues/4707)): a fold whose INIT navigated onto a `null`
+   (`foreach (null as {b:$b} | .) as $y (.a; .; .)` on `{"a":null}` is `["a","b"]`, as is `foreach (null | .b) ...`) runs
+   its source untracked with the live `null` in its frame and what the source moves the register to rebased onto the
+   register's path (`FoldSourceAmbient::register_null_off_root`); a `reduce` source backtracks the move and still answers
+   `["a"]`. And where a fold's accumulator is untracked but the register jq restored at its fork point is `null` (the
+   second pass of the innermost of three folds, whose accumulator is a fresh value), the literal is the register there
+   too (`FoldRegister::register_is_null`, `NotRegister::at_null`). Still wrong there: a comma that follows the literal
+   destructure in that innermost fold (`foreach ((null as {a:$a} | .), 1) as $y (.; $y; .)` three folds deep on
+   `null`), which the resolver now refuses on the second pass (`Invalid path expression with result 1`) where jq answers
+   and the by-value drive happened to match on the rows `lit-null-comma` of the `--deep` grid (nine rows of 161,616).
+   A destructure inside a fold that is itself the SOURCE of another fold
+   ([#4708](https://github.com/rust-works/succinctly/issues/4708)) is path-checked in jq wherever it stands, but the
+   outer fold's source was driven by value whenever its own spine held no navigation or destructure, so a destructure
+   in the nested fold's INIT/UPDATE/EXTRACT (or in the source of a fold in them) ran unchecked and `path()` answered,
+   and `del`/`=`/`|=` wrote through it (`foreach (foreach (1,2) as $k (.; {a:1} as $n | $n as {b:$b} | .; .)) as $z
+   (.; .; .)` printed `[] []` where jq raises). It is not a matter of how deep the fold is nested: it reproduces at
+   the root. Such a source is now routed to the resolver (`is_fold_with_destructuring_body`) when the nested fold
+   certainly destructures a freshly built value (for a `foreach` and a `reduce` source alike), or the register
+   (`.`, a `$x`) for a `foreach` source, which does not backtrack what the nested fold moved. Not read: a `reduce`
+   source, or a nested fold holding a `reduce`, for the register (a `reduce` restores the register and the resolver
+   refuses what jq answers), and a destructure behind an `empty`, a `select(false)`, a `limit(0; ..)` or an `if`
+   (`may_skip_or_branch`), which may never run or hand a value on. On the `--deep` grid, `fe3-fe-src` wrong accepts go
+   from 4,101 to 236 and `rd3-fe-src` from 1,617 to 236, with no match lost outside the nine rows above. What is left
+   of the `--deep` grid's wrong accepts (about 100 `bare-catch-error-*` rows per outer fold, the conditional and
+   empty-body destructures above, and the `?//` chains) is the same family as the two-fold residual and stays open;
+   `--deep` is therefore still judged against `--base` and is not a gate.
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family (`--deep` adds the three-fold nests of
-   [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build; its wrong accepts on `main` are
-   [#4708](https://github.com/rust-works/succinctly/issues/4708)). Outside a fold body, a bound expression
+   [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build; `--dump FILE` writes every
+   row's class for a gain/loss breakdown by source). Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
