@@ -30570,7 +30570,10 @@ fn path_context_absent_rest_route(rest: &[Expr]) -> Option<AbsentRestRoute> {
 /// an `OwnedIdentity` records: `base` is that ancestor's cursor, and the
 /// chain holds one link per component. Only the first link has a value to
 /// carry -- everything below the ancestor is absent, which is `null` -- so
-/// this pays exactly one `to_owned_cursor` per absent position.
+/// this pays exactly one `to_owned_cursor` per absent position. A position
+/// under a root-level owned node (a yq slice of the document, a computed
+/// sum) has no real ancestor: its identity is detached and carries the
+/// components over the owned values they were taken from (#3019).
 ///
 /// `parent` then pops the chain, which is what the walk's own answers
 /// already are: on `a: {b: 1}`, `.a.x.y | parent` is `null` (the absent
@@ -30584,9 +30587,9 @@ fn path_context_absent_identity<V: DocumentValue, S: EvalSemantics>(
 ) -> Result<OwnedIdentity<V>, EvalError> {
     // A position becomes absent by stepping off a real node, and the walk
     // roots itself at one (`path_context_root`), so the ancestor chain
-    // always holds at least one live cursor -- and, since a step from an
-    // absent node is absent too, every entry after the last live one is
-    // absent.
+    // holds a live cursor -- except under a *root-level owned node* (#3019,
+    // below) -- and, since a step from an absent node is absent too, every
+    // entry after the last live one is absent.
     //
     // The links below the deepest live ancestor, root first: the first one
     // was taken from that ancestor, and the rest hang under it.
@@ -30599,11 +30602,24 @@ fn path_context_absent_identity<V: DocumentValue, S: EvalSemantics>(
             break;
         }
     }
-    let Some(base) = base else {
-        debug_assert!(false, "an absent position hangs under a real ancestor");
-        return Ok(OwnedIdentity::detached());
-    };
     below.reverse();
+    let Some(base) = base else {
+        // #3019: no live ancestor at all -- the walk hangs under a *root-level* owned node (a yq
+        // slice of the document, a root `try ... catch` output, a computed bracket target), whose
+        // position is the root's: nothing above it, so there is no base node to be kept at. The
+        // links still name every component below it, so the identity carries them over the owned
+        // value each was taken from (`.[1:] | .[] | select(.c == 3) | .c | path` is `[1,"c"]`).
+        let mut id = OwnedIdentity::detached();
+        for link in &below {
+            let parent = match &link.from {
+                PathNode::Owned(v) => Rc::clone(v),
+                PathNode::Absent => Rc::new(OwnedValue::Null),
+                PathNode::At(_) => unreachable!("a live ancestor was searched for above"),
+            };
+            id = id.child(&parent, link.component.clone());
+        }
+        return Ok(id);
+    };
     let mut parent = Rc::new(to_owned_cursor::<S, _>(&base)?);
     let mut id = OwnedIdentity::kept(base);
     for (i, link) in below.iter().enumerate() {
