@@ -58602,23 +58602,72 @@ fn test_yq_sort_keys_absent_prefix_before_iterate_2855() -> Result<()> {
     Ok(())
 }
 
-/// #2870 (known gap, found reviewing #2855): the "don't vivify" rule above
-/// only covers a resolved path's prefix *before* its first `Iterate`/
-/// `Slice` -- a static field *after* the fan-out still reaches
-/// `update_path`'s ordinary per-element vivification, wrongly creating it
-/// on an array element that never had it. Pinning succinctly's own current
-/// (documented, not fixed) behavior here, not real yq's -- see
-/// `docs/compliance/yq/limitations.md`. Real yq leaves the second element
-/// as `q: 3` with no `b` key added at all.
+/// #2870 (found reviewing #2855): the "don't vivify" rule above also holds for a static field
+/// *after* a fan-out -- an element that lacks the field is left as it is, and one that has it is
+/// sorted. An index past the end still pads, as in yq, and a path with a slice keeps leaving the
+/// document unchanged. Each row was captured from yq v4.53.3.
 #[test]
-fn test_yq_sort_keys_vivifies_past_a_fanout_known_gap_2870() -> Result<()> {
-    let input = "a:\n  - b: 2\n    q: 1\n  - q: 3\n";
-    let (out, code) = run_yq_stdin("sort_keys(.a[].b)", input, &[])?;
-    assert_eq!(code, 0, "out={out:?}");
-    assert_eq!(
-        out.trim_end(),
-        "a:\n  - b: 2\n    q: 1\n  - q: 3\n    b: null"
-    );
+fn test_yq_sort_keys_does_not_vivify_past_a_fanout_2870() -> Result<()> {
+    for (filter, input, expected) in [
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: 2\n    q: 1\n  - q: 3\n",
+            r#"{"a":[{"b":2,"q":1},{"q":3}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n  - q: 3\n",
+            r#"{"a":[{"b":{"y":2,"z":1}},{"q":3}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n  - b: {x: 1, a: 2}\n",
+            r#"{"a":[{"b":{"y":2,"z":1}},{"b":{"a":2,"x":1}}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n  - c: {x: 1, a: 2}\n",
+            r#"{"a":[{"b":{"y":2,"z":1}},{"c":{"x":1,"a":2}}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b.z)",
+            "a:\n  - b: {z: 1, y: 2}\n  - c: {x: 1, a: 2}\n",
+            r#"{"a":[{"b":{"z":1,"y":2}},{"c":{"x":1,"a":2}}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b.nope)",
+            "a:\n  - b: {z: 1, y: 2}\n  - c: {x: 1, a: 2}\n",
+            r#"{"a":[{"b":{"z":1,"y":2}},{"c":{"x":1,"a":2}}]}"#,
+        ),
+        (
+            "sort_keys(.a[].b)",
+            "a:\n  x:\n    b: {z: 1, y: 2}\n  y:\n    c: 1\n",
+            r#"{"a":{"x":{"b":{"y":2,"z":1}},"y":{"c":1}}}"#,
+        ),
+        (
+            "sort_keys(.nope[].b)",
+            "a:\n  - b: {z: 1, y: 2}\n",
+            r#"{"a":[{"b":{"z":1,"y":2}}]}"#,
+        ),
+        (
+            "sort_keys(.a[])",
+            "a:\n  - b: 2\n    q: 1\n  - q: 3\n",
+            r#"{"a":[{"b":2,"q":1},{"q":3}]}"#,
+        ),
+        (
+            "sort_keys(.a[0:1][])",
+            "a:\n  - {z: 1, y: 2}\n  - {x: 1, a: 2}\n",
+            r#"{"a":[{"z":1,"y":2},{"x":1,"a":2}]}"#,
+        ),
+        (
+            "sort_keys(.a[][0])",
+            "a:\n  - [{z: 1, y: 2}]\n  - []\n",
+            r#"{"a":[[{"y":2,"z":1}],[null]]}"#,
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.trim()), (0, expected), "[{filter}] {input:?}");
+    }
     Ok(())
 }
 

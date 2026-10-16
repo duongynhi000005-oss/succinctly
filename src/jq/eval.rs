@@ -31430,6 +31430,31 @@ fn is_plain_fan_out_path(path_expr: &Expr) -> bool {
     plain(path_expr) && any_subexpr(path_expr, &mut |e| matches!(e, Expr::Iterate))
 }
 
+/// Whether every `Field` step of the static path `path` that lands on a mapping in `doc` names a
+/// key it has (#2870). An index step descends when it is in range and ends the walk when it is not
+/// (the write pads there), and a field step onto anything but a mapping is not checked.
+fn fields_exist_along(doc: &OwnedValue, path: &Expr) -> bool {
+    let mut steps = Vec::new();
+    push_path_components(&mut steps, path);
+    let mut at = Some(doc);
+    for step in &steps {
+        let Some(value) = at else {
+            return true;
+        };
+        at = match (unwrap_path_component(step).0, value) {
+            (Expr::Field(name), OwnedValue::Object(map)) => match map.get(name.as_str()) {
+                Some(child) => Some(child),
+                None => return false,
+            },
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                array_slot(items.len(), *idx).and_then(|at| items.get(at))
+            }
+            _ => None,
+        };
+    }
+    true
+}
+
 fn concrete_update_paths<S: EvalSemantics>(
     path_expr: &Expr,
     doc: &OwnedValue,
@@ -31734,9 +31759,10 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // *prefix* existing is enough -- `update_path`'s own native per-element
     // fan-out below decides the rest.
     if skip_absent_paths {
-        paths.retain(|path| {
+        let mut kept = vec_with_capacity(paths.len());
+        for path in paths {
             let mut steps = Vec::new();
-            push_path_components(&mut steps, path);
+            push_path_components(&mut steps, &path);
             let prefix_len = steps
                 .iter()
                 .position(|s| {
@@ -31746,8 +31772,31 @@ fn eval_update_impl<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                     )
                 })
                 .unwrap_or(steps.len());
-            navigate_read_only(&result, &steps[..prefix_len])
-        });
+            if !navigate_read_only(&result, &steps[..prefix_len]) {
+                continue;
+            }
+            // #2870: past a fan-out the paths are spelled out per element, and an element
+            // that lacks a *field* the path names is left alone, as yq leaves it
+            // (`sort_keys(.a[].b)` creates no `b` on an element without one); an index past the
+            // end still pads, as it does there. A path that cannot be spelled out, and one with a
+            // slice (whose no-op yq keeps), keeps the route it took before.
+            let fans_out = prefix_len < steps.len()
+                && !steps
+                    .iter()
+                    .any(|s| matches!(unwrap_path_component(s).0, Expr::Slice { .. }));
+            match fans_out
+                .then(|| concrete_update_paths::<S>(&path, &result))
+                .flatten()
+            {
+                Some(concrete) => kept.extend(
+                    concrete
+                        .into_iter()
+                        .filter(|concrete| fields_exist_along(&result, concrete)),
+                ),
+                None => kept.push(path),
+            }
+        }
+        paths = kept;
     }
     // #1351: redirect through aliases. `|=` is the one operator whose
     // *terminal* alias position is also redirected, and only when the filter
