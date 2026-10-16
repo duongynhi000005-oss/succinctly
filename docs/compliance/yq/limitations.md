@@ -632,8 +632,8 @@ Error: ... did not find expected key # succinctly: {"k":["item"]}
 - **A key whose content starts on the next line** (`?` / `  k`) never records a pending key (#4532), so
   the rejection does not reach it, and `?` / `  k` / `x: 1` loses the `x: 1` entry
   (`{"k":"x"}` where yq answers `{"k":null,"x":1}`).
-- **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is dropped
-  silently where yq errors (#4530); the next-line key form is #4532.
+- **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is an error
+  here as in yq (#4530); the next-line key form is #4532.
 
 ## Open divergences (bugs, not decisions)
 

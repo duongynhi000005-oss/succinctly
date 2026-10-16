@@ -7901,11 +7901,75 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         Ok(())
     }
 
+    /// Whether a `-` line at `indent` lands directly in a block mapping open at that indent whose
+    /// latest entry already has its value (`a: 1` / `- x`, a nested mapping or sequence that ended
+    /// on the line before, a block scalar). A same-indent `-` is legal there only as the
+    /// implicit value of a `key:` still waiting for one, so anywhere else real yq stops with
+    /// `did not find expected key` and the line must not be dropped (#4530).
+    ///
+    /// The line that owns the pending value has to sit at the mapping's own indent: a `-` that
+    /// dedents past a nested `b:` back into its parent mapping (`a:` / `  b:` / `- x`) is the
+    /// same error. A line that opens with its own `-` is a compact mapping inside a sequence item,
+    /// whose key column is not the line's indent, so it is judged on its ending alone. An
+    /// explicit key's owner mapping is left to
+    /// [`Self::explicit_key_with_content_rejects_sequence_at`], where a bare `?` legitimately
+    /// takes the sequence as its own content (YAML test suite 6PBE).
+    fn sequence_follows_completed_mapping_entry_at(&self, indent: usize) -> bool {
+        let Some(mut landing) = self.indent_stack.len().checked_sub(1) else {
+            return false;
+        };
+        while landing > 0 && self.indent_stack[landing] > indent {
+            landing -= 1;
+        }
+        if self.indent_stack[landing] != indent || self.type_stack[landing] != NodeType::Mapping {
+            return false;
+        }
+        if self
+            .pending_explicit_key
+            .is_some_and(|owner_depth| owner_depth == landing + 1)
+        {
+            return false;
+        }
+        !self.previous_content_line_defers_a_value_at(indent)
+    }
+
+    /// [`Self::previous_content_line_defers_its_value`] for a mapping entry in particular: the
+    /// previous content line ends in the `:` of a key (node properties and a comment aside) and
+    /// that key stands at `indent` ([`Self::sequence_follows_completed_mapping_entry_at`]). The
+    /// key's column is the line's indent plus the `- ` markers it opens with, so the compact
+    /// mapping of a sequence item (`- k:`) stands where its continuation lines do.
+    fn previous_content_line_defers_a_value_at(&self, indent: usize) -> bool {
+        let Some((lead, rest)) = self.previous_content_line() else {
+            return false;
+        };
+        let mut marker_len = 0;
+        while rest.get(marker_len) == Some(&b'-')
+            && Self::is_ws_break_or_eoi(rest.get(marker_len + 1).copied())
+        {
+            marker_len += 1;
+            while matches!(rest.get(marker_len), Some(b' ' | b'\t')) {
+                marker_len += 1;
+            }
+        }
+        lead + marker_len == indent && line_ends_with_colon_after_properties(&rest[marker_len..])
+    }
+
     /// Whether the nearest earlier line that is neither blank nor a comment leaves its value for
     /// the next line: a key written up to its colon (`a:`, `- k:`) or a bare `-`, a trailing
     /// comment aside. The only place a block scalar header on a line of its own can belong
     /// (#4259); a header anywhere else is not a value slot and keeps the path it always took.
     fn previous_content_line_defers_its_value(&self) -> bool {
+        self.previous_content_line().is_some_and(|(_, rest)| {
+            line_ends_with_colon_before_comment(rest)
+                || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest))
+        })
+    }
+
+    /// The nearest line above the cursor's that holds content, as its count of leading spaces and
+    /// the rest of it: a blank line, a comment line and node properties on a line of their own
+    /// (`&x`, part of the value that follows, #4271) are walked past. `None` at the top of the
+    /// input.
+    fn previous_content_line(&self) -> Option<(usize, &[u8])> {
         let mut line_start = self.pos;
         while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
             line_start -= 1;
@@ -7922,19 +7986,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             end = prev_start;
             let line = &self.input[prev_start..prev_end];
-            let rest = &line[line.iter().take_while(|&&b| b == b' ').count()..];
-            if rest.is_empty() || rest[0] == b'#' {
+            let lead = line.iter().take_while(|&&b| b == b' ').count();
+            let rest = &line[lead..];
+            if rest.is_empty() || rest[0] == b'#' || only_node_properties(rest) {
                 continue;
             }
-            // Node properties on a line of their own (`&x`) are part of the value that follows;
-            // the line before them is the owner (#4271).
-            if only_node_properties(rest) {
-                continue;
-            }
-            return line_ends_with_colon_before_comment(rest)
-                || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest));
+            return Some((lead, rest));
         }
-        false
+        None
     }
 
     /// A block scalar whose header sits on a line of its own (#4259, and after node properties
@@ -8031,6 +8090,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     return Err(self.err_unexpected_char(
                         self.pos,
                         "a sequence cannot be an explicit key's implicit value",
+                    ));
+                }
+                // The same line of an ordinary `key: value` entry: the `-` has nothing to be
+                // the value of, so it is an error, not a line to drop (#4530).
+                if self.sequence_follows_completed_mapping_entry_at(indent) {
+                    return Err(self.err_unexpected_char(
+                        self.pos,
+                        "a sequence cannot follow a completed mapping entry",
                     ));
                 }
                 self.parse_sequence_item(indent)?;
@@ -8325,6 +8392,58 @@ pub(crate) fn only_node_properties(bytes: &[u8]) -> bool {
         .split(|&b| b == b' ' || b == b'\t')
         .filter(|token| !token.is_empty())
         .all(|token| matches!(token[0], b'&' | b'!') && token[token.len() - 1] != b':')
+}
+
+/// `bytes` without its trailing spaces and tabs.
+fn trim_spaces_end(bytes: &[u8]) -> &[u8] {
+    let len = bytes
+        .iter()
+        .rposition(|&b| !matches!(b, b' ' | b'\t'))
+        .map_or(0, |at| at + 1);
+    &bytes[..len]
+}
+
+/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
+/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
+/// (#4530).
+fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
+    // A `#` opens a comment only outside a quoted key (`"x # y":`), and a quote opens one only
+    // at the start of a token (`it's` does not).
+    let mut quote = None;
+    let mut code_end = line.len();
+    let mut i = 0;
+    while i < line.len() {
+        let b = line[i];
+        match quote {
+            Some(b'"') if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if matches!(b, b'"' | b'\'')
+                && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) =>
+            {
+                quote = Some(b);
+            }
+            None if b == b'#' && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) => {
+                code_end = i;
+                break;
+            }
+            None => {}
+        }
+        i += 1;
+    }
+    let mut code = trim_spaces_end(&line[..code_end]);
+    while let Some(token_start) = code
+        .iter()
+        .rposition(|&b| matches!(b, b' ' | b'\t'))
+        .map(|at| at + 1)
+    {
+        let token = &code[token_start..];
+        if !matches!(token.first(), Some(b'&' | b'!')) {
+            break;
+        }
+        code = trim_spaces_end(&code[..token_start]);
+    }
+    code.last() == Some(&b':')
 }
 
 /// Whether `line` (already without its leading spaces) is a `-` and nothing else, a trailing
