@@ -150879,6 +150879,74 @@ fn test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756() -> Re
     ])
 }
 
+/// #4760 (the parameter residual of #4739): a call whose `def` body is `$x // BRANCH` with an argument that is
+/// never truthy runs `BRANCH` on the register, so a destructure there is the source's own: jq raises on a
+/// non-null document and walks the register on `null`. It was accepted. A truthy argument, or a body that
+/// names a parameter elsewhere, is unchanged. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_def_call_with_falsy_argument_runs_the_alternative_branch_4760() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(def f($x): $x // (. as {b:$b} | .); foreach f(false) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(def f($x): $x // (. as {b:$b} | .); foreach f(null) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(def f($x): $x // (. as {b:$b} | .); foreach f(false) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(def f($x): $x // (. as {b:$b} | .); foreach f(false) as $y (.; .; .))",
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(def f($x): $x // (. as {b:$b} | .); foreach f(1) as $y (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(def f($x): $x // (. as {b:$b} | .); foreach f(1) as $y (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"c":1}}"#,
+            r"path(reduce 1 as $k (.; def f($x): $x // (. as {b:$b} | .); foreach f(false) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(def f(g): g // (. as {b:$b} | .); foreach f(false) as $y (.; .; .))",
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4709 (the `try`/`?` residual of #4604): a `try`/`?` (or a `catch empty`) around the destructure of a
 /// `$x` bound to another node, as the source of a `foreach` that is the whole UPDATE of a `reduce`. The
 /// pattern's step raises, the `try` catches it, the source is empty, the `foreach` emits nothing, the
