@@ -50263,8 +50263,16 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             })
         };
         match unwrap_paren(expr) {
-            Expr::Builtin(Builtin::IsEmpty(gen)) => {
-                verdict_operand_leaves_register(gen).then_some(true)
+            // #4706: or a recursion, whose seed `isempty` stops on.
+            Expr::Builtin(Builtin::IsEmpty(gen)) => (verdict_operand_leaves_register(gen)
+                || seed_first_recursion(gen, false))
+            .then_some(true),
+            // #4706: `any(recurse; .)` is decided on the seed too, see [`seed_first_recursion`].
+            Expr::Builtin(Builtin::AnyCond(gen, cond))
+                if matches!(unwrap_paren(cond), Expr::Identity)
+                    && seed_first_recursion(gen, true) =>
+            {
+                Some(true)
             }
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
                 (verdict_operand_leaves_register(gen) && verdict_operand_leaves_register(cond))
@@ -50303,6 +50311,51 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
         }
     }
     leaves(update) == Some(true)
+}
+
+/// Whether `gen`, the generator of a verdict builtin, is a recursion whose first output is its
+/// seed, emitted before anything indexes, so a verdict that stops on the first output answers
+/// with the register where it entered (#4706): `recurse`, `..`, `recurse(f)` and `recurse(f; c)`
+/// are `def r: ., (f | r)`, and `f` is not run until the seed has been handed on. Neutral stages
+/// before it (`1 | recurse`) leave the seed at the register too; a navigating one
+/// (`.a | recurse`) does not, and a stage after it (`recurse | .a`) is not the first output.
+/// Read through a zero-arity `def` as [`verdict_builtin_leaves_register`] reads one.
+///
+/// `plain` asks for the spellings that cannot continue past a falsy seed (`recurse`, `..`: a
+/// `null`/`false` has no children), which is what lets `any(G; .)` be decided on the seed
+/// whichever way its `cond` answers; `recurse(f)` on `null` can go on, and the verdict then ends
+/// on a descendant. `all` is never decided on the seed (a truthy one goes on), nor is `any` over
+/// a `cond` other than `.`.
+fn seed_first_recursion(gen: &Expr, plain: bool) -> bool {
+    match unwrap_paren(gen) {
+        Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown) => true,
+        Expr::Builtin(Builtin::RecurseF(_) | Builtin::RecurseCond(..)) => !plain,
+        Expr::Pipe(stages) => match stages.split_last() {
+            Some((last, head)) => {
+                head.iter().all(neutral_leaves_register) && seed_first_recursion(last, plain)
+            }
+            None => false,
+        },
+        Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+            within_def_call_budget_with(|| seed_first_recursion(&def.body, plain).then_some(()))
+                .is_some()
+        }
+        Expr::FuncDef {
+            name,
+            params,
+            body,
+            then,
+            ..
+        } if params.is_empty()
+            && matches!(
+                unwrap_paren(then),
+                Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
+            ) =>
+        {
+            seed_first_recursion(body, plain)
+        }
+        _ => false,
+    }
 }
 
 /// Whether `operand` (the generator or `cond` of a verdict builtin, #4641) leaves jq's register
