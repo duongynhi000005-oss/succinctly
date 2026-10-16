@@ -258,11 +258,12 @@ WRAPPED_CONTEXTS = [
 # the end of the path refuses in jq (`with result null`); `foreign_register_markers` leaves a source holding a
 # `try`/`?` alone, since a fold that is not that UPDATE answers it. (An `empty` body or a bind
 # ahead of the destructure, a `select($x)` in front of it, and a `?//` chain of destructuring patterns over
-# the marker are decided since #4604.) They count against a lost match against `--base` like any row, but an
-# ACCEPT_WRONG in them does not fail the run.
+# the marker are decided since #4604.) The `bare-catch-error-*` and `try-body-dot-*` sources #4677/#4682 added are
+# open on `main` too (180 rows here; 352 more in the contexts outside this set make a run exit 1 there as well).
+# They count against a lost match against `--base` like any row, but an ACCEPT_WRONG in them does not fail the run.
 RESIDUAL_CONTEXTS = {"path-nav", "del-nav", "update-nav"}
 # ...and their count may not grow: the rows are not enumerated, so a new one is caught by the total.
-RESIDUAL_NAV_MAX = 18
+RESIDUAL_NAV_MAX = 198
 DOCS = [
     "null",
     "true",
