@@ -8296,6 +8296,19 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
         Some(YamlValue::key_string(self))
     }
 
+    fn substituted_key_text(&self) -> Option<String> {
+        match self {
+            // Only a JSON-sourced key can hold bytes the reader substitutes; the check comes before
+            // the decode so a YAML key (and a JSON key that decodes, by one scan) stays cheap.
+            YamlValue::String(
+                s @ YamlString::DoubleQuoted {
+                    json_sourced: true, ..
+                },
+            ) if s.as_str().is_err() => json_key_with_replacement_chars(s),
+            _ => None,
+        }
+    }
+
     /// One `as_str()` for both answers on the `String` arm, where the trait
     /// default would run two (#965 item 10). `YamlString::as_str` caches
     /// nothing -- each call re-finds the closing quote, makes up to three

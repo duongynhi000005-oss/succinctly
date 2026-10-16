@@ -621,9 +621,9 @@ yq v4.53.3:
 - **A bad key with YAML output is substituted like yq's** (#4536): each invalid byte becomes U+FFFD
   in the key, in the printed identity, `keys`, `to_entries`, `with_entries` and `key` alike. It was
   emptied to `""` (the fallback for a key that will not decode,
-  [#222](https://github.com/rust-works/succinctly/issues/222)) before. One shape still differs:
-  `keys` read back as *values* (`keys | .[0]`, `[keys[]]`, `keys | map(.)`) raises the decode error
-  where yq prints the key.
+  [#222](https://github.com/rust-works/succinctly/issues/222)) before. The elements of `keys` read
+  the same way when they are read back as values (`keys | .[0]`, `[keys[]]`, `keys | map(.)`,
+  `keys | join(",")`, #4741).
 - **The refusal can follow output already written** (`a: ` before the error), where yq refuses
   before printing; the streaming writers have no error channel to check first (the "Stage 6" gap in
   [decode-failure-routing.md](../../plan/decode-failure-routing.md)).

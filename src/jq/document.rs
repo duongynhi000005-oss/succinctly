@@ -1400,6 +1400,15 @@ pub trait DocumentValue: Sized + Clone {
         key_display_string_kind(self)
     }
 
+    /// The text a key reads as when its bytes do not decode but the document's reader substitutes
+    /// them (yq's JSON reader turns each invalid byte into U+FFFD, #4536), or `None` for a key that
+    /// decodes, or one that stays undecodable. A `keys` element made of such a key's cursor would
+    /// be decoded as a *value* and refused, so the walks that hand key cursors on as elements use
+    /// this text instead (#4741). `None` for every format whose bytes are validated up front.
+    fn substituted_key_text(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     /// Whether this key has no scalar form at all -- a YAML mapping,
     /// sequence, `null`, or an alias that does not resolve to a string (#222).
     ///
