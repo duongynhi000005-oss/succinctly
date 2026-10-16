@@ -50256,43 +50256,92 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
     /// Pipe and comma share the fold below, which is only right because every item must leave
     /// the register on its own: the pipe threads it from stage to stage and the comma restores it
     /// for each item, and an item that set it for the next would have to be refused here.
-    fn leaves(expr: &Expr) -> Option<bool> {
+    ///
+    /// `def` is the zero-arity `def` the expression sits in the scope of (#4720): its name and
+    /// what its body made of the register, so a call to it elsewhere in the scope than the whole
+    /// scope (`def f: isempty(1); (f | not)`) answers as its body does.
+    /// `read` of `gen`, an operand of a verdict builtin, with a call to the enclosing `def`
+    /// read as its body (#4720): `def f: recurse; isempty(f)` is `isempty(recurse)`.
+    fn operand(
+        gen: &Expr,
+        def: Option<(&str, &Expr, Option<bool>)>,
+        read: impl Fn(&Expr) -> bool,
+    ) -> bool {
+        match (unwrap_paren(gen), def) {
+            (Expr::FuncCall { name, args, .. }, Some((bound, body, _)))
+                if args.is_empty() && bound == name.as_str() =>
+            {
+                read(body)
+            }
+            _ => read(gen),
+        }
+    }
+
+    fn leaves(expr: &Expr, def: Option<(&str, &Expr, Option<bool>)>) -> Option<bool> {
         let fold = |stages: &[Expr]| {
             stages.iter().try_fold(false, |seen, stage| {
-                leaves(stage).map(|verdict| seen || verdict)
+                leaves(stage, def).map(|verdict| seen || verdict)
             })
         };
         match unwrap_paren(expr) {
             // #4706: or a recursion, whose seed `isempty` stops on.
-            Expr::Builtin(Builtin::IsEmpty(gen)) => (verdict_operand_leaves_register(gen)
-                || seed_first_recursion(gen, false))
-            .then_some(true),
+            Expr::Builtin(Builtin::IsEmpty(gen)) => {
+                (operand(gen, def, verdict_operand_leaves_register)
+                    || operand(gen, def, |gen| seed_first_recursion(gen, false)))
+                .then_some(true)
+            }
             // #4706: `any(recurse; .)` is decided on the seed too, see [`seed_first_recursion`].
             Expr::Builtin(Builtin::AnyCond(gen, cond))
                 if matches!(unwrap_paren(cond), Expr::Identity)
-                    && seed_first_recursion(gen, true) =>
+                    && operand(gen, def, |gen| seed_first_recursion(gen, true)) =>
             {
                 Some(true)
             }
             Expr::Builtin(Builtin::AnyCond(gen, cond) | Builtin::AllCond(gen, cond)) => {
-                (verdict_operand_leaves_register(gen) && verdict_operand_leaves_register(cond))
-                    .then_some(true)
+                (operand(gen, def, verdict_operand_leaves_register)
+                    && operand(cond, def, verdict_operand_leaves_register))
+                .then_some(true)
             }
             Expr::Pipe(stages) => fold(stages),
             Expr::Comma(items) => fold(items),
             // #4641: `and`/`or` are not subexps: `DUP; L; JUMP_F; POP; R`, so `R` runs from the
             // register `L` left, and the constant they emit is stated there. Both sides leaving
             // it where it entered leaves the whole there.
-            Expr::And(left, right) | Expr::Or(left, right) => Some(leaves(left)? | leaves(right)?),
+            Expr::And(left, right) | Expr::Or(left, right) => {
+                Some(leaves(left, def)? | leaves(right, def)?)
+            }
+            // #4720: a call to the enclosing zero-arity `def` is its body's statement.
+            Expr::FuncCall { name, args, .. }
+                if args.is_empty() && def.is_some_and(|(bound, ..)| bound == name.as_str()) =>
+            {
+                def.and_then(|(.., verdict)| verdict)
+            }
+            // #4720: a zero-arity `def` whose scope is more than its one call. Its body is read
+            // once and a call in the scope answers as it does; a scope that names it as a
+            // parameterised call, or shadows it, is not read through.
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                ..
+            } if params.is_empty()
+                && !matches!(
+                    unwrap_paren(then),
+                    Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
+                ) =>
+            {
+                leaves(then, Some((name.as_str(), body, leaves(body, None))))
+            }
             // #4641: a zero-arity `def` called as the whole of its scope (`def f: isempty(g); f`)
             // is its body ([`ZeroArityDefCall`]).
             other => match ZeroArityDefCall::of(other) {
-                Some(call) => call.read(leaves),
+                Some(call) => call.read(|body| leaves(body, None)),
                 None => neutral_leaves_register(other).then_some(false),
             },
         }
     }
-    leaves(update) == Some(true)
+    leaves(update, None) == Some(true)
 }
 
 /// Whether `gen`, the generator of a verdict builtin, is a recursion whose first output is its
