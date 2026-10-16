@@ -32989,25 +32989,26 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             // `Iterator::min_by`/`max_by` do. Reusing them rather than
             // hand-rolling the comparison keeps that asymmetry from being
             // re-derived and getting it backwards.
-            // #4055: yq's own comparator and tie rule for the bare spellings.
+            // #4055: yq's own comparator and tie rule for the bare spellings, whose keys are the
+            // elements themselves.
             if S::MIN_MAX_NEED_AN_ELEMENT && matches!(builtin, Builtin::Min | Builtin::Max) {
-                let owned: Vec<OwnedValue> = keyed
-                    .iter()
-                    .map(|(key, _)| match key {
-                        SortKey::Own(value) => value.clone(),
-                        SortKey::By(_) => {
-                            unreachable!("the bare spellings key every element by itself")
-                        } // patchcov: coverage tolerate-line reason="unreachable by construction: key_elements_generic keys every element of a bare min/max by itself (#4055)"
-                    })
-                    .collect();
-                return match crate::jq::eval::yq_extremum_index(
-                    &owned,
-                    matches!(builtin, Builtin::Max),
-                ) {
-                    Ok(at) => match keyed.into_iter().nth(at) {
-                        Some((_, cursor)) => GenericResult::OneCursor(cursor),
-                        None => unreachable!("the winner index is in range"), // patchcov: coverage tolerate-line reason="unreachable: yq_extremum_index answers an index of its input (#4055)"
-                    },
+                let picked = {
+                    let owned: Vec<&OwnedValue> = keyed
+                        .iter()
+                        .filter_map(|(key, _)| match key {
+                            SortKey::Own(value) => Some(value),
+                            SortKey::By(_) => None,
+                        })
+                        .collect();
+                    crate::jq::eval::yq_extremum_index(&owned, matches!(builtin, Builtin::Max))
+                };
+                return match picked {
+                    Ok(at) => keyed
+                        .into_iter()
+                        .nth(at)
+                        .map_or(GenericResult::None, |(_, cursor)| {
+                            GenericResult::OneCursor(cursor)
+                        }),
                     Err(e) => GenericResult::Error(e),
                 };
             }

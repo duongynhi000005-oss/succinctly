@@ -17704,51 +17704,45 @@ fn yq_extremum_tag(value: &OwnedValue) -> &'static str {
 /// cannot be subtracted from <kind>` when the running pick is the container), and two scalars of
 /// different kinds, or two booleans, are refused with the *later* element's tag
 /// (`!!str not yet supported for comparison`). Captured from yq v4.53.3. The winner's index.
-pub(crate) fn yq_extremum_index(items: &[OwnedValue], want_max: bool) -> Result<usize, EvalError> {
+pub(crate) fn yq_extremum_index<T: core::borrow::Borrow<OwnedValue>>(
+    items: &[T],
+    want_max: bool,
+) -> Result<usize, EvalError> {
+    let refused = |element: &OwnedValue| {
+        EvalError::new(format!(
+            "{} not yet supported for comparison",
+            yq_extremum_tag(element)
+        ))
+    };
     let mut best = 0;
     for (at, element) in items.iter().enumerate().skip(1) {
-        let pick = &items[best];
-        match element {
-            OwnedValue::Array(_) => {
+        let (pick, element) = (items[best].borrow(), element.borrow());
+        match (pick, element) {
+            (_, OwnedValue::Array(_)) => {
                 return Err(EvalError::new("arrays not yet supported for comparison"))
             }
-            OwnedValue::Object(_) => {
+            (_, OwnedValue::Object(_)) => {
                 return Err(EvalError::new("maps not yet supported for comparison"))
             }
+            (OwnedValue::Array(_) | OwnedValue::Object(_), _) => {
+                return Err(EvalError::new(format!(
+                    "{} ([{best}]) cannot be subtracted from {}",
+                    yq_extremum_tag(pick),
+                    yq_extremum_tag(element),
+                )))
+            }
+            // A `null` on either side takes no part: the pick stays.
+            (OwnedValue::Null, _) | (_, OwnedValue::Null) => continue,
             _ => {}
-        }
-        if matches!(pick, OwnedValue::Array(_) | OwnedValue::Object(_)) {
-            return Err(EvalError::new(format!(
-                "{} ([{best}]) cannot be subtracted from {}",
-                yq_extremum_tag(pick),
-                yq_extremum_tag(element),
-            )));
-        }
-        if matches!(element, OwnedValue::Null) || matches!(pick, OwnedValue::Null) {
-            continue;
         }
         let ordering = match (pick, element) {
             (OwnedValue::String(a), OwnedValue::String(b)) => a.as_bytes().cmp(b.as_bytes()),
-            (a, b) if yq_extremum_tag(a) != "!!bool" && yq_extremum_tag(b) != "!!bool" => {
-                match (a, b) {
-                    (
-                        OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
-                        OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
-                    ) => compare_values::<YqSemantics>(a, b),
-                    _ => {
-                        return Err(EvalError::new(format!(
-                            "{} not yet supported for comparison",
-                            yq_extremum_tag(element)
-                        )))
-                    }
-                }
-            }
-            _ => {
-                return Err(EvalError::new(format!(
-                    "{} not yet supported for comparison",
-                    yq_extremum_tag(element)
-                )))
-            }
+            (
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
+            ) => compare_values::<YqSemantics>(pick, element),
+            // A boolean, or two kinds that do not compare.
+            _ => return Err(refused(element)),
         };
         // `ordering` is the pick against the element: the element wins only when strictly
         // smaller (`min`) or larger (`max`).
