@@ -598,7 +598,7 @@ would cover only the last two spellings, leaving `1_000` → `1000` and `0X2A` �
 perfectly consumable output that succinctly simply declines to match — with no justification
 at all. The justification is the spec target, which is why the case belongs here.
 
-### Invalid UTF-8 in a `-p json` document — substituted for JSON output; YAML output still differs on a key and on the prefix (#1616)
+### Invalid UTF-8 in a `-p json` document — substituted for JSON output and in a YAML-output key; a bad value still differs on the prefix (#1616, #4536)
 
 Real yq turns each invalid byte of a JSON document into U+FFFD and lets the *output* encoder
 decide. succinctly does the first half on the bytes, before indexing, when the output is JSON
@@ -612,15 +612,18 @@ yq v4.53.3:
 | input / filter                       | yq                           | succinctly                     |
 |--------------------------------------|------------------------------|--------------------------------|
 | `-p json -o json .` on a bad value   | `"a": "x\ufffdy"` (escaped)  | `"a": "x�y"` (raw U+FFFD)      |
-| `-p json .` on `{"x\xe4y":1}`        | `x�y: 1` (substituted key)   | `"": 1` (the key is emptied)   |
+| `-p json .` on `{"x\xe4y":1}`        | `x�y: 1` (substituted key)   | `x�y: 1` (#4536)               |
 | `-p json .` on a bad value           | the refusal, nothing printed | an error after the prefix, e.g. `a: ` |
 | `-p json .a` on a bad value          | the raw bytes `x\xe4y`       | an error                       |
 
 - **A substituted value prints as the raw character, not `\ufffd`.** It is the same JSON value;
   telling a substituted U+FFFD from a literal one through the index is not worth tracking.
-- **A bad key with YAML output is silently emptied** (`"": 1`), the `""` fallback for a key that will
-  not decode ([#222](https://github.com/rust-works/succinctly/issues/222)), where yq substitutes it.
-  This is data loss rather than a refusal; tracked as #4536.
+- **A bad key with YAML output is substituted like yq's** (#4536): each invalid byte becomes U+FFFD
+  in the key, in the printed identity, `keys`, `to_entries`, `with_entries` and `key` alike. It was
+  emptied to `""` (the fallback for a key that will not decode,
+  [#222](https://github.com/rust-works/succinctly/issues/222)) before. One shape still differs:
+  `keys` read back as *values* (`keys | .[0]`, `[keys[]]`, `keys | map(.)`) raises the decode error
+  where yq prints the key.
 - **The refusal can follow output already written** (`a: ` before the error), where yq refuses
   before printing; the streaming writers have no error channel to check first (the "Stage 6" gap in
   [decode-failure-routing.md](../../plan/decode-failure-routing.md)).

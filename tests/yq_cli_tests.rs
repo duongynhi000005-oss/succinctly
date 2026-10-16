@@ -39240,6 +39240,40 @@ fn test_pjson_invalid_utf8_is_refused_only_when_printed_for_yaml_output_1616() -
     Ok(())
 }
 
+/// #4536: an object *key* holding invalid UTF-8 prints with U+FFFD for each bad byte under YAML
+/// output too (yq's JSON reader substitutes it, and a key reaches the encoder as text), where it
+/// used to be emptied to `""`. A bad *value* is still refused when printed, whatever the key.
+/// Each row was captured from yq v4.53.3.
+#[test]
+fn test_pjson_invalid_utf8_key_is_substituted_for_yaml_output_4536() -> Result<()> {
+    let input = b"{\"x\xe4y\":1,\"b\":2}";
+    for (filter, expected) in [
+        (".", "x\u{fffd}y: 1\nb: 2\n"),
+        ("keys", "- x\u{fffd}y\n- b\n"),
+        (
+            "to_entries",
+            "- key: x\u{fffd}y\n  value: 1\n- key: b\n  value: 2\n",
+        ),
+        ("with_entries(.)", "x\u{fffd}y: 1\nb: 2\n"),
+        ("with_entries(select(.value > 0))", "x\u{fffd}y: 1\nb: 2\n"),
+        ("[.[] | key]", "- x\u{fffd}y\n- b\n"),
+        ("to_entries | .[0] | .key", "x\u{fffd}y\n"),
+        (".b", "2\n"),
+        ("length", "2\n"),
+    ] {
+        let (out, err, code) = run_yq_stdin_bytes_with_stderr(filter, input, &["-p", "json"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "[{filter}]");
+        assert_eq!(out, expected, "[{filter}]");
+    }
+
+    // A bad key next to a bad value: the value is still refused.
+    let (_, err, code) =
+        run_yq_stdin_bytes_with_stderr(".", b"{\"x\xe4y\":\"v\xe4\"}", &["-p", "json"])?;
+    assert_eq!(code, 1);
+    assert!(err.contains("invalid UTF-8"), "{err:?}");
+    Ok(())
+}
+
 /// Genuine YAML keeps #1242's unconditional rejection whatever the output, and
 /// valid JSON is untouched.
 #[test]
