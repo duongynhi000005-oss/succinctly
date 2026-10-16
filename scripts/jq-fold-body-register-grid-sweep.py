@@ -8,7 +8,7 @@ fold's later emission of the accumulator raises in jq; when an enclosing `reduce
 moved the register onto an element, neither `.` nor `$x` is the register and the step raises for a
 `reduce` source too. `jq-path-register-sweep.py` has no outer-`$x`-destructured-in-a-body operand,
 so it cannot gate this: the grid here is outer fold x inner fold x source shape x write context x
-document, eight x six x a hundred and seventy x seven x thirteen.
+document, six x three x fifty-six x seven x thirteen.
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-path-register-sweep.py` does:
 MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`=`/`|=` write
@@ -20,7 +20,7 @@ ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
                                                    [--only SUBSTR[,SUBSTR...]] [--only-source SUBSTR[,SUBSTR...]]
                                                    [--only-context SUBSTR[,SUBSTR...]]
-                                                   [--jobs N] [--wrapped | --deep]
+                                                   [--jobs N] [--wrapped | --deep | --trailing]
 """
 import argparse
 import collections
@@ -56,8 +56,12 @@ INNER = [
     ("fe", "foreach ({S}) as $y (.; .; .)"),
     ("fe-y", "foreach ({S}) as $y (.; $y; .)"),  # EXTRACT is the element: it is the register
     ("rd", "reduce ({S}) as $y (.; .)"),
-    # (#4724) the `foreach` heads its UPDATE: a pipe runs its later stages once per input, so an empty
-    # source leaves the whole UPDATE empty whatever the stage is; a comma beside it still outputs
+]
+# (#4724) the inner `foreach` heads its outer UPDATE and something follows it: a pipe runs its later stages once
+# per input, so an empty source leaves the whole UPDATE empty whatever the stage is; a comma beside it does not.
+# Opt-in (`--trailing`): `main` is wrong on these for sources nothing here reads (`$x | .[0]` under a `reduce`
+# over `.[]?`), so the run is judged against `--base` alone, as `--wrapped` is.
+TRAILING_INNER = [
     ("fe-pipe", "foreach ({S}) as $y (.; .; .) | ."),
     ("fe-pipe-1", "foreach ({S}) as $y (.; .; .) | 1"),
     ("fe-comma-1", "foreach ({S}) as $y (.; .; .), 1"),
@@ -348,16 +352,23 @@ def main():
         action="store_true",
         help="run the three-fold-deep outers instead of the gated ones (#4648); judged against --base only",
     )
+    ap.add_argument(
+        "--trailing",
+        action="store_true",
+        help="run the inner folds that a pipe stage or a comma follows instead of the gated ones (#4724); judged against --base only",
+    )
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
-    if args.wrapped and args.deep:
-        ap.error("--wrapped and --deep are alternatives: run them separately")
-    if (args.wrapped or args.deep) and not args.base:
-        ap.error("--wrapped and --deep are judged against --base: pass a reference build")
+    if args.wrapped + args.deep + args.trailing > 1:
+        ap.error("--wrapped, --deep and --trailing are alternatives: run them separately")
+    if (args.wrapped or args.deep or args.trailing) and not args.base:
+        ap.error("--wrapped, --deep and --trailing are judged against --base: pass a reference build")
 
     rows = []
     contexts = WRAPPED_CONTEXTS if args.wrapped else CONTEXTS
-    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(DEEP_OUTER if args.deep else OUTER, INNER, SOURCES, contexts, DOCS):
+    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(
+        DEEP_OUTER if args.deep else OUTER, TRAILING_INNER if args.trailing else INNER, SOURCES, contexts, DOCS
+    ):
         name = f"{on}/{inn}/{sn}/{cn}"
         if args.only and not any(part in name for part in args.only.split(",")):
             continue
@@ -427,7 +438,7 @@ def main():
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
-    if args.wrapped or args.deep:
+    if args.wrapped or args.deep or args.trailing:
         # `main` is not clean on these rows: only what the candidate moved for the worse counts.
         worse = [r for r in results if r[5] == "ACCEPT_WRONG" and r[7] not in (None, "ACCEPT_WRONG")]
         print(f"newly ACCEPT_WRONG against --base: {len(worse)}")

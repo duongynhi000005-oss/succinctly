@@ -150014,7 +150014,8 @@ fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduc
 /// `foreach` emits nothing at all: no path (`path`, exit 0) and no write (`del`, `|=` and `=` hand the
 /// document back), where it printed one path per outer step. The state `null` the empty step leaves is
 /// not a register either, so the later steps are empty the same way, and a `?//` chain, an array
-/// pattern and a scalar marker raise alike. The controls are answered as jq answers them: a handler that
+/// pattern and a scalar marker raise alike, and so does a later step whose state is the `null` of an
+/// element that is `null` too (the same by kind, not the register: `.[]?` over `{"a":false,"b":null}`). The controls are answered as jq answers them: a handler that
 /// emits, a `reduce` source (which emits its state), a pipe stage behind
 /// a `foreach` that emits, a `null` document (where `$x` is the register) and the value-mode spelling,
 /// where nothing raises and the document comes through. Every row is a live jq
@@ -150024,6 +150025,20 @@ fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduc
 fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_foreach_4723(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (.; .; .) | .; .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r"path(. as $x | foreach .[]? as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
         (
             r#"{"a":{"b":1}}"#,
             r"[.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .)]",

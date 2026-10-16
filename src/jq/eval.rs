@@ -54667,11 +54667,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4709: a `try`/`?` around the destructure of a foreign marker catches the raise and leaves the
     // source empty, which the enclosing `reduce` UPDATE (this fold, whole) turns into a `null` state
     // that the end of the path refuses.
-    // #4723: a later step of an enclosing `foreach` runs on the `null` its empty UPDATE left, which
-    // is no register ([`foreign_in_off_body`]); the marker is still read against the frame.
+    // #4723: a later step of an enclosing `foreach` runs on the `null` its empty UPDATE left. That is
+    // no register ([`foreign_in_off_body`]), or it is one by kind (`jv_identical` of two `null`s) on
+    // an element that is `null`: either way the marker is still read against the frame, which a
+    // container-valued one is not at.
     let caught_foreign_verdict = update_of.is_some()
-        && ((ambient.trackable && !matches!(ambient.value, OwnedValue::Null))
-            || (off_body && update_of == Some(UpdateOf::Foreach)))
+        && if update_of == Some(UpdateOf::Foreach) {
+            ambient.trackable || off_body
+        } else {
+            ambient.trackable && !matches!(ambient.value, OwnedValue::Null)
+        }
         && fold_body::depth() != 0
         && caught_foreign_destructure::<S>(source, ambient, off_body);
     let marker_destructures_unplaced_register =
