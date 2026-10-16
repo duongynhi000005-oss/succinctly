@@ -29926,7 +29926,9 @@ fn yq_del_slice_outcome(
 /// holds another array and stays a no-op when it holds a scalar or object).
 /// The walk itself ([`yq_del_walk_error`]'s job) replays the path against `current` the way yq's
 /// generic navigation would, and returns the first type error it raises, or `None` when every
-/// branch gives up quietly (a missing key, an out-of-range index, a string or other scalar).
+/// branch gives up quietly (a missing key, a string or other scalar). An index past the end is not
+/// one of those: a negative one below the start raises `index [N] out of range` (#4568), and a
+/// positive one reads as an absent node the walk goes on over.
 ///
 /// A slice step applies yq's read-path slice rule ([`slice_owned_value_read`]: an array slices to
 /// a shorter array, a mapping to its alternating key/value children, #1102, any scalar but a string
@@ -29949,11 +29951,23 @@ fn yq_del_walk_error(current: &OwnedValue, steps: &[DeleteStep]) -> Option<EvalE
             OwnedValue::Object(map) => yq_del_walk_error(map.get(name)?, rest),
             _ => None,
         },
+        // #4568: a negative index below the start raises `index [N] out of range, array size is
+        // S` (and a trailing `?` does not suppress it, `EvalError::is_yq_negative_index_error`),
+        // while a positive one past the end reads as an absent node, so the walk goes on over
+        // `null`, and a negative index on that node (or on a literal `null`) is the "size is 0"
+        // row. A scalar, string or mapping takes no index at all and ends the branch quietly.
         Expr::Index { idx, .. } => match current {
-            OwnedValue::Array(arr) => yq_del_walk_error(
-                &arr[resolve_read_index(&OwnedValue::Int(*idx), arr.len())?],
-                rest,
-            ),
+            OwnedValue::Array(arr) => match resolve_read_index(&OwnedValue::Int(*idx), arr.len()) {
+                Some(slot) => yq_del_walk_error(&arr[slot], rest),
+                None if *idx < 0 => {
+                    Some(EvalError::yq_negative_index_out_of_range(*idx, arr.len()))
+                }
+                None => yq_del_walk_error(&OwnedValue::Null, rest),
+            },
+            OwnedValue::Null if *idx < 0 => {
+                Some(EvalError::yq_negative_index_out_of_range(*idx, 0))
+            }
+            OwnedValue::Null => yq_del_walk_error(&OwnedValue::Null, rest),
             _ => None,
         },
         Expr::Iterate => match current {
