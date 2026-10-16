@@ -76554,8 +76554,9 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
 /// answers (and under `?` the refusal was swallowed and the stream dropped). A `foreach`/`reduce` whose UPDATE is an
 /// `isempty`/`any`/`all` over operands that leave the register leaves it too ([`fold_with_verdict_update_leaves_register`]).
 /// Every jq side captured from jq 1.7.1 on `null`. The last rows are controls kept refused: an operand that navigates (jq
-/// refuses too) and a nested EXTRACT that reads the enclosing loop variable after a caught navigation (#3984's withhold,
-/// which jq answers).
+/// refuses too) and, on a document whose `.a` is not `null`, a nested EXTRACT that reads the enclosing loop variable after
+/// a caught navigation (#3984's withhold, which jq answers). On `null` that loop variable is a `null` marker, the register
+/// by kind (#4756), so the withhold is lifted and jq's answer is given.
 #[test]
 fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -76716,13 +76717,36 @@ fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()
         (
             r"null",
             r"path(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k))",
+            "[\"a\"]\n[\"a\"]\n",
             "",
-            "Invalid path expression near attempt to access element",
-            5,
+            0,
         ),
         (
             r"null",
             r"[path(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k)) = 5",
+            "{\"a\":5}\n",
+            "",
+            0,
+        ),
+        // ...on a document whose `.a` is not `null` the register is not that `null`, so the
+        // withhold stays and jq's answer is still refused.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)); $k); $k))",
             "",
             "Invalid path expression near attempt to access element",
             5,
@@ -154457,6 +154481,162 @@ fn test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_46
             (want_stdout, want_code),
             "`{filter}` on {doc}: stderr {stderr:?}"
         );
+    }
+    Ok(())
+}
+
+/// #4756: a `foreach` source that is a `?//` chain over a bound expression re-rooted by a `null`
+/// literal, a `$x` bound to a `null` document or a comma of those, on a `null` document. Every
+/// `null` is `jv_identical` to a `null` register by kind, so the chain's first alternative walks
+/// the register (`["a"]`) where the by-value drive reported the bare alternative's unmoved
+/// register (`[]`), at the top level, on an untracked entry (`1 |`) and inside another `foreach`'s
+/// UPDATE. The contrasts stay as they were: a stage that is not `null` (`1 |`, `false |`), a
+/// navigation in front, a body that navigates, and a `reduce`, which backtracks its source. On a
+/// document that is not `null` a `$x` chain on an untracked entry is still refused where jq
+/// answers `[]`. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_null_or_null_marker_headed_chain_walks_the_null_register_4756() -> Result<()>
+{
+    const REFUSED: &str = "Invalid path expression with result";
+    let chain = "(.|.) as {a:$a} ?// $a | .";
+    let programs: Vec<(String, &str, &str, i32)> = vec![
+        // The #4756 rows.
+        (format!("path(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach ($x | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("path(. as $x | 1 | (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)) | $x)".to_string(), "[\"b\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (null | {chain}) as $k (.; .; .)); .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ($x | {chain}) as $k (.; .; .)); .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        // The same source at the top level, where the register is trackable.
+        (format!("path(foreach (null | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("path(foreach (null | . as {a:$a} ?// $a | .) as $k (.; .; .))".to_string(), "[\"a\"]\n", "", 0),
+        (format!("path(. as $x | foreach ($x | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("path(. as $x | foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .))".to_string(), "[\"b\"]\n", "", 0),
+        // A comma of `null`s is the register on every output, one with a `1` on only some.
+        (format!("path(. as $x | 1 | (foreach ((null, null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach ((null, $x) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach ((null, 1) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach ((1, null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[\"a\"]\n", "", 0),
+        // The write side lands on the walked member.
+        (format!("(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x) = 5"), "{\"a\":5}\n", "", 0),
+        (format!("(. as $x | 1 | (foreach ($x | {chain}) as $k (.; .; .)) | $x) |= 5"), "{\"a\":5}\n", "", 0),
+        (format!("(foreach (null | {chain}) as $k (.; .; .)) = 5"), "{\"a\":5}\n", "", 0),
+        // Contrasts: the stage is not `null`, a navigation comes first, or the source is a `reduce`.
+        (format!("path(. as $x | 1 | (foreach (1 | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach (false | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        (format!("path(. as $x | 1 | (foreach (null | .a | {chain}) as $k (.; .; .)) | $x)"), "[\"a\",\"a\"]\n", "", 0),
+        ("path(. as $x | 1 | (foreach (null | (.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)) | $x)".to_string(), "[\"a\",\"a\"]\n", "", 0),
+        (format!("path(. as $x | 1 | (reduce (null | {chain}) as $k (.; .)) | $x)"), "[]\n", "", 0),
+    ];
+    for (program, stdout, stderr, code) in &programs {
+        let program: &'static str = Box::leak(program.clone().into_boxed_str());
+        assert_path_rows_both_routes_3749(&[("null", program, stdout, stderr, *code)])?;
+    }
+    // A document that is not `null`: the register is not the `null` the stage is, so the chain
+    // takes its bare alternative and the register stays where the fold entered.
+    for doc in [r"[[1],[1]]", r#"{"a":1}"#, r#"{"a":null}"#] {
+        for program in [
+            format!("path(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x)"),
+            format!("path(foreach (null | {chain}) as $k (.; .; .))"),
+            format!("path(. as $x | foreach ($x | {chain}) as $k (.; .; .))"),
+            format!("path(. as $x | 1 | (foreach ((null, 1) | {chain}) as $k (.; .; .)) | $x)"),
+        ] {
+            let program: &'static str = Box::leak(program.into_boxed_str());
+            let stdout = if program.contains("(null, 1)") {
+                "[]\n[]\n"
+            } else {
+                "[]\n"
+            };
+            assert_path_rows_both_routes_3749(&[(doc, program, stdout, "", 0)])?;
+        }
+        // ...and a `$x` chain on an untracked entry is still refused there, where jq answers `[]`
+        // (it was refused before, and a refusal costs an answer, not a write).
+        for program in [
+            format!("path(. as $x | 1 | (foreach ($x | {chain}) as $k (.; .; .)) | $x)"),
+            "path(. as $x | 1 | (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)) | $x)"
+                .to_string(),
+        ] {
+            let program: &'static str = Box::leak(program.into_boxed_str());
+            assert_path_rows_both_routes_3749(&[(doc, program, "", REFUSED, 5)])?;
+        }
+    }
+    Ok(())
+}
+
+/// #4757: a `?//` chain under a `reduce` inside a `foreach` UPDATE, entered on an untracked value
+/// (`1 |`), whether the chain is the `reduce`'s UPDATE, a `foreach` source in it, its source (also
+/// behind a call with arguments or a nested `foreach`) or under a handler-less `try`. A `reduce`
+/// backtracks its source and UPDATE, so the register it leaves is INIT's and the enclosing `foreach`
+/// emits at the entry: `[]` twice, where this refused (`Invalid path expression with result ...`).
+/// The contrasts keep their answer: where jq refuses too (a body, INIT or source that navigates, a
+/// chain with no bare alternative), and where jq answers but the chain is still refused (beneath
+/// `first`/`limit`/`nth`, whose retry after the consumer's stop emits once more; a `reduce` or
+/// `foreach` UPDATE inside a `reduce` UPDATE). Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_update_reduce_with_a_chain_on_untracked_entry_4757() -> Result<()> {
+    const REFUSED: &str = "Invalid path expression";
+    let chain = "(.|.) as {a:$a} ?// $a | .";
+    let docs = [r"[[1],[1]]", r"null", r#"{"a":1}"#, r#"{"a":{"b":1}}"#];
+    let in_update =
+        |body: &str| format!("path(. as $x | 1 | (foreach (1,2) as $j (.; ({body}); .)) | $x)");
+    let leak = |program: String| -> &'static str { Box::leak(program.into_boxed_str()) };
+    let answered = [
+        format!("reduce 1 as $m (.; {chain})"),
+        format!("reduce 1 as $m (.; foreach ({chain}) as $k (.; .; .))"),
+        format!("reduce ({chain}) as $k (.; .)"),
+        format!("reduce (foreach ({chain}) as $q (.; .; .)) as $k (.; .)"),
+        format!("reduce 1 as $m (.; try ({chain}))"),
+    ];
+    for doc in docs {
+        for body in &answered {
+            assert_path_rows_both_routes_3749(&[(doc, leak(in_update(body)), "[]\n[]\n", "", 0)])?;
+        }
+        // Behind a call with arguments, as #4615's shapes a and b.
+        for body in [
+            format!("reduce f({chain}) as $k (.; .)"),
+            format!("reduce 1 as $m (.; f({chain}))"),
+        ] {
+            let program = leak(format!("def f(g): g; {}", in_update(&body)));
+            assert_path_rows_both_routes_3749(&[(doc, program, "[]\n[]\n", "", 0)])?;
+        }
+        // jq refuses these too: the reduce's body, INIT or source navigates the register, or the
+        // chain has no bare alternative to retry onto.
+        for body in [
+            format!("reduce 1 as $m (.; ({chain}) | .a?)"),
+            "reduce 1 as $m (.; (.|.) as {a:$a} ?// [$a] | .)".to_string(),
+            "reduce 1 as $m (.; (.|.) as {a:$a} ?// $a | .a?)".to_string(),
+            format!("reduce 1 as $m (.a; {chain})"),
+            format!("reduce .a? as $m (.; {chain})"),
+        ] {
+            assert_path_rows_both_routes_3749(&[(doc, leak(in_update(&body)), "", REFUSED, 5)])?;
+        }
+    }
+    // The write side lands where the path does.
+    for (doc, update, delete) in [
+        (r"[[1],[1]]", "9\n", "[[1],[1]]\n"),
+        (r"null", "9\n", "null\n"),
+        (r#"{"a":1}"#, "9\n", "{}\n"),
+    ] {
+        let body = format!("reduce 1 as $m (.; {chain})");
+        let fold = format!("(. as $x | 1 | (foreach (1,2) as $j (.; ({body}); .)) | $x)");
+        assert_path_rows_both_routes_3749(&[
+            (doc, leak(format!("{fold} |= 9")), update, "", 0),
+            (doc, leak(format!("del({fold}.a?)")), delete, "", 0),
+        ])?;
+    }
+    // Still refused where jq answers `[]` twice: a chain beneath `first`/`limit`/`nth` (the
+    // retry after the consumer's stop emits once more: four paths where jq gives two), and a
+    // `reduce` or a `foreach` UPDATE inside a `reduce` UPDATE.
+    for body in [
+        format!("reduce 1 as $m (.; first({chain}))"),
+        format!("foreach (first({chain})) as $k (.; .; .)"),
+        format!("foreach (limit(1; {chain})) as $k (.; .; .)"),
+        format!("foreach (nth(0; {chain})) as $k (.; .; .)"),
+        format!("reduce 1 as $m (.; reduce ({chain}) as $k (.; .))"),
+        format!("foreach 1 as $m (.; {chain}; .)"),
+    ] {
+        let doc = r#"{"a":1}"#;
+        let program = leak(in_update(&body));
+        assert_path_rows_both_routes_3749(&[(doc, program, "", REFUSED, 5)])?;
     }
     Ok(())
 }
