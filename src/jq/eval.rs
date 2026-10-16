@@ -49786,12 +49786,17 @@ impl FoldRegister {
     /// 31 of 39,210 sampled path-register rows lost a jq match that way (`foreach (1,2) as $i
     /// (1; try .a; .)`). #3770 declined it for a fold whose register *is* tracked (a tracked
     /// register keeps the frame as it was), which is why that arm is not touched.
-    fn withhold_untracked_register(&mut self) {
+    fn withhold_untracked_register(&mut self, spare_live_null_bool: bool) {
         // An already-recorded loss is kept: `LostAt` is the more precise statement, and
         // widening it would make loud a refusal #3267 keeps exact. The live register is
         // dropped, as `Frame::unknown` drops it, so the frame never records a loss while
         // carrying a register (#3456 D2).
-        if !self.trackable && !self.frame.register_loss.is_lost() {
+        // #4756: not a live `null`/boolean register: those are `jv_identical` by kind, so no frozen
+        // `$var` is the register by pointer and the refusal of its navigation is jq's own verdict.
+        if !self.trackable
+            && !self.frame.register_loss.is_lost()
+            && (!spare_live_null_bool || !self.live_register().is_some_and(is_null_or_bool))
+        {
             self.frame = self
                 .frame
                 .with_register(None)
@@ -51262,6 +51267,17 @@ fn source_destructures_fresh(
     walk.reach(source) == Reach::Destructures
 }
 
+/// Whether a `foreach` source starts from a `null` literal or a `$x` marker (#4756): jq's register
+/// is `jv_identical` to either by kind when it is `null`, so the `.` after it is that register.
+fn head_is_null_or_marker(source: &Expr) -> bool {
+    match unwrap_paren(source) {
+        Expr::Pipe(stages) => stages.first().is_some_and(head_is_null_or_marker),
+        Expr::AsPattern { expr, .. } => head_is_null_or_marker(expr),
+        Expr::Literal(Literal::Null) | Expr::TrackedVar(_) => true,
+        _ => false,
+    }
+}
+
 /// The `$x` markers in a `foreach` `source` that the spine walk reads as the register (#4320).
 /// Outside every fold body, all of them: `.` is jq's register there, a `$x` that is the register
 /// is its destructure, and one that is another node raises at the pattern's first step in jq
@@ -51280,18 +51296,32 @@ fn fold_source_register_markers<S: EvalSemantics>(
     ambient: &FoldSourceAmbient<'_>,
 ) -> Vec<*const Tracked> {
     let mut markers = Vec::new();
+    // #4756: an untracked ambient whose register jq still holds as the document's `null`: a `null`
+    // `$x` is `jv_identical` to it by kind, as on a trackable `null` ambient.
+    let null_register = S::TAG == EvalTag::Jq
+        && !ambient.trackable
+        && head_is_null_or_marker(source)
+        && ambient.register_null
+        && !ambient.register_null_off_root;
     if S::TAG != EvalTag::Jq
-        || !ambient.trackable
+        || !(ambient.trackable || null_register)
         || !(fold_body::depth() == 0
             || fold_body::acc_is_register_here()
+            || null_register
             || matches!(ambient.value, OwnedValue::Null))
     {
         return markers;
     }
+    let register_value = if null_register {
+        &OwnedValue::Null
+    } else {
+        ambient.value
+    };
     // Only a source that destructures something can ask: the certification below compares a
     // marker's value with the register's, which is O(document) when their storage is not shared.
     if !any_subexpr(source, &mut |e| {
-        matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns))
+        matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)
+                || (null_register && routes_destructuring_chain(patterns)))
             || matches!(e, Expr::Foreach { .. } | Expr::Reduce { .. })
     }) {
         return markers;
@@ -51304,7 +51334,7 @@ fn fold_source_register_markers<S: EvalSemantics>(
             // body `acc_is_register` marked, only a marker that is the register is, since a
             // `$it` of the enclosing fold is another node jq answers for.
             if fold_body::depth() == 0
-                || marker_identical::<S>(marker, ambient.value, &ambient.frame)
+                || marker_identical::<S>(marker, register_value, &ambient.frame)
             {
                 markers.push(Rc::as_ptr(marker));
             }
@@ -53170,6 +53200,19 @@ impl<'e> RegisterSpine<'e> {
             }
             // #4278: a variable the spine bound to the register hands it on as `.` does.
             Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
+            // #4756: on a `null` register a `null` literal is `jv_identical` to it, and so is a
+            // `$x` bound outside the source that is the register at the fold, so each hands it on
+            // as `.` does: the chain behind it walks the register.
+            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_register => {
+                Reach::HandsOn
+            }
+            Expr::TrackedVar(marker)
+                if !self.fresh_only
+                    && self.null_register
+                    && self.markers.contains(&Rc::as_ptr(marker)) =>
+            {
+                Reach::HandsOn
+            }
             // #4187: a plain bind (`. as $x | BODY`, or a `?//` chain of bare `$var`s) does
             // not move the register -- its source runs as a subexpression -- so its body
             // meets the register where the bind did, and a destructure there is the source's
@@ -54939,7 +54982,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::depth() != 0
         && certain_fresh_destructure(source);
     let _fresh_mark = certain_fresh.then(fold_body::fresh_source);
-    let null_register_at_fold = ambient.trackable && matches!(ambient.value, OwnedValue::Null);
+    // #4756: ...or an untracked ambient whose register jq still holds as the document's `null`.
+    let null_register_at_fold = (ambient.trackable && matches!(ambient.value, OwnedValue::Null))
+        || (S::TAG == EvalTag::Jq
+            && foreach_source
+            && head_is_null_or_marker(source)
+            && ambient.register_null
+            && !ambient.register_null_off_root);
     let has_navigation = any_subexpr(source, &mut |e| {
         is_fold_source_navigation(e)
             || (S::TAG == EvalTag::Jq
@@ -59345,7 +59394,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         let (mut reg, acc) =
             FoldRegister::enter(init_branch, value, trackable, init_keeps_register, frame);
         if mentions_frozen_var {
-            reg.withhold_untracked_register(); // #3984
+            reg.withhold_untracked_register(false); // #3984
         }
 
         // #2031: SOURCE runs immediately after INIT against the same
@@ -60080,7 +60129,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         let (mut reg, mut state) =
             FoldRegister::enter(init_branch, value, trackable, init_keeps_register, frame);
         if mentions_frozen_var {
-            reg.withhold_untracked_register(); // #3984
+            reg.withhold_untracked_register(head_is_null_or_marker(input)); // #3984
         }
 
         // #2031/#2388: see `resolve_reduce`'s identical derivation —
