@@ -152,6 +152,35 @@ SOURCES = [
     ("wrapped-catch-select-false", "[try (select(false) | error) catch (. as {b:$b} | .)]"),
     ("wrapped-catch-empty", "[try (empty | error) catch (. as {b:$b} | .)]"),
     ("wrapped-alt-true-nested", "[false // (true // (. as {b:$b} | .))]"),
+    # (#4677) the same run branches with no brackets, where they are the whole source (or the one live
+    # stage of a pipe): outside a moved body the `foreach` route reads them too
+    ("bare-alt-false", "false // (. as {b:$b} | .)"),
+    ("bare-alt-null", "null // (. as {b:$b} | .)"),
+    ("bare-alt-empty", "empty // (. as {b:$b} | .)"),
+    ("bare-alt-notnot", "(false|not|not) // (. as {b:$b} | .)"),
+    ("bare-alt-chain", "false // false // (. as {b:$b} | .)"),
+    ("bare-alt-comma", "(false, null) // (. as {b:$b} | .)"),
+    ("bare-alt-comma-truthy", "(false, 1) // (. as {b:$b} | .)"),
+    ("bare-alt-pipe-id", "(false // (. as {b:$b} | .)) | ."),
+    ("bare-alt-arr", "false // (. as [$q] | .)"),
+    ("bare-alt-true", "true // (. as {b:$b} | .)"),
+    ("bare-alt-notfalse", "(false|not) // (. as {b:$b} | .)"),
+    ("bare-alt-left-destructure", "(. as {b:$b} | .) // 3"),
+    ("bare-catch-error", "try error catch (. as {b:$b} | .)"),
+    ("bare-catch-error-msg", "try error(\"x\") catch (. as {b:$b} | .)"),
+    ("bare-catch-error-obj", "try error({a:1}) catch (. as {b:$b} | .)"),
+    ("bare-catch-error-arr", "try error([1]) catch (. as [$b] | .)"),
+    ("bare-catch-truthy-alt-error", "try (1 // error) catch (. as {b:$b} | .)"),
+    ("bare-catch-ok", "try 1 catch (. as {b:$b} | .)"),
+    ("bare-catch-select-false", "try (select(false) | error) catch (. as {b:$b} | .)"),
+    # (#4682) the destructure in a `try` body, whatever the handler: the pattern either type-errors into
+    # the handler (nothing moved) or succeeds and moves the register
+    ("try-body-dot-obj-catch", "try (. as {a:$a} | .) catch ."),
+    ("try-body-dot-arr-catch", "try (. as [$a] | .) catch ."),
+    ("try-body-dot-obj-catch-empty", "try (. as {a:$a} | .) catch empty"),
+    ("try-body-dot-obj-catch-lit", "try (. as {a:$a} | .) catch 1"),
+    ("try-body-dot-obj-catch-error", "try (. as {a:$a} | .) catch error"),
+    ("try-body-dot-obj-nav-catch", "try (. as {a:$a} | .a) catch ."),
     # (#4621) an `empty` body: the destructure's path error is caught and the handler's output makes
     # the fold emit its accumulator, which is not the register; a handler that emits nothing does not
     ("try-dotpat-empty-catch", "try (. as [$a] | empty) catch ."),
