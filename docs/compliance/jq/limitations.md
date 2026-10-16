@@ -2496,7 +2496,7 @@ is the revert that established what the other one costs.
    [#4730](https://github.com/rust-works/succinctly/issues/4730)). Still accepted: a `foreach` UPDATE that wraps the
    `foreach` in a fallback (`(. | FE) // 3`, `if . then FE else . end`: the next step reads the `null` the empty one left),
    a `foreach` EXTRACT that is the `foreach` (`. | FE`), a `1 | FE` stage (succinctly raises `result 1` where jq emits
-   nothing), and a `select`/`if` condition other than `.` (`select(.a) | FE`). A condition that is not a pure function
+   nothing), a `select`/`if` condition other than `.` (`select(.a) | FE`), and a fallback or `if` head with a stage around it (`(. | FE) // 5 | tostring`, `select(.) | (FE // 5)`: the stage transforms the value, or a falsy state drops it, so the message differs). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks

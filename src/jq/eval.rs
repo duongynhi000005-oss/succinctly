@@ -40288,6 +40288,23 @@ fn emit_branches<'a>(
     Demand::Continue
 }
 
+/// The operand of a `try`/`?`/`try ... catch empty`, which hands an empty operand on as empty and
+/// raises nothing (#4754).
+fn catching_wrapper_inner(expr: &Expr) -> Option<&Expr> {
+    match unwrap_paren(expr) {
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => Some(inner),
+        Expr::Try {
+            expr: inner,
+            catch: Some(handler),
+        } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => Some(inner),
+        _ => None,
+    }
+}
+
 /// What a fold UPDATE leaves behind when the `foreach` that heads it emits nothing (#4754).
 struct EmptiedUpdate<'a> {
     /// The `foreach`'s source.
@@ -40336,21 +40353,23 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
             body => emptied_update(body, in_foreach),
         },
         Expr::Pipe(stages) => {
-            let mut rest = stages
+            let skipped = stages
                 .iter()
-                .skip_while(|stage| is_identity_or_select_dot(stage));
-            emptied_update(rest.next()?, in_foreach)
+                .take_while(|stage| is_identity_or_select_dot(stage))
+                .count();
+            let emptied = emptied_update(stages.get(skipped)?, in_foreach)?;
+            // A fallback or a state-dependent head hands a value on to the stages around it: a
+            // later stage transforms it (`// 5 | tostring`), and a `select(.)` ahead of it drops a
+            // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
+            let plain = emptied.fallback.is_none() && !emptied.truthy;
+            let surrounded = skipped + 1 < stages.len()
+                || stages[..skipped]
+                    .iter()
+                    .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
+            (plain || !surrounded).then_some(emptied)
         }
-        Expr::Optional(inner)
-        | Expr::Try {
-            expr: inner,
-            catch: None,
-        } => emptied_update(inner, in_foreach),
-        Expr::Try {
-            expr: inner,
-            catch: Some(handler),
-        } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => {
-            emptied_update(inner, in_foreach)
+        e if catching_wrapper_inner(e).is_some() => {
+            emptied_update(catching_wrapper_inner(e)?, in_foreach)
         }
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left, in_foreach)?;
@@ -52202,29 +52221,17 @@ fn caught_foreign_destructure<S: EvalSemantics>(
     let mut inner = source;
     let mut caught = false;
     loop {
-        inner = match unwrap_paren(inner) {
-            Expr::Optional(inner)
-            | Expr::Try {
-                expr: inner,
-                catch: None,
-            } => {
-                caught = true;
-                inner
+        if let Some(operand) = catching_wrapper_inner(inner) {
+            caught = true;
+            inner = operand;
+        } else if let Expr::Alternative(left, right) = unwrap_paren(inner) {
+            if !matches!(unwrap_paren(right), Expr::Builtin(Builtin::Empty)) {
+                break;
             }
-            Expr::Try {
-                expr: inner,
-                catch: Some(handler),
-            } if matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty)) => {
-                caught = true;
-                inner
-            }
-            Expr::Alternative(left, right)
-                if matches!(unwrap_paren(right), Expr::Builtin(Builtin::Empty)) =>
-            {
-                left
-            }
-            _ => break,
-        };
+            inner = left;
+        } else {
+            break;
+        }
     }
     if !caught {
         return false;
