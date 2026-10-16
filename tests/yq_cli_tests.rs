@@ -11980,6 +11980,68 @@ fn test_4530_sequence_as_the_implicit_value_of_a_pending_key_is_kept() -> Result
     Ok(())
 }
 
+/// #4532: an explicit key whose content is on the line after the `?` is a key like any other: the
+/// entry after it is its own entry (the key's value is null), a same-indent `-` is rejected as for
+/// a key written on the `?` line, and the usual spellings of the key content (quoted, flow, a
+/// sequence or compact mapping that stringifies to `""`, properties, a block scalar, a
+/// multi-line plain scalar, blank and comment lines before it) read as they do inline.
+/// Each row was captured from yq v4.53.3.
+#[test]
+fn test_4532_explicit_key_content_on_the_next_line() -> Result<()> {
+    for (input, expected) in [
+        ("?\n  k\nx: 1\n", r#"{"k":null,"x":1}"#),
+        ("?\n  k\ny: 2\nz: 3\n", r#"{"k":null,"y":2,"z":3}"#),
+        ("a: 1\n?\n  k\nx: 1\n", r#"{"a":1,"k":null,"x":1}"#),
+        ("?\n  k\n", r#"{"k":null}"#),
+        ("?\n  k\nx:\n  - 1\n", r#"{"k":null,"x":[1]}"#),
+        ("m:\n  ?\n    k\n  x: 1\n", r#"{"m":{"k":null,"x":1}}"#),
+        ("?  # c\n  k\nx: 1\n", r#"{"k":null,"x":1}"#),
+        ("?\n  \"k\"\nx: 1\n", r#"{"k":null,"x":1}"#),
+        ("?\n  k\n  j\nx: 1\n", r#"{"k j":null,"x":1}"#),
+        ("?\n  - a\nx: 1\n", r#"{"":null,"x":1}"#),
+        ("?\n  a: b\nx: 1\n", r#"{"":null,"x":1}"#),
+        ("?\n  [a, b]\nx: 1\n", r#"{"":null,"x":1}"#),
+        ("?\n  {a: b}\nx: 1\n", r#"{"":null,"x":1}"#),
+        ("? |\n  k\nx: 1\n", r#"{"k\n":null,"x":1}"#),
+        // The `:` value still attaches to the key, and the next entry is its own.
+        ("?\n  k\n: v\n", r#"{"k":"v"}"#),
+        ("?\n  k\n: v\nx: 1\n", r#"{"k":"v","x":1}"#),
+        ("?\n  - a\n  - b\n: v\nx: 1\n", r#"{"":"v","x":1}"#),
+        ("?\n    - a\n    - b\n: v\n", r#"{"":"v"}"#),
+        ("?\n  k\n: v\n?\n  j\n: w\n", r#"{"k":"v","j":"w"}"#),
+        ("?\n  k\n?\n  j\n", r#"{"k":null,"j":null}"#),
+        // Blank and comment lines before the content, and properties on it.
+        ("?\n\n  k\n: v\n", r#"{"k":"v"}"#),
+        ("?\n# c\n  k\n: v\n", r#"{"k":"v"}"#),
+        ("?\n  &a k\n: v\nb: *a\n", r#"{"k":"v","b":"k"}"#),
+        ("?\n  !!str k\nx: 1\n", r#"{"k":null,"x":1}"#),
+        ("? &a\n  k\nz: 1\n", r#"{"k":null,"z":1}"#),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+
+    // A same-indent `-` after the key is rejected, with or without the key on the `?` line.
+    for input in ["?\n  k\n- item\n", "?\n  k\n- item\nnewkey: v\n"] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.as_str()), (1, ""), "{input:?}: {err:?}");
+    }
+
+    // The key is navigable and writable as one written on the `?` line.
+    for (filter, input, expected) in [
+        ("keys", "?\n  k\nx: 1\n", "- k\n- x\n"),
+        (".x = 5", "?\n  k\nx: 1\n", "k:\nx: 5\n"),
+        (".k = 5", "?\n  k\nx: 1\n", "k: 5\nx: 1\n"),
+        ("del(.k)", "?\n  k\nx: 1\n", "x: 1\n"),
+        (".k | line", "?\n  k\nx: 1\n", "3\n"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!((code, out.as_str()), (0, expected), "[{filter}] {input:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
     // #1040's second (worse) repro: a field after the sequence used to

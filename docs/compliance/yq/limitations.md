@@ -640,7 +640,7 @@ slice written out in full (`(.[$i:]) | .[0]`) still does. It is an input-validat
 not an evaluator rule, and the same as `.[0]` and `length`; the table and the reasoning are in
 [jq limitations § A fused slice read does not validate the rest of the range](../jq/limitations.md#a-fused-slice-read-does-not-validate-the-rest-of-the-range-4195).
 
-### An explicit `?` key next to a block sequence — rejected when the key has content; three shapes remain (#1104)
+### An explicit `?` key next to a block sequence — rejected when the key has content; the bare `?` shape remains (#1104)
 
 Real yq reads a block sequence at a mapping's indent as the implicit value of an ordinary
 `key:` entry, but never as the value of an explicit key: `? k` / `- item` fails with
@@ -655,18 +655,17 @@ $ printf -- '---\n?\n- a\n- b\n:\n- c\n- d\n' | yq -o=json -I=0 .
 {"":["c","d"]}                       # succinctly: {"":["a","b","c","d"]}
 $ printf '?\n- item\n' | yq -o=json -I=0 .
 {"":null}                            # succinctly: {"":["item"]}
-$ printf '?\n  k\n- item\n' | yq -o=json -I=0 .
-Error: ... did not find expected key # succinctly: {"k":["item"]}
 ```
 
 - **A bare `?` followed by a same-indent sequence** (YAML test suite 6PBE) keeps parsing, with
   the sequence read as the value. Neither tool matches the spec (`{["a","b"]: ["c","d"]}`), and
   rejecting it here would stop the conformance suite's 6PBE parsing at all.
-- **A key whose content starts on the next line** (`?` / `  k`) never records a pending key (#4532), so
-  the rejection does not reach it, and `?` / `  k` / `x: 1` loses the `x: 1` entry
-  (`{"k":"x"}` where yq answers `{"k":null,"x":1}`).
+- **A key whose content starts on the next line** (`?` / `  k`) is read like one that starts on the
+  `?` line (#4532): `?` / `  k` / `x: 1` is `{"k":null,"x":1}` and `?` / `  k` / `- item` is an
+  error, as in yq. One spelling is not: node properties alone on that line (`?` / `  &a` / `  k`)
+  still leave the key content to the main loop, which takes the next entry for its value.
 - **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is an error
-  here as in yq (#4530); the next-line key form is #4532.
+  here as in yq (#4530).
 
 ## Open divergences (bugs, not decisions)
 
