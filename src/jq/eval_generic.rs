@@ -30599,11 +30599,24 @@ fn path_context_absent_identity<V: DocumentValue, S: EvalSemantics>(
             break;
         }
     }
-    let Some(base) = base else {
-        debug_assert!(false, "an absent position hangs under a real ancestor");
-        return Ok(OwnedIdentity::detached());
-    };
     below.reverse();
+    let Some(base) = base else {
+        // #3019: no live ancestor at all -- the walk hangs under a *root-level* owned node (a yq
+        // slice of the document, a root `try ... catch` output, a computed bracket target), whose
+        // position is the root's: nothing above it, so there is no base node to be kept at. The
+        // links still name every component below it, so the identity carries them over the owned
+        // value each was taken from (`.[1:] | .[] | select(.c == 3) | .c | path` is `[1,"c"]`).
+        let mut id = OwnedIdentity::detached();
+        for link in &below {
+            let parent = match &link.from {
+                PathNode::Owned(v) => Rc::clone(v),
+                PathNode::Absent => Rc::new(OwnedValue::Null),
+                PathNode::At(_) => unreachable!("a live ancestor was searched for above"),
+            };
+            id = id.child(&parent, link.component.clone());
+        }
+        return Ok(id);
+    };
     let mut parent = Rc::new(to_owned_cursor::<S, _>(&base)?);
     let mut id = OwnedIdentity::kept(base);
     for (i, link) in below.iter().enumerate() {
