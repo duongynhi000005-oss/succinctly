@@ -5156,6 +5156,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // dropped (#2811 review: `? a\n:\n  - 1\n# c\n`).
         self.attach_head_foot_to_key_at(self.bp_pos, indent);
 
+        // A comment an earlier anchor's deferred value floated onto this key (`x: &anc # c` /
+        // `  ? b # own`, #4384) is claimed here, as `parse_mapping_entry` claims it at an
+        // implicit key's open (#1080/#784) and before the key's own comment is captured, so the
+        // two read in source order (floated, then own). A key that is itself a collection
+        // (`? [1, 2]`, `? - p`, `? k: v`) does not take it: yq drops it there.
+        let collection_key = !self.at_line_end()
+            && (matches!(self.peek(), Some(b'[' | b'{'))
+                || (self.peek() == Some(b'-') && Self::is_ws_break_or_eoi(self.peek_at(1)))
+                || self.looks_like_mapping_entry());
+        if !collection_key {
+            self.take_pending_head_comment(self.bp_pos);
+        }
+
         // Check what the key is
         if self.at_line_end() {
             // Key content might be on next line(s), or this could be an empty key

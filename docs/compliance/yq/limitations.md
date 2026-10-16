@@ -5442,9 +5442,8 @@ route too, for a key whose value is a block container or a scalar (`-P` and ever
 print the floated comment on the key's line and the key's own comment on a line of its own at
 the key's indent, as yq does). Still different: a flow-valued or empty-valued key (yq moves both
 comments onto the next entry, `b: {c: 1}` / `d: 3 # floated` / `# own`; succinctly keeps the
-floated one on `b`'s line and drops the other), an explicit key under such an anchor ([#4384](https://github.com/rust-works/succinctly/issues/4384); `? b # own`
-loses the floated comment on every route, the plain read included), and a key whose value is
-`null` — and a missing
+floated one on `b`'s line and drops the other), and a key whose value is
+`null`. (An explicit scalar or empty key under such an anchor, `? b # own`, keeps the floated comment ahead of its own on every route since [#4384](https://github.com/rust-works/succinctly/issues/4384); a key that is itself a collection, `? [1, 2]`, does not take it, as in yq, but still reads as `""`.) — and a missing
 explicit-tag slot: `OwnedValue` has no field for it, so any
 computed/constructed value — including an object-slice result (#1102) — loses the source
 node's `!!map`/`!!seq` tag and quoting style in YAML output (`{"a":1,"b":2} | yq
