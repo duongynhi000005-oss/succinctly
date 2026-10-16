@@ -70623,6 +70623,179 @@ fn test_a_key_deleted_and_written_again_inherits_nothing_from_the_old_key_4113()
     Ok(())
 }
 
+/// #4384: a comment an earlier anchor's deferred value floated onto a key (`x: &anc # floated`) is
+/// kept when the key is written explicitly (`? b # own`), ahead of the key's own comment, as it is
+/// for an implicit key (#1080). A key that is itself a collection (`? [1, 2]`) does not take it,
+/// as in yq. Every row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_a_floated_comment_is_kept_on_an_explicit_key_4384() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "x: &anc # floated\n  ? b # own\n  : c: 1\n",
+            ".",
+            "x: &anc\n  b: # floated\n  # own\n    c: 1\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\n  : c: 1\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b\n  : c: 1\n",
+            ".",
+            "x: &anc\n  b: # floated\n    c: 1\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b\n  : c: 1\n",
+            ".x.b | key | line_comment",
+            "floated\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\n  : 2\n",
+            ".",
+            "x: &anc\n  b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\n  : 2\n  ? d # own2\n  : 3\n",
+            ".",
+            "x: &anc\n  b: 2 # floated\n  # own\n  d: 3 # own2\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\n  : 2\n  ? d # own2\n  : 3\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \"b\" # own\n  : 2\n",
+            ".",
+            "x: &anc\n  \"b\": 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \"b\" # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ?\n    b # own\n  : 2\n",
+            ".",
+            "x: &anc\n  b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ?\n    b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b\n  : 2 # vc\n",
+            ".x.b | key | line_comment",
+            "floated\n",
+        ),
+        (
+            "- &anc # floated\n  ? b # own\n  : 2\n",
+            ".",
+            "- &anc\n  b: 2 # floated\n  # own\n",
+        ),
+        (
+            "y: &p # f1\nx: &anc # floated\n  ? b # own\n  : 2\n",
+            ".",
+            "y: &p\nx: # f1\n&anc\n  b: 2 # floated\n  # own\n",
+        ),
+        (
+            "y: &p # f1\nx: &anc # floated\n  ? b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? &k b # own\n  : 2\n",
+            ".",
+            "x: &anc\n  &k b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? &k b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\nz: 1\n",
+            ".",
+            "x: &anc\n  b: # floated\n  # own\nz: 1\n",
+        ),
+        (
+            "x: &anc # floated\n  ? b # own\nz: 1\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: !!map # floated\n  ? b # own\n  : 2\n",
+            ".",
+            "x: !!map\n  b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: !!map # floated\n  ? b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? &k\n    b # own\n  : 2\n",
+            ".",
+            "x: &anc\n  &k b: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? &k\n    b # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "floated\nown\n",
+        ),
+        (
+            "x: &anc # floated\n  ? !!str\n    b\n  : 2\n",
+            ".",
+            "x: &anc\n  !!str b: 2 # floated\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \\x27b\\x27 # own\n  : 2\n",
+            ".",
+            "x: &anc\n  \\x27b\\x27: 2 # floated\n  # own\n",
+        ),
+        (
+            "x: &anc # floated\n  ? \\x27b\\x27 # own\n  : 2\n",
+            ".x.b | key | line_comment",
+            "\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4384: a key that is itself a collection does not take the floated comment. yq drops it there
+/// too, but it also prints the key as `? [1, 2] # own`, where succinctly still reads a complex
+/// key as `""` (a separate, recorded gap), so only the absence of `# floated` is pinned here --
+/// not yq's output.
+#[test]
+fn test_a_collection_key_does_not_take_a_floated_comment_4384() -> Result<()> {
+    for key in ["[1, 2]", "{k: v}", "- p"] {
+        for doc in [
+            format!("x: &anc # floated\n  ? {key} # own\n  : 2\n"),
+            format!("x: &anc # floated\n  ?\n    {key}\n  : 2\n"),
+        ] {
+            let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", &doc, &[])?;
+            assert_eq!(code, 0, "{doc:?}: {stderr:?}");
+            assert!(!stdout.contains("# floated"), "{doc:?}: {stdout:?}");
+        }
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and

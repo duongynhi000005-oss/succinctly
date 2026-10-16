@@ -5420,10 +5420,12 @@ anchor comment and a key's own comment couldn't coexist) is fixed on the streami
 route and, since [#2806](https://github.com/rust-works/succinctly/issues/2806), on the DOM
 route too, for a key whose value is a block container or a scalar (`-P` and every write form
 print the floated comment on the key's line and the key's own comment on a line of its own at
-the key's indent, as yq does). Still different: a flow-valued or empty-valued key (yq moves both
+the key's indent, as yq does). An explicit key under such an anchor keeps the floated comment
+too ([#4384](https://github.com/rust-works/succinctly/issues/4384)): a scalar, quoted, block-scalar
+or empty `? b # own` shows it ahead of its own on every route, and a key that is itself a
+collection (`? [1, 2]`) does not take it, as in yq, but still reads as `""`. Still different: a flow-valued or empty-valued key (yq moves both
 comments onto the next entry, `b: {c: 1}` / `d: 3 # floated` / `# own`; succinctly keeps the
-floated one on `b`'s line and drops the other), an explicit key under such an anchor ([#4384](https://github.com/rust-works/succinctly/issues/4384); `? b # own`
-loses the floated comment on every route, the plain read included), and a key whose value is
+floated one on `b`'s line and drops the other), and a key whose value is
 `null` — and a missing
 explicit-tag slot: `OwnedValue` has no field for it, so any
 computed/constructed value — including an object-slice result (#1102) — loses the source

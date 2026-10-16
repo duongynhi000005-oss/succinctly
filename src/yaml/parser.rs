@@ -5087,6 +5087,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         Ok(())
     }
 
+    /// Claim a comment an earlier anchor's deferred value floated onto this explicit key (`x: &anc
+    /// # c` / `  ? b # own`, #4384), as `parse_mapping_entry` claims it at an implicit key's open
+    /// (#1080/#784) and before the key's own comment is captured, so the two read in source order
+    /// (floated, then own). Called only where the key is a scalar or empty, never for a key that is
+    /// itself a collection (`? [1, 2]`, `? - p`, `? k: v`): yq drops the comment there, and the
+    /// pending slot is cleared as stale after the line.
+    #[inline]
+    fn claim_floated_comment_for_key(&mut self) {
+        if self.pending_head_comment.is_some() {
+            self.take_pending_head_comment(self.bp_pos);
+        }
+    }
+
     /// Parse an explicit key (`? key`).
     /// The key can be any value: scalar, sequence, or mapping.
     fn parse_explicit_key(&mut self, indent: usize) -> Result<(), YamlError> {
@@ -5170,6 +5183,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Emit empty key node using the position after `?`
                 self.pos = key_pos;
                 self.set_ib();
+                self.claim_floated_comment_for_key();
                 self.write_bp_open();
                 self.write_bp_close();
                 self.set_pending_explicit_key(owner_depth, true);
@@ -5197,6 +5211,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Emit empty key node using the position after `?`
                     self.pos = key_pos;
                     self.set_ib();
+                    self.claim_floated_comment_for_key();
                     self.write_bp_open();
                     self.write_bp_close();
                     // Restore position for main loop to process `: value`
@@ -5208,6 +5223,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Emit empty key node using the position after `?`
                 self.pos = key_pos;
                 self.set_ib();
+                self.claim_floated_comment_for_key();
                 self.write_bp_open();
                 self.write_bp_close();
                 // Restore position for main loop to process next content
@@ -5322,6 +5338,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             Some(b'|' | b'>') => {
                 // Block scalar as key
+                self.claim_floated_comment_for_key();
                 self.parse_block_scalar(indent)?;
             }
             _ if self.looks_like_mapping_entry() => {
@@ -5362,6 +5379,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             Some(b'"') => {
                 // Double-quoted key
+                self.claim_floated_comment_for_key();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
                 self.reject_content_after_inline_value()?;
@@ -5370,6 +5388,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             Some(b'\'') => {
                 // Single-quoted key
+                self.claim_floated_comment_for_key();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
                 self.reject_content_after_inline_value()?;
@@ -5378,6 +5397,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             _ => {
                 // Unquoted scalar key
+                self.claim_floated_comment_for_key();
                 self.write_bp_open();
                 let end_pos = self.parse_unquoted_value_with_indent(indent);
                 self.set_bp_text_end(end_pos);
