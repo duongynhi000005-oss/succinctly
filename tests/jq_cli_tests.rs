@@ -76760,6 +76760,80 @@ fn test_foreach_update_composed_verdict_under_try_follows_jq_4719() -> Result<()
     ])
 }
 
+/// #4716 (the neighbours of #4703): the always-run branch of a falsy-`//` or `try ... catch` foreach source
+/// is read as the left operand of another `//`, behind a `tostring`/`if` tail, with a computed-key
+/// `error({("a"):.})` message, and through a `def` with parameters its body does not name. Each raises in jq
+/// (the destructure of `.` moves the register) and was answered with `[]`; the `{(.a):.}` control is jq's own answer. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_always_run_branch_neighbours_follow_jq_4716() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(def f: false // (. as {b:$b} | .); foreach (f // 1) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (((false // (. as {b:$b} | .)) | not) // 1) as $y (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | tostring) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | if . then 1 else 2 end) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"path(foreach (try error({("a"):.}) catch (. as {b:$b} | .)) as $y (.; .; .))"#,
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"a\":true}}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(def f($x): false // (. as {b:$b} | .); foreach f(1) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(def f($x): false // (. as {b:$b} | .); foreach f(1) as $y (.; .; .))",
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(def f: false // (. as {b:$b} | .); foreach (f // 1) as $y (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":true}",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((try error({(.a):.}) catch (. as {b:$b} | .))) as $y (.; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of \"Cannot use boolean (true)...",
+            5,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the
