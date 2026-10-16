@@ -27523,6 +27523,118 @@ pub(crate) fn index_one_owned<S: EvalSemantics>(
     }
 }
 
+/// The integer a field name spells in yq (#4404), which reads it as an index when the value is an
+/// array: [`yq_parse_int64`] behind a first-byte check, so the ordinary name pays one comparison.
+/// `None` outside yq mode.
+pub(crate) fn yq_field_name_as_index<S: EvalSemantics>(name: &str) -> Option<i64> {
+    if S::TAG != EvalTag::Yq
+        || !name
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+'))
+    {
+        return None;
+    }
+    yq_parse_int64(name)
+}
+
+/// `path` with each string component that lands on an array in `root` and spells an integer
+/// ([`yq_parse_int64`]) replaced by that integer (#4404), or `None` when no component needed it.
+/// The walk follows `root` through the components it can classify and stops treating the rest as
+/// document-backed at the first one it cannot.
+fn yq_array_string_key_components(
+    root: &OwnedValue,
+    path: &[OwnedValue],
+) -> Option<Vec<OwnedValue>> {
+    if !path.iter().any(|component| {
+        matches!(component, OwnedValue::String(name) if yq_field_name_as_index::<YqSemantics>(name).is_some())
+    }) {
+        return None;
+    }
+    let mut at = Some(root);
+    let mut out: Option<Vec<OwnedValue>> = None;
+    for (i, component) in path.iter().enumerate() {
+        at = match (at, component) {
+            (Some(OwnedValue::Array(items)), OwnedValue::String(name)) => {
+                match yq_field_name_as_index::<YqSemantics>(name) {
+                    Some(idx) => {
+                        out.get_or_insert_with(|| path.to_vec())[i] = OwnedValue::Int(idx);
+                        let resolved = if idx < 0 {
+                            items.len() as i64 + idx
+                        } else {
+                            idx
+                        };
+                        usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                    }
+                    None => None,
+                }
+            }
+            (Some(OwnedValue::Array(items)), OwnedValue::Int(idx)) => {
+                let resolved = if *idx < 0 {
+                    items.len() as i64 + idx
+                } else {
+                    *idx
+                };
+                usize::try_from(resolved).ok().and_then(|at| items.get(at))
+            }
+            (Some(OwnedValue::Object(map)), OwnedValue::String(name)) => map.get(name.as_str()),
+            _ => None,
+        };
+    }
+    out
+}
+
+/// `components` navigated from `start`, with each `Field` step that lands on an array and spells
+/// an integer ([`yq_parse_int64`]) as the `Index` step of that integer (#4404): the component a
+/// write or `del()` applies must name the element the read reached, and the write walkers keep
+/// the two kinds of step apart. Borrowed as it came when nothing needed it, which is every query
+/// outside yq mode and every one without an integer-looking name.
+fn yq_static_components_by_position<'c, S: EvalSemantics>(
+    start: &OwnedValue,
+    components: &'c [Expr],
+) -> Cow<'c, [Expr]> {
+    if S::TAG != EvalTag::Yq
+        || !components
+            .iter()
+            .any(|c| matches!(c, Expr::Field(name) if yq_field_name_as_index::<S>(name).is_some()))
+    {
+        return Cow::Borrowed(components);
+    }
+    let mut at = Some(start);
+    let mut rewritten: Option<Vec<Expr>> = None;
+    for (i, component) in components.iter().enumerate() {
+        at = match component {
+            Expr::Field(name) => match (at, yq_field_name_as_index::<S>(name)) {
+                (Some(OwnedValue::Object(map)), _) => map.get(name.as_str()),
+                (Some(OwnedValue::Array(items)), Some(idx)) => {
+                    rewritten.get_or_insert_with(|| components.to_vec())[i] =
+                        Expr::Index { idx, key: None };
+                    let resolved = if idx < 0 {
+                        items.len() as i64 + idx
+                    } else {
+                        idx
+                    };
+                    usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                }
+                _ => None,
+            },
+            Expr::Index { idx, .. } => match at {
+                Some(OwnedValue::Array(items)) => {
+                    let resolved = if *idx < 0 {
+                        items.len() as i64 + idx
+                    } else {
+                        *idx
+                    };
+                    usize::try_from(resolved).ok().and_then(|at| items.get(at))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+    }
+    rewritten.map_or(Cow::Borrowed(components), Cow::Owned)
+}
+
 /// yq reads a string key against an array as the integer it spells (#4274): `.["1"]` is `.[1]`,
 /// `.["-1"]` the last element, `.["0x1"]`, `.["01"]`, `.["+1"]` and `.["1_0"]` follow
 /// [`yq_parse_int64`]. `None` outside yq mode, for a key that is not a string, and for a string
@@ -33552,10 +33664,26 @@ fn autovivify_object(root: &mut OwnedValue) {
 /// of a numeric index, where jq has no such key and the walkers below raise `Cannot index object
 /// with number`.
 ///
+/// The converse (#4404): a `Field` step that lands on an *array* and spells an integer
+/// ([`yq_parse_int64`]: `.["1"]`, `.["-1"]`, `.["0x1"]`) is the `Index` step of that integer, as
+/// yq's read of an array by a string key is (#4274). A name that is not an integer keeps the
+/// ordinary error.
+///
 /// The walk follows `root` through plain `Field`/`Index` steps and stops at the first step it
 /// cannot classify from the document (a fan-out, a slice, a group, a component the document
 /// does not reach), leaving the rest as it is.
 fn yq_mapping_index_steps<S: EvalSemantics>(root: &OwnedValue, path_expr: &Expr) -> Option<Expr> {
+    yq_index_steps_by_container::<S>(root, path_expr, true)
+}
+
+/// [`yq_mapping_index_steps`], with the mapping direction optional: `del()` reads a numeric index
+/// on a mapping as no member at all (a `1:` key is an `!!int`, which yq's delete leaves alone,
+/// #2353), and takes only the array direction of #4404.
+fn yq_index_steps_by_container<S: EvalSemantics>(
+    root: &OwnedValue,
+    path_expr: &Expr,
+    mapping_index_as_field: bool,
+) -> Option<Expr> {
     if S::TAG != EvalTag::Yq {
         return None;
     }
@@ -33563,7 +33691,11 @@ fn yq_mapping_index_steps<S: EvalSemantics>(root: &OwnedValue, path_expr: &Expr)
         Expr::Pipe(steps) => steps,
         single => core::slice::from_ref(single),
     };
-    if !steps.iter().any(|step| matches!(step, Expr::Index { .. })) {
+    if !steps.iter().any(|step| match step {
+        Expr::Index { .. } => true,
+        Expr::Field(name) => yq_field_name_as_index::<S>(name).is_some(),
+        _ => false,
+    }) {
         return None;
     }
     let mut at = Some(root);
@@ -33571,12 +33703,23 @@ fn yq_mapping_index_steps<S: EvalSemantics>(root: &OwnedValue, path_expr: &Expr)
     for (i, step) in steps.iter().enumerate() {
         match step {
             Expr::Field(name) => {
-                at = at.and_then(|v| match v {
-                    OwnedValue::Object(map) => map.get(name.as_str()),
+                at = match (at, yq_field_name_as_index::<S>(name)) {
+                    (Some(OwnedValue::Object(map)), _) => map.get(name.as_str()),
+                    (Some(OwnedValue::Array(items)), Some(idx)) => {
+                        rewritten.get_or_insert_with(|| steps.to_vec())[i] =
+                            Expr::Index { idx, key: None };
+                        let resolved = if idx < 0 {
+                            items.len() as i64 + idx
+                        } else {
+                            idx
+                        };
+                        usize::try_from(resolved).ok().and_then(|i| items.get(i))
+                    }
                     _ => None,
-                });
+                };
             }
             Expr::Index { idx, key } => match at {
+                Some(OwnedValue::Object(_)) if !mapping_index_as_field => break,
                 Some(OwnedValue::Object(map)) => {
                     let text = yq_scalar_text::<S>(&index_component_value(*idx, key.as_ref()))
                         .map(Cow::into_owned)?;
@@ -37414,6 +37557,11 @@ fn key_to_path_component<S: EvalSemantics>(
                 return Ok(Expr::Field(text));
             }
         }
+    }
+    // #4404: yq reads a string key against an array as the integer it spells, in a write as in a
+    // read (#4274).
+    if let (OwnedValue::Array(_), Some(index)) = (container, yq_array_string_key_index::<S>(key)) {
+        return key_to_path_component::<S>(&index, container, scalar_noop);
     }
     match key {
         OwnedValue::String(s) => Ok(Expr::Field(s.to_string())),
@@ -63106,14 +63254,21 @@ fn resolve_index_expr_sink<'a, S: EvalSemantics>(
             // discard it is pure waste for a `Cow::Borrowed` root -- `Cow`'s
             // own `Clone` is the O(1) reference copy in that case, only
             // paying the deep clone when `target_value` was already owned.
+            // #4404: a string key an array reads as an index reads that element.
+            let index_key = matches!(target_value.as_ref(), OwnedValue::Array(_))
+                .then(|| yq_array_string_key_index::<S>(k))
+                .flatten();
             let next_value: Cow<'a, OwnedValue> = if scalar_noop {
                 target_value.clone()
             } else {
-                Cow::Owned(match index_one_owned::<S>(target_value, k, false) {
-                    Ok(v) => v.expect("non-optional index yields a value or errors"),
-                    Err(_) if optional => continue,
-                    Err(e) => escape!(e.into()),
-                })
+                Cow::Owned(
+                    match index_one_owned::<S>(target_value, index_key.as_ref().unwrap_or(k), false)
+                    {
+                        Ok(v) => v.expect("non-optional index yields a value or errors"),
+                        Err(_) if optional => continue,
+                        Err(e) => escape!(e.into()),
+                    },
+                )
             };
             // `resolve_dynamic_indexes` strips the `Expr::Optional` wrapper
             // below from every component before it ever reaches
@@ -64018,7 +64173,7 @@ enum StaticAccess<'e> {
 /// Takes `current` by reference deliberately: the destructive navigator calls
 /// this *before* consuming its value, which is sound only because the answer
 /// borrows from `component` (the `'e` below) and never from `current`.
-fn classify_static_component<'e>(
+fn classify_static_component<'e, S: EvalSemantics>(
     component: &'e Expr,
     current: &OwnedValue,
 ) -> Result<StaticAccess<'e>, EvalEscape> {
@@ -64026,6 +64181,19 @@ fn classify_static_component<'e>(
         Expr::Field(name) => match current {
             OwnedValue::Object(_) => Ok(StaticAccess::Field(name.as_str())),
             OwnedValue::Null => Ok(StaticAccess::Null),
+            // #4404 (yq): a name an array reads as the integer it spells is that element.
+            OwnedValue::Array(items) if yq_field_name_as_index::<S>(name).is_some() => {
+                let idx = yq_field_name_as_index::<S>(name).unwrap_or_default();
+                let resolved = if idx < 0 {
+                    items.len() as i64 + idx
+                } else {
+                    idx
+                };
+                Ok(usize::try_from(resolved)
+                    .ok()
+                    .filter(|&i| i < items.len())
+                    .map_or(StaticAccess::Null, StaticAccess::Index))
+            }
             other => Err(EvalError::cannot_index_with_field(owned_type_name(other), name).into()),
         },
         Expr::Index { idx, .. } => match current {
@@ -64224,7 +64392,7 @@ fn navigate_static_component_ref<'v, S: EvalSemantics>(
         return Ok(None);
     }
     Ok(Some(
-        match classify_static_component(component, current.value())? {
+        match classify_static_component::<S>(component, current.value())? {
             StaticAccess::Field(name) => current.field(name),
             StaticAccess::Index(slot) => current.child_at(slot),
             StaticAccess::Null => WalkNode::Null,
@@ -64434,6 +64602,11 @@ fn apply_static_tail_one<'a, S: EvalSemantics>(
     // `Builtin::GetPath`'s own resolved-but-still-untracked result, see
     // `resolve_static_tail`'s doc comment) — goes through the shared,
     // trackable-aware helper.
+    let by_position = if tail.is_empty() {
+        Cow::Borrowed(tail)
+    } else {
+        yq_static_components_by_position::<S>(&current, tail)
+    };
     let end: Cow<'a, OwnedValue> = if tail.is_empty() {
         // #986: with no tail there is nothing to navigate *into*, so an
         // untracked `current` is not this function's problem to raise —
@@ -64462,7 +64635,7 @@ fn apply_static_tail_one<'a, S: EvalSemantics>(
     // static suffix, not document depth, so this doesn't reopen an O(d²)
     // hole; it's a small, honest constant-factor trade against the
     // amortized `Vec` growth this replaces.
-    let path = PathPrefix::extend_many(&prefix, tail.iter().cloned());
+    let path = PathPrefix::extend_many(&prefix, by_position.iter().cloned());
     Ok(Some(PathBranch {
         path,
         value: end,
@@ -64956,7 +65129,10 @@ fn resolve_seq_from_seed<'a, S: EvalSemantics>(
         // `resolve_seq_stage` performs at its own `extend_many(&prefix, ..)`
         // sites.
         let branch = PathBranch::passthrough(
-            PathPrefix::extend_many(&seed.path, flat),
+            PathPrefix::extend_many(
+                &seed.path,
+                yq_static_components_by_position::<S>(&seed.value, &flat).into_owned(),
+            ),
             Cow::Owned(end),
             seed.trackable,
             branch_snapshot,
@@ -68167,6 +68343,14 @@ fn eval_owned_navigation<S: EvalSemantics>(
     );
     match expr {
         Expr::Identity => Some(Ok(Some(input.clone()))),
+        // #4404 (yq): a name an array reads as the integer it spells is that index.
+        Expr::Field(name)
+            if matches!(input, OwnedValue::Array(_))
+                && yq_field_name_as_index::<S>(name).is_some() =>
+        {
+            let idx = yq_field_name_as_index::<S>(name).unwrap_or_default();
+            eval_owned_navigation::<S>(&Expr::Index { idx, key: None }, input, optional)
+        }
         // #2470: `Ok(None)` here is this helper's own "no output", which is
         // exactly what a key lookup that found nothing must produce inside a
         // read-only context (`yq_absent_key_read_is_empty`) -- the same rule
@@ -77101,6 +77285,10 @@ fn delete_trie_object(
     // a no-op through the unvalidated root rather than the `unreachable!()`
     // that used to sit here and abort the process on this exact input
     // (#2049).
+    // #4404 (yq): names an array reads as the integers they spell delete those elements.
+    if yq_mode && matches!(value, OwnedValue::Array(_)) {
+        return delete_trie_array_by_names(value, trie, id);
+    }
     let Some(entries) = value.as_object_mut() else {
         return Ok(value);
     };
@@ -77141,6 +77329,56 @@ fn delete_trie_object(
         value = delete_keys(value, &key_refs, yq_mode)?;
     }
 
+    Ok(value)
+}
+
+/// [`delete_trie_object`] for an array in yq mode (#4404): a `Field` edge whose name spells an
+/// integer ([`yq_parse_int64`]) is the element it names, as a read of the array by that string is
+/// (#4274). Continuations are walked first, against the array as it entered, and the terminal
+/// elements go in one batch, as [`delete_trie_array`] does for index edges; an edge whose name is
+/// no integer deletes nothing, as before.
+fn delete_trie_array_by_names(
+    mut value: OwnedValue,
+    trie: &DeleteTrie,
+    id: u32,
+) -> Result<OwnedValue, EvalError> {
+    let node = trie.node(id);
+    for &slot in &node.field_groups {
+        let (name, &child) = node
+            .fields
+            .get_index(slot)
+            .expect("field_groups holds live fields indices");
+        let Some(idx) = yq_field_name_as_index::<YqSemantics>(name) else {
+            continue;
+        };
+        if trie.skips_doomed_continuation(child, true) {
+            continue;
+        }
+        let OwnedValue::Array(arr) = &mut value else {
+            break;
+        };
+        let resolved = if idx < 0 { arr.len() as i64 + idx } else { idx };
+        match usize::try_from(resolved)
+            .ok()
+            .and_then(|at| arr.get_mut(at))
+        {
+            Some(target) => {
+                let old = core::mem::replace(target, OwnedValue::Null);
+                *target = delete_trie_apply(old, trie, child, true)?;
+            }
+            None => delete_trie_through_absent(trie, child)?,
+        }
+    }
+    let doomed: Vec<OwnedValue> = node
+        .fields
+        .iter()
+        .filter(|(_, &child)| trie.node(child).terminal)
+        .filter_map(|(name, _)| yq_field_name_as_index::<YqSemantics>(name).map(OwnedValue::Int))
+        .collect();
+    if !doomed.is_empty() {
+        let key_refs: Vec<&OwnedValue> = doomed.iter().collect();
+        value = delete_keys(value, &key_refs, true)?;
+    }
     Ok(value)
 }
 
@@ -78306,6 +78544,14 @@ fn delete_at_path(
     // does not, even though both reach an `Index` step against a `null`).
     real_slot: bool,
 ) -> Result<(), EvalError> {
+    // #4404: the same string-key-on-array reading as a write; a numeric index on a mapping keeps
+    // deleting nothing (#2353).
+    if yq_mode {
+        if let Some(rewritten) = yq_index_steps_by_container::<YqSemantics>(root, path_expr, false)
+        {
+            return delete_at_path(root, &rewritten, optional, yq_mode, real_slot);
+        }
+    }
     match path_expr {
         Expr::Identity => {
             // del(.) replaces with null
@@ -83026,6 +83272,9 @@ fn delpaths_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 v = if path.is_empty() {
                     root_deleted = true;
                     OwnedValue::Null
+                } else if let Some(normalised) = yq_array_string_key_components(&v, path) {
+                    // #4404: a string component an array reads as an index names that index.
+                    delete_paths_sorted::<S>(v, &[normalised.as_slice()], 0)?
                 } else {
                     delete_paths_sorted::<S>(v, core::slice::from_ref(&path), 0)?
                 };

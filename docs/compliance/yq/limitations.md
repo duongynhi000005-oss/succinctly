@@ -2398,7 +2398,7 @@ mechanism at all and turned out to have a separate, more severe divergence (a ha
 instead of missing autovivification) — see
 [#1919](https://github.com/rust-works/succinctly/issues/1919).
 
-### An array read by a string key -- the read side is resolved ([#4274](https://github.com/rust-works/succinctly/issues/4274)); the write side and a fractional key remain
+### An array read or written by a string key ([#4274](https://github.com/rust-works/succinctly/issues/4274), [#4404](https://github.com/rust-works/succinctly/issues/4404)); a fractional key and a mapping's numeric `del` remain
 
 yq reads a string key against an array as the integer it spells (`parseInt64`, the reader `pick`
 uses, #4257): `[10,20,30] | .["1"]` is `20`, `.["-1"]` is `30` (a negative index wraps), `.["01"]`,
@@ -2408,16 +2408,21 @@ all of that the same way for every read route -- a literal key, `.[$k]`, `.[("1"
 (`(. + [])["1"]`), the slice of an array, and under `?` -- through `eval::yq_array_string_key_index`
 and `eval::yq_parse_int64`. jq mode keeps raising `Cannot index array with string`, as jq does.
 
+**The write side (#4404)** follows the read: `.["1"] = 9`, `|=`, `+=`, `del(.["1"])`, a comma group
+(`(.["1"], .["2"]) = 0`, `del(.["1"], .["0"])`), a computed key (`"1" as $k | .[$k] = 9`), a
+mid-chain step (`.a["1"].x = 9`) and a metadata write all address the element the integer names, on
+JSON and YAML input alike; a string that is no integer keeps the ordinary error.
+
 **Not matched:**
 
-- **The write side.** `.["1"] = 9`, `.["1"] |= . + 1` and `del(.["1"])` on an array still raise
-  `Cannot index array with string "1"`, where yq writes and deletes element 1.
 - **A fractional number key.** `.[1.5]` and `.[1.0]` index here (truncating); yq raises `cannot index
   array with '1.5'` (a JSON-sourced `1.0` does index in yq, and the two cannot be told apart in the
   owned value).
 - **The wording of the refusal.** yq's is `cannot index array with ' 1' (strconv.ParseInt: parsing
   " 1": invalid syntax)`; this build keeps its own `Cannot index array with string " 1"`.
-- **A mapping indexed by a number**, `{"0":"z"} | del(.[0])`, which yq deletes and this build leaves.
+- **A mapping indexed by a number**, `{"0":"z"} | del(.[0])` (and `a: {"1": x}` | `del(.a[1])`), which yq
+  deletes when the key is a string and this build leaves: a `1:` key is an `!!int`, which yq's delete leaves
+  alone (#2353), and the value tree does not keep which spelling a key had.
 
 ### A mid-chain `Field`/`Index` step hitting the wrong container type or an out-of-range array index
 
