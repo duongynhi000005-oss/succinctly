@@ -5713,7 +5713,11 @@ impl<W> Copy for YamlField<'_, W> {}
 /// (#2822); a scalar that is not a string never matches.
 fn field_key_is_named<W: AsRef<[u64]>>(key: &YamlValue<'_, W>, name: &str) -> bool {
     match key {
-        YamlValue::String(key) => key.as_str().is_ok_and(|k| k == name),
+        YamlValue::String(key) => match key.as_str() {
+            Ok(k) => k == name,
+            // A JSON key with invalid UTF-8 is addressed by its substituted text (#4536).
+            Err(_) => json_key_with_replacement_chars(key).is_some_and(|k| k == name),
+        },
         YamlValue::Mapping(_) | YamlValue::Sequence(_) => name.is_empty(),
         _ => false,
     }
@@ -8005,6 +8009,28 @@ impl<'a, W: AsRef<[u64]>> YamlValue<'a, W> {
     }
 }
 
+/// A JSON object key whose bytes are not UTF-8, decoded the way yq's JSON reader does: each
+/// invalid byte becomes U+FFFD (#4536). `None` for any other key, or one that still fails to
+/// decode.
+fn json_key_with_replacement_chars(s: &YamlString<'_>) -> Option<String> {
+    if !matches!(
+        s,
+        YamlString::DoubleQuoted {
+            json_sourced: true,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let substituted = crate::text::utf8::substitute_invalid_utf8_per_byte(s.raw_bytes());
+    let repaired = YamlString::DoubleQuoted {
+        text: &substituted,
+        start: 0,
+        json_sourced: true,
+    };
+    repaired.as_str().ok().map(Cow::into_owned)
+}
+
 /// The [`key_string_kind`](YamlValue::key_string_kind) result for a genuine
 /// `String` key: its decoded content on success, or the shared `""`
 /// fallback (marked `is_fallback`) on a decode failure. Shared by
@@ -8013,6 +8039,13 @@ impl<'a, W: AsRef<[u64]>> YamlValue<'a, W> {
 fn string_key_kind<'a>(s: &YamlString<'a>) -> (Cow<'a, str>, bool) {
     match s.as_str() {
         Ok(text) => (text, false),
+        // A JSON document's key may hold invalid UTF-8 (`-p json`, #4536): yq's JSON reader
+        // turns each bad byte into U+FFFD, so the key prints as that text. A *value* is not
+        // touched here -- yq refuses to print one, which the decode error still reports.
+        Err(YamlStringError::InvalidUtf8) => match json_key_with_replacement_chars(s) {
+            Some(text) => (Cow::Owned(text), false),
+            None => (Cow::Borrowed(""), true),
+        },
         Err(_) => (Cow::Borrowed(""), true),
     }
 }
@@ -8247,7 +8280,14 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
     /// `string_decode_error`, which is `None` for those variants anyway.
     fn decoded_key_str(&self) -> Result<Option<Cow<'_, str>>, &'static str> {
         match self {
-            YamlValue::String(s) => s.as_str().map(Some).map_err(YamlStringError::message),
+            YamlValue::String(s) => match s.as_str() {
+                Ok(text) => Ok(Some(text)),
+                // A JSON key with invalid UTF-8 reads with U+FFFD for each bad byte (#4536).
+                Err(e) => match json_key_with_replacement_chars(s) {
+                    Some(text) => Ok(Some(Cow::Owned(text))),
+                    None => Err(e.message()),
+                },
+            },
             YamlValue::Alias { .. } => {
                 if let Some(reason) = self.string_decode_error() {
                     return Err(reason);
@@ -9886,12 +9926,14 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
     // a second pass over a scalar that decodes fine.
     let str_val = match s.as_str() {
         Ok(v) => v,
-        Err(e) => {
-            return match undecodable {
-                Undecodable::Raise => Err(decode_failure(e)),
-                Undecodable::PreserveEmpty => Ok(out.write_str("\"\"")?),
-            }
-        }
+        Err(e) => match undecodable {
+            Undecodable::Raise => return Err(decode_failure(e)),
+            // A JSON key with invalid UTF-8 prints with U+FFFD for each bad byte (#4536).
+            Undecodable::PreserveEmpty => match json_key_with_replacement_chars(s) {
+                Some(text) => Cow::Owned(text),
+                None => return Ok(out.write_str("\"\"")?),
+            },
+        },
     };
 
     // For quoted strings, preserve the quoting style
