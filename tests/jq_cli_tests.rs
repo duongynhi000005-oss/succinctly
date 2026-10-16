@@ -135011,6 +135011,12 @@ fn test_foreach_source_destructuring_dot_behind_a_bare_alternative_or_handler_ra
         ),
         (
             r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; reduce ((false // (. as {b:$b}|.)) | .) as $y (.; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
             r"del(foreach (false // (. as {b:$b}|.)) as $y (.; .; .))",
             "",
             5,

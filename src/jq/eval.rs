@@ -54062,6 +54062,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::depth() != 0
         && certain_fresh_destructure(source);
     let _fresh_mark = certain_fresh.then(fold_body::fresh_source);
+    let null_register_at_fold = ambient.trackable && matches!(ambient.value, OwnedValue::Null);
     let has_navigation = any_subexpr(source, &mut |e| {
         is_fold_source_navigation(e)
             || (S::TAG == EvalTag::Jq
@@ -54084,16 +54085,17 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && foreach_source_destructures_register(
             source,
             register_markers.clone(),
-            ambient.trackable && matches!(ambient.value, OwnedValue::Null),
+            null_register_at_fold,
         ))
         || destructures_unplaced_register
+        // #4677/#4682: the part of a bare `//` or `try ... catch` source that always runs.
         || (S::TAG == EvalTag::Jq
             && foreach_source
             && bare_run_branch_of_source(source, !in_moved_body).is_some_and(|branch| {
                 foreach_source_destructures_register(
                     branch,
                     register_markers.clone(),
-                    ambient.trackable && matches!(ambient.value, OwnedValue::Null),
+                    null_register_at_fold,
                 )
             }))
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
