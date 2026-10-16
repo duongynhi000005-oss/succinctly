@@ -53925,7 +53925,21 @@ impl<'e> RegisterSpine<'e> {
                 }
                 let peeled = peel_register_transparent(other);
                 if !core::ptr::eq(peeled, other) {
-                    self.reach(peeled)
+                    // #4756: a chain behind `null |` under `first`/`limit`/`nth` retries after the
+                    // consumer's stop and emits once more (#4537), which the router cannot yet count
+                    // against a `$x.a?` that follows: those stay with the by-value drive.
+                    let counted = matches!(
+                        unwrap_bind_source(other),
+                        Expr::FirstExpr(_)
+                            | Expr::Limit { .. }
+                            | Expr::NthExpr { .. }
+                            | Expr::Builtin(Builtin::FirstStream(_) | Builtin::NthStream(..))
+                    );
+                    let entry = self.null_by_kind;
+                    self.null_by_kind &= !counted;
+                    let reach = self.reach(peeled);
+                    self.null_by_kind = entry;
+                    reach
                 } else if yields_only_the_register(other) {
                     // `select(literal)` (#3956).
                     Reach::HandsOn
