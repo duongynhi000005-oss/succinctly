@@ -150811,6 +150811,74 @@ fn test_caught_foreign_marker_refusal_is_caught_by_an_outer_try_4730() -> Result
     ])
 }
 
+/// #4756: a `foreach` source that is a `?//` chain over a re-rooted bound expression (`null | CHAIN`,
+/// `$x | CHAIN`, `$x as PAT ?// $v`) on a `null` document. jq's register is that `null` and each head is
+/// `jv_identical` to it by kind, so the chain's first alternative walks the register: the path is the
+/// walked one, not the root. The last rows pin a chain whose key raises, which takes the fallback
+/// alternative at the root and is left as it was. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(. as $x | 1 | (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | 1 | (foreach ($x | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | 1 | (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)) | $x)",
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .)) | $x)",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"(. as $x | 1 | (foreach ($x as {b:$b} ?// $b | .) as $k (.; .; .)) | $x) = 5",
+            "{\"b\":5}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {(error("q")):$a} ?// $a | .) as $k (.; .; .)) | $x | .z)"#,
+            "[\"z\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"(. as $x | 1 | (foreach (null | (.|.) as {(error("q")):$a} ?// $a | .) as $k (.; .; .)) | $x | getpath(["z"])) = 5"#,
+            "{\"z\":5}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"del(. as $x | 1 | (foreach (null | (.|.) as {(error("q")):$a} ?// $a | .) as $k (.; .; .)) | $x | .z)"#,
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4709 (the `try`/`?` residual of #4604): a `try`/`?` (or a `catch empty`) around the destructure of a
 /// `$x` bound to another node, as the source of a `foreach` that is the whole UPDATE of a `reduce`. The
 /// pattern's step raises, the `try` catches it, the source is empty, the `foreach` emits nothing, the
