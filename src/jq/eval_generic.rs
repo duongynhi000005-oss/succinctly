@@ -35706,10 +35706,19 @@ fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
         return META_ALL;
     }
     match strip_parens(stage) {
-        Expr::Assign { .. }
-        | Expr::Update { .. }
-        | Expr::CompoundAssign { .. }
-        | Expr::AlternativeAssign { .. } => META_ALL,
+        // #3641: a write to `.` itself (`. = {"c": 9}`, `. |= f`, `. += {...}`) puts the right-hand
+        // side's nodes under the fields, which have no position (yq: `0`); a write to a path under
+        // it replaces one field's value in place and leaves that field's node (`.c = 3 | .c | line`).
+        Expr::Assign { path, .. }
+        | Expr::Update { path, .. }
+        | Expr::CompoundAssign { path, .. }
+        | Expr::AlternativeAssign { path, .. } => {
+            if matches!(strip_parens(path), Expr::Identity) {
+                META_ALL & !META_CHILD
+            } else {
+                META_ALL
+            }
+        }
         // #3641: `. + {"b": 9}` puts the right operand's node under `b`, which has no position
         // (yq: `0`), so the fields of a sum are not the document's.
         Expr::Arithmetic { .. } => META_ALL & !META_CHILD,
@@ -35719,7 +35728,6 @@ fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
             | Builtin::SortBy(_)
             | Builtin::SortKeys(_)
             | Builtin::SortKeysOneLevel
-            | Builtin::MapValues(_)
             | Builtin::Flatten
             | Builtin::FlattenDepth(_)
             | Builtin::Shuffle
@@ -35728,6 +35736,9 @@ fn stage_keeps_node_metadata(stage: &Expr) -> u8 {
             | Builtin::Pick(_)
             | Builtin::Omit(_),
         ) => META_ALL,
+        // #3641: `map_values(1)` replaces each field's value, and a field's anchor goes with it
+        // (`map_values(1) | .c | anchor` is empty in yq, `.c = 3 | .c | anchor` is `x`).
+        Expr::Builtin(Builtin::MapValues(_)) => META_ALL & !META_CHILD,
         Expr::Builtin(Builtin::Unique | Builtin::UniqueBy(_) | Builtin::Reverse) => {
             META_STYLE | META_LINE_COMMENT
         }

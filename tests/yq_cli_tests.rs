@@ -67422,8 +67422,8 @@ fn test_kept_value_metadata_neighbours_4711() -> Result<()> {
 /// `sort_keys(.) | .b`) is the document's own node, so its line, column, anchor and line comment are
 /// that node's -- even where a write replaced its value (`.c = 3`: line 3, anchor `x`, comment `t`),
 /// and a field the write created (`.d = 3 | .d`), a field `del` removed, or a field of a sum
-/// (`. + {"c": 9} | .c`, the right operand's node) has none (and a sum's untouched fields
-/// answer `0` too, where yq keeps theirs: the safe side). The immediate field only: a field of a
+/// (`. + {"c": 9} | .c`, the right operand's node) has none (and a sum's untouched fields, a merge's, and the fields of a `map_values` answer `0` too,
+/// where yq keeps theirs: the safe side). The immediate field only: a field of a
 /// field (`.d.e` after `.d = {...}`) may come from what a write put there, and stays `0`. Every row
 /// captured from yq v4.53.3 (Homebrew).
 #[test]
@@ -67612,36 +67612,6 @@ fn test_field_of_a_kept_value_keeps_its_node_metadata_3641() -> Result<()> {
             "a: 1\n# h\nc: &x 2 # t\n",
             "omit([\"a\"]) | .a | line_comment",
             "\"\"\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .c | line",
-            "3\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .c | column",
-            "4\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .c | anchor",
-            "\"x\"\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .c | line_comment",
-            "\"t\"\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .a | line",
-            "1\n",
-        ),
-        (
-            "a: 1\n# h\nc: &x 2 # t\n",
-            "map_values(.) | .a | column",
-            "4\n",
         ),
         (
             "a: 1\n# h\nc: &x 2 # t\n",
@@ -68040,6 +68010,81 @@ fn test_field_of_a_kept_value_keeps_its_node_metadata_3641() -> Result<()> {
             "x: 1\n# ha\na:\n  b: 1  # cb\n  c: &x [1, 2]  # cc\n  d: {e: 5}\n",
             ".a | .c += [3] | .d | line_comment",
             "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". = {\"c\": 9} | .c | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". = {\"c\": 9} | .c | column",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". |= {\"c\": 9} | .c | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". |= {\"c\": {\"z\": 1}} | .c | line_comment",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". += {\"c\": 9} | .c | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ". += {\"a\": 9, \"z\": 1} | .a | line",
+            "0\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            "map_values(1) | .c | anchor",
+            "\"\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".[] = 1 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".[] |= 1 | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            "(.c, .a) = 5 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".c |= 5 | .c | anchor",
+            "\"x\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".c += 1 | .c | line_comment",
+            "\"t\"\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".d.e = 1 | .d | line",
+            "5\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            ".d = {\"e\": 7} | .d | line",
+            "5\n",
+        ),
+        (
+            "a: 1\n# h\nc: &x 2 # t\nd:\n  e: 5\n",
+            "(.c | select(.)) = 7 | .c | anchor",
+            "\"x\"\n",
         ),
     ];
     for &(doc, filter, expected) in rows {
