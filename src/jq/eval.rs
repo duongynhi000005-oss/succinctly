@@ -54483,13 +54483,37 @@ fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
         Expr::DefCall { def, .. } if !def.params.is_empty() && !body_names_a_param(def) => {
             within_def_call_budget_with(|| bare_run_branch_of_source(&def.body, try_body))
         }
+        // #4760: ...and a body `$x // BRANCH` whose argument for `$x` is a constant that is never
+        // truthy: the call is `BRANCH`, which then names no parameter. Any other body that names one
+        // stays opaque.
+        Expr::DefCall { def, args, .. } if !def.params.is_empty() && body_names_a_param(def) => {
+            let Expr::Alternative(left, right) = unwrap_paren(&def.body) else {
+                return None;
+            };
+            let falsy_param = def.params.iter().zip(args).any(|(param, arg)| {
+                let named = match (param, unwrap_paren(left)) {
+                    (Param::Dollar(p), Expr::Var(name))
+                    | (Param::Bare(p), Expr::FuncCall { name, .. }) => p == name,
+                    _ => false,
+                };
+                named && never_truthy(arg)
+            });
+            (falsy_param && !expr_names_a_param(def, right))
+                .then(|| within_def_call_budget_with(|| run_branch_of_bind_chain(right)))
+                .flatten()
+        }
         _ => None,
     }
 }
 
 /// Whether the body of `def` mentions one of its parameters, as `g` or `$g` (#4716).
 fn body_names_a_param(def: &FuncDefData) -> bool {
-    any_subexpr(&def.body, &mut |e| match e {
+    expr_names_a_param(def, &def.body)
+}
+
+/// Whether `e` mentions a parameter of `def`, as `g` or `$g`.
+fn expr_names_a_param(def: &FuncDefData, e: &Expr) -> bool {
+    any_subexpr(e, &mut |e| match e {
         Expr::Var(name) | Expr::FuncCall { name, .. } => {
             def.params.iter().any(|param| match param {
                 Param::Bare(p) | Param::Dollar(p) => p == name,
