@@ -53776,10 +53776,42 @@ fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
             let mut live = stages.iter().filter(|stage| !is_identity_stage(stage));
             match (live.next(), live.next()) {
                 (Some(head), None) => bare_run_branch_of_source(head, try_body),
+                // #4703: the head runs on the register whatever follows it, and a tail that emits
+                // once for each output leaves its emission to raise as the head's would.
+                (Some(head), Some(next)) => {
+                    let tail_emits_once = core::iter::once(next).chain(live).all(emits_once_stage);
+                    tail_emits_once
+                        .then(|| bare_run_branch_of_source(head, try_body))
+                        .flatten()
+                }
                 _ => None,
             }
         }
+        // #4703: the first item of a comma runs first and emits first; literals ahead of it emit once
+        // and move nothing.
+        Expr::Comma(items) => items
+            .iter()
+            .find(|item| !matches!(unwrap_paren(item), Expr::Literal(_)))
+            .and_then(|first| bare_run_branch_of_source(first, try_body)),
+        // #4703: a call of a `def` with no parameters runs its body on the register, as the call's
+        // own input. Read through the shared budget, as the spine reads a call.
+        Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+            within_def_call_budget_with(|| bare_run_branch_of_source(&def.body, try_body))
+        }
         _ => None,
+    }
+}
+
+/// Whether `e` emits exactly one output for each input it is given and moves no register: a literal,
+/// `not`, or a `select` of a literal that is truthy (#4703).
+fn emits_once_stage(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity | Expr::Literal(_) | Expr::Not | Expr::Builtin(Builtin::Length) => true,
+        Expr::Builtin(Builtin::Select(cond)) => matches!(
+            unwrap_paren(cond),
+            Expr::Literal(literal) if !matches!(literal, Literal::Null | Literal::Bool(false))
+        ),
+        _ => false,
     }
 }
 
@@ -53823,7 +53855,9 @@ fn certainly_raises(e: &Expr) -> bool {
     let emits_once = |e: &Expr| matches!(unwrap_paren(e), Expr::Identity | Expr::Literal(_));
     let raises = |e: &Expr| match unwrap_paren(e) {
         Expr::Error(None) => true,
-        Expr::Error(Some(message)) => is_constant_construction(message),
+        Expr::Error(Some(message)) => {
+            is_constant_construction(message) || emits_a_message_once(message)
+        }
         _ => false,
     };
     match unwrap_paren(e) {
@@ -53831,6 +53865,20 @@ fn certainly_raises(e: &Expr) -> bool {
             .split_last()
             .is_some_and(|(last, earlier)| earlier.iter().all(emits_once) && raises(last)),
         other => raises(other),
+    }
+}
+
+/// Whether `e`, the message of an `error(e)`, always emits an output (#4703): `.` or an array
+/// construction, which collects whatever its body yields. An error evaluating it is raised and
+/// caught by the same `try`, so what the message holds does not matter, only that it is not `empty`.
+fn emits_a_message_once(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity | Expr::Array(_) | Expr::Literal(_) => true,
+        // an object whose keys are literal and whose values are such messages: one output
+        Expr::Object(entries) => entries.iter().all(|entry| {
+            matches!(entry.key, ObjectKey::Literal(_)) && emits_a_message_once(&entry.value)
+        }),
+        _ => false,
     }
 }
 
