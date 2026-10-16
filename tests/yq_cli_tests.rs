@@ -20045,6 +20045,147 @@ mod meta_assign_798 {
         Ok(())
     }
 
+    /// #4526: a right-hand side that produces no node -- an absent path, a container, no output at
+    /// all -- takes the empty text, so it clears an existing comment, style or anchor and writes
+    /// nothing where there was none, as yq does. A scalar (`null` included), an empty mapping the
+    /// expression builds and the first node of several are nodes. Every row was captured from yq v4.53.3.
+    #[test]
+    fn rhs_without_a_node_clears_the_slot_4526() -> Result<()> {
+        for (filter, input, expected) in [
+            // No existing metadata: nothing is written.
+            (".a line_comment = .zz", "a: 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (
+                ".a line_comment = .b.zz",
+                "a: 1\nb: {c: 2}\n",
+                "a: 1\nb: {c: 2}\n",
+            ),
+            (
+                ".a line_comment = .zz.y",
+                "a: 1\nb: {c: 2}\n",
+                "a: 1\nb: {c: 2}\n",
+            ),
+            (
+                ".a line_comment = .b",
+                "a: 1\nb: {c: 2}\n",
+                "a: 1\nb: {c: 2}\n",
+            ),
+            (".a line_comment = .b", "a: 1\nb: [2]\n", "a: 1\nb: [2]\n"),
+            (".a line_comment = .b", "a: 1\nb: {}\n", "a: 1\nb: {}\n"),
+            (".a line_comment = .a", "a: [1]\nb: 2\n", "a: [1]\nb: 2\n"),
+            (".a line_comment = []", "a: 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (".a head_comment = .zz", "a: 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (
+                ".a foot_comment = .b",
+                "a: 1\nb: {c: 2}\n",
+                "a: 1\nb: {c: 2}\n",
+            ),
+            (".a style = .zz", "a: 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (".a style = .b", "a: 1\nb: {c: 2}\n", "a: 1\nb: {c: 2}\n"),
+            (".a anchor = .zz", "a: 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (".a anchor = .b", "a: 1\nb: {c: 2}\n", "a: 1\nb: {c: 2}\n"),
+            (
+                "(.a, .b) line_comment = .zz",
+                "a: 1\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
+            // Existing metadata is cleared, as for `= ""`.
+            (
+                ".a line_comment = .zz",
+                "a: 1 # old\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
+            (
+                ".a line_comment = .b",
+                "a: 1 # old\nb: {c: 2}\n",
+                "a: 1\nb: {c: 2}\n",
+            ),
+            (".a line_comment = []", "a: 1 # old\nb: 2\n", "a: 1\nb: 2\n"),
+            (
+                ".a line_comment = (\"x\" | select(false))",
+                "a: 1 # old\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
+            (
+                ".a line_comment |= .zz",
+                "a: 1 # old\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
+            (".a style = .zz", "a: \"x\"\nb: 2\n", "a: x\nb: 2\n"),
+            (
+                ".a style = .b",
+                "a: \"x\"\nb: {c: 1}\n",
+                "a: x\nb: {c: 1}\n",
+            ),
+            (".a anchor = .zz", "a: &x 1\nb: 2\n", "a: 1\nb: 2\n"),
+            (
+                ".a anchor = .b",
+                "a: &x 1\nb: {c: 1}\n",
+                "a: 1\nb: {c: 1}\n",
+            ),
+            (
+                ".a comments = .zz",
+                "# h\na: 1 # l\n# f\nb: 2\n",
+                "# h\na: 1\n# f\nb: 2\n",
+            ),
+            // A node is written: `null`, a scalar, a built `{}`, and the first node of several.
+            (
+                ".a line_comment = null",
+                "a: 1\nb: 2\n",
+                "a: 1 # null\nb: 2\n",
+            ),
+            (".a line_comment = {}", "a: 1\nb: 2\n", "a: 1 # {}\nb: 2\n"),
+            (
+                ".a line_comment = ({} | .)",
+                "a: 1\nb: 2\n",
+                "a: 1 # {}\nb: 2\n",
+            ),
+            (
+                ".a line_comment = ({} + {})",
+                "a: 1\nb: 2\n",
+                "a: 1 # {}\nb: 2\n",
+            ),
+            (
+                ".a line_comment = {\"x\": 1}",
+                "a: 1 # old\nb: 2\n",
+                "a: 1\nb: 2\n",
+            ),
+            (
+                ".a line_comment = .b",
+                "a: 1\nb: null\n",
+                "a: 1 # null\nb: null\n",
+            ),
+            (".a line_comment = .b", "a: 1\nb: 2\n", "a: 1 # 2\nb: 2\n"),
+            (
+                ".a line_comment = (.zz, \"y\")",
+                "a: 1\nb: 2\n",
+                "a: 1 # y\nb: 2\n",
+            ),
+            (
+                ".a line_comment = (\"x\", .zz)",
+                "a: 1\nb: 2\n",
+                "a: 1 # x\nb: 2\n",
+            ),
+            (
+                ".a line_comment = (.zz // \"d\")",
+                "a: 1\nb: 2\n",
+                "a: 1 # d\nb: 2\n",
+            ),
+            (
+                ".a line_comment = .b[]",
+                "a: 1\nb: [1,2]\n",
+                "a: 1 # 1\nb: [1, 2]\n",
+            ),
+        ] {
+            let (out, code) = run_yq_stdin(filter, input, &[])?;
+            assert_eq!((code, out.as_str()), (0, expected), "[{filter}] {input:?}");
+        }
+        // A variable bound to a container takes no text either.
+        let (out, code) =
+            run_yq_stdin(".b as $x | .a line_comment = $x", "a: 1\nb: {c: 2}\n", &[])?;
+        assert_eq!((code, out.as_str()), (0, "a: 1\nb: {c: 2}\n"));
+        Ok(())
+    }
+
     #[test]
     fn line_comment_assign_empty_string_clears_an_existing_comment() -> Result<()> {
         let (out, code) = run_yq_stdin(".a line_comment = \"\"", "a: 1 # x\n", &[])?;

@@ -4099,6 +4099,78 @@ fn resolve_pipeline_writes(
     true
 }
 
+/// The text a metadata write takes from its right-hand side, evaluated against `input`: the first
+/// node it produces, stringified, and the empty string -- which clears the slot -- when it
+/// produces none (#4526). yq clears the existing comment, style or anchor for an absent path, a
+/// container and an empty output alike (`a: 1 # old` with `.a line_comment = .zz` prints `a: 1`),
+/// where a write that did nothing would leave it. `None` when evaluating it failed, after
+/// reporting.
+fn meta_rhs_text(input: &OwnedValue, value: &Expr, sink: &mut ErrorSink) -> Option<String> {
+    let reports_before = sink.report_count();
+    let nodes = meta_rhs_nodes(input, value, sink);
+    if sink.report_count() != reports_before {
+        return None;
+    }
+    let Some(node) = nodes.into_iter().next() else {
+        return Some(String::new());
+    };
+    let results =
+        evaluate_input(&node, &Expr::Builtin(Builtin::ToString), sink).unwrap_or_default();
+    if sink.report_count() != reports_before {
+        return None;
+    }
+    match results.into_iter().next() {
+        Some(OwnedValue::String(s)) => Some(s.to_string()),
+        _ => Some(String::new()),
+    }
+}
+
+/// The outputs of a metadata write's right-hand side that yq reads as a node to take a text
+/// from (#4526). An absent path (`.a line_comment = .zz`) produces no node there, and neither does
+/// a container (`= .b` over a mapping or sequence, `= []`); `null`, a scalar
+/// and an empty mapping the expression builds (`{}`, which yq reads as its text) are nodes. A member of a top-level `,` is
+/// judged on its own, so `(.zz, "y")` writes `y`.
+///
+/// A path-shaped member is told from the others by `path(MEMBER)` answering one path per output:
+/// that path is then looked up in `current`. Any other member (a literal, an arithmetic result)
+/// is always a node. Absentness does not survive a stage after the path (`.zz | tostring`), which
+/// reads as the text `null` here where yq writes nothing.
+fn meta_rhs_nodes(current: &OwnedValue, value: &Expr, sink: &mut ErrorSink) -> Vec<OwnedValue> {
+    fn members<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match expr {
+            Expr::Paren(inner) => members(inner, out),
+            Expr::Comma(list) => list.iter().for_each(|member| members(member, out)),
+            other => out.push(other),
+        }
+    }
+    let mut parts = Vec::new();
+    members(value, &mut parts);
+    let mut nodes = Vec::new();
+    for member in parts {
+        let outputs = evaluate_input(current, member, sink).unwrap_or_default();
+        let paths = evaluate_input_quiet(
+            current,
+            &Expr::Builtin(Builtin::Path(Box::new(member.clone()))),
+        )
+        .filter(|paths| paths.len() == outputs.len());
+        for (at, output) in outputs.into_iter().enumerate() {
+            let present = paths.as_ref().map_or(true, |paths| {
+                meta_path_from_value(&paths[at], current)
+                    .map_or(true, |path| owned_value_at(current, &path).is_some())
+            });
+            // An empty mapping the expression builds (`{}`, `{} | .`, `{} + {}`) is a node whose
+            // text is `{}`; one read from the document, and every other container, is not.
+            let built_empty_mapping =
+                paths.is_none() && matches!(&output, OwnedValue::Object(map) if map.is_empty());
+            let container = matches!(output, OwnedValue::Object(_) | OwnedValue::Array(_));
+            if present && (!container || built_empty_mapping) {
+                nodes.push(output);
+            }
+        }
+    }
+    nodes
+}
+
 /// Resolve one `Expr::MetaAssign` stage against `current`, the document it
 /// runs on, pushing one [`ResolvedMetaWrite`] per candidate onto `out`.
 /// Returns `false` (after reporting via `sink`) only on a genuine
@@ -4186,8 +4258,8 @@ fn resolve_one_meta_assign(
     // Every slot coerces its right-hand side to text first, never requiring
     // a string outright (live-verified against pinned yq: `.a style = 5` =>
     // `unknown style 5`, `.a style = true` => `unknown style true`, `.a
-    // style = {}` => `unknown style {}` -- always coerced, then checked).
-    let stringify = Expr::Pipe(vec![value.clone(), Expr::Builtin(Builtin::ToString)].into());
+    // style = {}` => `unknown style {}` -- always coerced, then checked) -- see
+    // `meta_rhs_text` for the right-hand sides that produce no text.
     let reports_before = sink.report_count();
     let mut texts = Vec::with_capacity(paths.len());
     if is_update {
@@ -4203,25 +4275,24 @@ fn resolve_one_meta_assign(
                     .cloned()
                     .unwrap_or(OwnedValue::Null),
             };
-            let results = evaluate_input(&candidate, &stringify, sink).unwrap_or_default();
+            let Some(s) = meta_rhs_text(&candidate, value, sink) else {
+                return false;
+            };
             if sink.report_count() != reports_before {
                 return false;
             }
-            if let Some(OwnedValue::String(s)) = results.into_iter().next() {
-                texts.push((path, on_key, s));
-            }
+            texts.push((path, on_key, s));
         }
     } else {
         // `=` evaluates its right-hand side once, against the stage's own
         // input; a multi-output right-hand side keeps its first output
         // (`.a line_comment = ("x","y")` => `# x`, live-verified).
-        let results = evaluate_input(current, &stringify, sink).unwrap_or_default();
+        let Some(s) = meta_rhs_text(current, value, sink) else {
+            return false;
+        };
         if sink.report_count() != reports_before {
             return false;
         }
-        let Some(OwnedValue::String(s)) = results.into_iter().next() else {
-            return true;
-        };
         texts.extend(
             paths
                 .into_iter()

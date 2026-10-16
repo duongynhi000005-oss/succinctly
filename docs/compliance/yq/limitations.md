@@ -4474,6 +4474,16 @@ pipe is visible to a later stage's right-hand side (`.a = 2 | .b line_comment = 
 tostring)` writes `# 2`) — every one of those live-verified against pinned v4.53.3 and
 pinned by a `meta_assign_*_798` golden.
 
+A right-hand side that produces no node takes the empty text (#4526), as in yq: an absent path
+(`.a line_comment = .zz`, `.b.zz`, `.zz.y`), a container (`= .b` over a mapping or sequence, `= []`),
+a variable bound to one, and no output at all (`select(false)`, `|= .zz`) write nothing where there was
+nothing and clear an existing comment, style or anchor, exactly like `= ""`. `null`, a scalar, a
+`{}` the expression builds (`{}`, `{} | .`; yq reads it as its text, where a `{}` read from the document is no node) and the first node of several are nodes. One shape differs:
+absentness is read from a right-hand side that is a path (`path(RHS)` answers one path per output),
+so it does not survive a stage after it, and `.a line_comment = (.zz | tostring)` writes `# null`
+where yq writes nothing; an out-of-range positive index (`.b[5]`) reads as absent here where yq
+pads `b` with `null`s and writes `# null`.
+
 What is refused explicitly (an error, never a silent no-op — the outcome #798's triage
 ruled out), even though real yq supports every one of them:
 
