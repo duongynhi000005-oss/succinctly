@@ -12103,6 +12103,70 @@ fn test_4736_explicit_value_property_then_same_indent_sequence() -> Result<()> {
     Ok(())
 }
 
+/// #4737: a `key:` or `? key` line at the indent of an open block sequence that is not the
+/// same-indent value of a key is an error in yq (`did not find expected '-' indicator`); the entry
+/// used to become one more sequence item holding a mapping. A sequence that is a key's same-indent
+/// value is closed by the next entry as before, and a compact mapping inside an item keeps its
+/// continuation lines. Each row was captured from yq v4.53.3.
+#[test]
+fn test_4737_mapping_entry_at_an_open_sequences_indent() -> Result<()> {
+    for input in [
+        "a:\n  - x\n  c: 1\n",
+        "a:\n  - x\n  - y\n  c: 1\nd: 2\n",
+        "a:\n  - k: v\n  c: 1\n",
+        "a:\n  - k: v\n    j: w\n  c: 1\n",
+        "a:\n  -\n    k: v\n  c: 1\n",
+        "a:\n  - x\n  # c\n  c: 1\n",
+        "a:\n  - x\n  c:\n    - 1\n",
+        "a:\n  - \"x\"\n  c: 1\n",
+        "a:\n  - [1]\n  c: 1\n",
+        "a:\n  - |\n    t\n  c: 1\n",
+        "a:\n  - x\n  \"c\": 1\n",
+        "a:\n  - x\n  &y c: 1\n",
+        "a:\n  - x\n  ? c\n  : 1\n",
+        "a:\n  - x\n  ? c\n",
+        "a: &y\n  - x\n  c: 1\n",
+        "- x\nc: 1\n",
+        "- a\n- b\nc: 1\n",
+        "-   a: hello\nb: 2\n",
+        "? k\n- item\n? j\n: v\n",
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, out.as_str()), (1, ""), "{input:?}: {err:?}");
+        assert!(
+            err.contains("a mapping entry cannot follow a sequence item at its indent")
+                || err.contains("sequence cannot be an explicit key"),
+            "{input:?}: unexpected stderr {err:?}"
+        );
+    }
+
+    for (input, expected) in [
+        ("a:\n- x\nc: 1\n", r#"{"a":["x"],"c":1}"#),
+        ("a:\n- x\n- y\nc: 1\n", r#"{"a":["x","y"],"c":1}"#),
+        ("a:\n  - x\nb: 1\n", r#"{"a":["x"],"b":1}"#),
+        (
+            "a:\n  - x\n  - y\nb:\n  - z\n",
+            r#"{"a":["x","y"],"b":["z"]}"#,
+        ),
+        ("a:\n  - k: v\n  - j: w\n", r#"{"a":[{"k":"v"},{"j":"w"}]}"#),
+        (
+            "- k: v\n  j: w\n- m: n\n",
+            r#"[{"k":"v","j":"w"},{"m":"n"}]"#,
+        ),
+        ("- k: v\n  c: 1\n", r#"[{"k":"v","c":1}]"#),
+        ("- - a\n  - b\n- c\n", r#"[["a","b"],"c"]"#),
+        ("a:\n  - - x\n    - y\n  - z\n", r#"{"a":[["x","y"],"z"]}"#),
+        ("a:\n  - x\n\"c\": 1\n", r#"{"a":["x"],"c":1}"#),
+        ("a:\n- x\n? c\n: 1\n", r#"{"a":["x"],"c":1}"#),
+        ("? k\n: - a\n  - b\n", r#"{"k":["a","b"]}"#),
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!((code, err.as_str()), (0, ""), "{input:?}");
+        assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
     // #1040's second (worse) repro: a field after the sequence used to
@@ -15690,19 +15754,17 @@ fn test_inconsistent_compact_mapping_indent_does_not_leak_into_next_item() -> Re
 }
 
 #[test]
-fn test_indent_genuinely_below_the_item_stays_a_separate_top_level_entry() -> Result<()> {
+fn test_indent_genuinely_below_the_item_is_not_swallowed_into_the_mapping() -> Result<()> {
     // Regression guard: an indent at or below the sequence item's own dash
     // column (strictly below the compact mapping's *and* the item's own
     // virtual indent) must not be swallowed into the mapping by
     // `compact_mapping_gap_reaches`. Real `yq` v4.53.3 rejects this input
-    // too (`did not find expected '-' indicator`) — same as every other
-    // case in this file — succinctly's own two-item output here comes from
-    // a separate, pre-existing "parse the obvious extension" heuristic
-    // (an indent-0 mapping line becoming a new top-level sequence item),
-    // not evidence this shape is any more spec-legitimate than the others.
+    // too (`did not find expected '-' indicator`), and so does this build
+    // since #4737: the line used to become a second top-level sequence item
+    // (`[{"a":"hello"},{"b":2}]`) through a "parse the obvious extension"
+    // heuristic, which was no more spec-legitimate than the shapes above.
     let (output, exit_code) = run_yq_stdin(".", "-   a: hello\nb: 2\n", &["-o", "json", "-I0"])?;
-    assert_eq!(exit_code, 0);
-    assert_eq!(output.trim(), r#"[{"a":"hello"},{"b":2}]"#);
+    assert_eq!((exit_code, output.as_str()), (1, ""));
     Ok(())
 }
 

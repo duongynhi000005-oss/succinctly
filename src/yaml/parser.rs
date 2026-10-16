@@ -4036,6 +4036,24 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
+    /// A sequence still open at a mapping entry's own indent has no mapping to close it into: its
+    /// items stand at that column, so a `key:` or `? key` there is neither an item nor a sibling
+    /// of the sequence's key (`a:` / `  - x` / `  c: 1`). Real yq stops with `did not find
+    /// expected '-' indicator`; the entry used to become one more item holding a mapping (#4737).
+    /// Called after [`Self::close_same_indent_sequence_before_mapping_entry`], which has already
+    /// closed the sequence that is a key's same-indent value.
+    fn reject_mapping_entry_on_open_sequence(&self, indent: usize) -> Result<(), YamlError> {
+        if self.current_type == Some(NodeType::Sequence)
+            && self.indent_stack.last().copied() == Some(indent)
+        {
+            return Err(self.err_unexpected_char(
+                self.pos,
+                "a mapping entry cannot follow a sequence item at its indent",
+            ));
+        }
+        Ok(())
+    }
+
     /// Parse a sequence item (starts with `- `).
     fn parse_sequence_item(&mut self, indent: usize) -> Result<(), YamlError> {
         self.enter_nested()?;
@@ -4687,6 +4705,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         //   bar:    <- new entry closes the sequence
         self.close_same_indent_sequence_before_mapping_entry(indent);
 
+        self.reject_mapping_entry_on_open_sequence(indent)?;
+
         // Now check if we need to open a new mapping
         let need_new_mapping = self.current_type != Some(NodeType::Mapping)
             || self.indent_stack.last().copied() != Some(indent);
@@ -5089,6 +5109,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // wrongly nests `k2` as a second element of `k`'s array instead of
         // opening a sibling mapping entry.
         self.close_same_indent_sequence_before_mapping_entry(indent);
+        self.reject_mapping_entry_on_open_sequence(indent)?;
 
         // Check if we need to open a new mapping
         let need_new_mapping = self.current_type != Some(NodeType::Mapping)
