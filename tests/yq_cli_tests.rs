@@ -32628,6 +32628,85 @@ fn test_4542_del_slice_then_iterate_field_tail_errors_per_element() -> Result<()
     Ok(())
 }
 
+/// #4568: `del()` through a slice-run and a *negative* index raises yq's `index [N] out of range,
+/// array size is S` when the index is below the start of the sliced sequence (a scalar, `null` or
+/// mapping target slices to an empty sequence or its key/value children), and a trailing `?` or a
+/// comma sibling does not rescue it. A positive index past the end reads as an absent node, so it
+/// stays a no-op, but the walk goes on over `null` and a negative index after it fails with size 0.
+#[test]
+fn test_4568_del_slice_run_negative_index_out_of_range_errors() -> Result<()> {
+    let failing = [
+        ("del(.a[5:9][-1])", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][-3])", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0:2][-1])", r#"{"a":5}"#, 0),
+        ("del(.a[1:2][-1])", r#"{"a":null}"#, 0),
+        ("del(.a[0:2][-1])", r#"{"a":{}}"#, 0),
+        ("del(.a[0:2][-5])", r#"{"a":{"x":1}}"#, 2),
+        ("del(.a[0:2][][-1])", r#"{"a":[[],1]}"#, 0),
+        ("del(.a[0:2][][-2])", r#"{"a":[[1],[2]]}"#, 1),
+        ("del(.a[0:2][-3].x)", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0:2][-3][0:1])", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0:2][1:2][-3])", r#"{"a":[1,2,3]}"#, 1),
+        ("del(.a[1:][-3])", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.[0:2][-3])", r"[1,2,3]", 2),
+        ("del(.a[][0:2][-3])", r#"{"a":[[1,2,3]]}"#, 2),
+        // A positive index past the end continues over `null`; so does a literal `null` element.
+        ("del(.a[0:2][5][-1])", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][5][3][-1])", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][5][-1].x)", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][0][-1])", r#"{"a":[null]}"#, 0),
+        ("del(.a[0:2][0].k[-1])", r#"{"a":[{"k":null}]}"#, 0),
+        ("del(.a[0:2][0].k[-1])", r#"{"a":[{"k":[]}]}"#, 0),
+        ("del(.a[0:2][0].k[0][-1])", r#"{"a":[{"k":[]}]}"#, 0),
+        // Neither a trailing `?` nor a comma sibling, in either position, rescues the call.
+        ("del(.a[0:2][-3]?)", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0:2]?[-3])", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0:2][5]?[-1])", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][-3], .a[0])", r#"{"a":[1,2,3]}"#, 2),
+        ("del(.a[0], .a[0:2][-3])", r#"{"a":[1,2,3]}"#, 2),
+    ];
+    for (filter, input, size) in failing {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (1, ""),
+            "[{filter}] [{input}] stderr: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("out of range, array size is ")
+                && stderr.contains(&format!("array size is {size}")),
+            "[{filter}] [{input}] stderr: {stderr:?}"
+        );
+    }
+
+    // In range, a positive index, a string target, a scalar element and an absent key stay inert.
+    let inert = [
+        ("del(.a[0:2][-1])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][-2])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][5])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][-1])", r#"{"a":"str"}"#),
+        ("del(.a[0:2][0][-1])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][0][-1])", r#"{"a":[{"x":1}]}"#),
+        ("del(.a[0:2][0][-1])", r#"{"a":["s"]}"#),
+        ("del(.a[0:2][-1][-1])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][5][0])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][5].x[-1])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][5][][-1])", r#"{"a":[1,2,3]}"#),
+        ("del(.a[0:2][0].zz[-1])", r#"{"a":[{"k":[]}]}"#),
+        ("del(.a[0:2][][-1])", r#"{"a":[[1],[2]]}"#),
+        ("del(.a[0:3][-3])", r#"{"a":[1,2,3]}"#),
+    ];
+    for (filter, input) in inert {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.as_str()),
+            (0, format!("{input}\n").as_str()),
+            "[{filter}] [{input}]"
+        );
+    }
+    Ok(())
+}
+
 /// #2333: the error propagates even when the array-targeting field access
 /// isn't the step immediately after the slice — `.a[0:2][0].x` slices,
 /// indexes into the (real) sliced array, and *that* element turns out to

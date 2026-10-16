@@ -29949,11 +29949,23 @@ fn yq_del_walk_error(current: &OwnedValue, steps: &[DeleteStep]) -> Option<EvalE
             OwnedValue::Object(map) => yq_del_walk_error(map.get(name)?, rest),
             _ => None,
         },
+        // #4568: a negative index below the start raises `index [N] out of range, array size is
+        // S` (and a trailing `?` does not suppress it, `EvalError::is_yq_negative_index_error`),
+        // while a positive one past the end reads as an absent node, so the walk goes on over
+        // `null`, and a negative index on that node (or on a literal `null`) is the "size is 0"
+        // row. A scalar, string or mapping takes no index at all and ends the branch quietly.
         Expr::Index { idx, .. } => match current {
-            OwnedValue::Array(arr) => yq_del_walk_error(
-                &arr[resolve_read_index(&OwnedValue::Int(*idx), arr.len())?],
-                rest,
-            ),
+            OwnedValue::Array(arr) => match resolve_read_index(&OwnedValue::Int(*idx), arr.len()) {
+                Some(slot) => yq_del_walk_error(&arr[slot], rest),
+                None if *idx < 0 => {
+                    Some(EvalError::yq_negative_index_out_of_range(*idx, arr.len()))
+                }
+                None => yq_del_walk_error(&OwnedValue::Null, rest),
+            },
+            OwnedValue::Null if *idx < 0 => {
+                Some(EvalError::yq_negative_index_out_of_range(*idx, 0))
+            }
+            OwnedValue::Null => yq_del_walk_error(&OwnedValue::Null, rest),
             _ => None,
         },
         Expr::Iterate => match current {
