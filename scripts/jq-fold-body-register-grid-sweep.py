@@ -19,12 +19,13 @@ ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that 
 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
                                                    [--only SUBSTR[,SUBSTR...]] [--only-source SUBSTR[,SUBSTR...]]
-                                                   [--jobs N] [--wrapped | --deep]
+                                                   [--jobs N] [--wrapped | --deep] [--dump FILE]
 """
 import argparse
 import collections
 import concurrent.futures
 import itertools
+import json
 import subprocess
 import sys
 
@@ -341,6 +342,7 @@ def main():
         action="store_true",
         help="run the three-fold-deep outers instead of the gated ones (#4648); judged against --base only",
     )
+    ap.add_argument("--dump", help="write every row's classes as JSON lines to this file (name, doc, candidate, base)")
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
     if args.wrapped and args.deep:
@@ -380,6 +382,10 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
         results = [r for r in ex.map(work, rows) if r]
 
+    if args.dump:
+        with open(args.dump, "w") as out:
+            for r in results:
+                out.write(json.dumps({"name": r[0], "doc": r[3], "prog": r[2], "cand": r[5], "base": r[7]}) + "\n")
     totals = collections.Counter(r[5] for r in results)
     print(f"rows={len(results)} of {len(rows)} (the pinned oracle timed out on the rest)")
     print(f"candidate={dict(sorted(totals.items()))}")

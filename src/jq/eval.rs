@@ -49679,6 +49679,22 @@ impl FoldRegister {
         )
     }
 
+    /// Whether the value jq's register holds is known to be `null`: the live register an untracked
+    /// stage still holds ([`Self::live_register`]), otherwise the fold's own register value when
+    /// that is tracked. Not an untracked register's placeholder value.
+    fn register_is_null(&self) -> bool {
+        match self.live_register() {
+            Some(live) => matches!(live, OwnedValue::Null),
+            None => self.trackable && matches!(self.value, OwnedValue::Null),
+        }
+    }
+
+    /// Whether this register is a tracked `null` INIT navigated to below the root (#4707): jq's register
+    /// holds that `null`, which the fold's input (the document) is not.
+    fn is_tracked_null_below_root(&self) -> bool {
+        self.trackable && self.path.depth() > 0 && matches!(self.value, OwnedValue::Null)
+    }
+
     /// #4131: this untracked register as a *trackable* one at the fold's root, when the stage
     /// carries its live value ([`FoldRegister::live_register`]) and that value is `null` or a
     /// boolean. Those are `jv_identical` to any equal `null`/boolean by kind
@@ -53713,6 +53729,79 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
     }
 }
 
+/// Whether `e` is a fold one of whose bodies (INIT, UPDATE, EXTRACT) certainly runs a destructure that
+/// jq path-checks on a node the fold's source has no register for (#4708): a fold nested in another
+/// fold's SOURCE and driven by value runs that destructure unchecked, which accepted what jq refuses
+/// (`foreach (foreach (1,2) as $k (.; {a:1} as $n | $n as {b:$b} | .; .)) as $z (.; .; .)`). The
+/// resolver models the fold's bodies, so the source goes there. Read through the same spine walks the
+/// source's own destructure is: a destructure of a freshly built value always (a `reduce` source
+/// raises on it as a `foreach` one does), one of the register (`.`, a `$x`) only for a `foreach`
+/// source, which does not backtrack what the nested fold moved. A `reduce` source restores the
+/// register, and the resolver refuses what jq answers there. A body whose destructure may never run
+/// or emit (behind a `select(false)`, an `empty` body, a conditional) is not read: the spine says
+/// `Destructures` only for one that does.
+fn is_fold_with_destructuring_body(e: &Expr, foreach_source: bool, known: NotRegister) -> bool {
+    let (init, update, extract) = match e {
+        Expr::Reduce { init, update, .. } => (init, update, None),
+        Expr::Foreach {
+            init,
+            update,
+            extract,
+            ..
+        } => (init, update, extract.as_deref()),
+        _ => return false,
+    };
+    // A `reduce` backtracks every UPDATE it runs, so a destructure of the register anywhere inside one
+    // moves nothing for the fold around it (and the resolver refuses what jq answers): only the
+    // fresh-value reading holds there, as it does for a `reduce` source.
+    let backtracked = !matches!(e, Expr::Foreach { .. })
+        || any_subexpr(e, &mut |inner| {
+            !core::ptr::eq(inner, e) && matches!(inner, Expr::Reduce { .. })
+        });
+    let register_read = foreach_source && !backtracked;
+    let destructures = |body: &Expr| {
+        let mut markers = Vec::new();
+        if register_read {
+            any_subexpr(body, &mut |inner| {
+                if let Expr::TrackedVar(marker) = inner {
+                    markers.push(Rc::as_ptr(marker));
+                }
+                false
+            });
+        }
+        (register_read
+            && !may_skip_or_branch(body)
+            && foreach_source_destructures_register(body, markers, false))
+            || source_destructures_fresh(body, false, false, known)
+    };
+    [Some(&**init), Some(&**update), extract]
+        .into_iter()
+        .flatten()
+        .any(|body| {
+            destructures(body)
+                || any_subexpr(body, &mut |inner| match inner {
+                    Expr::Foreach { input, .. } | Expr::Reduce { input, .. } => destructures(input),
+                    _ => false,
+                })
+        })
+}
+
+/// Whether `e` has a part that may emit nothing or is chosen by a condition: an `empty`, a `select`
+/// of a literally false condition, a `limit` of zero, an `if`. The destructure behind it may never
+/// run or never hand a value on, which the spine walk does not tell apart
+/// ([`is_fold_with_destructuring_body`]).
+fn may_skip_or_branch(e: &Expr) -> bool {
+    any_subexpr(e, &mut |inner| match inner {
+        Expr::Builtin(Builtin::Empty) | Expr::If { .. } => true,
+        Expr::Builtin(Builtin::Select(cond)) => matches!(
+            unwrap_paren(cond),
+            Expr::Literal(lit) if matches!(literal_to_owned(lit), OwnedValue::Null | OwnedValue::Bool(false))
+        ),
+        Expr::Limit { n, .. } => limit_literal_count(n).is_some_and(|n| n <= 0.0),
+        _ => false,
+    })
+}
+
 /// Whether `e` destructures a *freshly built* value (#3489): an `[1] as [$a] |
 /// ...` bind, or a `reduce`/`foreach` loop pattern over `([1], [2])`, with an
 /// array or object pattern ([`patterns_all_bare`] is `false`). Matching one
@@ -53829,12 +53918,12 @@ struct NotRegister {
     null: bool,
     true_: bool,
     false_: bool,
-    /// The register is the fold's input and that is `null` (#4648), so a literal `null`
-    /// destructured in a source is the register: its pattern steps move jq's register, which only
-    /// the resolver models. Not where INIT moved the register off the document: the resolver does
-    /// not place a step from a `null` register below the root (`{"a":null} | path(foreach (null|.b)
-    /// as $y (.a; .; .))` is refused on `main` too), so routing there would refuse what a by-value
-    /// drive answers (`path(reduce (null as {b:$b} | .) as $y (.a; .))` is `["a"]`).
+    /// The register is `null` (#4648), so a literal `null` destructured in a source is the register:
+    /// its pattern steps move jq's register, which only the resolver models. The fold's input when that
+    /// is `null`; otherwise the register jq holds, when the fold knows it to be `null`
+    /// ([`FoldRegister::register_is_null`], #4707): the live register an untracked stage carries, or a
+    /// tracked one INIT navigated to below the root (`{"a":null} | path(foreach (null|.b) as $y (.a; .;
+    /// .))` is `["a","b"]`, [`FoldSourceAmbient::relocate_base`] rebases what the source moves it to).
     at_null: bool,
 }
 
@@ -53857,6 +53946,7 @@ impl NotRegister {
         if !ambient.trackable {
             return Self {
                 null: ambient.register_non_null,
+                at_null: ambient.register_null,
                 ..Self::default()
             };
         }
@@ -54856,6 +54946,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 && (live_path_refusal(e).is_some()
                     || is_fold_source_destructuring(e, not_register)
                     || is_fold_with_destructured_register_source(e, &register_markers)
+                    || is_fold_with_destructuring_body(e, foreach_source, not_register)
                     || matches!(
                         e,
                         Expr::Builtin(
@@ -57116,6 +57207,12 @@ struct FoldSourceAmbient<'v> {
     /// Whether the value jq's register holds is known not to be `null` (#4581): the fold's own
     /// register after INIT, which `trackable` does not say when INIT moved it off the document.
     register_non_null: bool,
+    /// Whether the value jq's register holds is known to be `null` ([`FoldRegister::register_is_null`]).
+    register_null: bool,
+    /// The register is a `null` INIT navigated to below the root, which `value` (the document) is
+    /// not: the source runs untracked with the live `null` in its frame, and what it moves the
+    /// register to is relative to that register, not to the document ([`Self::relocate_base`]).
+    register_null_off_root: bool,
 }
 
 impl FoldSourceAmbient<'_> {
@@ -57138,7 +57235,8 @@ impl FoldSourceAmbient<'_> {
     /// struct, so [`fold_source_ambient`]'s two constructors can't drift
     /// out of sync with it.
     fn relocate_base<'r>(&self, reg_path: &'r Rc<PathPrefix>) -> Option<&'r Rc<PathPrefix>> {
-        (self.trackable && reg_path.depth() > 0).then_some(reg_path)
+        ((self.trackable || self.register_null_off_root) && reg_path.depth() > 0)
+            .then_some(reg_path)
     }
 }
 
@@ -57272,12 +57370,23 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         // `Snapshot::No` whenever `trackable` holds (#1573) -- so a
         // trackable-via-the-new-disjunct branch cannot leak a stale,
         // unrelated `Snapshot::Marked` regardless.
+        let register_null_off_root = S::TAG == EvalTag::Jq
+            && !source_trackable
+            && !init_moved
+            && reg.is_tracked_null_below_root()
+            && !frame.register_loss.is_lost();
         return FoldSourceAmbient {
             value,
             trackable: source_trackable,
             snapshot: path_snapshot,
-            frame: frame.clone(),
+            frame: if register_null_off_root {
+                frame.with_register(Some(&OwnedValue::Null))
+            } else {
+                frame.clone()
+            },
             register_non_null: reg.register_is_non_null(),
+            register_null: reg.register_is_null(),
+            register_null_off_root,
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s
@@ -57307,6 +57416,8 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         snapshot: Snapshot::No,
         frame: frame.unknown(),
         register_non_null: reg.register_is_non_null(),
+        register_null: reg.register_is_null(),
+        register_null_off_root: false,
     }
 }
 
