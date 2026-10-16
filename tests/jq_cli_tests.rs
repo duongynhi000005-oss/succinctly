@@ -136440,7 +136440,7 @@ fn test_reduce_body_source_destructuring_dot_behind_a_bare_alternative_or_handle
 }
 
 /// #4703: the always-run branch of a `//` or `try ... catch` source (#4677) behind a pipe tail that emits once
-/// (`| select(true)`, `| not`, `| length`, a literal), as the first item of a comma (leading literals emit
+/// (`| select(true)`, `| not`, `| length`, `| select([])`, a literal), as the first item of a comma (leading literals emit
 /// first and move nothing), as the body of a `def` with no parameters (also through another such `def`), and
 /// behind an `error` whose message is `.`, an array or an object of such. Each leaves the destructure of `.`
 /// to move the register, so the fold's emission raises (`{"a":true}`) or answers with the moved path
@@ -139091,6 +139091,222 @@ fn test_foreach_source_run_branch_behind_tail_comma_def_and_computed_error_4703(
             r"path(def f: 1, (try error({a:.}) catch (. as [$q] | .)); foreach f as $y (.; .; .))",
             "[]\n",
             5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "[\"b\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) |= 9",
+            "{\"b\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) = 9",
+            "{\"b\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select([])) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "[\"b\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) |= 9",
+            "{\"b\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) = 9",
+            "{\"b\":9}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:1})) as $y (.; .; .)) = 9",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"path(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"null",
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"del(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .))",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) |= 9",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) |= 9",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) |= 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) = 9",
+            "{\"a\":true}\n",
+            0,
+        ),
+        (
+            r"null",
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) = 9",
+            "null\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r"(foreach ((false // (. as {b:$b} | .)) | select({a:empty})) as $y (.; .; .)) = 9",
+            "{\"a\":{\"b\":2}}\n",
+            0,
         ),
     ];
     for (doc, filter, want_stdout, want_code) in ROWS {

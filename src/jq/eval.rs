@@ -53807,10 +53807,13 @@ fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
 fn emits_once_stage(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity | Expr::Literal(_) | Expr::Not | Expr::Builtin(Builtin::Length) => true,
-        Expr::Builtin(Builtin::Select(cond)) => matches!(
-            unwrap_paren(cond),
-            Expr::Literal(literal) if !matches!(literal, Literal::Null | Literal::Bool(false))
-        ),
+        Expr::Builtin(Builtin::Select(cond)) => {
+            matches!(
+                unwrap_paren(cond),
+                Expr::Literal(literal) if !matches!(literal, Literal::Null | Literal::Bool(false))
+            ) || matches!(unwrap_paren(cond), Expr::Array(_))
+                || (matches!(unwrap_paren(cond), Expr::Object(_)) && is_constant_construction(cond))
+        }
         _ => false,
     }
 }
@@ -53870,7 +53873,10 @@ fn certainly_raises(e: &Expr) -> bool {
 
 /// Whether `e`, the message of an `error(e)`, always emits an output (#4703): `.` or an array
 /// construction, which collects whatever its body yields. An error evaluating it is raised and
-/// caught by the same `try`, so what the message holds does not matter, only that it is not `empty`.
+/// caught by the same `try`, so the handler runs either way and only a message that is `empty` is
+/// excluded. The handler's input is then the register value or, if evaluating the message raised,
+/// that error's text: a destructure of either raises (a string and an array are both indexed by
+/// a tracked `INDEX` step), and this is read only for a handler that is a plain bind chain.
 fn emits_a_message_once(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity | Expr::Array(_) | Expr::Literal(_) => true,
