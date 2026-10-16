@@ -76083,6 +76083,502 @@ fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()
     ])
 }
 
+/// #4706 (#4698's residual): `isempty(recurse)` / `any(recurse; .)` composed with another stage (`| not`,
+/// `and`/`or`) or behind a zero-arity `def` as a `foreach` UPDATE. jq emits a recursion's seed first, at the
+/// register, and `isempty` (or `any` over a `cond` that decides on the seed) stops there, so the verdict leaves
+/// the register where it entered whatever wraps it. The bare spelling was placed by the dynamic route, whose
+/// statement does not outlive a stage, so the wrapped one fell back to the static view, which did not admit a
+/// recursion; under `?` the refusal was swallowed and the stream element dropped
+/// (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[[0]]`, here `[]`). Every jq
+/// side captured from jq 1.7.1 on `[1]`; the controls that follow are the shapes the admission must not reach
+/// (a verdict decided on a descendant, or after a navigating stage), which keep jq's answer or its refusal.
+#[test]
+fn test_foreach_update_composed_isempty_any_recurse_follows_jq_4706() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(recurse) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(recurse) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse) and true); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse) and true); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(recurse) and true); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(recurse) and true); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (true and isempty(recurse)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (true and isempty(recurse)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (true and isempty(recurse)); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (true and isempty(recurse)); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(recurse; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (any(recurse; .) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (any(recurse; .) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (any(recurse; .) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(..; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (any(..; .) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (any(..; .) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (any(..; .) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; isempty(def f: recurse; f); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; isempty(def f: recurse; f); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; isempty(def f: recurse; f); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; isempty(def f: recurse; f); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(def f: recurse; f) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(def f: recurse; f) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(def f: recurse; f) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(def f: recurse; f) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1 | recurse) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(1 | recurse) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(1 | recurse) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(1 | recurse) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse(.[]?)) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse(.[]?)) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(recurse(.[]?)) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(recurse(.[]?)) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse(.[]?; true)) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse(.[]?; true)) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(recurse(.[]?; true)) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(recurse(.[]?; true)) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(..) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(..) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; (isempty(..) | not); $k))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; (isempty(..) | not); $k)) = 9",
+            "[9]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(recurse; . == 1) | not); $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (any(recurse; . == 1) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (all(recurse; .) | not); $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (all(recurse; .) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse | .a) | not); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse | .a) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(.a | recurse) | not); $k))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(.a | recurse) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(recurse | select(. == 1)) | not); $k))",
+            "",
+            "Invalid path expression near attempt to iterate through 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(recurse | select(. == 1)) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        // `any` reads the same shapes with the f-less recursion (`plain`): through a neutral
+        // stage, a bound `def` and a `def` written inside the operand.
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(1 | recurse; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: recurse; path(foreach .[]? as $k (0; (any(f; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(def f: recurse; f; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        // A `def` bound around the fold: the verdict reads the call's body.
+        (
+            r"[1]",
+            r"def f: recurse; path(foreach .[]? as $k (0; (isempty(f) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: recurse; [path(foreach .[]? as $k (0; (isempty(f) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        // The recursion's seed is at the register only when nothing before it navigated: a
+        // neutral stage keeps the register at the root (`$r` is the root, `[]`), a navigating one
+        // (`.b | recurse`) leaves it on `b`, where `$r` is refused, as jq refuses it.
+        (
+            r#"{"b":[2]}"#,
+            r"path(. as $r | foreach (1) as $k (.; (isempty(1 | recurse) | not); $r))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":[2]}"#,
+            r"path(. as $r | foreach (1) as $k (.; (isempty(.b | recurse) | not); $r))",
+            "",
+            "Invalid path expression with result {\"b\":[2]}",
+            5,
+        ),
+        (
+            r#"{"b":[2]}"#,
+            r"[path(. as $r | foreach (1) as $k (.; (isempty(.b | recurse) | not); $r))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4706: the spellings of [`test_foreach_update_composed_isempty_any_recurse_follows_jq_4706`] that stay
+/// refused where jq answers, because the admission cannot prove the verdict is decided on the recursion's
+/// seed: `any(recurse(f); .)` may go on past a falsy seed (`f` is any filter), and `any(recurse; true)` is not
+/// the identity `cond` the admission reads. On `[1]` the seed does decide both, so jq prints `[0]` / `[[0]]` for
+/// all four. A refusal is the safe direction; this pins that it stays one rather than becoming a wrong answer,
+/// so a later promotion has to change the row on purpose.
+#[test]
+fn test_foreach_update_composed_any_recurse_not_decided_on_the_seed_stays_refused_4706(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(recurse(.[]?); .) | not); $k))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (any(recurse(.[]?); .) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(recurse; true) | not); $k))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (any(recurse; true) | not); $k))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the

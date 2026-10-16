@@ -876,10 +876,19 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `?//` bind operand (`isempty(. as $q ?// $z | .)`: `isempty(g)` is `g | false`, so jq path-checks nothing `g` emits, and a body that
   steps nowhere raises nothing even where `.` is an accumulator that need not be the register). Pinned by
   `test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_follows_jq_4698`.
-  Only the bare spellings are fixed: `isempty(recurse)` composed (`(isempty(recurse) | not)`, `(recurse and true)`, `(any(recurse; .) | not)`)
-  or behind a `def` (`isempty(def f: recurse; f)`) is still refused where jq answers, and under `?`/`try` the refusal is swallowed
-  (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[]`, jq prints `[[0]]`): the static view
-  (`verdict_operand_leaves_register`) does not admit a recursion, whose later outputs do move the register.
+  **Since [#4706](https://github.com/rust-works/succinctly/issues/4706)** the same recursion composed (`(isempty(recurse) | not)`,
+  `(isempty(recurse) and true)`, `(any(recurse; .) | not)`) or behind a `def` (`isempty(def f: recurse; f)`, or a `def f: recurse;`
+  around the fold) answers as jq does too, and so does the `[path(...)?]` twin that used to drop the stream element
+  (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` was `[]`, jq prints `[[0]]`). The bare spelling is placed by
+  the recursion's seed (`AtEntry`), a statement that does not outlive a stage, so a wrapper fell back to the static view
+  (`verdict_operand_leaves_register`), which did not admit a recursion. `verdict_builtin_leaves_register` now admits one where the
+  verdict stops on the seed: `isempty(G)` for `recurse`, `..`, `recurse(f)` and `recurse(f; c)` (jq emits the seed before it runs `f`),
+  after neutral stages only, and `any(G; .)` for the f-less `recurse`/`..`, where a falsy seed (`null`/`false`) has no children, so the
+  search ends on the seed whichever way it goes. Pinned by `test_foreach_update_composed_isempty_any_recurse_follows_jq_4706`.
+  **Still refused where jq answers** (pinned by `test_foreach_update_composed_any_recurse_not_decided_on_the_seed_stays_refused_4706`): a
+  verdict that can end on a descendant -- `any(recurse(f); .)` (`recurse([1])` on `null` goes on past a falsy seed), `any(recurse; true)`
+  (a `cond` other than `.`), `all(recurse; .)` (a truthy seed goes on) -- whose register has moved by then, and a composed verdict
+  inside a `try` UPDATE (`try ((isempty(1) | not))` is refused on `main` as well; the `try` handling is not this gate's).
   **Since [#4699](https://github.com/rust-works/succinctly/issues/4699)** a fold whose UPDATE is a verdict builtin, nested in another
   fold's UPDATE, leaves the register where it entered, as a neutral UPDATE does: `foreach .a? as $k (0; foreach (1,2) as $j (1;
   isempty(1); .); $k)` and the `reduce` spelling (`reduce (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)))`) answer as jq
@@ -896,7 +905,13 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
   the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly
-  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it).
+  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it). Two gates stack
+  (found by experiment while fixing #4706, not shipped): `fans_out_with` counts the marker-reading fold, so the outer UPDATE's frame
+  carries no register, and `FoldRegister::resolve_sink` hands an *untracked* fold register's body `Frame::unknown()` (no position, no
+  register) after a review found fabricated writes when the untracked value was read as the register. Lifting only the first made the
+  inner `try ($w|.b)` refuse against a register the frame knew by value but not by position, and the `try` swallowed it: the loud
+  error became a silently empty stream, the worse direction. Closing the row needs the register's *position* (the `$w` marker's
+  origin) carried through an untracked fold register.
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare
