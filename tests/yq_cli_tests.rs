@@ -69634,7 +69634,7 @@ fn test_yaml_flow_colon_before_a_flow_indicator_is_content_4558() -> Result<()> 
 /// middle of `.a[]` -- as yq does, where the cursor route printed only the value (`.a` and `.` already
 /// copied the dash line, and the DOM route has kept it since #4231). A scalar item's comment is dropped,
 /// as in yq (`- # c1` / `  y` prints `y`). `[.a[]]` and the slice `.a[1:]` are other routes and still
-/// differ. Every row captured from yq v4.53.3 (Homebrew).
+/// differ. A block container's anchor/tag line prints above the comment, a flow container's below it. Every row captured from yq v4.53.3 (Homebrew).
 #[test]
 fn test_printing_a_sequence_item_by_itself_keeps_the_comment_after_its_dash_4256() -> Result<()> {
     let rows: &[(&str, &str, &str)] = &[
@@ -69905,6 +69905,66 @@ fn test_printing_a_sequence_item_by_itself_keeps_the_comment_after_its_dash_4256
             "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
             ".m.a[1]",
             "null\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x\n    c: 2\n",
+            ".a[1]",
+            "&x\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!map\n    c: 2\n",
+            ".a[1]",
+            "!!map\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x [1, 2]\n",
+            ".a[1]",
+            "# own\n&x [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x [1, 2]\n",
+            ".a",
+            "- x\n# own\n- &x [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    {k: 1}\n",
+            ".a[1]",
+            "# own\n{k: 1}\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    {k: 1}\n",
+            ".a",
+            "- x\n# own\n- {k: 1}\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!seq [1, 2]\n",
+            ".a[1]",
+            "# own\n!!seq [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!seq [1, 2]\n",
+            ".a",
+            "- x\n# own\n- !!seq [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - &y # own\n    c: 2\n",
+            ".a[1]",
+            "&y\nc: 2 # own\n",
+        ),
+        (
+            "a:\n  - x\n  - &y # own\n    c: 2\n",
+            ".a",
+            "- x\n- &y\n  c: 2 # own\n",
+        ),
+        (
+            "a: 1\n---\nb:\n  - # own\n    c: 2\n",
+            ".a",
+            "1\n---\nnull\n",
+        ),
+        (
+            "a: 1\n---\nb:\n  - # own\n    c: 2\n",
+            ".b[0]",
+            "null\n---\n# own\nc: 2\n",
         ),
     ];
     for &(doc, filter, expected) in rows {

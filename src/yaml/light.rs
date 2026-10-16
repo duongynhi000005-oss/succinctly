@@ -520,6 +520,15 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         (wrapper.resolve_bare_seq_item().bp_pos == self.bp_pos).then(|| comment.to_string())
     }
 
+    /// Whether `write_leading_anchor` ends this container's anchor/tag with a line break: it has
+    /// one and is not flow style (a flow container's `&x [..]` stays on one line).
+    fn anchor_or_tag_on_own_line(&self) -> bool {
+        let this = self.resolve_bare_seq_item();
+        this.is_container()
+            && (this.anchor().is_some() || this.explicit_tag_at(None).is_some())
+            && this.style() != "flow"
+    }
+
     /// Parse an alias value from text position.
     fn parse_alias_value(&self, text_pos: usize) -> YamlValue<'a, W> {
         // Extract anchor name from text (skip the `*`)
@@ -1591,6 +1600,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         let resolved = self_.resolve_alias_target_cursor().unwrap_or(self_);
         let value = resolved.value();
         let is_collection_root = matches!(value, YamlValue::Mapping(_) | YamlValue::Sequence(_));
+        let mut dash_comment: Option<String> = None;
         if is_document {
             if is_first_document {
                 write_yq_header(out, self_.text, self_.index)?;
@@ -1602,9 +1612,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             // #4256: a container that is a bare-dash item's value prints the comment after its
             // dash as a head line (`.a[1]` on `- # own` / `  c: 2` is `# own` / `c: 2` in yq);
             // a scalar item's comment is dropped, as yq drops it.
-            if let Some(comment) = self_.dash_wrapper_comment() {
-                out.write_str(&comment)?;
-                out.write_char('\n')?;
+            dash_comment = self_.dash_wrapper_comment();
+            // yq puts a block container's anchor/tag line *above* that comment, and a flow
+            // container's comment above its `&x [..]` line.
+            if !self_.anchor_or_tag_on_own_line() {
+                if let Some(comment) = dash_comment.take() {
+                    out.write_str(&comment)?;
+                    out.write_char('\n')?;
+                }
             }
         }
         // #1350 code review: `write_leading_anchor` must run *before*
@@ -1620,6 +1635,10 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         // this on the pre-resolution cursor is always a no-op when `self_`
         // is an alias, exactly as needed.
         self_.write_leading_anchor(out)?;
+        if let Some(comment) = dash_comment {
+            out.write_str(&comment)?;
+            out.write_char('\n')?;
+        }
         // #1350: a bare alias *root* (`succinctly yq '.b'` on `b: *x`) used
         // to stream `*x` literally -- unlike every non-root alias, which
         // `stream_yaml_value` resolves normally as part of its parent. A
