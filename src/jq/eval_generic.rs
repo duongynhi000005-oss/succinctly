@@ -32989,6 +32989,29 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             // `Iterator::min_by`/`max_by` do. Reusing them rather than
             // hand-rolling the comparison keeps that asymmetry from being
             // re-derived and getting it backwards.
+            // #4055: yq's own comparator and tie rule for the bare spellings, whose keys are the
+            // elements themselves.
+            if S::MIN_MAX_NEED_AN_ELEMENT && matches!(builtin, Builtin::Min | Builtin::Max) {
+                let picked = {
+                    let owned: Vec<&OwnedValue> = keyed
+                        .iter()
+                        .filter_map(|(key, _)| match key {
+                            SortKey::Own(value) => Some(value),
+                            SortKey::By(_) => None,
+                        })
+                        .collect();
+                    crate::jq::eval::yq_extremum_index(&owned, matches!(builtin, Builtin::Max))
+                };
+                return match picked {
+                    Ok(at) => keyed
+                        .into_iter()
+                        .nth(at)
+                        .map_or(GenericResult::None, |(_, cursor)| {
+                            GenericResult::OneCursor(cursor)
+                        }),
+                    Err(e) => GenericResult::Error(e),
+                };
+            }
             let winner = if matches!(builtin, Builtin::Min | Builtin::MinBy(_)) {
                 keyed.into_iter().min_by(|(a, _), (b, _)| a.cmp::<S>(b))
             } else {

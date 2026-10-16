@@ -10333,6 +10333,9 @@ pub(crate) fn eval_owned_relocating_fold<S: EvalSemantics>(
         return None;
     }
     let items: Vec<OwnedValue> = match (builtin, input) {
+        // yq's `min`/`max` have their own comparator and can raise (#4055), which this fold
+        // does not model: the ordinary route answers them.
+        (Builtin::Min | Builtin::Max, _) if S::MIN_MAX_NEED_AN_ELEMENT => return None,
         (Builtin::Add | Builtin::Min | Builtin::Max, OwnedValue::Array(items)) => {
             items.iter().cloned().collect()
         }
@@ -17680,6 +17683,94 @@ fn builtin_all_cond<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     any_all_gen_cond::<W, S>(gen, cond, value, optional, false)
 }
 
+/// yq's tag for a value, as its errors spell it.
+fn yq_extremum_tag(value: &OwnedValue) -> &'static str {
+    match value {
+        OwnedValue::Null => "!!null",
+        OwnedValue::Bool(_) => "!!bool",
+        OwnedValue::Int(_) | OwnedValue::NumberLiteral(NumberRepr::Int(..), _) => "!!int",
+        OwnedValue::Float(_) | OwnedValue::NumberLiteral(NumberRepr::Float(..), _) => "!!float",
+        OwnedValue::String(_) => "!!str",
+        OwnedValue::Array(_) => "!!seq",
+        OwnedValue::Object(_) => "!!map",
+    }
+}
+
+/// yq's `min`/`max` over an array (#4055), which is not jq's total order: it scans from the first
+/// element and replaces the running pick only when the next element is strictly smaller (larger),
+/// so a tie keeps the first, and it compares two numbers or two strings (bytewise) and nothing
+/// else. A `null` element never takes part (`[null, 1] | min` is `null`, `[1, null]` is `1`), a
+/// container is refused (`arrays`/`maps not yet supported for comparison`, or `!!seq ([i])
+/// cannot be subtracted from <kind>` when the running pick is the container), and two scalars of
+/// different kinds, or two booleans, are refused with the *later* element's tag
+/// (`!!str not yet supported for comparison`). Captured from yq v4.53.3. The winner's index.
+pub(crate) fn yq_extremum_index<T: core::borrow::Borrow<OwnedValue>>(
+    items: &[T],
+    want_max: bool,
+) -> Result<usize, EvalError> {
+    let refused = |element: &OwnedValue| {
+        EvalError::new(format!(
+            "{} not yet supported for comparison",
+            yq_extremum_tag(element)
+        ))
+    };
+    let mut best = 0;
+    for (at, element) in items.iter().enumerate().skip(1) {
+        let (pick, element) = (items[best].borrow(), element.borrow());
+        match (pick, element) {
+            (_, OwnedValue::Array(_)) => {
+                return Err(EvalError::new("arrays not yet supported for comparison"))
+            }
+            (_, OwnedValue::Object(_)) => {
+                return Err(EvalError::new("maps not yet supported for comparison"))
+            }
+            (OwnedValue::Array(_) | OwnedValue::Object(_), _) => {
+                return Err(EvalError::new(format!(
+                    "{} ([{best}]) cannot be subtracted from {}",
+                    yq_extremum_tag(pick),
+                    yq_extremum_tag(element),
+                )))
+            }
+            // A `null` on either side takes no part: the pick stays.
+            (OwnedValue::Null, _) | (_, OwnedValue::Null) => continue,
+            _ => {}
+        }
+        let ordering = match (pick, element) {
+            (OwnedValue::String(a), OwnedValue::String(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..),
+            ) => compare_values::<YqSemantics>(pick, element),
+            // A boolean, or two kinds that do not compare.
+            _ => return Err(refused(element)),
+        };
+        // `ordering` is the pick against the element: the element wins only when strictly
+        // smaller (`min`) or larger (`max`).
+        let replaces = if want_max {
+            ordering == core::cmp::Ordering::Less
+        } else {
+            ordering == core::cmp::Ordering::Greater
+        };
+        if replaces {
+            best = at;
+        }
+    }
+    Ok(best)
+}
+
+/// [`yq_extremum_index`] as a `min`/`max` result: the winning element, or the error through
+/// `optional` like the other array errors of these builtins.
+fn yq_extremum_result<'a, W: Clone + AsRef<[u64]>>(
+    mut items: Vec<OwnedValue>,
+    want_max: bool,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match yq_extremum_index(&items, want_max) {
+        Ok(at) => QueryResult::Owned(items.swap_remove(at)),
+        Err(e) => suppress_or_raise(e, optional),
+    }
+}
+
 /// yq's `min`/`max` of a mapping: the extremum of its values, nothing for an empty one (#4236).
 /// `items` is the values already materialised, so a decode failure surfaces here once.
 fn mapping_extremum<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
@@ -17723,6 +17814,9 @@ fn builtin_min<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 };
             }
 
+            if S::MIN_MAX_NEED_AN_ELEMENT {
+                return yq_extremum_result::<W>(items, false, optional);
+            }
             let min = items.into_iter().min_by(compare_values::<S>).unwrap();
             QueryResult::Owned(min)
         }
@@ -17772,6 +17866,9 @@ fn builtin_max<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 };
             }
 
+            if S::MIN_MAX_NEED_AN_ELEMENT {
+                return yq_extremum_result::<W>(items, true, optional);
+            }
             let max = items.into_iter().max_by(compare_values::<S>).unwrap();
             QueryResult::Owned(max)
         }

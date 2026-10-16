@@ -4701,10 +4701,15 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
 
 **Not reproduced**, each its own issue:
 
-- **`contains` and array `-`** keep typed equality where yq compares by text; `min`/`max`/`min_by`/
-  `max_by` keep jq's ordering where yq's comparator rejects a mixed array outright
-  (`[2, "10", 3] | min` is `!!str not yet supported for comparison` in yq;
-  [#4055](https://github.com/rust-works/succinctly/issues/4055)).
+- **`contains` and array `-`** keep typed equality where yq compares by text; `min_by`/`max_by` (not yq
+  builtins) keep jq's ordering. `min`/`max` of an *array* follow yq's own comparator
+  ([#4055](https://github.com/rust-works/succinctly/issues/4055)): a scan from the first element that
+  replaces the pick only when the next is strictly smaller (larger), so a tie keeps the first (jq's `max`
+  keeps the last); two numbers or two strings (bytewise) compare and nothing else does, so
+  `[2, "10", 3] | min` is `!!str not yet supported for comparison`, as is any boolean, with the later
+  element's tag; a container is refused (`arrays not yet supported for comparison`, or `!!seq ([0])
+  cannot be subtracted from !!int` when the pick is the container); and a `null` element never takes part
+  (`[null, 1] | min` is `null`, `[1, null]` is `1`).
 - **`min`/`max` of nothing, and `to_entries`/`with_entries`/`split` of `null`, answer nothing in yq
   mode (#4236).** yq has no element to pick, so `[] | min`, `{} | max` and `1 | min` print
   nothing (jq: `null`, and an error for the other two), a mapping is the extremum of its values
@@ -4717,8 +4722,9 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
   node into `[]` when it is *written* through (`[null, {a: 2}] | .[] |= min` is `[[], 2]`, and
   `(.[] | min) = 5` rewrites the `null` too), where this leaves the node as it was; and yq's
   comparator rejects the values of a mapping that are maps, booleans or of mixed types
-  (`{a: true, b: false} | min` is `!!bool not yet supported for comparison`) exactly as for an
-  array (#4055), where this keeps jq's ordering.
+  (`{a: true, b: false} | min` is `!!bool not yet supported for comparison`, and a map value among
+  scalars is `!!seq (a) cannot be subtracted from !!int`) exactly as for an array, where this keeps
+  jq's ordering for a mapping (#4055 covers the array).
 - **`pick` on an array and `omit` (#4257).** In yq mode `pick` indexes an array by an integer, by a
   string `yq`'s own `parseInt64` accepts (`"1"`, `"0x1"`, `"0o1"`, `"1_0"`), or by an integral float;
   any other key raises, and a negative index matches nothing. `omit` removes only non-negative integer
