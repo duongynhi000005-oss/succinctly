@@ -32653,6 +32653,7 @@ fn test_4568_del_slice_run_negative_index_out_of_range_errors() -> Result<()> {
         // A positive index past the end continues over `null`; so does a literal `null` element.
         ("del(.a[0:2][5][-1])", r#"{"a":[1,2,3]}"#, 0),
         ("del(.a[0:2][5][3][-1])", r#"{"a":[1,2,3]}"#, 0),
+        ("del(.a[0:2][5][0:1][-1])", r#"{"a":[1,2,3]}"#, 0),
         ("del(.a[0:2][5][-1].x)", r#"{"a":[1,2,3]}"#, 0),
         ("del(.a[0:2][0][-1])", r#"{"a":[null]}"#, 0),
         ("del(.a[0:2][0].k[-1])", r#"{"a":[{"k":null}]}"#, 0),

@@ -29926,7 +29926,9 @@ fn yq_del_slice_outcome(
 /// holds another array and stays a no-op when it holds a scalar or object).
 /// The walk itself ([`yq_del_walk_error`]'s job) replays the path against `current` the way yq's
 /// generic navigation would, and returns the first type error it raises, or `None` when every
-/// branch gives up quietly (a missing key, an out-of-range index, a string or other scalar).
+/// branch gives up quietly (a missing key, a string or other scalar). An index past the end is not
+/// one of those: a negative one below the start raises `index [N] out of range` (#4568), and a
+/// positive one reads as an absent node the walk goes on over.
 ///
 /// A slice step applies yq's read-path slice rule ([`slice_owned_value_read`]: an array slices to
 /// a shorter array, a mapping to its alternating key/value children, #1102, any scalar but a string

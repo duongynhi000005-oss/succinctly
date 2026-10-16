@@ -3783,7 +3783,13 @@ type-checked too (`del(.a[0:2][].x)` over a root array fails on `.a`, `del(.a[].
 `a: [[1]]` fails on `.b`), including when the path ends in a further slice behind the field
 (`del(.a[0:2][].x[0:1])`). Only `.field`, `[n]`, `.[]` and slice steps are walked; a computed
 index or recursive descent in the tail ends that walk as a no-op. `.x?` suppresses and a `[0]`
-tail stays a no-op. A negative index below the start of the sliced sequence raises yq's `index [N] out of range, array size is S` (`del(.a[0:2][-3])`; a scalar, `null` or mapping target slices to size 0, or to its key/value children, and a trailing `?` does not suppress it, [#4568](https://github.com/rust-works/succinctly/issues/4568)), while a positive index past the end stays a no-op but walks on over `null`, so `del(.a[0:2][5][-1])` fails with size 0. One shape still differs, because the information is not in the value tree: an
+tail stays a no-op. A negative index below the start of the sliced sequence raises yq's
+`index [N] out of range, array size is S` (`del(.a[0:2][-3])`; a scalar, `null` or mapping target
+slices to size 0 or to its key/value children, and a trailing `?` does not suppress it,
+[#4568](https://github.com/rust-works/succinctly/issues/4568)), while a positive index past the end
+stays a no-op but walks on over `null`, so `del(.a[0:2][5][-1])` fails with size 0.
+
+One shape still differs, because the information is not in the value tree: an
 unquoted YAML timestamp (`a: 2024-01-01`) or a `!!binary` scalar is a string to succinctly but not
 to yq, so `del(.a[0:2].x)` no-ops here where yq fails (a *quoted* `"2024-01-01"` matches).
 
