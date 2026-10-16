@@ -11910,6 +11910,71 @@ fn assert_explicit_key_sequence_rejected_1104(input: &str) -> Result<()> {
     Ok(())
 }
 
+/// #4530: a `-` line at the indent of an open mapping whose latest entry already has its value is
+/// a parse error in yq ("did not find expected key"), not a line to drop. It is legal only as the
+/// implicit value of a `key:` still waiting for one, whatever follows the colon on that line (a
+/// comment, an anchor, a tag) and however many blank or comment lines sit in between.
+#[test]
+fn test_4530_sequence_after_a_completed_mapping_entry_is_rejected() -> Result<()> {
+    for input in [
+        "a: 1\n- x\n",
+        "k: v\n- x\n",
+        "a: 1 # c\n- x\n",
+        "a: \"s\"\n- x\n",
+        "a: &x 1\nb: *x\n- y\n",
+        // An explicit key whose `:` value is complete, and a nested mapping or sequence value.
+        "? k\n: v\n- x\n",
+        "m:\n  ? k\n- item\n",
+        "a:\n  b: 1\n- x\n",
+        "a:\n  - x\n- y\n",
+        "x: !!map\n  a: 1\n- y\n",
+        // A block scalar and a multi-line flow sequence that ended on the previous line.
+        "a: |\n  t\n- x\n",
+        "a: [1,\n 2]\n- x\n",
+        // The key stands deeper than the `-`: the `-` dedents past `b:` into the parent mapping.
+        "a:\n  b:\n- x\n",
+        // A `-` at a nested mapping's indent, after a completed entry of it.
+        "a:\n  b: 1\n  - x\n",
+        "a: 1\nb: 2\n- x\nc: 3\n",
+    ] {
+        let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 1, "{input:?} must be rejected, got stdout {out:?}");
+        assert_eq!(out, "", "{input:?} printed output before failing");
+        assert!(
+            err.contains("a sequence cannot follow a completed mapping entry"),
+            "{input:?}: unexpected stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4530: the shapes the check above must leave alone -- a `key:` waiting for its value takes a
+/// same-indent sequence, with properties, a comment or blank lines after the colon, an explicit
+/// `:` value likewise, and an ordinary sequence of items.
+#[test]
+fn test_4530_sequence_as_the_implicit_value_of_a_pending_key_is_kept() -> Result<()> {
+    for (input, expected) in [
+        ("k:\n- item\n", r#"{"k":["item"]}"#),
+        ("k: &x\n- item\n", r#"{"k":["item"]}"#),
+        ("k: !!seq\n- item\n", r#"{"k":["item"]}"#),
+        ("k: &x !!seq\n- item\n", r#"{"k":["item"]}"#),
+        ("k:   # c\n- item\n", r#"{"k":["item"]}"#),
+        ("k:\n\n# c\n- item\n", r#"{"k":["item"]}"#),
+        ("a: 1\nb:\n- x\n- y\n", r#"{"a":1,"b":["x","y"]}"#),
+        ("? k\n:\n- item\n", r#"{"k":["item"]}"#),
+        ("- k:\n  - 1\n", r#"[{"k":[1]}]"#),
+        ("- a\n- b\n", r#"["a","b"]"#),
+    ] {
+        let (out, code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, out.trim()),
+            (0, expected),
+            "{input:?} must keep parsing"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn test_yaml_explicit_key_same_indent_sequence_then_new_entry_1040() -> Result<()> {
     // #1040's second (worse) repro: a field after the sequence used to
@@ -15598,18 +15663,14 @@ fn test_sequence_item_gap_headline_repro() -> Result<()> {
 #[test]
 fn test_sequence_item_gap_at_the_mappings_own_indent_with_resolved_key() -> Result<()> {
     // Lower bound aside, the mapping's own exact indent is *not* included in
-    // this fix's trigger range (see `sequence_item_gap_reaches`'s own doc
-    // comment for why: that exact indent is ambiguous with the legitimate
-    // "block sequence value at the key's own indent" shape when the key is
-    // deferred, so this fix deliberately leaves it alone rather than risk
-    // misreading that case). This regression guard pins the current,
-    // unchanged (pre-existing, still-buggy) behavior for the one sub-case
-    // this fix does *not* reach, so a future change to the boundary doesn't
-    // silently start (or stop) altering it without a test noticing either
-    // way.
+    // #900's trigger range (see `sequence_item_gap_reaches`'s own doc comment
+    // for why: that exact indent is ambiguous with the legitimate "block
+    // sequence value at the key's own indent" shape when the key is deferred).
+    // Here the key already has its value (`a: hello`), so the `-` has nothing
+    // to be the value of and is an error, as in real yq, not a line to drop
+    // (#4530; this pinned the silent drop, `[{"a":"hello"}]`, before).
     let (output, exit_code) = run_yq_stdin(".", "-   a: hello\n    - b\n", &["-o", "json", "-I0"])?;
-    assert_eq!(exit_code, 0);
-    assert_eq!(output.trim(), r#"[{"a":"hello"}]"#);
+    assert_eq!((exit_code, output.as_str()), (1, ""));
     Ok(())
 }
 
@@ -35076,12 +35137,15 @@ fn test_yaml_sort_keys_non_identity_filter_multi_output_2486() -> Result<()> {
     assert_eq!(code, 0);
     assert_eq!(streamed, dom_forced);
 
-    for doc in streamed.split("---\n") {
-        if doc.trim().is_empty() {
-            continue;
-        }
-        let (_, reread_code) = run_yq_stdin(".", doc, &[])?;
-        assert_eq!(reread_code, 0, "each document must re-parse: {doc:?}");
+    // The results of `.[]` are printed back to back, so each one is re-read through its own filter.
+    for filter in [".outer", ".list"] {
+        let (doc, code) = run_yq_stdin(filter, input, &["--sort-keys"])?;
+        assert_eq!(code, 0);
+        let (_, reread_code) = run_yq_stdin(".", &doc, &[])?;
+        assert_eq!(
+            reread_code, 0,
+            "each document must re-parse: [{filter}] {doc:?}"
+        );
     }
     Ok(())
 }

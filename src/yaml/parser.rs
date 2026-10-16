@@ -7901,6 +7901,69 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         Ok(())
     }
 
+    /// Whether a `-` line at `indent` lands directly in a block mapping open at that indent whose
+    /// latest entry already has its value (`a: 1` / `- x`, a nested mapping or sequence that ended
+    /// on the line before, a block scalar). A same-indent `-` is legal there only as the
+    /// implicit value of a `key:` still waiting for one, so anywhere else real yq stops with
+    /// `did not find expected key` and the line must not be dropped (#4530).
+    ///
+    /// The line that owns the pending value has to sit at the mapping's own indent: a `-` that
+    /// dedents past a nested `b:` back into its parent mapping (`a:` / `  b:` / `- x`) is the
+    /// same error. A line that opens with its own `-` is a compact mapping inside a sequence item,
+    /// whose key column is not the line's indent, so it is judged on its ending alone. An
+    /// explicit key's owner mapping is left to
+    /// [`Self::explicit_key_with_content_rejects_sequence_at`], where a bare `?` legitimately
+    /// takes the sequence as its own content (YAML test suite 6PBE).
+    fn sequence_follows_completed_mapping_entry_at(&self, indent: usize) -> bool {
+        let Some(mut landing) = self.indent_stack.len().checked_sub(1) else {
+            return false;
+        };
+        while landing > 0 && self.indent_stack[landing] > indent {
+            landing -= 1;
+        }
+        if self.indent_stack[landing] != indent || self.type_stack[landing] != NodeType::Mapping {
+            return false;
+        }
+        if self
+            .pending_explicit_key
+            .is_some_and(|owner_depth| owner_depth == landing + 1)
+        {
+            return false;
+        }
+        !self.previous_content_line_defers_a_value_at(indent)
+    }
+
+    /// [`Self::previous_content_line_defers_its_value`] for a mapping entry in particular: the
+    /// previous content line ends in the `:` of a key (node properties and a comment aside) and
+    /// that key stands at `indent` ([`Self::sequence_follows_completed_mapping_entry_at`]).
+    fn previous_content_line_defers_a_value_at(&self, indent: usize) -> bool {
+        let mut line_start = self.pos;
+        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
+            line_start -= 1;
+        }
+        let mut end = line_start;
+        while end > 0 {
+            let mut prev_end = end - 1;
+            if prev_end > 0 && self.input[prev_end] == b'\n' && self.input[prev_end - 1] == b'\r' {
+                prev_end -= 1;
+            }
+            let mut prev_start = prev_end;
+            while prev_start > 0 && !is_line_break(self.input[prev_start - 1]) {
+                prev_start -= 1;
+            }
+            end = prev_start;
+            let line = &self.input[prev_start..prev_end];
+            let lead = line.iter().take_while(|&&b| b == b' ').count();
+            let rest = &line[lead..];
+            if rest.is_empty() || rest[0] == b'#' || only_node_properties(rest) {
+                continue;
+            }
+            return (lead == indent || rest[0] == b'-')
+                && line_ends_with_colon_after_properties(rest);
+        }
+        false
+    }
+
     /// Whether the nearest earlier line that is neither blank nor a comment leaves its value for
     /// the next line: a key written up to its colon (`a:`, `- k:`) or a bare `-`, a trailing
     /// comment aside. The only place a block scalar header on a line of its own can belong
@@ -8031,6 +8094,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     return Err(self.err_unexpected_char(
                         self.pos,
                         "a sequence cannot be an explicit key's implicit value",
+                    ));
+                }
+                // The same line of an ordinary `key: value` entry: the `-` has nothing to be
+                // the value of, so it is an error, not a line to drop (#4530).
+                if self.sequence_follows_completed_mapping_entry_at(indent) {
+                    return Err(self.err_unexpected_char(
+                        self.pos,
+                        "a sequence cannot follow a completed mapping entry",
                     ));
                 }
                 self.parse_sequence_item(indent)?;
@@ -8325,6 +8396,37 @@ pub(crate) fn only_node_properties(bytes: &[u8]) -> bool {
         .split(|&b| b == b' ' || b == b'\t')
         .filter(|token| !token.is_empty())
         .all(|token| matches!(token[0], b'&' | b'!') && token[token.len() - 1] != b':')
+}
+
+/// `bytes` without its trailing spaces and tabs.
+fn trim_spaces_end(bytes: &[u8]) -> &[u8] {
+    let len = bytes
+        .iter()
+        .rposition(|&b| !matches!(b, b' ' | b'\t'))
+        .map_or(0, |at| at + 1);
+    &bytes[..len]
+}
+
+/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
+/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
+/// (#4530).
+fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
+    let code_end = (0..line.len())
+        .find(|&i| line[i] == b'#' && (i == 0 || matches!(line[i - 1], b' ' | b'\t')))
+        .unwrap_or(line.len());
+    let mut code = trim_spaces_end(&line[..code_end]);
+    while let Some(token_start) = code
+        .iter()
+        .rposition(|&b| matches!(b, b' ' | b'\t'))
+        .map(|at| at + 1)
+    {
+        let token = &code[token_start..];
+        if !matches!(token.first(), Some(b'&' | b'!')) {
+            break;
+        }
+        code = trim_spaces_end(&code[..token_start]);
+    }
+    code.last() == Some(&b':')
 }
 
 /// Whether `line` (already without its leading spaces) is a `-` and nothing else, a trailing
