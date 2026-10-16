@@ -53592,9 +53592,44 @@ fn array_wrapped_destructure_of_register(source: &Expr) -> bool {
         && source_destructures_register(&drop_array_wrappers(source), true))
         // #4644: the same two run branches with no brackets, where they are the whole source: that is
         // the only place a branch is known to run (under an `if`, a `limit` or a `first` it may not).
-        || matches!(unwrap_paren(source), Expr::Alternative(..) | Expr::Try { catch: Some(_), .. })
-            && run_branch_of_bind_chain(source)
-                .is_some_and(|chain| source_destructures_register(chain, true))
+        || bare_run_branch_of_source(source, false)
+            .is_some_and(|chain| source_destructures_register(chain, true))
+}
+
+/// #4677/#4682: the part of a whole source that always runs when the source is a bare `//` or
+/// `try ... catch` ([`run_branch_of_bind_chain`]'s), also as the one live stage of a pipe
+/// (`(false // D) | .`: the first stage runs on the register whatever follows it). With `try_body`, also
+/// the body of a `try ... catch` that is a plain bind chain: it always runs, and whether its
+/// destructure raises into the handler or moves the register depends on the value, which the resolver
+/// the route sends the source to decides (a moved reduce body's loud refusal does not take it: there
+/// the pattern step raises on the marker whatever the value, and the handler catches it).
+fn bare_run_branch_of_source(source: &Expr, try_body: bool) -> Option<&Expr> {
+    match unwrap_paren(source) {
+        Expr::Try {
+            expr: body,
+            catch: Some(_),
+        } if try_body
+            && is_plain_bind_chain(body)
+            // A `?//` chain retries its next alternative on a raise (#4585): which one ends the chain
+            // is not the single destructure's question.
+            && !any_subexpr(body, &mut |e| {
+                matches!(e, Expr::AsPattern { patterns, .. } if patterns.len() > 1)
+            }) =>
+        {
+            Some(body)
+        }
+        Expr::Alternative(..) | Expr::Try { catch: Some(_), .. } => {
+            run_branch_of_bind_chain(source)
+        }
+        Expr::Pipe(stages) => {
+            let mut live = stages.iter().filter(|stage| !is_identity_stage(stage));
+            match (live.next(), live.next()) {
+                (Some(head), None) => bare_run_branch_of_source(head, try_body),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// `source` with every `[E]` (and, #4644, every bare `//` or `try ... catch` run branch) whose `E` is a plain bind chain replaced by `E`
@@ -53637,7 +53672,7 @@ fn certainly_raises(e: &Expr) -> bool {
     let emits_once = |e: &Expr| matches!(unwrap_paren(e), Expr::Identity | Expr::Literal(_));
     let raises = |e: &Expr| match unwrap_paren(e) {
         Expr::Error(None) => true,
-        Expr::Error(Some(message)) => matches!(unwrap_paren(message), Expr::Literal(_)),
+        Expr::Error(Some(message)) => is_constant_construction(message),
         _ => false,
     };
     match unwrap_paren(e) {
@@ -53645,6 +53680,20 @@ fn certainly_raises(e: &Expr) -> bool {
             .split_last()
             .is_some_and(|(last, earlier)| earlier.iter().all(emits_once) && raises(last)),
         other => raises(other),
+    }
+}
+
+/// Whether `e` is a literal, or an object or array built from literals only: a value `error` throws
+/// the same way whatever the input (#4677: `error({a:1})`).
+fn is_constant_construction(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Literal(_) => true,
+        Expr::Array(inner) => is_constant_construction(inner),
+        Expr::Comma(items) => items.iter().all(is_constant_construction),
+        Expr::Object(entries) => entries.iter().all(|entry| {
+            matches!(entry.key, ObjectKey::Literal(_)) && is_constant_construction(&entry.value)
+        }),
+        _ => false,
     }
 }
 
@@ -53656,6 +53705,8 @@ fn never_truthy(e: &Expr) -> bool {
         Expr::Builtin(Builtin::Empty) => true,
         // `A // B` yields B's outputs when A has no truthy one, so it has none either.
         Expr::Alternative(left, right) => never_truthy(left) && never_truthy(right),
+        // #4677: every output of a comma is falsy (`(false, null) // X` runs `X`).
+        Expr::Comma(items) => items.iter().all(never_truthy),
         Expr::Pipe(stages) => match stages.split_first() {
             Some((head, rest)) if !rest.is_empty() => {
                 let truthy = match unwrap_paren(head) {
@@ -54036,6 +54087,15 @@ fn drive_fold_source_with<S: EvalSemantics>(
             ambient.trackable && matches!(ambient.value, OwnedValue::Null),
         ))
         || destructures_unplaced_register
+        || (S::TAG == EvalTag::Jq
+            && foreach_source
+            && bare_run_branch_of_source(source, !in_moved_body).is_some_and(|branch| {
+                foreach_source_destructures_register(
+                    branch,
+                    register_markers.clone(),
+                    ambient.trackable && matches!(ambient.value, OwnedValue::Null),
+                )
+            }))
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
         // provably off it: the pattern's step raises, so the resolver decides rather than the
         // by-value drive, which has no register to check the step against.

@@ -134903,6 +134903,295 @@ fn test_reduce_body_source_destructuring_dot_behind_a_bare_alternative_or_handle
     Ok(())
 }
 
+/// #4677: a `//` right operand behind a constant-falsy left, and the handler of a `try` whose body can
+/// only raise, as the whole source of a top-level `foreach` (or the one live stage of a pipe). jq runs
+/// the branch and its destructure of `.` moves the register, so the fold's emission of its accumulator
+/// raises `Invalid path expression`; the `RegisterSpine` walk read both as opaque (#4644 read them for
+/// a moved `reduce` body only) and the source was driven by value, so the fold answered and `del`,
+/// `=` and `|=` wrote through it. On a `null` document the same shape answers in jq, with the path the
+/// destructure moved to. Controls: a truthy left, a `try` body that does not raise, a branch that may
+/// not run, a source that is not the register, a `reduce` (which backtracks the destructure) and a
+/// `try` body inside a moved `reduce` body (the pattern step raises there and the `try` catches it).
+/// The moved-body spellings of the comma left operand, the thrown object and the pipe stage ride the
+/// same gates. Every row captured from jq 1.7.1; stdout and the exit status are pinned.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_destructuring_dot_behind_a_bare_alternative_or_handler_raises_4677(
+) -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (false // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (false // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (null // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (empty // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false|not|not) // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (false // false // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false, null) // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false // (. as {b:$b}|.)) | .) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r#"path(foreach (try error("x") catch (. as {b:$b}|.)) as $y (.; .; .))"#,
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (try error({a:1}) catch (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false,false) // (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try error({a:1}) catch (. as {b:$b}|.)) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach ((false // (. as {b:$b}|.)) | .) as $y (.; .; .)))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(foreach (false // (. as {b:$b}|.)) as $y (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(foreach (try error catch (. as {b:$b}|.)) as $y (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (false // (. as {b:$b}|.)) as $y (.; .; .))",
+            "[\"b\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (true // (. as {b:$b}|.)) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach ((false, 1) // (. as {b:$b}|.)) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (try 1 catch (. as {b:$b}|.)) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (try (1 // error) catch (. as {b:$b}|.)) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (limit(1; 1, (false // (. as {b:$b}|.)))) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (false // .) as $y (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(reduce (false // (. as {b:$b}|.)) as $y (.; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .[]? as $i (.; foreach (try (. as {a:$a} | .) catch .) as $y (.; .; .)))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, stdout, code) in rows {
+        let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (out.as_str(), status),
+            (*stdout, *code),
+            "`{filter}` on {doc}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// #4682: a `foreach` source `try (. as PATTERN | .) catch H` whose *body* destructures the register.
+/// The pattern either type-errors into the handler (nothing moved, jq answers) or succeeds and moves
+/// the register, so the fold's emission of its accumulator raises whatever the handler is; the walk
+/// read the `try` with a handler as opaque and the source was answered. The value decides, so the
+/// source is routed to the resolver rather than refused. Every row captured from jq 1.7.1; stdout and
+/// the exit status are pinned.
+#[test]
+fn test_foreach_source_try_body_destructuring_dot_with_a_handler_raises_4682() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"[[1],[1]]",
+            r"path(foreach (try (. as [$a] | .) catch .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r"[]",
+            r"path(foreach (try (. as [$a] | .) catch .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach (try (. as {a:$a} | .) catch empty) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach (try (. as {a:$a} | .) catch 1) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach (try (. as {a:$a} | .) catch error) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"del(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .))",
+            "",
+            5,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .)) |= 9",
+            "",
+            5,
+        ),
+        (
+            r"null",
+            r"path(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .))",
+            "[\"a\"]\n",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (try (. as [$a] | .) catch empty) as $k (.; .; .))",
+            "[0]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"path(foreach (try (. as [$a] | .) catch .) as $k (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[true]",
+            r"path(foreach (try (. as {a:$a} | .) catch .) as $k (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(foreach (try (. as {a:$a} | .a) catch .) as $k (.; .; .))",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r"path(reduce (try (. as {a:$a} | .) catch .) as $k (.; .))",
+            "[]\n",
+            0,
+        ),
+    ];
+    for (doc, filter, stdout, code) in rows {
+        let (out, err, status) = run_jq_full(&["-c", filter], Some(doc))?;
+        assert_eq!(
+            (out.as_str(), status),
+            (*stdout, *code),
+            "`{filter}` on {doc}: stderr {err:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4604: `select($x)` passes the register on by `$x`'s own truthiness, whatever node it is bound to, so
 /// a fold source `select($x) | . as {a:$a} | .` in the body of a `reduce` whose source moved the register
 /// destructures `.`, which is the accumulator and not the register there, and raises in jq. The
