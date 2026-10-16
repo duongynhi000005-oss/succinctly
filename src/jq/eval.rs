@@ -65902,15 +65902,12 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
         Err((_, EvalEscape::Error(e)))
             if S::TAG == EvalTag::Yq
                 && e.is_untracked_navigation_error()
-                && is_yq_grammar_write_target(expr) =>
+                && recoverable_write_members(expr).is_some() =>
         {
             // The members of a comma are resolved one by one, and one that fails the same way adds
             // no target (`del([.n][0], .n)` still deletes `.n`, as yq does); a lone failing target
             // leaves the document alone.
-            let members = match unwrap_paren(expr) {
-                Expr::Comma(members) => members.as_slice(),
-                _ => core::slice::from_ref(expr),
-            };
+            let members = recoverable_write_members(expr).unwrap_or_default();
             let mut gathered = Vec::new();
             for member in members {
                 match resolve_terminal::<S>(member, input, false, Untracked::KeepInOrder) {
@@ -66138,6 +66135,30 @@ fn is_identity_stage(expr: &Expr) -> bool {
 /// which is also where #1651's document-root short-circuit and #1764's
 /// no-`Untracked::Skip` exception now live. Everything below therefore
 /// always takes the `path()`/`=`/`|=` reading of both.
+/// The members a failed write target `expr` is recovered from (#4360): `expr` itself, or the members
+/// of its top-level comma, when it is a [`is_yq_grammar_write_target`] and no member fans out (a
+/// comma, `.[]` or a slice anywhere inside one). Such a member that fails resolves to *no* target,
+/// exactly; a fan-out may have written some of its targets before the failing one, and yq writes
+/// all of the others, so a target that fans out keeps the loud refusal rather than a partial write.
+fn recoverable_write_members(expr: &Expr) -> Option<&[Expr]> {
+    if !is_yq_grammar_write_target(expr) {
+        return None;
+    }
+    let members = match unwrap_paren(expr) {
+        Expr::Comma(members) => members.as_slice(),
+        _ => core::slice::from_ref(expr),
+    };
+    let fans_out = |member: &Expr| {
+        any_subexpr(member, &mut |node| {
+            matches!(node, Expr::Comma(_) | Expr::Iterate | Expr::Slice { .. })
+        })
+    };
+    members
+        .iter()
+        .all(|member| !fans_out(member))
+        .then_some(members)
+}
+
 /// Whether every node of the write target `expr` is a construct yq's own grammar accepts (#4360): a
 /// path step, a literal, a constructor, arithmetic and the handful of builtins that compute a value.
 /// A target that holds a jq-only construct (`foreach`, `reduce`, `try`, `getpath`, `as`) has no yq
@@ -66190,7 +66211,7 @@ fn resolve_dynamic_indexes<S: EvalSemantics>(
         Err(EvalEscape::Error(e))
             if S::TAG == EvalTag::Yq
                 && e.is_untracked_navigation_error()
-                && is_yq_grammar_write_target(expr) =>
+                && recoverable_write_members(expr).is_some() =>
         {
             // A comma goes on to its later members (`(.a, [.n][0], .s) = 7` writes `.a` and `.s`):
             // each is resolved on its own, and a member that fails the same way adds nothing.
@@ -66205,7 +66226,8 @@ fn resolve_dynamic_indexes<S: EvalSemantics>(
                     }
                     Ok(out)
                 }
-                _ => Ok(out),
+                // One target with no fan-out: it failed, so there is none.
+                _ => Ok(Vec::new()),
             }
         }
         Err(e) => Err((out, e)),

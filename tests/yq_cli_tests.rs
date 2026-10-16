@@ -29983,16 +29983,17 @@ fn test_yq_del_after_untracked_branch_navigation_1868() -> Result<()> {
 }
 
 /// #1868: only a scalar literal is pruned. A bound variable's node (the owned routes inline one as
-/// a literal array or object), a computed key and `..` keep the refusal, since yq's variables hold
-/// the document's own nodes and a write through them reaches it (#2072, #3037); `(.a, 1 | .[$k]) = 5`
-/// and `(.a, 1 | ..) = 5` are recorded residuals in `docs/compliance/yq/limitations.md`. A step into a
-/// *computed* value (`(1 | tostring) | .[0]`, a constructed `[1] | .[0]`) is answered since #4360:
-/// the branch finds nothing to write through, so only `.a` is written, as yq does (rows captured
-/// from yq v4.53.3).
+/// a literal array or object), a computed key, `..` and a fan-out over the failing step keep the
+/// refusal, since yq's variables hold the document's own nodes and a write through them reaches it
+/// (#2072, #3037); `(.a, 1 | .[$k]) = 5` and `(.a, 1 | ..) = 5` are recorded residuals in
+/// `docs/compliance/yq/limitations.md`. A step into a *computed* value (`(1 | tostring) | .[0]`, a
+/// constructed `[1] | .[0]`) is answered since #4360: that member finds nothing to write through,
+/// so only `.a` is written, as yq does (rows captured from yq v4.53.3).
 #[test]
 fn test_yq_untracked_branch_navigation_still_refuses_what_is_not_a_constant_1868() -> Result<()> {
     for filter in [
         ".a as $y | .a | ($y.b) = 9",
+        "del(.a, [1] | .[])",
         "\"x\" as $k | (.a, 1 | .[$k]) = 5",
         "(.a, 1 | ..) = 5",
     ] {
@@ -30004,7 +30005,6 @@ fn test_yq_untracked_branch_navigation_still_refuses_what_is_not_a_constant_1868
     for (filter, expected) in [
         ("(.a, (1 | tostring) | .[0]) = 5", "{\"a\":5}\n"),
         ("(.a, [1] | .[0]) = 5", "{\"a\":5}\n"),
-        ("del(.a, [1] | .[])", "{}\n"),
     ] {
         let (out, code) = run_yq_stdin(filter, "a:\n  b: 1\n", &["-o=json", "-I=0"])?;
         assert_eq!((code, out.as_str()), (0, expected), "{filter}");
@@ -68324,7 +68324,7 @@ fn test_json_integer_past_2_pow_53_keeps_its_exact_digits_3605() -> Result<()> {
 /// expression near attempt to access element ...` (jq mode still does, as jq does). The targets the
 /// other branches of a comma resolved still take the write. A bare computed target (`(.n + 1) = 5`)
 /// was already a no-op for the assignments; `del((1 + 2))` and `del(.s + "x")` (which yq reads as
-/// `.s`) are still refused. Every row captured from yq v4.53.3 (Homebrew).
+/// `.s`) are still refused, and so is a target that fans out over the failing step. Every row captured from yq v4.53.3 (Homebrew).
 #[test]
 fn test_write_through_a_computed_left_side_is_a_noop_4360() -> Result<()> {
     let rows: &[(&str, &str, &str)] = &[
@@ -68622,6 +68622,23 @@ fn test_write_through_a_computed_left_side_is_a_noop_4360() -> Result<()> {
             (0, expected),
             "`{filter}` on {doc:?}: {stderr:?}"
         );
+    }
+    // The conversion is exact or absent: a target that fans out over a failing step (yq writes every
+    // other target) keeps the loud refusal rather than a partial write, as do a dynamic index and a
+    // `?` on the failing step.
+    let doc = r#"{"a":{"b":1},"s":"xyz","n":5,"l":[1,2],"m":[{"x":1},{"x":2}]}"#;
+    for filter in [
+        "(.m[] | (.x, [.x][0])) = 9",
+        "(.l[] | (., [.][0])) |= 9",
+        "del(.a, (.s, [.n][0]))",
+        "del(.m[] | (.x, [.x][0]))",
+        "(.l + [3])[.n] = 5",
+        "(.l + [3])[0]? = 5",
+    ] {
+        let (_out, err, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["-p=json", "-o=json", "-I=0"])?;
+        assert_ne!(code, 0, "{filter}");
+        assert!(err.contains("Invalid path expression"), "{filter}: {err}");
     }
     // jq mode keeps jq's refusal for the same text.
     let (stdout, stderr, code) =
