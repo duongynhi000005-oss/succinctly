@@ -534,6 +534,36 @@ evaluated and printed (#1817, #2304). `tests/yq_cli_tests.rs` pins this
 (`test_deep_block_yaml_*_1817`). Streamed shapes that never materialize the document
 (`.`, `.[]`, `keys`, `length`, `map(.)`) have no ceiling at all.
 
+### A JSON integer past 2^53 keeps its exact digits — rule 4(b) ([#3605](https://github.com/rust-works/succinctly/issues/3605))
+
+yq's JSON decoder reads every number through a `float64`, so an integer a document spelled past
+`2^53` that has no exact `float64` is rounded before anything else sees it; the rounded value
+then prints, compares and does arithmetic as that value. succinctly reads the integer token as
+an exact `i64` and keeps it. Against yq v4.53.3 on
+`[999999999999999999,9999999999999999,9007199254740993,123456789012345678]` with
+`-p json -o json -I=0`:
+
+| filter                       | yq                      | succinctly yq          |
+|------------------------------|-------------------------|------------------------|
+| `.[]`                        | `1000000000000000000` `10000000000000000` `9007199254740992` `123456789012345680` | `999999999999999999` `9999999999999999` `9007199254740993` `123456789012345678` |
+| `.[0] \| tostring`           | `"1000000000000000000"` | `"999999999999999999"` |
+| `.[0] \| length`             | `19`                    | `18`                   |
+| `.[0] + 1`                   | `1000000000000000001`   | `1000000000000000000`  |
+| `.[0] == 999999999999999999` | `false`                 | `true`                 |
+
+Rule 4(b) permits the refusal: matching rewrites a number the document spelled exactly, on every
+print and every write (`-i`, `-p json -o yaml`), so a round trip through a JSON document changes
+data that nothing in the query touched — and a comparison against the literal the document
+holds is `false`. It is not rule 4(a): yq's own output is readable; the divergence is chosen
+because matching corrupts data. The same integer in a *YAML* document is exact in both tools
+(`a: 999999999999999999` with `.a + 1` is `1000000000000000000`), so the divergence is the JSON
+decoder's alone (a `.json` file read without `-p json` rounds in yq and stays exact here as well). A
+value past `i64::MAX` is clamped to `9223372036854775807` by both tools, so it agrees. The same holds
+for negatives and on every route that prints or writes: the streaming print, `-o yaml`, `-P` and a
+write that leaves the integer alone (`.[3] = 0`). Pinned, with the `2^53`, `2^62` and `i64::MAX`
+boundaries, those routes and the YAML control, in
+`test_json_integer_past_2_pow_53_keeps_its_exact_digits_3605`.
+
 ## Input-spec divergences (below ADR-0018's scope)
 
 ADR-0018 adjudicates *evaluator and CLI behaviour*. A divergence originating in which inputs
