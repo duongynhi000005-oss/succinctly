@@ -66095,6 +66095,116 @@ fn is_identity_stage(expr: &Expr) -> bool {
     }
 }
 
+/// The members a failed write target `expr` is recovered from (#4360): `expr` itself, or the members
+/// of its top-level comma, when it is a [`is_yq_grammar_write_target`] and no member fans out (a
+/// comma, `.[]` or a slice anywhere inside one). Such a member that fails resolves to *no* target,
+/// exactly; a fan-out may have written some of its targets before the failing one, and yq writes
+/// all of the others, so a target that fans out keeps the loud refusal rather than a partial write.
+/// (A comma that holds a *static* member is split before it ever fails, #4401, and each member then
+/// faces this question on its own.)
+fn recoverable_write_members(expr: &Expr) -> Option<&[Expr]> {
+    if !is_yq_grammar_write_target(expr) {
+        return None;
+    }
+    let members = match unwrap_paren(expr) {
+        Expr::Comma(members) => members.as_slice(),
+        _ => core::slice::from_ref(expr),
+    };
+    let fans_out = |member: &Expr| {
+        any_subexpr(member, &mut |node| {
+            matches!(node, Expr::Comma(_) | Expr::Iterate | Expr::Slice { .. })
+        })
+    };
+    members
+        .iter()
+        .all(|member| !fans_out(member))
+        .then_some(members)
+}
+
+/// Whether every node of the write target `expr` is a construct yq's own grammar accepts (#4360): a
+/// path step, a literal, a constructor, arithmetic and the handful of builtins that compute a value.
+/// A target that holds a jq-only construct (`foreach`, `reduce`, `try`, `getpath`, `as`) has no yq
+/// oracle to read a no-op from, and keeps the refusal -- a silent no-op there would hide a wrong
+/// acceptance.
+fn is_yq_grammar_write_target(expr: &Expr) -> bool {
+    !any_subexpr(expr, &mut |node| {
+        !matches!(
+            node,
+            Expr::Identity
+                | Expr::Field(_)
+                | Expr::Index { .. }
+                | Expr::Slice { .. }
+                | Expr::Iterate
+                | Expr::Literal(_)
+                | Expr::Paren(_)
+                | Expr::Pipe(_)
+                | Expr::Comma(_)
+                | Expr::Array(_)
+                | Expr::Object(_)
+                | Expr::Arithmetic { .. }
+                | Expr::Builtin(
+                    Builtin::Length
+                        | Builtin::Keys
+                        | Builtin::KeysUnsorted
+                        | Builtin::ToEntries
+                        | Builtin::ToString
+                )
+        )
+    })
+}
+
+/// The resolved write targets of `PATH[] | select(...)...` when `PATH` ends on nothing to iterate in
+/// yq (#4401), `None` when the ordinary resolution applies: `PATH` a chain of static fields and
+/// indexes, then one `.[]`, then at least one `select` and only `select`s, over a value that is absent or `null` (the target
+/// is the static `PATH[]`, which the writer vivifies to `[]` and writes into zero elements, as it
+/// does for a lone `.a[] = v`) or a scalar (no target at all: yq leaves the document alone).
+fn iterate_of_nothing_target(expr: &Expr, input: &OwnedValue) -> Option<Vec<Expr>> {
+    /// The stages of a pipe, looking through the parentheses and nested pipes the parser leaves
+    /// (`(.a[] | select(f))` is `Pipe([Pipe([a, .[]]), select(f)])`).
+    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match unwrap_paren(expr) {
+            Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),
+            other => out.push(other),
+        }
+    }
+    let mut stages = Vec::new();
+    flatten(expr, &mut stages);
+    let at = stages
+        .iter()
+        .position(|stage| matches!(unwrap_paren(stage), Expr::Iterate))?;
+    if at == 0
+        || !stages[..at]
+            .iter()
+            .all(|stage| matches!(unwrap_paren(stage), Expr::Field(_) | Expr::Index { .. }))
+        || stages[at + 1..].is_empty()
+        || !stages[at + 1..]
+            .iter()
+            .all(|stage| matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Select(_))))
+    {
+        return None;
+    }
+    // Where the prefix lands: `Some(value)` for a value it holds, `None` for an absent one (a
+    // missing key, or a step through `null`, which yq vivifies).
+    let mut current = Some(input);
+    for stage in &stages[..at] {
+        current = match (unwrap_paren(stage), current) {
+            (_, None | Some(OwnedValue::Null)) => None,
+            (Expr::Field(name), Some(OwnedValue::Object(map))) => map.get(name),
+            (Expr::Index { idx, .. }, Some(OwnedValue::Array(items))) => {
+                resolve_read_index(&OwnedValue::Int(*idx), items.len()).map(|i| &items[i])
+            }
+            _ => return None,
+        };
+    }
+    match current {
+        None | Some(OwnedValue::Null) => Some(vec![Expr::Pipe(
+            stages[..=at].iter().map(|stage| (*stage).clone()).collect(),
+        )]),
+        Some(OwnedValue::Array(_) | OwnedValue::Object(_)) => None,
+        Some(_) => Some(Vec::new()),
+    }
+}
+
 /// Rewrite every computed key in a path expression into the static component it
 /// denotes for `input`, and fan a top-level `Comma` out into one path per
 /// branch, yielding one fully-static path expression per resolved path.
@@ -66174,67 +66284,37 @@ fn is_identity_stage(expr: &Expr) -> bool {
 /// which is also where #1651's document-root short-circuit and #1764's
 /// no-`Untracked::Skip` exception now live. Everything below therefore
 /// always takes the `path()`/`=`/`|=` reading of both.
-/// The members a failed write target `expr` is recovered from (#4360): `expr` itself, or the members
-/// of its top-level comma, when it is a [`is_yq_grammar_write_target`] and no member fans out (a
-/// comma, `.[]` or a slice anywhere inside one). Such a member that fails resolves to *no* target,
-/// exactly; a fan-out may have written some of its targets before the failing one, and yq writes
-/// all of the others, so a target that fans out keeps the loud refusal rather than a partial write.
-fn recoverable_write_members(expr: &Expr) -> Option<&[Expr]> {
-    if !is_yq_grammar_write_target(expr) {
-        return None;
-    }
-    let members = match unwrap_paren(expr) {
-        Expr::Comma(members) => members.as_slice(),
-        _ => core::slice::from_ref(expr),
-    };
-    let fans_out = |member: &Expr| {
-        any_subexpr(member, &mut |node| {
-            matches!(node, Expr::Comma(_) | Expr::Iterate | Expr::Slice { .. })
-        })
-    };
-    members
-        .iter()
-        .all(|member| !fans_out(member))
-        .then_some(members)
-}
-
-/// Whether every node of the write target `expr` is a construct yq's own grammar accepts (#4360): a
-/// path step, a literal, a constructor, arithmetic and the handful of builtins that compute a value.
-/// A target that holds a jq-only construct (`foreach`, `reduce`, `try`, `getpath`, `as`) has no yq
-/// oracle to read a no-op from, and keeps the refusal -- a silent no-op there would hide a wrong
-/// acceptance.
-fn is_yq_grammar_write_target(expr: &Expr) -> bool {
-    !any_subexpr(expr, &mut |node| {
-        !matches!(
-            node,
-            Expr::Identity
-                | Expr::Field(_)
-                | Expr::Index { .. }
-                | Expr::Slice { .. }
-                | Expr::Iterate
-                | Expr::Literal(_)
-                | Expr::Paren(_)
-                | Expr::Pipe(_)
-                | Expr::Comma(_)
-                | Expr::Array(_)
-                | Expr::Object(_)
-                | Expr::Arithmetic { .. }
-                | Expr::Builtin(
-                    Builtin::Length
-                        | Builtin::Keys
-                        | Builtin::KeysUnsorted
-                        | Builtin::ToEntries
-                        | Builtin::ToString
-                )
-        )
-    })
-}
-
 fn resolve_dynamic_indexes<S: EvalSemantics>(
     expr: &Expr,
     input: &OwnedValue,
     defer_trailing_iterate: bool,
 ) -> Result<Vec<Expr>, (Vec<Expr>, EvalEscape)> {
+    // #4401: a comma of write targets that holds a static member (`(.a[], .b[]) = v`) resolves
+    // member by member in yq mode. Resolved jointly, the dynamic resolver walked `.b[]` as a read
+    // and raised `Cannot iterate over null` on an absent `.b`; as its own static path it reaches
+    // the writer verbatim, which does what a lone `.b[] = v` does -- vivify `b: []` and write into
+    // its zero elements. A comma's paths are its members' in order, so nothing else moves.
+    if S::TAG == EvalTag::Yq && !defer_trailing_iterate {
+        if let Expr::Comma(members) = unwrap_paren(expr) {
+            if members.iter().any(|member| !needs_path_prepass(member)) {
+                let mut out = Vec::new();
+                for member in members {
+                    match resolve_dynamic_indexes::<S>(member, input, defer_trailing_iterate) {
+                        Ok(paths) => out.extend(paths),
+                        Err((_, escape)) => return Err((out, escape)),
+                    }
+                }
+                return Ok(out);
+            }
+        }
+    }
+    // #4401: `(.a[] | select(. == 1)) = v` over an `.a` that is absent, `null` or a scalar iterates
+    // nothing, and yq still vivifies the `[]` an absent or `null` `.a` iterated (`{"a":[]}`).
+    if S::TAG == EvalTag::Yq && !defer_trailing_iterate {
+        if let Some(paths) = iterate_of_nothing_target(expr, input) {
+            return Ok(paths);
+        }
+    }
     // An always-`Continue` sink over the streaming form below; the
     // write-side callers want every resolved expression.
     let mut out = Vec::new();
