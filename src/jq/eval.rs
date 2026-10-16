@@ -53830,6 +53830,9 @@ fn certainly_raises(e: &Expr) -> bool {
         Expr::Pipe(stages) => stages
             .split_last()
             .is_some_and(|(last, earlier)| earlier.iter().all(emits_once) && raises(last)),
+        // #4704: `A // B` runs `B` when `A` has no truthy output, so a falsy constant `A` raises
+        // exactly when `B` does (`false // error`).
+        Expr::Alternative(left, right) if never_truthy(left) => certainly_raises(right),
         other => raises(other),
     }
 }
@@ -54043,6 +54046,33 @@ fn passing_marker_selects<S: EvalSemantics>(source: &Expr) -> Vec<Expr> {
         false
     });
     passing
+}
+
+/// #4704: whether `source` emits nothing in the body of a `reduce` whose source moved the register,
+/// because the destructure of `.` it begins with raises there ([`leading_destructure_of_dot_element`])
+/// and a `?`, a `try` or a `try ... catch empty` around it swallows the raise: `(. as {b:$b} | .)?`,
+/// `try (. as {a:$a} | .) catch empty`, and either one as the branch `false // X` runs. A `foreach`
+/// source that emits nothing makes the enclosing `reduce` UPDATE emit nothing, whose `null` state jq
+/// refuses at the end of the path; a handler that emits (`catch .`) is a source of its own.
+fn caught_leading_destructure_emits_nothing(source: &Expr) -> bool {
+    match unwrap_paren(source) {
+        Expr::Optional(body)
+        | Expr::Try {
+            expr: body,
+            catch: None,
+        } => leading_destructure_of_dot_element(body).is_some(),
+        Expr::Try {
+            expr: body,
+            catch: Some(handler),
+        } => {
+            matches!(unwrap_paren(handler), Expr::Builtin(Builtin::Empty))
+                && leading_destructure_of_dot_element(body).is_some()
+        }
+        Expr::Alternative(left, right) if never_truthy(left) => {
+            caught_leading_destructure_emits_nothing(right)
+        }
+        _ => false,
+    }
 }
 
 fn drive_fold_source_with<S: EvalSemantics>(
@@ -54426,6 +54456,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // own "with result" refusal does for a `.` body. A `null` ambient is left to the
     // resolver's own `null` clause (#4007): on a `null` document the register really is
     // that `null`, and jq answers.
+    // #4704: the raise is swallowed, so the source is empty and the enclosing UPDATE's `null` state
+    // is the register jq refuses at the end of the path. Nothing to drive.
+    if foreach_source
+        && in_moved_body
+        && refusal_eligible
+        && fold_body::depth() != 0
+        && caught_leading_destructure_emits_nothing(source)
+    {
+        return Flow::Exhausted;
+    }
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
         && ambient.trackable
