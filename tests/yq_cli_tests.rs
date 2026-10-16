@@ -68732,7 +68732,8 @@ fn test_write_through_a_computed_left_side_is_a_noop_4360() -> Result<()> {
 
 /// #3019: the path-context walk dropped every component above a position that hangs under a
 /// *root-level* owned node -- a yq slice of the document (`.[1:]`), a slice of a slice, a computed
-/// sum -- so `path` answered only the tail (`["c"]` for `[1,"c"]`), `parent` answered nothing, and a
+/// sum (the rows below also read absent fields under them, `.z.y`: an `Absent` link under an owned one)
+/// -- so `path` answered only the tail (`["c"]` for `[1,"c"]`), `parent` answered nothing, and a
 /// debug build panicked (`an absent position hangs under a real ancestor`). The identity now carries
 /// every component below the owned root over the value each was taken from. Every row captured from
 /// yq v4.53.3 (Homebrew); rows that read an absent field and so vivify it in yq (#2435) are left out.
@@ -68830,6 +68831,40 @@ fn test_path_and_parent_under_a_root_level_owned_node_keep_their_prefix_3019() -
         ("x: 1\nl: [{a: 1}, {c: 3}]\n", "(.l + [{\"c\": 5}]) | .[0]  | [path]", "[[\"l\",0]]\n"),
         ("x: 1\nl: [{a: 1}, {c: 3}]\n", "(.l + [{\"c\": 5}]) | .[0] | .c | path", "[\"l\",0,\"c\"]\n"),
         ("x: 1\nl: [{a: 1}, {c: 3}]\n", "(.l + [{\"c\": 5}]) | .[0] | .c | [path]", "[[\"l\",0,\"c\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z | path", "[1,\"z\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z | path", "[0,\"z\"]\n[1,\"z\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z | key", "\"z\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z | key", "\"z\"\n\"z\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z | [path]", "[[1,\"z\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z | [path]", "[[0,\"z\"]]\n[[1,\"z\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z.y | path", "[1,\"z\",\"y\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z.y | path", "[0,\"z\",\"y\"]\n[1,\"z\",\"y\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z.y | key", "\"y\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z.y | key", "\"y\"\n\"y\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .z.y | [path]", "[[1,\"z\",\"y\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .z.y | [path]", "[[0,\"z\",\"y\"]]\n[[1,\"z\",\"y\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .c.d.e | path", ""),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .c.d.e | path", "[0,\"c\",\"d\",\"e\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[1] | .c.d.e | key", ""),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .c.d.e | key", "\"e\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", ".[1:] | .[] | .c.d.e | [path]", "[[0,\"c\",\"d\",\"e\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z | path", "[1,\"z\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z | path", "[0,\"z\"]\n[1,\"z\"]\n[2,\"z\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z | key", "\"z\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z | key", "\"z\"\n\"z\"\n\"z\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z | [path]", "[[1,\"z\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z | [path]", "[[0,\"z\"]]\n[[1,\"z\"]]\n[[2,\"z\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z.y | path", "[1,\"z\",\"y\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z.y | path", "[0,\"z\",\"y\"]\n[1,\"z\",\"y\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z.y | key", "\"y\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z.y | key", "\"y\"\n\"y\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .z.y | [path]", "[[1,\"z\",\"y\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .z.y | [path]", "[[0,\"z\",\"y\"]]\n[[1,\"z\",\"y\"]]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .c.d.e | path", ""),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .c.d.e | path", "[0,\"c\",\"d\",\"e\"]\n[2,\"c\",\"d\",\"e\"]\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[1] | .c.d.e | key", ""),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .c.d.e | key", "\"e\"\n\"e\"\n"),
+        ("- {a: 1}\n- {b: 2}\n- {c: 3}\n", "(. + [{\"z\": 9}])[1:] | .[] | .c.d.e | [path]", "[[0,\"c\",\"d\",\"e\"]]\n[[2,\"c\",\"d\",\"e\"]]\n"),
     ];
     for &(doc, filter, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
