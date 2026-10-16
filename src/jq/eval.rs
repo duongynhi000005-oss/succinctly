@@ -49553,6 +49553,12 @@ impl FoldRegister {
         }
     }
 
+    /// Whether this register is a tracked `null` INIT navigated to below the root (#4707): jq's register
+    /// holds that `null`, which the fold's input (the document) is not.
+    fn is_tracked_null_below_root(&self) -> bool {
+        self.trackable && self.path.depth() > 0 && matches!(self.value, OwnedValue::Null)
+    }
+
     /// #4131: this untracked register as a *trackable* one at the fold's root, when the stage
     /// carries its live value ([`FoldRegister::live_register`]) and that value is `null` or a
     /// boolean. Those are `jv_identical` to any equal `null`/boolean by kind
@@ -57179,9 +57185,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         let register_null_off_root = S::TAG == EvalTag::Jq
             && !source_trackable
             && !init_moved
-            && reg.trackable
-            && reg.path.depth() > 0
-            && matches!(reg.value, OwnedValue::Null)
+            && reg.is_tracked_null_below_root()
             && !frame.register_loss.is_lost();
         return FoldSourceAmbient {
             value,

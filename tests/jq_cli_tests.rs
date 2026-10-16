@@ -66145,6 +66145,27 @@ fn test_literal_null_destructure_in_a_fold_source_moves_a_null_register_below_th
     Ok(())
 }
 
+/// #4707: the one shape the fix above trades a wrong answer for a refusal on. A comma that follows the literal
+/// `null` destructure in the innermost of three folds, on a `null` document: jq prints `["a"]`, `[]`, `["a"]`,
+/// `[]` (its register is restored at the comma's fork point, so the `1` is no path output), the by-value drive
+/// printed `["a"]`, `[]`, `[]`, `[]`, and the resolver, which now places the destructure, raises `Invalid path
+/// expression with result 1` on the second pass of the innermost fold, where its accumulator is untracked. Pinned
+/// as the refusal it is, so that a change to it is seen; the answer is jq's, and it belongs to the follow-up that
+/// teaches the resolver not to check an emission of that fold.
+#[test]
+fn test_comma_after_a_null_destructure_in_the_innermost_of_three_folds_stays_refused_4707(
+) -> Result<()> {
+    let filter = r"path(foreach (1,2) as $i (.; foreach (foreach (1,2) as $k (.; foreach ((null as {a:$a} | .), 1) as $y (.; $y; .); .)) as $z (.; .; .); .))";
+    let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("null"))?;
+    assert_eq!(code, 5, "stderr: {stderr:?}");
+    assert!(
+        stderr.contains("Invalid path expression with result 1"),
+        "stderr: {stderr:?}"
+    );
+    assert_eq!(stdout, "[\"a\"]\n[]\n");
+    Ok(())
+}
+
 /// #4637: a `foreach` (or `reduce`) source that begins with a destructure of `.`, in the body of a `reduce` whose
 /// source moved the register onto an element. The accumulator is no node of that register, so
 /// jq's pattern step raises `near attempt to access element 0 of ...`, which an enclosing `?`/`try`
