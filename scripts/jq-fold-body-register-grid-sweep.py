@@ -18,7 +18,8 @@ ACCEPT_WRONG outside the documented residual (`KNOWN_ACCEPT_WRONG`), a row that 
 #3186/#3267), or a candidate timeout. Run it against a `main` build as `--base` to see what a change moved.
 
 Usage: scripts/jq-fold-body-register-grid-sweep.py --bin BIN [--base BIN] [--jq JQ] [--show N]
-                                                   [--only SUBSTR[,SUBSTR...]] [--jobs N] [--wrapped]
+                                                   [--only SUBSTR[,SUBSTR...]] [--only-source SUBSTR[,SUBSTR...]]
+                                                   [--jobs N] [--wrapped | --deep]
 """
 import argparse
 import collections
@@ -38,6 +39,17 @@ OUTER = [
     # (#4627) EXTRACT is the loop element, which a navigating source leaves at jq's register
     ("fe-nav-i", "foreach .[]? as $i (.; {I}; $i)"),
     ("fe-nava-i", "foreach .a? as $i (.; {I}; $i)"),
+]
+# (#4648) the inner fold three levels down: a fold in the UPDATE of a fold that is the SOURCE of another
+# fold in the UPDATE of the outer one, and a fold in the UPDATE of a fold in the UPDATE of the outer one.
+# The live register an untracked fold holds reaches the innermost through two bodies. Opt-in (`--deep`):
+# `main` is wrong on hundreds of these rows (a `null` literal bound to a variable and destructured, as the
+# source of a fold in an UPDATE), so the run is judged against `--base` alone, as `--wrapped` is.
+DEEP_OUTER = [
+    ("fe3-fe-src", "foreach (1,2) as $i (.; foreach (foreach (1,2) as $k (.; {I}; .)) as $z (.; .; .); .)"),
+    ("rd3-fe-src", "reduce (1,2) as $i (.; reduce (foreach (1,2) as $k (.; {I}; .)) as $z (.; .))"),
+    ("fe3-fe-upd", "foreach (1,2) as $i (.; foreach (1,2) as $k (.; {I}; .); .)"),
+    ("rd3-rd-upd", "reduce (1,2) as $i (.; reduce (1,2) as $k (.; {I}))"),
 ]
 INNER = [
     ("fe", "foreach ({S}) as $y (.; .; .)"),
@@ -310,22 +322,30 @@ def main():
     ap.add_argument("--jq", default="/usr/bin/jq", help="the pinned oracle (jq 1.7.1)")
     ap.add_argument("--show", type=int, default=20, help="max rows printed per section")
     ap.add_argument("--only", default="", help="restrict to rows whose name contains this (comma-separated: any of)")
+    ap.add_argument("--only-source", default="", help="restrict to sources whose name contains this (comma-separated: any of)")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument(
         "--wrapped",
         action="store_true",
         help="run the `?`/`try`-wrapped contexts instead of the gated ones (#4637); judged against --base only",
     )
+    ap.add_argument(
+        "--deep",
+        action="store_true",
+        help="run the three-fold-deep outers instead of the gated ones (#4648); judged against --base only",
+    )
     ap.add_argument("--breakdown", action="store_true", help="count the #4588 residual rows per outer fold and source")
     args = ap.parse_args()
-    if args.wrapped and not args.base:
-        ap.error("--wrapped is judged against --base: pass a reference build")
+    if (args.wrapped or args.deep) and not args.base:
+        ap.error("--wrapped and --deep are judged against --base: pass a reference build")
 
     rows = []
     contexts = WRAPPED_CONTEXTS if args.wrapped else CONTEXTS
-    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(OUTER, INNER, SOURCES, contexts, DOCS):
+    for (on, o), (inn, i), (sn, s), (cn, c), doc in itertools.product(DEEP_OUTER if args.deep else OUTER, INNER, SOURCES, contexts, DOCS):
         name = f"{on}/{inn}/{sn}/{cn}"
         if args.only and not any(part in name for part in args.only.split(",")):
+            continue
+        if args.only_source and not any(part in sn for part in args.only_source.split(",")):
             continue
         prog = c.replace("{O}", o.replace("{I}", i.replace("{S}", s)))
         rows.append((name, sn, prog, doc))
@@ -389,7 +409,7 @@ def main():
     for title, section in (("ACCEPT_WRONG", fresh), ("LOST MATCH", lost), ("TIMEOUT", hung)):
         for name, _sn, prog, doc, oracle, klass, cand, _b in section[: args.show]:
             print(f"{title} {name} [{klass}]\n   {prog}\n   in={doc} jq={oracle} build={cand}")
-    if args.wrapped:
+    if args.wrapped or args.deep:
         # `main` is not clean on these rows: only what the candidate moved for the worse counts.
         worse = [r for r in results if r[5] == "ACCEPT_WRONG" and r[7] not in (None, "ACCEPT_WRONG")]
         print(f"newly ACCEPT_WRONG against --base: {len(worse)}")

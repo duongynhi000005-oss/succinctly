@@ -37675,12 +37675,21 @@ fn slice_bound_component_value(bound: Option<i64>, key: Option<&SliceBoundKey>) 
 /// unlike `register`, it survives a moved position (it is knowledge about
 /// the branch, not about the node under it). Cleared when the branch is
 /// trackable again, and by a fresh invocation.
+///
+/// `live_non_null` (#4648) is the kind of the live register without its value: jq's register is
+/// known not to be `null`, though `register` is `None`. A fold's UPDATE hands a nested body the
+/// live register's value only for a `null` or boolean one ([`FoldRegister::resolve_sink`]), the
+/// kinds `jv_identical` compares by value; a container or scalar register is not handed on, since
+/// an equal value is not the same node. What a nested fold needs of it is only that it is not
+/// `null` ([`FoldRegister::register_is_non_null`]), which is a fact about the kind. It is cleared
+/// by every constructor that sets or forgets the register, as `register` is.
 #[derive(Debug, Clone)]
 pub(crate) struct Frame {
     invocation: u64,
     at: Option<Rc<PathPrefix>>,
     register: Option<Rc<OwnedValue>>,
     register_loss: RegisterLoss,
+    live_non_null: bool,
 }
 
 /// Whether, and where, a branch's path register was lost (#3267) -- see
@@ -37726,6 +37735,7 @@ impl Frame {
             at,
             register: None,
             register_loss: RegisterLoss::Kept,
+            live_non_null: false,
         }
     }
 
@@ -37737,6 +37747,7 @@ impl Frame {
             at: Some(path),
             register: None,
             register_loss: RegisterLoss::Kept,
+            live_non_null: false,
         }
     }
 
@@ -37747,6 +37758,7 @@ impl Frame {
             at: None,
             register: None,
             register_loss: self.register_loss.clone(),
+            live_non_null: false,
         }
     }
 
@@ -37775,7 +37787,15 @@ impl Frame {
             // for a container, and the register is nearly always one.
             register: register.map(|value| Rc::new(value.clone())),
             register_loss: self.register_loss.clone(),
+            live_non_null: false,
         }
+    }
+
+    /// This frame, recording that jq's live register is not `null` although its value is not
+    /// carried (#4648). Set after [`Frame::with_register`], which clears it.
+    fn with_live_non_null(mut self, non_null: bool) -> Self {
+        self.live_non_null = non_null;
+        self
     }
 
     /// This frame, recording whether the branch's register was dropped by a
@@ -37821,6 +37841,7 @@ impl Frame {
                 None
             },
             register_loss: self.register_loss.clone(),
+            live_non_null: path.depth() == 0 && self.live_non_null,
         }
     }
 
@@ -49407,6 +49428,16 @@ impl FoldRegister {
     /// (the frame dropped it, as in a fold two deep) the fold's own value is all there is to
     /// read, and it is the accumulator again: the old answer, not a new one.
     fn register_is_non_null(&self) -> bool {
+        // #4648: a fold nested in another fold's UPDATE is handed the live register's value only
+        // for a `null` or boolean one, so for any other it carries the kind alone.
+        if self.live_register_known
+            && !self.trackable
+            && !self.frame.register_loss.is_lost()
+            && self.frame.register().is_none()
+            && self.frame.live_non_null
+        {
+            return true;
+        }
         !matches!(
             self.live_register().unwrap_or(&self.value),
             OwnedValue::Null
@@ -49737,11 +49768,18 @@ impl FoldRegister {
             .then(|| self.live_register())
             .flatten()
             .filter(|live| is_null_or_bool(live) && !fans_out(expr));
+        // #4648: ...and a register of any other kind is not handed on, but a fold nested in the
+        // body still needs to know it is not `null` ([`FoldRegister::register_is_non_null`]).
+        let live_non_null = S::TAG == EvalTag::Jq
+            && self
+                .live_register()
+                .is_some_and(|live| !matches!(live, OwnedValue::Null));
         let update_frame = if self.trackable {
             self.frame.clone()
         } else {
             self.frame.unknown()
-        };
+        }
+        .with_live_non_null(live_non_null);
         // #2860: `relocate`'s own `identical()` fallback re-derives
         // trackability from this call's *entry-time* register
         // (`self.value`/`self.frame`), which `resolve_seq_sink`/`resolve_node`
@@ -49818,11 +49856,13 @@ impl FoldRegister {
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
             let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
-            let update_frame = update_frame.with_register(if carries {
-                Some(&self.value)
-            } else {
-                live_register
-            });
+            let update_frame = update_frame
+                .with_register(if carries {
+                    Some(&self.value)
+                } else {
+                    live_register
+                })
+                .with_live_non_null(live_non_null);
             resolve_node_sink::<S>(
                 expr,
                 &input,
@@ -53244,6 +53284,14 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
 /// (.; .))` is `[]` in jq and was refused). A bare `$var` bind performs no step
 /// and stays by value too.
 fn is_fold_source_destructuring(e: &Expr, known: NotRegister) -> bool {
+    // #4648: a literal `null` is not the register's own when the register is anything else, and is
+    // when it is `null`: there its pattern steps move jq's register (`null | path(foreach (null as
+    // {b:$b} | .) as $y (.; .; .))` is `["b"]`), which the resolver places and a by-value drive does
+    // not. Routed as the fresh value it is not, for this decision only.
+    let known = NotRegister {
+        null: known.null || known.at_null,
+        ..known
+    };
     match e {
         Expr::AsPattern { expr, patterns, .. } => {
             routes_fresh_destructuring(patterns) && yields_only_fresh_values(expr, known)
@@ -53333,6 +53381,13 @@ struct NotRegister {
     null: bool,
     true_: bool,
     false_: bool,
+    /// The register is the fold's input and that is `null` (#4648), so a literal `null`
+    /// destructured in a source is the register: its pattern steps move jq's register, which only
+    /// the resolver models. Not where INIT moved the register off the document: the resolver does
+    /// not place a step from a `null` register below the root (`{"a":null} | path(foreach (null|.b)
+    /// as $y (.a; .; .))` is refused on `main` too), so routing there would refuse what a by-value
+    /// drive answers (`path(reduce (null as {b:$b} | .) as $y (.a; .))` is `["a"]`).
+    at_null: bool,
 }
 
 impl NotRegister {
@@ -53361,6 +53416,7 @@ impl NotRegister {
             null: !matches!(ambient.value, OwnedValue::Null),
             true_: !matches!(ambient.value, OwnedValue::Bool(true)),
             false_: !matches!(ambient.value, OwnedValue::Bool(false)),
+            at_null: matches!(ambient.value, OwnedValue::Null),
         }
     }
 }
