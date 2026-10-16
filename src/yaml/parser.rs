@@ -5171,9 +5171,21 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 return Ok(());
             }
 
-            // Content at deeper indent - that's the key content
-            // Let the main loop parse it (don't restore position - stay at content start)
-            return Ok(());
+            // Content at deeper indent: that is the key content. Parsed here as if it
+            // had followed the `?` on its own line, so the key is recorded as pending and
+            // the entry after it is not taken for its value (#4532).
+            self.advance_by(next_indent);
+            // Node properties on the content line belong to the key, as on the `?` line. When
+            // they stand alone on it the key content is a further line down, which the main loop
+            // reads as it always has.
+            if matches!(self.peek(), Some(b'&' | b'!')) {
+                let properties_start = self.pos;
+                self.parse_node_properties()?;
+                if self.at_line_end() {
+                    self.pos = properties_start;
+                    return Ok(());
+                }
+            }
         }
 
         // Mark key position
