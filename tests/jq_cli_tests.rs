@@ -106628,10 +106628,12 @@ fn test_navigated_bind_null_bool_sibling_answers_3136() -> Result<()> {
     Ok(())
 }
 
-/// yq mode is untouched by #3135 as well: the identity-pipe door is jq-only,
-/// so the owned-rooted shape keeps refusing where real yq v4.53.3 prints
-/// the document unchanged (`{"b": 1}` for this filter, a no-op write) --
-/// the same recorded divergence as `test_navigated_bind_yq_mode_unchanged_3037`.
+/// yq mode is untouched by #3135 as well: the identity-pipe door is jq-only. The owned-rooted
+/// shape used to refuse where real yq v4.53.3 prints the document unchanged (`{"b": 1}` for this
+/// filter, a no-op write); since #4360 a step applied to a value that is not a path finds nothing
+/// to write through in yq mode, so it is that no-op here too (the flow style yq keeps after
+/// `tojson|fromjson` is the one remaining difference). The promotion stays jq-only, so it cannot
+/// become a write yq does not perform: the document comes back unchanged, never `9`.
 #[test]
 fn test_navigated_bind_on_owned_root_yq_mode_unchanged_3135() -> Result<()> {
     let (output, code) = spawn_with_signal_retry(
@@ -106643,14 +106645,9 @@ fn test_navigated_bind_on_owned_root_yq_mode_unchanged_3135() -> Result<()> {
         },
         Some(b"a:\n  b: 1\n"),
     )?;
-    assert_ne!(
-        code,
-        0,
-        "#3135 yq: stdout={:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Invalid path expression"),
+    assert_eq!(
+        (code, String::from_utf8_lossy(&output.stdout).as_ref()),
+        (0, "b: 1\n"),
         "#3135 yq: stderr={:?}",
         String::from_utf8_lossy(&output.stderr)
     );

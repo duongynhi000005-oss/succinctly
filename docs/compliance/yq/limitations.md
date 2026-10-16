@@ -2215,6 +2215,32 @@ does not cover (a derived or bound sibling, so the group refuses) is still skipp
 other literal is parentless and ordered by the rule above: `true | del(null)`,
 `{a: {b: 1}} | .a.b |= del(null)` and `[null, 1] | map(del(null))` leave their input unchanged.
 
+### A write whose left side steps into a value that is not a path is a no-op ([#4360](https://github.com/rust-works/succinctly/issues/4360)); a bare computed `del()` target still refuses
+
+The #1764 rule above covers a branch that *ends* on a computed value. A branch that *steps into*
+one -- an index or a field applied to a sum, a constructor or a builtin's result -- raised jq's
+`Invalid path expression near attempt to access element ...` in yq mode, where yq finds nothing to
+write through and returns the document unchanged, exit 0 (`=`, `|=`, `+=` and `del()`; jq mode
+raises, as jq does). Against yq v4.53.3 on `{"a":{"b":1},"s":"xyz","n":5,"l":[1,2]}`:
+
+```bash
+$ yq -p=json -o=json -I=0 '(.l + [3])[0] = 5'          # {"a":{"b":1},"s":"xyz","n":5,"l":[1,2]}
+$ yq -p=json -o=json -I=0 '[.n][0] |= 5'               # unchanged
+$ yq -p=json -o=json -I=0 'del({"q": .n}.q)'           # unchanged
+$ yq -p=json -o=json -I=0 '(.a, [.n][0], .s) = 7'      # {"a":7,"s":7,"n":5,"l":[1,2]}
+$ yq -p=json -o=json -I=0 'del([.n][0], .n)'           # {"a":{"b":1},"s":"xyz","l":[1,2]}
+```
+
+The members of a comma are resolved one by one once one of them fails this way, so the later ones
+still take the write or the delete. The conversion applies only to a target built from constructs
+yq's own grammar accepts (path steps, literals, constructors, arithmetic, `length`, `keys`,
+`to_entries`, `tostring`): a `foreach`, `reduce`, `try`, `getpath` or `as` inside the target is a
+jq-only construct with no yq oracle, and keeps the refusal (a silent no-op there would hide a wrong
+acceptance; pinned by `test_yq_mode_getpath_register_unchanged_2896` and its siblings). Still
+refused: a bare computed `del()` target -- `del((1 + 2))` is a no-op in yq, `del(.s + "x")` deletes
+`.s` there (yq reads the sum as its left operand) -- and the `//=` spelling is not yq's at all.
+Pinned in `test_write_through_a_computed_left_side_is_a_noop_4360`.
+
 ### `del()` with a field key against a scalar root: errors instead of no-op
 
 Deleting a field key from a scalar document raises `Cannot index <type> with string
