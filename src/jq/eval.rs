@@ -50285,29 +50285,11 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             // it where it entered leaves the whole there.
             Expr::And(left, right) | Expr::Or(left, right) => Some(leaves(left)? | leaves(right)?),
             // #4641: a zero-arity `def` called as the whole of its scope (`def f: isempty(g); f`)
-            // is its body, which the resolver resolves in place against the call's own input and
-            // frame, as in [`def_call_keeps_register`]. Bound (a `DefCall`) it is read through the
-            // shared budget (not recognised without `std`, like every budgeted read, #3790);
-            // unbound (the `FuncDef` the fold's UPDATE is written as) only when `then` is the
-            // one call to it, so no other body is looked into and nothing needs a budget.
-            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
-                within_def_call_budget_with(|| leaves(&def.body))
-            }
-            Expr::FuncDef {
-                name,
-                params,
-                body,
-                then,
-                ..
-            } if params.is_empty()
-                && matches!(
-                    unwrap_paren(then),
-                    Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
-                ) =>
-            {
-                leaves(body)
-            }
-            other => neutral_leaves_register(other).then_some(false),
+            // is its body ([`ZeroArityDefCall`]).
+            other => match ZeroArityDefCall::of(other) {
+                Some(call) => call.read(leaves),
+                None => neutral_leaves_register(other).then_some(false),
+            },
         }
     }
     leaves(update) == Some(true)
@@ -50336,25 +50318,60 @@ fn seed_first_recursion(gen: &Expr, plain: bool) -> bool {
             }
             None => false,
         },
-        Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
-            within_def_call_budget_with(|| seed_first_recursion(&def.body, plain).then_some(()))
-                .is_some()
+        other => ZeroArityDefCall::of(other)
+            .and_then(|call| call.read(|body| seed_first_recursion(body, plain).then_some(())))
+            .is_some(),
+    }
+}
+
+/// The body of a zero-arity `def` that an expression is the whole call of (#4641), and whether
+/// the call is bound. The resolver resolves the body in place against the call's own input and
+/// frame, as in [`def_call_keeps_register`], so the register statement it makes is the one the
+/// call hands on. The one definition of that reading for [`verdict_builtin_leaves_register`] and
+/// [`seed_first_recursion`].
+struct ZeroArityDefCall<'a> {
+    body: &'a Expr,
+    bound: bool,
+}
+
+impl<'a> ZeroArityDefCall<'a> {
+    /// `expr` as such a call: bound (a `DefCall`), or unbound (the `FuncDef` a fold's UPDATE is
+    /// written as) only when `then` is the one call to it.
+    fn of(expr: &'a Expr) -> Option<Self> {
+        match expr {
+            Expr::DefCall { def, args, .. } if args.is_empty() && def.params.is_empty() => {
+                Some(Self {
+                    body: &def.body,
+                    bound: true,
+                })
+            }
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                ..
+            } if params.is_empty()
+                && matches!(
+                    unwrap_paren(then),
+                    Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
+                ) =>
+            {
+                Some(Self { body, bound: false })
+            }
+            _ => None,
         }
-        Expr::FuncDef {
-            name,
-            params,
-            body,
-            then,
-            ..
-        } if params.is_empty()
-            && matches!(
-                unwrap_paren(then),
-                Expr::FuncCall { name: called, args, .. } if called == name && args.is_empty()
-            ) =>
-        {
-            seed_first_recursion(body, plain)
+    }
+
+    /// What `read` makes of the body. A bound call is read through the shared budget, so it is
+    /// `None` past it and without `std` (like every budgeted read, #3790); an unbound one looks
+    /// into no other body, so it needs none.
+    fn read<T>(&self, read: impl FnOnce(&Expr) -> Option<T>) -> Option<T> {
+        if self.bound {
+            within_def_call_budget_with(|| read(self.body))
+        } else {
+            read(self.body)
         }
-        _ => false,
     }
 }
 

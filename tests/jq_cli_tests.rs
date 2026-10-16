@@ -76089,7 +76089,7 @@ fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()
 /// the register where it entered whatever wraps it. The bare spelling was placed by the dynamic route, whose
 /// statement does not outlive a stage, so the wrapped one fell back to the static view, which did not admit a
 /// recursion; under `?` the refusal was swallowed and the stream element dropped
-/// (`[path(foreach .[]? as  (0; (isempty(recurse) | not); ))?]` on `[1]` is `[[0]]`, here `[]`). Every jq
+/// (`[path(foreach .[]? as $k (0; (isempty(recurse) | not); $k))?]` on `[1]` is `[[0]]`, here `[]`). Every jq
 /// side captured from jq 1.7.1 on `[1]`; the controls that follow are the shapes the admission must not reach
 /// (a verdict decided on a descendant, or after a navigating stage), which keep jq's answer or its refusal.
 #[test]
@@ -76473,6 +76473,29 @@ fn test_foreach_update_composed_isempty_any_recurse_follows_jq_4706() -> Result<
             "",
             0,
         ),
+        // `any` reads the same shapes with the f-less recursion (`plain`): through a neutral
+        // stage, a bound `def` and a `def` written inside the operand.
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(1 | recurse; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"def f: recurse; path(foreach .[]? as $k (0; (any(f; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (any(def f: recurse; f; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
         // A `def` bound around the fold: the verdict reads the call's body.
         (
             r"[1]",
@@ -76516,10 +76539,11 @@ fn test_foreach_update_composed_isempty_any_recurse_follows_jq_4706() -> Result<
 }
 
 /// #4706: the spellings of [`test_foreach_update_composed_isempty_any_recurse_follows_jq_4706`] that stay
-/// refused where jq answers, because the verdict is not decided on the recursion's seed: `any(recurse(f); .)`
-/// can go on past a falsy seed (`recurse([1])` on `null`), and `any(recurse; true)` is not the identity `cond`
-/// the admission reads. jq prints `[0]` / `[[0]]` for all four. A refusal is the safe direction; this pins that
-/// it stays one rather than becoming a wrong answer, so a later promotion has to change the row on purpose.
+/// refused where jq answers, because the admission cannot prove the verdict is decided on the recursion's
+/// seed: `any(recurse(f); .)` may go on past a falsy seed (`f` is any filter), and `any(recurse; true)` is not
+/// the identity `cond` the admission reads. On `[1]` the seed does decide both, so jq prints `[0]` / `[[0]]` for
+/// all four. A refusal is the safe direction; this pins that it stays one rather than becoming a wrong answer,
+/// so a later promotion has to change the row on purpose.
 #[test]
 fn test_foreach_update_composed_any_recurse_not_decided_on_the_seed_stays_refused_4706(
 ) -> Result<()> {

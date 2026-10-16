@@ -377,8 +377,10 @@ OPERANDS = [
     "isempty(def f: recurse; f)",
     # (#4706) the composed spellings #4698 left: a recursion's seed is its first output, at the
     # register, so a verdict that stops there (`isempty`, `any` over `.`) leaves it whatever wraps it
-    # (`| not`, `and`, a `def`). The controls are the shapes decided on a descendant or after a
-    # navigating stage, which must keep the refusal jq's register makes.
+    # (`| not`, `and`, a `def`): those rows now answer as jq does. The controls are the shapes decided
+    # on a descendant or after a navigating stage (`.a | recurse`, `recurse | .a`, `any(recurse(f); .)`,
+    # `any(recurse; true)`, `all(recurse; .)`), which keep the refusal jq's register makes or the
+    # refusal the build still makes where jq answers.
     "(any(recurse; .) | not)",
     "(any(..; .) | not)",
     "(isempty(..) | not)",

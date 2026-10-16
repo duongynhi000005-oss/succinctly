@@ -905,12 +905,13 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
   the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly
-  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it). Two gates stack: `fans_out_with` counts the
-  marker-reading fold, so the outer UPDATE's frame carries no register, and an *untracked* fold register hands its body
-  `Frame::unknown()` (no position, no register) after a review found fabricated writes when the untracked value was read as the
-  register. Lifting only the first turns the loud error into a silently empty stream (the inner `try ($w|.b)` refuses against a
-  register it now knows by value but not by position, and the `try` swallows it), which is the worse direction; the second needs the
-  register's *position* (the `$w` marker's origin) carried through an untracked fold register.
+  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it). Two gates stack
+  (found by experiment while fixing #4706, not shipped): `fans_out_with` counts the marker-reading fold, so the outer UPDATE's frame
+  carries no register, and `FoldRegister::resolve_sink` hands an *untracked* fold register's body `Frame::unknown()` (no position, no
+  register) after a review found fabricated writes when the untracked value was read as the register. Lifting only the first made the
+  inner `try ($w|.b)` refuse against a register the frame knew by value but not by position, and the `try` swallowed it: the loud
+  error became a silently empty stream, the worse direction. Closing the row needs the register's *position* (the `$w` marker's
+  origin) carried through an untracked fold register.
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare
