@@ -859,14 +859,23 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   siblings, so a caught `try .a` step of the inner fold against a live `null` accumulator is no longer dropped
   (`path(foreach .a? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))` on `null` is `["a","a"]`, it raised `... with result null`;
   with `.` as EXTRACT the error names `result false`, it said `result true`). Pinned by
-  `test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499`. **Still refused where jq answers** (unchanged by
-  it): the other `isempty(FOLD)` shapes -- an inner `reduce` (`isempty(reduce (1,2) as $i (1; try .a))`), an inner EXTRACT that
-  reads the loop variable (`... try .a; $i)`), a non-`null` accumulator or register (`[path(foreach .[]? as $k (0;
-  isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]` on `[1]` is `[]` where jq prints `[[0]]`), and a fold as the `cond` of
-  `any`/`all` -- and a nested fold that
+  `test_foreach_update_isempty_over_a_fold_follows_the_live_null_register_4499`.
+  **Since [#4661](https://github.com/rust-works/succinctly/issues/4661)** the other `isempty(FOLD)` shapes answer as jq does: an inner
+  `reduce` (`isempty(reduce (1,2) as $i (1; try .a))`, which backtracks its source and every UPDATE, so it leaves the register at the
+  entry), an inner EXTRACT that computes after a navigating UPDATE (`... try .a; $i)`, `...; 5)`, which states the register UPDATE
+  reached), a non-`null` accumulator or register (`[path(foreach .[]? as $k (0; isempty(foreach (1,2) as $i (1; try .a; .)); $k))?]` on
+  `[1]` is `[[0]]`; the fold never emits, so the `true` is at the entry), and a fold as the generator of `any`/`all`. An enclosing
+  fold reads the register a verdict's answer states (`isempty`, `any` and `all` count as producers of that statement, as a `catch`
+  handler does). Pinned by `test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_register_follows_jq_4661`. The
+  `foreach` half is gated: the EXTRACT must leave the register where UPDATE put it (`cannot_move_register`) and be a single
+  computed output. **Still refused where jq answers** (unchanged by it, identical on `main`): an EXTRACT that forks (`... try .a; ($i, 5))`, `...; (try error("x") catch 5))`),
+  `isempty(recurse)` / `any(recurse; .)` and `isempty(. as $q ?// $z | .)` as the UPDATE, and a verdict over a fold inside a second
+  fold's UPDATE or a `foreach`'s loop body (`foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(reduce ...); $k); $k)`);
+  a nested fold that
   reads an outer frozen `$var` (`path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .); .))` on `{"a":{"b":1}}`: jq prints
   `["a","b"]` twice, a refusal here in every context) -- [#3984](https://github.com/rust-works/succinctly/issues/3984)'s withhold keeps
-  the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly.
+  the register from a fold that mentions a marker, and lifting it needs the fold's use of the frozen `$var` modelled exactly
+  ([#4499](https://github.com/rust-works/succinctly/issues/4499) stays open for it).
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare

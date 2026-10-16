@@ -48818,6 +48818,14 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
         Expr::And(left, _) | Expr::Or(left, _) if verdict_builtin_leaves_register(left) => {
             EntryMarkers::Forwarded
         }
+        // #4661: a verdict builtin states the register of each answer itself
+        // ([`register_after`], [`drained_register_at_entry`]), whatever its operands do: they are
+        // run and backtracked, and an answer whose register the arm cannot place states none. A
+        // producer in its own right, like a `catch` handler; its operands' statements never reach
+        // the sink.
+        Expr::Builtin(Builtin::IsEmpty(_) | Builtin::AnyCond(..) | Builtin::AllCond(..)) => {
+            EntryMarkers::Forwarded
+        }
         other if hosts_stating_producer(other) => EntryMarkers::Opaque,
         _ => EntryMarkers::None,
     }
@@ -50153,7 +50161,8 @@ impl FoldRegister {
 /// stages leave the register too (`1 | isempty(.)`, `(isempty(1) | not) | .`), or among the items
 /// of a comma (`(isempty(1), isempty(2))`: jq forks it, so each item runs from the register the
 /// comma entered with). An operand is run and backtracked, so [`neutral_leaves_register`] reads it,
-/// through `first`/`limit` and the shapes that fork. The bare and one-argument spellings iterate
+/// through `first`/`limit` and the shapes that fork, and a `reduce` whose source and UPDATEs it
+/// backtracks ([`verdict_operand_leaves_register`], #4661). The bare and one-argument spellings iterate
 /// their input, which moves it, so they are not admitted, and an all-neutral pipe or comma is
 /// [`neutral_leaves_register`]'s, not this one's.
 fn verdict_builtin_leaves_register(update: &Expr) -> bool {
@@ -50220,6 +50229,9 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
 /// - a pipe that cannot emit past a leading `empty` (`empty | .a`): nothing it holds after the
 ///   `empty` runs, and what is before it must leave the register itself (an earlier stage that
 ///   navigates a computed value raises in jq where this evaluates by value);
+/// - a `reduce` that [`reduce_leaves_register_in_place`] admits (#4661): the source, the pattern's
+///   steps and every UPDATE are backtracked, so each output it emits is at the entry register
+///   whatever those navigate, and only an INIT that moves it is refused;
 /// - a pipe or comma of those.
 fn verdict_operand_leaves_register(operand: &Expr) -> bool {
     if neutral_leaves_register(operand) {
@@ -50227,6 +50239,16 @@ fn verdict_operand_leaves_register(operand: &Expr) -> bool {
     }
     match peel_register_transparent(operand) {
         Expr::Builtin(Builtin::Path(_)) => true,
+        // #4661: a `reduce` backtracks its source, its pattern's steps and every UPDATE, so only
+        // INIT's navigation survives it ([`reduce_leaves_register_in_place`]), and it emits only
+        // once that backtracking is done: each output (an INIT that forks gives several, `empty`
+        // none) is at the register it entered with.
+        Expr::Reduce {
+            input,
+            init,
+            update,
+            ..
+        } => reduce_leaves_register_in_place(input, init, update),
         stage @ Expr::Builtin(_) => is_select_stage(stage),
         Expr::Pipe(stages) => {
             match stages
@@ -59407,13 +59429,43 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         )))
                                 .then(fold_body::acc_off_register);
                                 let _foreach_body = fold_body::foreach_body();
+                                // #4661: UPDATE navigated the register to `extract_reg` and EXTRACT
+                                // computed a value there without moving it (`foreach ... (1; try .a;
+                                // $i)`): jq emits from inside the loop, so its register is still on
+                                // what UPDATE reached. The computed emission is no node of it, but a
+                                // consumer that needs to know where the register is (a verdict
+                                // builtin handing it to an enclosing fold, [`register_after`]) is
+                                // told, as it is for an EXTRACT that is `.`. Only an emission that
+                                // navigated nowhere from the register (its path is the register's
+                                // own) states nothing yet, and only for an EXTRACT that
+                                // [`cannot_move_register`] -- one that may have navigated and
+                                // computed after it keeps the statement it made.
+                                let extract_moved = S::TAG == EvalTag::Jq
+                                    && !update_unmoved
+                                    && walked_at.is_none()
+                                    && extract_reg.trackable
+                                    && extract_reg.path.depth() > reg.path.depth()
+                                    && cannot_move_register(ext_expr);
+                                let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
+                                    if extract_moved
+                                        && !branch.trackable
+                                        && matches!(branch.register, BranchRegister::None)
+                                        && *branch.path == *extract_reg.path
+                                    {
+                                        emit(branch.with_register(BranchRegister::Unmoved(
+                                            Cow::Owned(extract_reg.value.clone()),
+                                        )))
+                                    } else {
+                                        emit(branch)
+                                    }
+                                };
                                 match extract_reg.resolve_sink::<S>(
                                     ext_expr,
                                     update_branch.value.clone().into_owned(),
                                     extract_at_register,
                                     &extract_snapshot,
                                     keep,
-                                    &mut emit,
+                                    &mut emit_extracted,
                                 ) {
                                     // #2979 rule 3: anything after `STOREV` that escapes --
                                     // EXTRACT, or the terminal `path()` check refusing the
