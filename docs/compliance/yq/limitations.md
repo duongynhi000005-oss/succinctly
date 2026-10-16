@@ -5860,3 +5860,10 @@ picked once per run, from the *first* file's extension, for every file, as in yq
 `[0,0]` twice, `t.yaml t.json` is `[1,6]` twice; an explicit `-p` is not looked at per file;
 [#4394](https://github.com/rust-works/succinctly/issues/4394)). `--eval-all` is the exception: it still reports
 `[1,6]` for a JSON input (yq: `[0,0]`), tracked as #4544.
+
+### Comment after a sequence item's dash on collecting routes ([#4256](https://github.com/rust-works/succinctly/issues/4256))
+
+A sequence item printed by itself keeps the comment after its bare dash when the item is a container:
+`a:` / `  - # own` / `    c: 2` with `.a[1]`, `.a[-1]`, `.a | .[1]`, `.a[]` or `.a[] | select(.)` prints `# own` /
+`c: 2`, as yq does. A scalar item's comment is dropped, as in yq. The two routes that collect items first
+(`[.a[]]`) or slice (`.a[1:]`) still print the container without that comment; yq keeps it there.

@@ -510,6 +510,16 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         }
     }
 
+    /// The comment on the bare `-` of the sequence item this cursor is the value of (#4256):
+    /// `- # own` / `  c: 2`. It lives on the item's wrapper node, which a navigation such as
+    /// `.a[1]` steps past, so it is read from the parent: the parent is that wrapper exactly when
+    /// resolving it lands on this cursor. `None` for every other node.
+    fn dash_wrapper_comment(&self) -> Option<String> {
+        let wrapper = self.parent()?;
+        let comment = wrapper.line_comment_raw()?;
+        (wrapper.resolve_bare_seq_item().bp_pos == self.bp_pos).then(|| comment.to_string())
+    }
+
     /// Parse an alias value from text position.
     fn parse_alias_value(&self, text_pos: usize) -> YamlValue<'a, W> {
         // Extract anchor name from text (skip the `*`)
@@ -1587,6 +1597,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             }
             if is_first_document || is_collection_root {
                 self_.write_head_comments_at(out, "", self_.bp_pos)?;
+            }
+        } else if is_collection_root {
+            // #4256: a container that is a bare-dash item's value prints the comment after its
+            // dash as a head line (`.a[1]` on `- # own` / `  c: 2` is `# own` / `c: 2` in yq);
+            // a scalar item's comment is dropped, as yq drops it.
+            if let Some(comment) = self_.dash_wrapper_comment() {
+                out.write_str(&comment)?;
+                out.write_char('\n')?;
             }
         }
         // #1350 code review: `write_leading_anchor` must run *before*
