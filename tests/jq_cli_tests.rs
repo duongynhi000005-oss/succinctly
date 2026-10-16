@@ -150016,13 +150016,21 @@ fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduc
 /// not a register either, so the later steps are empty the same way, and a `?//` chain, an array
 /// pattern and a scalar marker raise alike. The controls are answered as jq answers them: a handler that
 /// emits, a `reduce` source (which emits its state), a pipe stage behind
-/// a `foreach` that emits, and a `null` document (where `$x` is the register). Every row is a live jq
+/// a `foreach` that emits, a `null` document (where `$x` is the register) and the value-mode spelling,
+/// where nothing raises and the document comes through. Every row is a live jq
 /// 1.7.1 capture.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_foreach_4723(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .)]",
+            "[{\"a\":{\"b\":1}},{\"a\":{\"b\":1}}]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":{"b":1}}"#,
             r"path(.a as $x | foreach (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
@@ -150122,6 +150130,13 @@ fn test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_forea
 fn test_caught_foreign_marker_destructure_as_the_head_of_a_pipe_update_of_a_reduce_4724(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[.a as $x | reduce (1,2) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .)]",
+            "[{\"a\":{\"b\":1}}]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":{"b":1}}"#,
             r"path(.a as $x | foreach (1,2) as $i (.; reduce (try ($x as {a:$a} | .)) as $y (.; .); .))",

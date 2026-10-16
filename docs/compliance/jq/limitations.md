@@ -2489,10 +2489,13 @@ is the revert that established what the other one costs.
    state to refuse but no emission at all, and the `null` the empty step leaves is no register for the later steps either, so
    the fold prints no path and a write hands the document back (`Flow::Exhausted`; pinned by
    `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_foreach_4723`,
-   [#4723](https://github.com/rust-works/succinctly/issues/4723)). A comma beside the `foreach` in the UPDATE (`foreach ..., 1`) is no head:
-   the `1` still outputs, in both folds. Still accepted: a `foreach` source with a second output beside the
-   `try` (`foreach ((try ($x as {a:$a} | .)), 1) as $y (.; .; .)` under a `foreach` emits twice per step where jq once), and a
-   `try` nested in another (`try (try X)`). A condition that is not a pure function
+   [#4723](https://github.com/rust-works/succinctly/issues/4723)). A comma beside the `foreach` in the UPDATE (`foreach ..., 1`) is no head,
+   so the `foreach` is not read as the whole UPDATE: a `reduce` parent raises on the `1` as jq does, but a `foreach` parent
+   still emits the inner `foreach`'s phantom path too (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .), .` prints 4
+   paths where jq prints 2 over `(1,2)`). Still accepted for the same reason: a `foreach` that another construct wraps
+   (`label $f | foreach ...`, `try (foreach ...)`) as the UPDATE of either parent, a `foreach` source with a second output
+   beside the `try` (`foreach ((try ($x as {a:$a} | .)), 1) as $y (.; .; .)` under a `foreach` emits twice per step where jq
+   once), and a `try` nested in another (`try (try X)`). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks

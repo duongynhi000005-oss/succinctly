@@ -69062,7 +69062,10 @@ mod fold_body {
     /// enclosing fold takes every output of that UPDATE, and a `foreach` that emits nothing leaves
     /// none (a pipe runs its later stages once per input). An enclosing `reduce` then holds a `null`
     /// state, an enclosing `foreach` emits nothing. The marker identifies the fold, and is shared by
-    /// the copies a pipe makes of its stages.
+    /// the copies a pipe makes of its stages. Another fold of the body whose source is a caught
+    /// destructure of the same marker reads the same mark, which is sound: its source is empty by the
+    /// same certification, so it is empty wherever it sits (an INIT or EXTRACT of the head, a stage
+    /// the empty head never runs).
     pub(crate) fn sole_update_foreach(
         marker: *const super::Tracked,
         of: super::UpdateOf,
