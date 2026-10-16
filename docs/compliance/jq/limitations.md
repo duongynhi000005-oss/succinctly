@@ -2473,13 +2473,21 @@ is the revert that established what the other one costs.
    ([#4617](https://github.com/rust-works/succinctly/issues/4617)): the caught source emits nothing, so an enclosing `foreach`
    whose UPDATE it is gets a `null` accumulator on its next step while jq's register stays on the document, and the fold
    reads the register it still holds (`FoldRegister::register_is_non_null`) rather than that accumulator (pinned by
-   `test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update_4617`). On a `null` document the same
-   rows still answer `[]` where jq prints the pattern's path (`["b"]`), and so do they with a fold whose INIT navigated onto a
-   `null` (`foreach (1,2) as $i (.a; ...)` on `{"a":null}`: `["a"]` for jq's `["a","b"]`); both answer the same on `main`. A
-   fold nested *two* deep (the caught destructure's fold is itself the source of a fold in an UPDATE) is refused where jq answers
-   silently, because the frame no longer carries the live register there: `main` answered it by value, `[]` twice for `path()` and
-   `null` for `del()`, so this is the safe direction of a different wrong answer.
-   `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family. Outside a fold body, a bound expression
+   `test_caught_literal_destructure_in_a_nested_fold_source_after_an_empty_update_4617`). That holds two folds deep too
+   ([#4648](https://github.com/rust-works/succinctly/issues/4648)): a fold in an UPDATE is handed the live register's value only
+   for a `null` or boolean one (a document is not the same node as an equal value), so `Frame::live_non_null` carries the one fact
+   the nested fold needs of it, that it is not `null`. On a `null` register a literal `null` destructured in a fold's source *is* the
+   register, so its pattern steps move jq's register (`null | path(foreach (null as {b:$b} | .) as $y (.; .; .))` is
+   `["b"]`); the fold's source is routed to the resolver for it (`NotRegister::at_null`) rather than driven by value, which
+   left the register at the root (`[]`). Still answered at the root where jq answers below it: a fold whose INIT navigated onto a
+   `null` (`foreach (null as {b:$b} | .) as $y (.a; .; .)` on `{"a":null}`: `["a"]` for jq's `["a","b"]`). The resolver does
+   not place any step from a `null` register below the root (`foreach (null | .b) as $y (.a; .; .)` is refused on `main` too),
+   so routing that source would refuse what the by-value drive answers (`reduce (null as {b:$b} | .) as $y (.a; .)` is `["a"]`);
+   it is the same gap for every source shape and stays open on [#4707](https://github.com/rust-works/succinctly/issues/4707), with a
+   literal `null` destructure ending on a fresh value read by an EXTRACT `$y` three folds deep (`[]` for jq's `["b"]`).
+   `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family (`--deep` adds the three-fold nests of
+   [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build; its wrong accepts on `main` are
+   [#4708](https://github.com/rust-works/succinctly/issues/4708)). Outside a fold body, a bound expression
    that hands the register on through a pipe, an `if` or `//` (`($x | .) as {a:$a}`; inside a body the loud refusal above
    reads the pipe-headed `$x`) is also still accepted, which
    `RegisterSpine::binds_register` does not read the way `reach` reads a stage, since that would route `(.|.)`
