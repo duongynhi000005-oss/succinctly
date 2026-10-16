@@ -3181,28 +3181,36 @@ from no position at all).
 cursor, not from a path, and no cursor reaches the filter. `.a | .b |= line` is `2` in real
 yq and `0` in succinctly — a separate, pre-existing gap, not one #2522 touches.
 
-The same gap shows on everything downstream of a write, and on `-R` and `--slurp`: those
+The same gap shows on much of what is downstream of a write, and on `-R` and `--slurp`: those
 evaluate a value succinctly has re-indexed into throwaway text, whose positions are not the
-user's file's, so the cursor-metadata builtins answer their fixed defaults there (#3479).
+user's file's, so the cursor-metadata builtins answer their fixed defaults there (#3479), except
+for the field read straight off a kept value (#3641, below).
 `--arg` alone does not: a filter that only reads stays on the cursor route (`--arg v x '.c |
 line'` is `2`), and it joins the gap only through a write (`--arg v x '.c = $v | .c | line'`
-is `0`). Against yq v4.53.3 on `a: 1` / `c: 2`:
+was `0` before #3641). Against yq v4.53.3 on `a: 1` / `c: 2`:
 
 | query                        | yq | succinctly yq    |
 |------------------------------|----|------------------|
 | `.c \| line`                 | 2  | 2 (cursor route) |
-| `.c = 3 \| .c \| line`       | 2  | 0                |
-| `.c = 3 \| .a \| line`       | 1  | 0                |
-| `.c = 3 \| .c \| column`     | 4  | 0                |
-| `.c \|= . + 1 \| .c \| line` | 2  | 0                |
+| `.c = 3 \| .c \| line`       | 2  | 2                |
+| `.c = 3 \| .a \| line`       | 1  | 1                |
+| `.c = 3 \| .c \| column`     | 4  | 4                |
+| `.c \|= . + 1 \| .c \| line` | 2  | 2                |
 | `.d = 3 \| .d \| line`       | 0  | 0                |
+| `.c = 3 \| [.[] \| line]`    | 1, 2 | 0, 0           |
 
-`0` is deliberate rather than the position in the re-indexed text (`1` for all of them), which
-would look right and be wrong; `test_dom_route_cursor_metadata_is_positionless_3479` pins it.
-Carrying the original node's position through a write is a separate, larger change, filed as
-[#3641](https://github.com/rust-works/succinctly/issues/3641). The loss is not only
-position: after `.c = 3`, yq still answers `.c | anchor` and `.c | line_comment` from the
-overwritten node (`x` and `t` on `c: &x 2 # t`), and succinctly answers an empty string.
+Since [#3641](https://github.com/rust-works/succinctly/issues/3641) the field read straight
+off a value that kept its position (`.c = 3 | .c`, `del(.b) | .c`, `sort_keys(.) | .b`) is the
+document's own node: its line, column, anchor and line comment survive the write, also where
+the write replaced the field's value (`c: &x 2 # t` with `.c = 3`: `.c | anchor` is `x`,
+`.c | line_comment` is `t`), and a field the write created (`.d = 3 | .d`), a field `del`
+removed and a field of a sum (`. + {"c": 9} | .c`, the right operand's node) have none. `0` is
+still deliberate rather than the position in the re-indexed text (`1`), which would look right
+and be wrong; `test_dom_route_cursor_metadata_is_positionless_3479` pins it. What remains: the
+fields a `.[]` fans out to, a field of a field (`.d.e`, `.c[0]` after a write; yq answers `0` where
+a container was overwritten by a container, so it is not safe to read the document's), the
+untouched fields of a sum, and a getter nested in a comma, an operand or a body
+([#4712](https://github.com/rust-works/succinctly/issues/4712)).
 
 ### An `and`/`or` operand's evaluation context -- resolved as precedence ([#2506](https://github.com/rust-works/succinctly/issues/2506)); a literal against an empty context remains a residual gap
 
