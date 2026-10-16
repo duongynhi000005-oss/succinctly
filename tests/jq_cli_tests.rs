@@ -75905,7 +75905,7 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
 /// fold's `advance` did not carry the register past it (`cannot_move_register` is `false` for a builtin
 /// UPDATE), so the enclosing EXTRACT's `$k` was refused where jq
 /// answers (and under `?` the refusal was swallowed and the stream dropped). A `foreach`/`reduce` whose UPDATE is an
-/// `isempty`/`any`/`all` over operands that leave the register leaves it too ([`fold_over_verdict_update_cannot_move_register`]).
+/// `isempty`/`any`/`all` over operands that leave the register leaves it too ([`fold_with_verdict_update_leaves_register`]).
 /// Every jq side captured from jq 1.7.1 on `null`. The last rows are controls kept refused: an operand that navigates (jq
 /// refuses too) and a nested EXTRACT that reads the enclosing loop variable after a caught navigation (#3984's withhold,
 /// which jq answers).

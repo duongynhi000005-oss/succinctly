@@ -884,7 +884,10 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   fold's UPDATE, leaves the register where it entered, as a neutral UPDATE does: `foreach .a? as $k (0; foreach (1,2) as $j (1;
   isempty(1); .); $k)` and the `reduce` spelling (`reduce (1,2) as $j (1; isempty(reduce (1,2) as $i (1; try .a)))`) answer as jq
   does; the enclosing fold's `advance` reads the nested UPDATE
-  (`fold_over_verdict_update_cannot_move_register`). Pinned by `test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699`.
+  (`fold_with_verdict_update_leaves_register`). Pinned by `test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699`.
+  That admission is read by `advance` only for an UPDATE that *is* the nested fold: the same fold behind a pipe stage (`foreach ... | .`), a
+  `label` or a `first(...)` is still refused where jq answers (`[path(foreach .a? as $k (0; foreach (1,2) as $j (1; isempty(1); .) | .; $k))?]`
+  on `null` is `[]`, jq prints `[["a"],["a"]]`), as on `main`.
   **Still refused where jq answers**: an EXTRACT that forks *and navigates after its first output*
   (`... try .a; (5, .a))`: the gate asks that the whole EXTRACT leave the register, and a navigating item does not),
   and a nested fold whose EXTRACT is the enclosing loop variable after a caught navigation
