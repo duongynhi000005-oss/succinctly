@@ -8298,7 +8298,13 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
 
     fn substituted_key_text(&self) -> Option<String> {
         match self {
-            YamlValue::String(s) if s.as_str().is_err() => json_key_with_replacement_chars(s),
+            // Only a JSON-sourced key can hold bytes the reader substitutes; the check comes before
+            // the decode so a YAML key (and a JSON key that decodes, by one scan) stays cheap.
+            YamlValue::String(
+                s @ YamlString::DoubleQuoted {
+                    json_sourced: true, ..
+                },
+            ) if s.as_str().is_err() => json_key_with_replacement_chars(s),
             _ => None,
         }
     }

@@ -10832,7 +10832,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
                 if key_is_malformed(&key) {
                     return GenericResult::Error(fields.malformed_member_error());
                 }
-                last_cursor = Some(cursor);
+                last_cursor = Some((key, cursor));
             }
             // #1956: matches this function's own `distinct_key_cursors_checked`/
             // `keys_are_well_formed` siblings via the same
@@ -10849,7 +10849,7 @@ fn fold_lazy_keys_stage<S: EvalSemantics, V: DocumentValue>(
                 return GenericResult::Error(fields.malformed_member_error());
             }
             match last_cursor {
-                Some(c) => GenericResult::OneCursor(c),
+                Some((key, c)) => key_element::<V>(&key, c),
                 None => GenericResult::Owned(OwnedValue::Null),
             }
         }
