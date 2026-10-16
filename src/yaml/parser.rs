@@ -7935,8 +7935,41 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
     /// [`Self::previous_content_line_defers_its_value`] for a mapping entry in particular: the
     /// previous content line ends in the `:` of a key (node properties and a comment aside) and
-    /// that key stands at `indent` ([`Self::sequence_follows_completed_mapping_entry_at`]).
+    /// that key stands at `indent` ([`Self::sequence_follows_completed_mapping_entry_at`]). The
+    /// key's column is the line's indent plus the `- ` markers it opens with, so the compact
+    /// mapping of a sequence item (`- k:`) stands where its continuation lines do.
     fn previous_content_line_defers_a_value_at(&self, indent: usize) -> bool {
+        let Some((lead, rest)) = self.previous_content_line() else {
+            return false;
+        };
+        let mut marker_len = 0;
+        while rest.get(marker_len) == Some(&b'-')
+            && Self::is_ws_break_or_eoi(rest.get(marker_len + 1).copied())
+        {
+            marker_len += 1;
+            while matches!(rest.get(marker_len), Some(b' ' | b'\t')) {
+                marker_len += 1;
+            }
+        }
+        lead + marker_len == indent && line_ends_with_colon_after_properties(&rest[marker_len..])
+    }
+
+    /// Whether the nearest earlier line that is neither blank nor a comment leaves its value for
+    /// the next line: a key written up to its colon (`a:`, `- k:`) or a bare `-`, a trailing
+    /// comment aside. The only place a block scalar header on a line of its own can belong
+    /// (#4259); a header anywhere else is not a value slot and keeps the path it always took.
+    fn previous_content_line_defers_its_value(&self) -> bool {
+        self.previous_content_line().is_some_and(|(_, rest)| {
+            line_ends_with_colon_before_comment(rest)
+                || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest))
+        })
+    }
+
+    /// The nearest line above the cursor's that holds content, as its count of leading spaces and
+    /// the rest of it: a blank line, a comment line and node properties on a line of their own
+    /// (`&x`, part of the value that follows, #4271) are walked past. `None` at the top of the
+    /// input.
+    fn previous_content_line(&self) -> Option<(usize, &[u8])> {
         let mut line_start = self.pos;
         while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
             line_start -= 1;
@@ -7958,46 +7991,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if rest.is_empty() || rest[0] == b'#' || only_node_properties(rest) {
                 continue;
             }
-            return (lead == indent || rest[0] == b'-')
-                && line_ends_with_colon_after_properties(rest);
+            return Some((lead, rest));
         }
-        false
-    }
-
-    /// Whether the nearest earlier line that is neither blank nor a comment leaves its value for
-    /// the next line: a key written up to its colon (`a:`, `- k:`) or a bare `-`, a trailing
-    /// comment aside. The only place a block scalar header on a line of its own can belong
-    /// (#4259); a header anywhere else is not a value slot and keeps the path it always took.
-    fn previous_content_line_defers_its_value(&self) -> bool {
-        let mut line_start = self.pos;
-        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
-            line_start -= 1;
-        }
-        let mut end = line_start;
-        while end > 0 {
-            let mut prev_end = end - 1;
-            if prev_end > 0 && self.input[prev_end] == b'\n' && self.input[prev_end - 1] == b'\r' {
-                prev_end -= 1;
-            }
-            let mut prev_start = prev_end;
-            while prev_start > 0 && !is_line_break(self.input[prev_start - 1]) {
-                prev_start -= 1;
-            }
-            end = prev_start;
-            let line = &self.input[prev_start..prev_end];
-            let rest = &line[line.iter().take_while(|&&b| b == b' ').count()..];
-            if rest.is_empty() || rest[0] == b'#' {
-                continue;
-            }
-            // Node properties on a line of their own (`&x`) are part of the value that follows;
-            // the line before them is the owner (#4271).
-            if only_node_properties(rest) {
-                continue;
-            }
-            return line_ends_with_colon_before_comment(rest)
-                || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest));
-        }
-        false
+        None
     }
 
     /// A block scalar whose header sits on a line of its own (#4259, and after node properties
@@ -8411,9 +8407,30 @@ fn trim_spaces_end(bytes: &[u8]) -> &[u8] {
 /// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
 /// (#4530).
 fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
-    let code_end = (0..line.len())
-        .find(|&i| line[i] == b'#' && (i == 0 || matches!(line[i - 1], b' ' | b'\t')))
-        .unwrap_or(line.len());
+    // A `#` opens a comment only outside a quoted key (`"x # y":`), and a quote opens one only
+    // at the start of a token (`it's` does not).
+    let mut quote = None;
+    let mut code_end = line.len();
+    let mut i = 0;
+    while i < line.len() {
+        let b = line[i];
+        match quote {
+            Some(b'"') if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if matches!(b, b'"' | b'\'')
+                && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) =>
+            {
+                quote = Some(b);
+            }
+            None if b == b'#' && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) => {
+                code_end = i;
+                break;
+            }
+            None => {}
+        }
+        i += 1;
+    }
     let mut code = trim_spaces_end(&line[..code_end]);
     while let Some(token_start) = code
         .iter()

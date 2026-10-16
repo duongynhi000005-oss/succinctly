@@ -11933,6 +11933,8 @@ fn test_4530_sequence_after_a_completed_mapping_entry_is_rejected() -> Result<()
         "a: [1,\n 2]\n- x\n",
         // The key stands deeper than the `-`: the `-` dedents past `b:` into the parent mapping.
         "a:\n  b:\n- x\n",
+        // The same through a compact mapping of a sequence item that stands deeper.
+        "a:\n  - k:\n- x\n",
         // A `-` at a nested mapping's indent, after a completed entry of it.
         "a:\n  b: 1\n  - x\n",
         "a: 1\nb: 2\n- x\nc: 3\n",
@@ -11963,6 +11965,9 @@ fn test_4530_sequence_as_the_implicit_value_of_a_pending_key_is_kept() -> Result
         ("a: 1\nb:\n- x\n- y\n", r#"{"a":1,"b":["x","y"]}"#),
         ("? k\n:\n- item\n", r#"{"k":["item"]}"#),
         ("- k:\n  - 1\n", r#"[{"k":[1]}]"#),
+        // A `#` inside a quoted key is not a comment.
+        ("\"x # y\":\n- item\n", r#"{"x # y":["item"]}"#),
+        ("'a #b': &a\n- item\n", r#"{"a #b":["item"]}"#),
         ("- a\n- b\n", r#"["a","b"]"#),
     ] {
         let (out, code) = run_yq_stdin(".", input, &["-o=json", "-I=0"])?;
