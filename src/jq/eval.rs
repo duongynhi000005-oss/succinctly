@@ -47868,6 +47868,8 @@ fn reduce_source_is_bare_final_bind_chain(input: &Expr) -> bool {
     (fold_body::depth() == 0 && source_moves_register_only_by_binds(input))
         // #4757: or the UPDATE of a `foreach` that reads the statement a `reduce` makes.
         || (fold_body::foreach_body_stating_here()
+            // `true`: the enclosing `foreach` marked this body only after reading this source with its own register
+            // in hand (`update_states_it`), so a `null` head is the register here.
             && source_moves_register_only_by_binds_in_update(input, true))
 }
 
@@ -59613,6 +59615,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                 && patterns_all_bare(patterns)
                 && cannot_move_register(init)
                 && cannot_move_register(input)
+                // `true`: as in `reduce_source_is_bare_final_bind_chain`, the enclosing `foreach` read this UPDATE.
                 && source_moves_register_only_by_binds_in_update(update, true)));
     let register_unmoved = leaves_in_place && trackable;
     // #3984: jq mode only, like every register admission here. A syntactic property of the
@@ -60308,20 +60311,20 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && trackable
         && foreach_cannot_move_register(patterns, input, init, update, extract);
     // #3984: see `resolve_reduce`'s identical flag; EXTRACT counts too.
-    let fold_parts = [input, init, update]
-        .into_iter()
-        .chain(extract)
-        .collect::<Vec<_>>();
     // #4756: ...except a `null` marker beside a live `null` register: `jv_identical` holds by kind
     // for any `null`, so the marker is the register wherever it came from and there is no pointer
     // to guess at.
-    let null_markers_beside_null_register = !trackable
-        && matches!(frame.register(), Some(OwnedValue::Null))
-        && !frame.register_loss.is_lost()
-        && fold_markers_are_all_null(patterns, &fold_parts);
-    let mentions_frozen_var = S::TAG == EvalTag::Jq
-        && fold_mentions_frozen_var(patterns, &fold_parts)
-        && !null_markers_beside_null_register;
+    let mentions_frozen_var = S::TAG == EvalTag::Jq && {
+        let fold_parts = [input, init, update]
+            .into_iter()
+            .chain(extract)
+            .collect::<Vec<_>>();
+        let null_markers_beside_null_register = !trackable
+            && matches!(frame.register(), Some(OwnedValue::Null))
+            && !frame.register_loss.is_lost()
+            && fold_markers_are_all_null(patterns, &fold_parts);
+        fold_mentions_frozen_var(patterns, &fold_parts) && !null_markers_beside_null_register
+    };
     // #3580: everything but UPDATE leaves the register where the fold entered, so
     // an emission is at the entry exactly when the UPDATE output it came from was
     // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from

@@ -2822,7 +2822,7 @@ is the revert that established what the other one costs.
    `foreach`) and under a handler-less `try`. A `reduce` backtracks its source and UPDATE, so the register it leaves is INIT's; the enclosing `foreach` marks the
    body (`fold_body::foreach_body_stating`) when its UPDATE is such a `reduce` (`update_states_it`), and the `reduce` states `AtEntry` where its frame holds no
    register. Pinned by `test_foreach_update_reduce_with_a_chain_on_untracked_entry_4757`.
-   Over the 56 operands added for #4756 and #4757 (`--stage-only`, 116,507 rows, jq 1.7.1, candidate vs a `main` build): MATCH 100,844 -> 101,154,
+   Over the 55 operands added for #4756 and #4757 (`--stage-only`, 116,507 rows, jq 1.7.1, candidate vs a `main` build): MATCH 100,844 -> 101,154,
    REFUSE_WRONG 14,513 -> 14,356, DIFF 948 -> 795, ACCEPT_WRONG (202) unchanged, 0 regressions. The 208 `foreach` operands with a `?//` source
    (`--stage-only --sample 40000 --seed 4756`): MATCH 35,828 -> 35,849, REFUSE_WRONG 3,965 -> 3,960, DIFF 174 -> 158, ACCEPT_WRONG (60) unchanged, 0
    regressions; a 60,027-row whole-grid sample (`--stage-only --sample 60000 --seed 77`): MATCH 57,326 -> 57,336, REFUSE_WRONG 2,526 -> 2,520, DIFF 127 -> 123,
@@ -2830,6 +2830,8 @@ is the revert that established what the other one costs.
    `main`, 0 lost; `scripts/jq-bind-origin-fuzz.py` (6,000 programs, `--seed 4756 --fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only.
    The sweep's first full run lost 3 matches (`first(null | CHAIN)` under `del` on an untracked entry, where the routed source's refused emission is not counted against
    the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` stays with the by-value drive.
+   Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with the register (`(null, .) | CHAIN`,
+   `(., null) | CHAIN`) on an untracked entry, and a `null` behind `try`, `first(null)` or `(null | .)` in front of the chain.
    Still refused where jq answers: a chain beneath `first`/`limit`/`nth` in a `foreach` UPDATE (and a `reduce` UPDATE that is `first(CHAIN)`) and a
    `reduce` or `foreach` UPDATE inside a `reduce` UPDATE. The first kind came back as a wrong answer when read (`foreach (1,2) as $i (.; foreach
    (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the

@@ -740,7 +740,6 @@ OPERANDS = [
     "(foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .a; .))",
     "(foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .a))",
     "(foreach (first(null | (.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
-    "(foreach (first(null | (.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (limit(1; null | (.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (nth(0; null | (.|.) as {a:$a} ?// $a | .)) as $k (.; .; .))",
     "(foreach (1,2) as $j (.; (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
