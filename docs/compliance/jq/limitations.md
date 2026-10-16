@@ -2822,11 +2822,11 @@ is the revert that established what the other one costs.
    `foreach`) and under a handler-less `try`. A `reduce` backtracks its source and UPDATE, so the register it leaves is INIT's; the enclosing `foreach` marks the
    body (`fold_body::foreach_body_stating`) when its UPDATE is such a `reduce` (`update_states_it`), and the `reduce` states `AtEntry` where its frame holds no
    register. Pinned by `test_foreach_update_reduce_with_a_chain_on_untracked_entry_4757`.
-   Over the 55 operands added for #4756 and #4757 (`--stage-only`, 116,507 rows, jq 1.7.1, candidate vs a `main` build): MATCH 100,844 -> 101,154,
-   REFUSE_WRONG 14,513 -> 14,356, DIFF 948 -> 795, ACCEPT_WRONG (202) unchanged, 0 regressions. The 208 `foreach` operands with a `?//` source
-   (`--stage-only --sample 40000 --seed 4756`): MATCH 35,828 -> 35,849, REFUSE_WRONG 3,965 -> 3,960, DIFF 174 -> 158, ACCEPT_WRONG (60) unchanged, 0
-   regressions; a 60,027-row whole-grid sample (`--stage-only --sample 60000 --seed 77`): MATCH 57,326 -> 57,336, REFUSE_WRONG 2,526 -> 2,520, DIFF 127 -> 123,
-   ACCEPT_WRONG (44) unchanged, 0 regressions. `scripts/jq-nested-fold-frozen-var-sweep.py` (2,673 rows, which `mentions_non_null_marker` reaches): identical to
+   Over the 55 operands added for #4756 and #4757 (`--stage-only`, 114,427 rows, jq 1.7.1, candidate vs a `main` build): MATCH 99,148 -> 99,458,
+   REFUSE_WRONG 14,236 -> 14,079, DIFF 841 -> 688, ACCEPT_WRONG (202) unchanged, 0 regressions. The 208 `foreach` operands with a `?//` source
+   (`--stage-only --sample 30000 --seed 4757`): MATCH 26,997 -> 27,011, REFUSE_WRONG 2,850 -> 2,845, DIFF 120 -> 111, ACCEPT_WRONG (60) unchanged, 0
+   regressions; a 60,027-row whole-grid sample (`--stage-only --sample 60000 --seed 77`, one base commit earlier): MATCH 57,326 -> 57,336, REFUSE_WRONG
+   2,526 -> 2,520, DIFF 127 -> 123, ACCEPT_WRONG (44) unchanged, 0 regressions. `scripts/jq-nested-fold-frozen-var-sweep.py` (2,673 rows, which `mentions_non_null_marker` reaches): identical to
    `main`, 0 lost; `scripts/jq-bind-origin-fuzz.py` (6,000 programs, `--seed 4756 --fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only.
    The sweep's first full run lost 3 matches (`first(null | CHAIN)` under `del` on an untracked entry, where the routed source's refused emission is not counted against
    the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` stays with the by-value drive.
