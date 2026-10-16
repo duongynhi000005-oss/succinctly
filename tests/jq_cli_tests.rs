@@ -154526,6 +154526,10 @@ fn test_foreach_source_null_or_null_marker_headed_chain_walks_the_null_register_
         (format!("path(. as $x | 1 | (foreach (null | .a | {chain}) as $k (.; .; .)) | $x)"), "[\"a\",\"a\"]\n", "", 0),
         ("path(. as $x | 1 | (foreach (null | (.|.) as {a:$a} ?// $a | .a?) as $k (.; .; .)) | $x)".to_string(), "[\"a\",\"a\"]\n", "", 0),
         (format!("path(. as $x | 1 | (reduce (null | {chain}) as $k (.; .)) | $x)"), "[]\n", "", 0),
+        // ...and a `null` stage under `first` stays with the by-value drive: routed, the refused emission
+        // was not counted against the `$x.a?` after it and the `del` refused (the sweep's first full run).
+        (format!("del(. as $x | 1 | (foreach (first(null | {chain})) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        (format!("del(. as $x | 1 | (foreach (limit(1; null | {chain})) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
     ];
     for (program, stdout, stderr, code) in &programs {
         let program: &'static str = Box::leak(program.clone().into_boxed_str());
