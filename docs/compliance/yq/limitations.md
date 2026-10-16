@@ -4974,7 +4974,8 @@ Three narrower residuals of the same fix, each captured live from v4.53.3:
   (the line `.a` itself stands on) and were `0` here.
   [#4696](https://github.com/rust-works/succinctly/issues/4696) settles it for `line` and
   `column` in `succinctly yq`, for the stages that hand yq's own node on: a write (`=`, `|=`,
-  the compound forms), `del`, `sort`, `sort_by`, `flatten`, `sort_keys`, `map_values`, `pick`,
+  the compound forms), `del`, `sort`, `sort_by`, `flatten`, `flatten(n)`, `shuffle`, `to_number`,
+  `sort_keys`, `map_values`, `pick`,
   `omit`, arithmetic on the node (`. + {}`, `. * {}`) and `map` where it keeps the node (an
   empty container, a scalar), plus the stages that pass their input through (`select`, ...).
   The list is an allow-list (`stage_keeps_node_metadata`): a stage that builds a fresh node

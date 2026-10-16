@@ -33676,6 +33676,13 @@ impl<V: DocumentValue> OwnedIdentity<V> {
         self
     }
 
+    /// The same position holding a fresh scalar or array the pipe built (`path`, `file_index`,
+    /// `filename`): no longer the node, so no source line or column of its own (#4696).
+    fn without_meta(mut self) -> Self {
+        self.meta = false;
+        self
+    }
+
     /// [`OwnedIdentity::rebuilt`] by `stage` (#4696): the value is a new one at the same position,
     /// and it keeps the node's metadata only if `stage` is one yq hands the node itself through.
     fn rebuilt_by(self, stage: &Expr) -> Self {
@@ -35634,6 +35641,10 @@ fn stage_keeps_node_metadata(stage: &Expr) -> bool {
                         | Builtin::SortKeysOneLevel
                         | Builtin::MapValues(_)
                         | Builtin::Flatten
+                        | Builtin::FlattenDepth(_)
+                        | Builtin::Shuffle
+                        | Builtin::ToNumber
+                        | Builtin::Map(_)
                         | Builtin::Pick(_)
                         | Builtin::Omit(_)
                 )
@@ -37028,12 +37039,11 @@ fn reads_node_position(stages: &[Expr]) -> bool {
 
 /// Whether a pipe that leaves the cursor domain at `stage` and reads `line`/`column` afterwards
 /// is the owned identity route's (#4696): `stage` is one whose output keeps the node's position
-/// ([`stage_keeps_node_metadata`], or `map`, which hands an empty container or a scalar on as the
-/// node itself). Any other stage keeps the route it had -- `min`/`max` pick a child the cursor
+/// ([`stage_keeps_node_metadata`]; `map` is on it for the empty container or scalar it hands on as
+/// the node itself, and detaches the rest). Any other stage keeps the route it had -- `min`/`max` pick a child the cursor
 /// route already answers the line of, and `tostring`/`length` answer `0` there as yq does.
 fn leaves_node_position_to_owned(stage: &Expr) -> bool {
     stage_keeps_node_metadata(stage)
-        || matches!(strip_parens(stage), Expr::Builtin(Builtin::Map(_)))
 }
 
 /// The cursor a *kept* owned value stands at (#4696): the node whose position `id` models, when
@@ -37103,16 +37113,16 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
     // cursor and answers these with their `""`/`0` defaults -- correct for a
     // value the query *built*, wrong for the key `key` just emitted, which is
     // a document node real yq reads the entry's comments, line, column, style
-    // and anchor from. Narrowed to a key node deliberately: whether an
-    // *ordinary* kept owned value should answer metadata from its base is the
-    // wider question this issue does not settle (`.a | del(.b) | line` is `2`
-    // in yq, `0` here). Decided before the match so the key-node check --
-    // a member scan -- runs once, and only for a metadata stage.
+    // and anchor from. Decided before the match so the key-node check -- a
+    // member scan -- runs once, and only for a metadata stage.
     //
-    // #4696 settles it for `line` and `column`, the two a kept value's every
+    // Whether an *ordinary* kept owned value answers metadata from its base
+    // was #2763's open question (`.a | del(.b) | line` is `2` in yq, `0` was
+    // here). #4696 settles it for `line` and `column`, which every
     // allow-listed stage ([`stage_keeps_node_metadata`]) hands on unchanged: a
     // value that is still the node (or its rebuilt copy) answers from the
-    // node. `style`, `anchor` and the comments stay at the defaults here.
+    // node. `style`, `anchor` and the comments of a kept value stay at the
+    // defaults (see `limitations.md`).
     if let Some(builtin) = node_metadata_getter(stage) {
         // yq mode only: `line`/`column` are not jq's, so `succinctly jq` keeps the `0` it always
         // answered here (ADR-0018 -- the allow-list was captured from yq, not from a reference
@@ -37253,7 +37263,7 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
             Ok(path) => eval_owned_identity_stages::<S, V>(
                 rest,
                 Cow::Owned(OwnedValue::array_from(path)),
-                id,
+                id.without_meta(),
                 optional,
                 tail,
             ),
@@ -37267,7 +37277,7 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
             Ok(path) => eval_owned_identity_stages::<S, V>(
                 rest,
                 Cow::Owned(OwnedValue::Int(file_index_for_path(&path))),
-                id,
+                id.without_meta(),
                 optional,
                 tail,
             ),
@@ -37277,7 +37287,7 @@ fn eval_owned_identity_stages<S: EvalSemantics, V: DocumentValue>(
             Ok(path) => eval_owned_identity_stages::<S, V>(
                 rest,
                 Cow::Owned(OwnedValue::String(filename_for_path(&path).into())),
-                id,
+                id.without_meta(),
                 optional,
                 tail,
             ),

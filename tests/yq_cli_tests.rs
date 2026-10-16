@@ -67163,6 +67163,78 @@ fn test_kept_value_answers_line_and_column_from_its_node_4696() -> Result<()> {
             &["-p=json", "-o=json", "-I=0"],
             "0\n",
         ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | path | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | file_index | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | filename | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na:\n  b: 1\n  c: [1, 2]\n",
+            ".a | del(.b) | path | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | sort | path | line",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | .[0] = 1 | path | column",
+            &["-o=json", "-I=0"],
+            "0\n",
+        ),
+        (
+            "x: 1\n\na: [[1], [2, [3]]]\n",
+            ".a | flatten(1) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: [[1], [2, [3]]]\n",
+            ".a | flatten(2) | column",
+            &["-o=json", "-I=0"],
+            "4\n",
+        ),
+        (
+            "x: 1\n\na: [3, 1, 2]\n",
+            ".a | shuffle | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: 7\n",
+            ".a | to_number | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: {}\n",
+            ".a | del(.b) | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
+        (
+            "x: 1\n\na: 7\n",
+            ".a | . + 1 | map(.) | line",
+            &["-o=json", "-I=0"],
+            "3\n",
+        ),
     ];
     for &(doc, filter, args, expected) in rows {
         let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, args)?;
