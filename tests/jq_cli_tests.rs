@@ -76633,6 +76633,86 @@ fn test_foreach_update_composed_any_recurse_not_decided_on_the_seed_stays_refuse
     ])
 }
 
+/// #4719: a composed verdict (`| not`) under a `try`/`?` as a `foreach` UPDATE states its answer at the
+/// register UPDATE entered with, as the bare composition does ([`verdict_builtin_leaves_register`] now reads
+/// through the wrapper). Under `?` the refusal was swallowed and the stream element dropped. Every jq side
+/// captured from jq 1.7.1 on `[1]`.
+#[test]
+fn test_foreach_update_composed_verdict_under_try_follows_jq_4719() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; try ((isempty(1) | not)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; try ((isempty(1) | not)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; try ((isempty(recurse) | not)); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; try ((isempty(recurse) | not)); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; try (any(1; .) | not); $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; try (any(1; .) | not); $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[path(foreach .[]? as $k (0; (isempty(1) | not)?; $k))?]",
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(foreach .[]? as $k (0; (isempty(1) | not)?; $k))",
+            "[0]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (0; try (isempty(1) | not); .))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"[1]",
+            r"(foreach .[]? as $k (0; try (isempty(1) | not); .)) = 9",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+    ])
+}
+
 /// #4596: a fold with INIT `.` whose source navigates leaves jq's register on the element for the whole
 /// step, so the accumulator is no node of it: a `?//` bind of `.` in the UPDATE fails `path_intact` at its
 /// first step and jq retries onto the bare alternative. A `reduce` then backtracks the register to the

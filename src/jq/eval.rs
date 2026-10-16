@@ -50304,6 +50304,13 @@ fn verdict_builtin_leaves_register(update: &Expr) -> bool {
             }
             Expr::Pipe(stages) => fold(stages),
             Expr::Comma(items) => fold(items),
+            // #4719: `E?` and `try E` add no movement of their own
+            // ([`peel_register_transparent`]), so a pipe or comma under one is read as bare.
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            } => leaves(inner, def),
             // #4641: `and`/`or` are not subexps: `DUP; L; JUMP_F; POP; R`, so `R` runs from the
             // register `L` left, and the constant they emit is stated there. Both sides leaving
             // it where it entered leaves the whole there.
