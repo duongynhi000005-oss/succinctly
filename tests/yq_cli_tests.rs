@@ -69629,6 +69629,355 @@ fn test_yaml_flow_colon_before_a_flow_indicator_is_content_4558() -> Result<()> 
     Ok(())
 }
 
+/// #4256: a sequence item printed by itself keeps the comment after its dash when the item is a
+/// container -- `- # own` / `  c: 2` prints `# own` / `c: 2` for `.a[1]`, `.a[-1]`, `.a | .[1]`, and in the
+/// middle of `.a[]` -- as yq does, where the cursor route printed only the value (`.a` and `.` already
+/// copied the dash line, and the DOM route has kept it since #4231). A scalar item's comment is dropped,
+/// as in yq (`- # c1` / `  y` prints `y`). `[.a[]]` and the slice `.a[1:]` are other routes and still
+/// differ. A block container's anchor/tag line prints above the comment, a flow container's below it. Every row captured from yq v4.53.3 (Homebrew).
+#[test]
+fn test_printing_a_sequence_item_by_itself_keeps_the_comment_after_its_dash_4256() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a[1]",
+            "# own\nc: 2\n",
+        ),
+        ("a:\n  - b: 1\n  - # own\n    c: 2\n", ".a[0]", "b: 1\n"),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a[]",
+            "b: 1\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a[-1]",
+            "# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a | .[1]",
+            "# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a[] | select(.)",
+            "b: 1\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".a",
+            "- b: 1\n- # own\n  c: 2\n",
+        ),
+        (
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+            ".",
+            "a:\n  - b: 1\n  - # own\n    c: 2\n",
+        ),
+        ("a:\n  - b: 1\n  - # own\n    c: 2\n", ".m.a[0]", "null\n"),
+        ("a:\n  - b: 1\n  - # own\n    c: 2\n", ".m.a[]", ""),
+        ("a:\n  - b: 1\n  - # own\n    c: 2\n", ".m.a[1]", "null\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a[1]", "y\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a[0]", "x\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a[]", "x\ny\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a[-1]", "y\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a | .[1]", "y\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a[] | select(.)", "x\ny\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".a", "- x\n# c1\n- y\n"),
+        (
+            "a:\n  - x\n  - # c1\n    y\n",
+            ".",
+            "a:\n  - x\n  # c1\n  - y\n",
+        ),
+        ("a:\n  - x\n  - # c1\n    y\n", ".m.a[0]", "null\n"),
+        ("a:\n  - x\n  - # c1\n    y\n", ".m.a[]", ""),
+        ("a:\n  - x\n  - # c1\n    y\n", ".m.a[1]", "null\n"),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a[1]",
+            "# c2\n- 1\n- 2\n",
+        ),
+        ("a:\n  - 1\n  - # c2\n    - 1\n    - 2\n", ".a[0]", "1\n"),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a[]",
+            "1\n# c2\n- 1\n- 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a[-1]",
+            "# c2\n- 1\n- 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a | .[1]",
+            "# c2\n- 1\n- 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a[] | select(.)",
+            "1\n# c2\n- 1\n- 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".a",
+            "- 1\n- # c2\n  - 1\n  - 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".",
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+        ),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".m.a[0]",
+            "null\n",
+        ),
+        ("a:\n  - 1\n  - # c2\n    - 1\n    - 2\n", ".m.a[]", ""),
+        (
+            "a:\n  - 1\n  - # c2\n    - 1\n    - 2\n",
+            ".m.a[1]",
+            "null\n",
+        ),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".a[1]", "z\n"),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".a[0]", "# c3\nk: v\n"),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".a[]", "# c3\nk: v\nz\n"),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".a[-1]", "z\n"),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".a | .[1]", "z\n"),
+        (
+            "a:\n  - # c3\n    k: v\n  - z\n",
+            ".a[] | select(.)",
+            "# c3\nk: v\nz\n",
+        ),
+        (
+            "a:\n  - # c3\n    k: v\n  - z\n",
+            ".a",
+            "- # c3\n  k: v\n- z\n",
+        ),
+        (
+            "a:\n  - # c3\n    k: v\n  - z\n",
+            ".",
+            "a:\n  - # c3\n    k: v\n  - z\n",
+        ),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".m.a[0]", "null\n"),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".m.a[]", ""),
+        ("a:\n  - # c3\n    k: v\n  - z\n", ".m.a[1]", "null\n"),
+        ("a:\n  - # c4\n    - p\n    - q\n  - r\n", ".a[1]", "r\n"),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".a[0]",
+            "# c4\n- p\n- q\n",
+        ),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".a[]",
+            "# c4\n- p\n- q\nr\n",
+        ),
+        ("a:\n  - # c4\n    - p\n    - q\n  - r\n", ".a[-1]", "r\n"),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".a | .[1]",
+            "r\n",
+        ),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".a[] | select(.)",
+            "# c4\n- p\n- q\nr\n",
+        ),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".a",
+            "- # c4\n  - p\n  - q\n- r\n",
+        ),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".",
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+        ),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".m.a[0]",
+            "null\n",
+        ),
+        ("a:\n  - # c4\n    - p\n    - q\n  - r\n", ".m.a[]", ""),
+        (
+            "a:\n  - # c4\n    - p\n    - q\n  - r\n",
+            ".m.a[1]",
+            "null\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a[1]",
+            "null\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a[0]",
+            "null\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a[]",
+            "",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a | .[1]",
+            "null\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a[] | select(.)",
+            "",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".a",
+            "null\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".",
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".m.a[0]",
+            "#no space\nc: 2\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".m.a[]",
+            "#no space\nc: 2\n#  wide\nd: 3\n",
+        ),
+        (
+            "m:\n  a:\n    - #no space\n      c: 2\n    - #  wide\n      d: 3\n",
+            ".m.a[1]",
+            "#  wide\nd: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a[1]",
+            "null\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a[0]",
+            "# own\nc: 2 # tail\nd: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a[]",
+            "# own\nc: 2 # tail\nd: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a[-1]",
+            "# own\nc: 2 # tail\nd: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a | .[1]",
+            "null\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a[] | select(.)",
+            "# own\nc: 2 # tail\nd: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".a",
+            "- # own\n  c: 2 # tail\n  d: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".",
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+        ),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".m.a[0]",
+            "null\n",
+        ),
+        ("a:\n  - # own\n    c: 2 # tail\n    d: 3\n", ".m.a[]", ""),
+        (
+            "a:\n  - # own\n    c: 2 # tail\n    d: 3\n",
+            ".m.a[1]",
+            "null\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x\n    c: 2\n",
+            ".a[1]",
+            "&x\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!map\n    c: 2\n",
+            ".a[1]",
+            "!!map\n# own\nc: 2\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x [1, 2]\n",
+            ".a[1]",
+            "# own\n&x [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    &x [1, 2]\n",
+            ".a",
+            "- x\n# own\n- &x [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    {k: 1}\n",
+            ".a[1]",
+            "# own\n{k: 1}\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    {k: 1}\n",
+            ".a",
+            "- x\n# own\n- {k: 1}\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!seq [1, 2]\n",
+            ".a[1]",
+            "# own\n!!seq [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - # own\n    !!seq [1, 2]\n",
+            ".a",
+            "- x\n# own\n- !!seq [1, 2]\n",
+        ),
+        (
+            "a:\n  - x\n  - &y # own\n    c: 2\n",
+            ".a[1]",
+            "&y\nc: 2 # own\n",
+        ),
+        (
+            "a:\n  - x\n  - &y # own\n    c: 2\n",
+            ".a",
+            "- x\n- &y\n  c: 2 # own\n",
+        ),
+        (
+            "a: 1\n---\nb:\n  - # own\n    c: 2\n",
+            ".a",
+            "1\n---\nnull\n",
+        ),
+        (
+            "a: 1\n---\nb:\n  - # own\n    c: 2\n",
+            ".b[0]",
+            "null\n---\n# own\nc: 2\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
 /// #4593: an assignment whose left side navigates and then filters (`(.a[] | select(. > 5)) = v`) and
 /// matches nothing never reads the right side in yq: the document comes back with only the steps yq
 /// created while walking (`(.zz | select(.)) = v` adds `zz: null`). The right side was evaluated and
