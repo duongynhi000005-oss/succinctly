@@ -12129,16 +12129,22 @@ fn test_4737_mapping_entry_at_an_open_sequences_indent() -> Result<()> {
         "- x\nc: 1\n",
         "- a\n- b\nc: 1\n",
         "-   a: hello\nb: 2\n",
-        "? k\n- item\n? j\n: v\n",
     ] {
         let (out, err, code) = run_yq_stdin_with_stderr(".", input, &["-o=json", "-I=0"])?;
         assert_eq!((code, out.as_str()), (1, ""), "{input:?}: {err:?}");
         assert!(
-            err.contains("a mapping entry cannot follow a sequence item at its indent")
-                || err.contains("sequence cannot be an explicit key"),
+            err.contains("a mapping entry cannot follow a sequence item at its indent"),
             "{input:?}: unexpected stderr {err:?}"
         );
     }
+    // An explicit key's own `-` line keeps #1104's rejection.
+    let (out, err, code) =
+        run_yq_stdin_with_stderr(".", "? k\n- item\n? j\n: v\n", &["-o=json", "-I=0"])?;
+    assert_eq!((code, out.as_str()), (1, ""), "{err:?}");
+    assert!(
+        err.contains("a sequence cannot be an explicit key"),
+        "{err:?}"
+    );
 
     for (input, expected) in [
         ("a:\n- x\nc: 1\n", r#"{"a":["x"],"c":1}"#),

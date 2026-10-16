@@ -4036,13 +4036,18 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
-    /// A sequence still open at a mapping entry's own indent has no mapping to close it into: its
-    /// items stand at that column, so a `key:` or `? key` there is neither an item nor a sibling
-    /// of the sequence's key (`a:` / `  - x` / `  c: 1`). Real yq stops with `did not find
-    /// expected '-' indicator`; the entry used to become one more item holding a mapping (#4737).
-    /// Called after [`Self::close_same_indent_sequence_before_mapping_entry`], which has already
-    /// closed the sequence that is a key's same-indent value.
-    fn reject_mapping_entry_on_open_sequence(&self, indent: usize) -> Result<(), YamlError> {
+    /// What a mapping entry (`key:` or `? key`) at `indent` does to a block sequence still open
+    /// there: closes it when it is a key's same-indent value
+    /// ([`Self::close_same_indent_sequence_before_mapping_entry`]), and otherwise rejects the entry.
+    /// A sequence open at that indent with no mapping to close it into has its items at that
+    /// column, so the entry is neither an item nor a sibling of the sequence's key (`a:` / `  - x`
+    /// / `  c: 1`). Real yq stops with `did not find expected '-' indicator`; the entry used to
+    /// become one more item holding a mapping (#4737).
+    fn settle_open_sequence_before_mapping_entry(
+        &mut self,
+        indent: usize,
+    ) -> Result<(), YamlError> {
+        self.close_same_indent_sequence_before_mapping_entry(indent);
         if self.current_type == Some(NodeType::Sequence)
             && self.indent_stack.last().copied() == Some(indent)
         {
@@ -4703,9 +4708,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         //   foo:
         //   - item  <- sequence at same indent as mapping
         //   bar:    <- new entry closes the sequence
-        self.close_same_indent_sequence_before_mapping_entry(indent);
-
-        self.reject_mapping_entry_on_open_sequence(indent)?;
+        self.settle_open_sequence_before_mapping_entry(indent)?;
 
         // Now check if we need to open a new mapping
         let need_new_mapping = self.current_type != Some(NodeType::Mapping)
@@ -5108,8 +5111,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // `need_new_mapping` below sees `current_type == Sequence` and
         // wrongly nests `k2` as a second element of `k`'s array instead of
         // opening a sibling mapping entry.
-        self.close_same_indent_sequence_before_mapping_entry(indent);
-        self.reject_mapping_entry_on_open_sequence(indent)?;
+        self.settle_open_sequence_before_mapping_entry(indent)?;
 
         // Check if we need to open a new mapping
         let need_new_mapping = self.current_type != Some(NodeType::Mapping)
