@@ -23,6 +23,7 @@ Usage: scripts/jq-nested-fold-outer-var-sweep.py --bin BIN [--base BIN] [--jq JQ
 import argparse
 import collections
 import concurrent.futures
+import os
 import subprocess
 import sys
 
@@ -70,8 +71,7 @@ CONTEXTS = ["path({e})", "[path({e})]", "del({e})", "({e}) = 9", "({e}) |= 9"]
 def programs():
     for outer in OUTERS:
         for inner in INNERS:
-            inner_x = inner
-            body = outer.replace("{inner_x}", inner_x).replace("{inner}", inner)
+            body = outer.replace("{inner_x}", inner).replace("{inner}", inner)
             for context in CONTEXTS:
                 yield context.replace("{e}", body)
 
@@ -103,6 +103,9 @@ def main():
     ap.add_argument("--show", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=8)
     args = ap.parse_args()
+    for build in (args.bin, args.base):
+        if build and not os.access(build, os.X_OK):
+            sys.exit(f"not an executable build: {build}")
 
     rows = [(doc, prog) for prog in programs() for doc in DOCS]
 

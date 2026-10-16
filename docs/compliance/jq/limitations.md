@@ -916,8 +916,9 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   body `Frame::unknown()`, so lifting only the first turned the loud refusal into a silently empty stream. The enclosing
   fold's step register now reaches the inner fold with its value *and* position (`FoldRegister::positioned`), so a `$w`
   marker certifies against it exactly and the `try` swallows only what jq's does. The admission is deliberately narrow:
-  the inner fold must be the enclosing `foreach`/`reduce`'s whole `UPDATE` (`fold_body::sole_update_foreach_here`; the
-  same shapes in an `EXTRACT`, as a comma sibling, behind a `try`, or under a stage keep #3984's withhold, which
+  the inner fold must be the enclosing `foreach`/`reduce`'s whole `UPDATE`, or the head of the pipe that is
+  (`fold_body::sole_update_foreach_here`; the same shapes in an `EXTRACT`, as a comma sibling, behind a `try`, or under a
+  stage outside the enclosing fold keep #3984's withhold, which
   `jq-nested-fold-frozen-var-sweep.py` pins), and a `$var` in its `INIT` or source (`foreach (1,2) as $i ($w; try .b; .)`,
   where the accumulator *is* the register) stays refused. Over `scripts/jq-nested-fold-outer-var-sweep.py` (3,600 rows) 893
   rows flipped to MATCH, with no ACCEPT_WRONG, no lost match and no new DIFF; the 48 DIFF rows left are exit-5 rows

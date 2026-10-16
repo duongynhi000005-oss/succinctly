@@ -74032,6 +74032,21 @@ fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Resul
             "",
             0,
         ),
+        // The inner fold heads the pipe that is the outer UPDATE: later stages run once per output.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .) | .; .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; try ($w|.b); .) | $w; .))",
+            "",
+            "Invalid path expression with result {\"b\":1}",
+            5,
+        ),
         // The write forms land on the register's child, or refuse as jq does.
         (
             r#"{"a":{"b":1}}"#,
@@ -76649,11 +76664,11 @@ fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_
 /// UPDATE), so the enclosing EXTRACT's `$k` was refused where jq
 /// answers (and under `?` the refusal was swallowed and the stream dropped). A `foreach`/`reduce` whose UPDATE is an
 /// `isempty`/`any`/`all` over operands that leave the register leaves it too ([`fold_with_verdict_update_leaves_register`]).
-/// Every jq side captured from jq 1.7.1 on `null`. The last rows are controls kept refused (an operand that navigates; jq
-/// refuses too), then a nested EXTRACT that reads the enclosing loop variable after a caught navigation. #3984's withhold
-/// refused that one where jq answers; on `null` the loop variable is a `null` marker, the register by kind (#4756), and on
-/// any document the inner `foreach` is the outer fold's whole UPDATE with no `$k` in its INIT or source (#4499), so jq's
-/// answer is given.
+/// Every jq side captured from jq 1.7.1, on `null` unless a row says otherwise. The `isempty(.a)` rows are controls kept
+/// refused (an operand that navigates; jq refuses too). The rows after them read the enclosing loop variable in the nested
+/// EXTRACT after a caught navigation, which #3984's withhold used to refuse where jq answers: on `null` the loop variable
+/// is a `null` marker, the register by kind (#4756), and on any document the inner `foreach` is the outer fold's whole
+/// UPDATE with no `$k` in its INIT or source (#4499).
 #[test]
 fn test_verdict_update_of_a_fold_nested_in_a_fold_follows_jq_4699() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

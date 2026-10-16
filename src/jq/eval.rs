@@ -49910,7 +49910,9 @@ struct FoldRegister {
     live_register_known: bool,
     /// #4499: the live register [`FoldRegister::live_register`] is stated exactly -- value and
     /// position, the enclosing fold's step register's -- for a `foreach` that is that fold's whole
-    /// UPDATE, so a body nested in this one may read a frozen `$var` marker against it.
+    /// UPDATE, so a body nested in this one may read a frozen `$var` marker against it. Only ever
+    /// set with the register unmoved since entry (`resolve_foreach`), copied only by the arms that
+    /// keep the register where it stood, and re-checked against `frame` at its one reader.
     positioned: bool,
 }
 
@@ -50404,6 +50406,8 @@ impl FoldRegister {
             // `try` catches -- `(foreach .a as $w (0; try (($w | .c | .z),
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
+            // #4499: `fans_out` skips a fold unless it mentions a marker, so the second operand
+            // only ever widens the case of a marker-mentioning fold that is the whole UPDATE.
             let carries = S::TAG == EvalTag::Jq
                 && self.trackable
                 && !tr
@@ -60474,6 +60478,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             && fold_markers_are_all_null(patterns, &fold_parts);
         fold_mentions_frozen_var(patterns, &fold_parts) && !null_markers_beside_null_register
     };
+    // #4499: this `foreach` is another fold's whole UPDATE (or heads the pipe that is), and the
+    // `$var` it mentions is in its UPDATE or EXTRACT: a `$var` in INIT or the source is the
+    // accumulator or element itself, which the enclosing register's position does not certify.
+    // Loop-invariant, so read once; `drive_fork` applies it per INIT fork.
+    let reads_enclosing_register_exactly = S::TAG == EvalTag::Jq
+        && mentions_frozen_var
+        && fold_body::sole_update_foreach_here(input)
+        && !fold_mentions_frozen_var(patterns, &[input, init]);
     // #3580: everything but UPDATE leaves the register where the fold entered, so
     // an emission is at the entry exactly when the UPDATE output it came from was
     // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
@@ -60660,15 +60672,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             FoldRegister::enter(init_branch, value, trackable, init_keeps_register, frame);
         if mentions_frozen_var {
             // #4499: ...unless the register is the enclosing fold's step register, stated by value
-            // and position, and this `foreach` is that fold's whole UPDATE: a frozen `$var` in its
-            // UPDATE or EXTRACT then certifies against it exactly, as in the enclosing fold's own
-            // body. One in INIT or the source is the accumulator (or the element) itself, which
-            // this does not model: that stays withheld.
-            if S::TAG == EvalTag::Jq
-                && reg.register_is_positioned()
-                && fold_body::sole_update_foreach_here(input)
-                && !fold_mentions_frozen_var(patterns, &[input, init])
-            {
+            // and position ([`reads_enclosing_register_exactly`]).
+            if reads_enclosing_register_exactly && reg.register_is_positioned() {
                 reg.positioned = true;
             } else {
                 reg.withhold_untracked_register(head_is_null_or_marker(input)); // #3984
@@ -67628,6 +67633,12 @@ fn raise_free_identity_passthrough(expr: &Expr, wide: bool) -> bool {
     }
 }
 
+/// #4499: whether `expr` is a `foreach` that is the whole UPDATE of the fold being resolved
+/// ([`fold_body::sole_update_foreach_here`]).
+fn is_sole_update_foreach(expr: &Expr) -> bool {
+    matches!(unwrap_paren(expr), Expr::Foreach { input, .. } if fold_body::sole_update_foreach_here(input))
+}
+
 /// Whether `expr` holds a variable marker anywhere (#3279 review).
 ///
 /// #3279's `if` and pipe arms assume every `.` they see is the frame's own
@@ -67639,12 +67650,6 @@ fn raise_free_identity_passthrough(expr: &Expr, wide: bool) -> bool {
 /// equal document node -- `del(.k | ... as $v | $v | .b)` wrote where jq
 /// refuses. So the widened arms admit marker-free shapes only; a marker
 /// source keeps the pre-#3279 grammar.
-/// #4499: whether `expr` is a `foreach` that is the whole UPDATE of the fold being resolved
-/// ([`fold_body::sole_update_foreach_here`]).
-fn is_sole_update_foreach(expr: &Expr) -> bool {
-    matches!(unwrap_paren(expr), Expr::Foreach { input, .. } if fold_body::sole_update_foreach_here(input))
-}
-
 fn mentions_marker(expr: &Expr) -> bool {
     crate::jq::walk::any_subexpr(expr, &mut |e| matches!(e, Expr::TrackedVar(_)))
 }
