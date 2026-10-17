@@ -40392,7 +40392,12 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
         Expr::Pipe(stages) => {
             let skipped = stages
                 .iter()
-                .take_while(|stage| is_identity_or_select_dot(stage))
+                .take_while(|stage| {
+                    // #4776: a literal emits once, and the `foreach` after it is empty whatever its
+                    // input is.
+                    is_identity_or_select_dot(stage)
+                        || matches!(unwrap_paren(stage), Expr::Literal(_))
+                })
                 .count();
             let emptied = emptied_update(stages.get(skipped)?, in_foreach)?;
             // A fallback or a state-dependent head hands a value on to the stages around it: a
@@ -40412,7 +40417,7 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(left, in_foreach)?;
             match unwrap_paren(right) {
                 Expr::Builtin(Builtin::Empty) => {}
-                Expr::Literal(literal) if !in_foreach => {
+                Expr::Literal(literal) => {
                     emptied.fallback = Some(literal_to_owned(literal));
                 }
                 _ => return None,
@@ -40423,8 +40428,7 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
             cond,
             then_branch,
             else_branch,
-        } if !in_foreach
-            && matches!(unwrap_paren(cond), Expr::Identity)
+        } if matches!(unwrap_paren(cond), Expr::Identity)
             && matches!(unwrap_paren(else_branch), Expr::Identity) =>
         {
             let mut emptied = emptied_update(then_branch, in_foreach)?;
@@ -40432,6 +40436,29 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
             Some(emptied)
         }
         _ => None,
+    }
+}
+
+/// The [`fold_body`] mark for the body of a fold (a `reduce` UPDATE, or a `foreach` UPDATE or
+/// EXTRACT with `in_foreach`) that is empty exactly when a `foreach` in it is (#4709, #4724,
+/// #4754, #4776): the `foreach` itself, or a wrapper [`emptied_update`] sees through.
+fn sole_update_mark<S: EvalSemantics>(
+    body: &Expr,
+    in_foreach: bool,
+) -> Option<fold_body::SoleGuard> {
+    if S::TAG != EvalTag::Jq {
+        return None;
+    }
+    match unwrap_paren(body) {
+        Expr::Foreach { input, .. } => Some(fold_body::sole_update_foreach(input, in_foreach)),
+        e => emptied_update(e, in_foreach).map(|emptied| {
+            fold_body::sole_update_pipe_head(
+                emptied.source,
+                in_foreach,
+                emptied.fallback,
+                emptied.truthy,
+            )
+        }),
     }
 }
 
@@ -60276,20 +60303,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // #4724: ...or a pipe headed by one: its later stages run once per output, so an
                         // empty `foreach` leaves the whole UPDATE empty whatever they are. A comma beside
                         // it (`foreach ..., 1`) is not that, and stays unmarked.
-                        let _sole_update_foreach = match unwrap_paren(&substituted) {
-                            Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
-                                Some(fold_body::sole_update_foreach(input, false))
-                            }
-                            e if S::TAG == EvalTag::Jq => emptied_update(e, false).map(|emptied| {
-                                fold_body::sole_update_pipe_head(
-                                    emptied.source,
-                                    false,
-                                    emptied.fallback,
-                                    emptied.truthy,
-                                )
-                            }),
-                            _ => None,
-                        };
+                        let _sole_update_foreach = sole_update_mark::<S>(&substituted, false);
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -61149,6 +61163,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             true,
                                         )))
                                 .then(fold_body::acc_off_register);
+                                // #4776: and an EXTRACT that is such a `foreach` emits nothing for the step.
+                                let _sole_extract_foreach = sole_update_mark::<S>(ext_expr, true);
                                 let _foreach_body = fold_body::foreach_body();
                                 // #4661: UPDATE navigated the register to `extract_reg` and EXTRACT
                                 // computed a value there without moving it (`foreach ... (1; try .a;
@@ -61234,20 +61250,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             carries_dot && fold_body::foreach_body_moved_here();
                         // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                         // emits, so an inner source that is empty leaves this one emitting nothing.
-                        let _sole_update_foreach = match unwrap_paren(&bound_update) {
-                            Expr::Foreach { input, .. } if S::TAG == EvalTag::Jq => {
-                                Some(fold_body::sole_update_foreach(input, true))
-                            }
-                            e if S::TAG == EvalTag::Jq => emptied_update(e, true).map(|emptied| {
-                                fold_body::sole_update_pipe_head(
-                                    emptied.source,
-                                    true,
-                                    emptied.fallback,
-                                    emptied.truthy,
-                                )
-                            }),
-                            _ => None,
-                        };
+                        let _sole_update_foreach = sole_update_mark::<S>(&bound_update, true);
                         let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                             if update_stays_if_stated {
                                 fold_body::foreach_body_stating()
