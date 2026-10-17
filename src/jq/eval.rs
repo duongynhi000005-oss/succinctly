@@ -53661,16 +53661,22 @@ impl<'e> RegisterSpine<'e> {
             }
             // #4278: a variable the spine bound to the register hands it on as `.` does.
             Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
-            // #4756: on a `null` register a `null` literal is `jv_identical` to it, and so is a
-            // `$x` bound outside the source that is the register at the fold, so each hands it on
-            // as `.` does: the chain behind it walks the register.
-            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_register => {
+            // #4756: on a `null` register a `null` literal is `jv_identical` to it by kind, and so is a
+            // `$x` bound outside the source that the caller certified as the register at the fold, so
+            // each hands it on as `.` does: the chain behind it walks the register, and so does the stage
+            // after `null | ` or `$x | `. One pair of arms for both ways the register is known `null`
+            // (#4773): `null_register` (`.` is that register, tracked) and `null_by_kind` (only a `null`
+            // is, on an untracked entry; see [`null_leaves_of`] for what else is one).
+            Expr::Literal(Literal::Null)
+                if !self.fresh_only && (self.null_register || self.null_by_kind) =>
+            {
                 Reach::HandsOn
             }
             Expr::TrackedVar(marker)
                 if !self.fresh_only
-                    && self.null_register
-                    && self.markers.contains(&Rc::as_ptr(marker)) =>
+                    && self.markers.contains(&Rc::as_ptr(marker))
+                    && (self.null_register
+                        || (self.null_by_kind && matches!(marker.value, OwnedValue::Null))) =>
             {
                 Reach::HandsOn
             }
@@ -53823,18 +53829,6 @@ impl<'e> RegisterSpine<'e> {
                 }
             }
             Expr::Comma(branches) => self.reach_any(branches, true),
-            // #4756: on a `null` register a `null` literal is the register by kind (`jv_identical`),
-            // as is a `$x` marker the caller certified, so the stage after `null | ` or `$x | `
-            // meets the register where the pipe did.
-            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_by_kind => Reach::HandsOn,
-            Expr::TrackedVar(marker)
-                if !self.fresh_only
-                    && self.null_by_kind
-                    && matches!(marker.value, OwnedValue::Null)
-                    && self.markers.contains(&Rc::as_ptr(marker)) =>
-            {
-                Reach::HandsOn
-            }
             // #4566: either operand of a `//` meets `.` where the `//` did, and the resolver runs
             // only the one jq does, so a fresh destructure in either is the source's own. For the
             // `fresh_only` walk only: the register walks read a `//` as opaque.
