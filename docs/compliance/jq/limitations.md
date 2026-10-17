@@ -950,7 +950,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `[0]`, `[1]`), a source that yields `null` elements (`path(reduce .[]? as $k (.; try (. as [$a] ?// $a | $a)))` on
   `[null,[1]]` raises where jq prints `[]`; the gate is a non-`null` element, as #4507's), and a `reduce` operand of
   `and`/`or` over INIT `.` on a `null` document (`path(foreach .a? as $k (.; .; try ((reduce . as [$a] ?// $a ({"a":5}; .a)) and
-  (.a | .b)?)))` answers where jq raises `result false`: a `null` state is on a `null` register by kind).
+  (.a | .b)?)))` answers where jq raises `result false`: a `null` state is on a `null` register by kind,
+  [#4806](https://github.com/rust-works/succinctly/issues/4806)).
   **Since [#4608](https://github.com/rust-works/succinctly/issues/4608)** the first alternative's own path error retries the next one in a
   fold body whose accumulator is marked off the register too (`fold_body::acc_off_register_here`, in `resolve_as_pattern`'s escape arm):
   `. as $q ?// $z | (if $q then true else empty end | .a?)` binds the state, runs `true | .a?`, and `.a?` does not suppress the
