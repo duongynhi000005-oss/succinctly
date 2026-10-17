@@ -953,7 +953,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`fold_escape_outcome`), not only outside every fold body: a `reduce` nested in a fold body whose computed INIT is navigated by its UPDATE raises in jq's
   alternative one and retries onto the next with the state handed back as `null` (`LOADVN`), so
   `path(foreach .a? as $k (.; .; (reduce . as [$a] ?// $a ({"a":5}; .a))))` on `null` is `["a"]` (it was refused) and under `try ((reduce ...) and (.a | .b)?)` the end of the
-  path refuses `result false` (it was swallowed, and `del` went through). Pinned by `test_nested_fold_alt_bind_update_error_retries_in_a_fold_body_4806`.
+  path refuses `result false` (it was swallowed, and `del` went through). Pinned by `test_nested_fold_alt_bind_update_error_retries_in_a_fold_body_4806`. Two rows that refuse in both tools
+  name a different node in the message now (`[1] | del(foreach (1,2) as $k (.; isempty((foreach . as $a ?// [$a] (null; .a; .))); .))`: jq `element "a" of null`, here `element 0 of [1]`): the retried alternative reaches a different refusal first (not traced further); exit code and stdout are jq's.
   **Since [#4608](https://github.com/rust-works/succinctly/issues/4608)** the first alternative's own path error retries the next one in a
   fold body whose accumulator is marked off the register too (`fold_body::acc_off_register_here`, in `resolve_as_pattern`'s escape arm):
   `. as $q ?// $z | (if $q then true else empty end | .a?)` binds the state, runs `true | .a?`, and `.a?` does not suppress the

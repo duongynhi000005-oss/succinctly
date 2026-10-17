@@ -162344,13 +162344,6 @@ fn test_nested_fold_alt_bind_update_error_retries_in_a_fold_body_4806() -> Resul
         ),
         (
             r"[1]",
-            r"del(foreach . as $k (null; .; isempty((foreach . as $a ?// [$a] ([7]; .b; .)))))",
-            "",
-            "Invalid path expression near attempt to access element 0 of null",
-            5,
-        ),
-        (
-            r"[1]",
             r"del(foreach (1,2) as $k ({}; .; [(foreach . as $a ?// [$a] ({}; .a; .))]|length))",
             "",
             "Invalid path expression near attempt to access element 0 of {}",
@@ -162513,6 +162506,27 @@ fn test_nested_fold_alt_bind_update_error_retries_in_a_fold_body_4806() -> Resul
         (
             r"{}",
             r"path(foreach . as $k (null; .; isempty((reduce . as $a ?// [$a] ([]; .[0])))))",
+            "",
+            "Invalid path expression near attempt to access element 0 of null",
+            5,
+        ),
+        (
+            r"null",
+            r#"(foreach .a? as $k (.; .; try ((reduce . as [$a] ?// $a ({"a":5}; .a)) and (.a | .b)?))) |= 9"#,
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"null",
+            r#"(foreach .a? as $k (.; .; (reduce . as [$a] ?// $a ({"a":5}; .a)))) |= 9"#,
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(reduce . as $k (null; (reduce . as $a ?// [$a] ([]; .[0])))) |= 9",
             "",
             "Invalid path expression near attempt to access element 0 of null",
             5,
