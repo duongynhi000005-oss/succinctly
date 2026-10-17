@@ -61418,6 +61418,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && extract_reg.trackable
                                     && extract_reg.path.depth() > reg.path.depth()
                                     && cannot_move_register(ext_expr);
+                                // ...except behind a `//`, which backtracks a falsy left side and
+                                // leaves the register where it entered (`(FE) // 5`).
+                                let register_lost_at_the_root = S::TAG == EvalTag::Jq
+                                    && !extract_reg.trackable
+                                    && extract_reg.path.depth() == 0
+                                    && extract_reg.frame.register_loss.is_lost()
+                                    && !any_subexpr(&bound_update, &mut |e| {
+                                        matches!(e, Expr::Alternative(..))
+                                    });
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
                                     if extract_moved
                                         && !branch.trackable
@@ -61430,6 +61439,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         emit(branch.with_register(BranchRegister::Unmoved(
                                             Cow::Owned(extract_reg.value.clone()),
                                         )))
+                                    } else if register_lost_at_the_root
+                                        && !branch.trackable
+                                        && branch.path.depth() == 0
+                                        && matches!(branch.register, BranchRegister::None)
+                                    {
+                                        // #4800: UPDATE may have moved the register off the root
+                                        // (`1 | FOREACH` whose source destructures a `$x` that is
+                                        // it), which the root path of a computed emission cannot
+                                        // say, so the terminal's `null` carve-out must not read
+                                        // it as the register's.
+                                        emit(branch.with_register(BranchRegister::LostSomewhere))
                                     } else {
                                         emit(branch)
                                     }
@@ -66992,7 +67012,10 @@ fn resolve_terminal_sink<'a, S: EvalSemantics>(
                 // own catchable error into an uncatchable one
                 // (`[path(.a | 5 | select(true) | null | .[])?]` is `[]` in jq).
                 let identical = S::TAG == EvalTag::Jq && null_bool_identical(&branch.value, input);
-                if identical && (near_iterate || branch.path.depth() == 0) {
+                // #4800: ...and not for a branch that states the register lost, which a computed
+                // emission of a fold whose UPDATE may have moved it off the root does.
+                let register_lost = matches!(branch.register, BranchRegister::LostSomewhere);
+                if identical && !register_lost && (near_iterate || branch.path.depth() == 0) {
                     // emission: mirror the navigation family's identical
                     // seed (#2691) -- the identical literal carried through
                     // the *root* (empty) path answers `[]` in real jq 1.7.1.
