@@ -48063,8 +48063,9 @@ fn source_moves_register_only_by_binds_in_update(expr: &Expr, null_register: boo
 }
 
 /// Whether `e` is the `null` register by kind on every output ([`null_leaves_of`]): a `null` literal
-/// or a `$x` marker holding `null` (#4756), and what is made of them (#4774). `.` is not: an untracked
-/// entry's `.` is no node of the register, so a head that mixes it with a `null` is not one.
+/// or a `$x` marker holding `null` (#4756), and what is made of them (#4774). A bare `.` is not one
+/// (`input_null` is `false`): an untracked entry's `.` is no node of the register, so a head that mixes
+/// it with a `null` is not one either, while `.` after a `null` stage of a pipe (`null | .`) is.
 fn is_null_head(e: &Expr) -> bool {
     null_leaves_of(e, true, false, &|_| true)
 }
@@ -53865,7 +53866,8 @@ impl<'e> RegisterSpine<'e> {
                         // #4774: and a comma that mixes a `null` with `.` (`(null, .)`, `(., null)`)
                         // is the register on the `null` outputs only: `.` is no node of the
                         // register here, so the chain behind it is walked on those.
-                        // Only outside every fold body, as in [`reach_any`](Self::reach_any).
+                        // Only outside every fold body, as in [`reach_any`](Self::reach_any), which is
+                        // also the only place the arm below can see a `Partial` from.
                         Reach::HandsOn
                             if self.null_by_kind
                                 && fold_body::depth() == 0
@@ -54114,8 +54116,7 @@ impl<'e> RegisterSpine<'e> {
                             | Expr::Limit { .. }
                             | Expr::NthExpr { .. }
                             | Expr::Builtin(Builtin::FirstStream(_) | Builtin::NthStream(..))
-                    ) && (!self.null_leaves(other, true)
-                        || any_subexpr(other, &mut |e| matches!(e, Expr::AsPattern { .. })));
+                    ) && !self.null_leaves(other, true);
                     let entry = self.null_by_kind;
                     self.null_by_kind &= !counted;
                     let reach = self.reach(peeled);
