@@ -74076,21 +74076,34 @@ fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Resul
 /// `$var` in the inner fold's `INIT` makes the accumulator the register itself, which the admission
 /// does not model (jq prints `["a","b"]`): a refusal that is loud, never a silently empty stream.
 /// A fold that is a comma sibling of the outer `UPDATE` keeps the register withheld too (jq prints
-/// `["a","b"]` twice, then raises on the sibling).
+/// `["a","b"]` twice, then raises on the sibling). The last row is a frozen `$x` in the inner
+/// fold's *source*, bound outside both folds: jq refuses it (the outer source moved the register
+/// onto the element), and handing the enclosing register to that source accepted it
+/// (`jq-fold-body-register-grid-sweep.py`, `rd-nav/fe/x-idx`).
 #[test]
 fn test_foreach_that_is_a_fold_update_keeps_init_marker_and_comma_sibling_refused_4499(
 ) -> Result<()> {
-    for filter in [
-        r"path(foreach .a as $w (.; foreach (1,2) as $i ($w; try .b; .); .))",
-        r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
+    for (doc, filter, stderr_part) in [
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i ($w; try .b; .); .))",
+            "Invalid path expression",
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
+            "Invalid path expression",
+        ),
+        (
+            "[null]",
+            r"path(. as $x | reduce .[]? as $i (.; foreach ($x | .[0]) as $y (.; .; .)))",
+            "Invalid path expression",
+        ),
     ] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":{"b":1}}"#))?;
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(doc))?;
         assert_eq!(code, 5, "{filter}: {stderr}");
         assert_eq!(stdout, "", "{filter}");
-        assert!(
-            stderr.contains("Invalid path expression"),
-            "{filter}: {stderr}"
-        );
+        assert!(stderr.contains(stderr_part), "{filter}: {stderr}");
     }
     Ok(())
 }

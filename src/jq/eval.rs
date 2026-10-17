@@ -67634,9 +67634,17 @@ fn raise_free_identity_passthrough(expr: &Expr, wide: bool) -> bool {
 }
 
 /// #4499: whether `expr` is a `foreach` that is the whole UPDATE of the fold being resolved
-/// ([`fold_body::sole_update_foreach_here`]).
+/// ([`fold_body::sole_update_foreach_here`]) and whose frozen `$var`s are confined to its UPDATE and
+/// EXTRACT. One in its INIT or source is the accumulator or element itself (or a binding the
+/// enclosing register does not certify: `. as $x | reduce .[]? as $i (.; foreach ($x | .[0]) as $y
+/// (.; .; .))`), which handing it the enclosing register accepted where jq refuses.
 fn is_sole_update_foreach(expr: &Expr) -> bool {
-    matches!(unwrap_paren(expr), Expr::Foreach { input, .. } if fold_body::sole_update_foreach_here(input))
+    matches!(
+        unwrap_paren(expr),
+        Expr::Foreach { input, init, patterns, .. }
+            if fold_body::sole_update_foreach_here(input)
+                && !fold_mentions_frozen_var(patterns, &[input, init])
+    )
 }
 
 /// Whether `expr` holds a variable marker anywhere (#3279 review).
