@@ -160841,6 +160841,83 @@ fn test_caught_foreign_marker_destructure_later_steps_run_on_the_state_left_4792
     ])
 }
 
+/// #4791: the same caught foreign-`$x` `foreach`, with `$x` bound *outside* the `path()`/`del()` (so it is
+/// an unplaced bind, with no position to compare with the element the `reduce` source moved onto). On a
+/// boolean document the bind is jq's `jv_identical` register on the root step and foreign (the state
+/// `null`) afterwards, so the `foreach` refuses with `null`; a `(.,.a)`/`(.,.[0])` source indexes the
+/// boolean and raises. Captured from `/usr/bin/jq` 1.7.1, both routes, `path` and `del`.
+#[test]
+fn test_caught_foreign_marker_bound_outside_the_resolver_4791() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "true",
+            r". as $x | path(reduce .. as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            "true",
+            r". as $x | del(reduce .. as $i (.; select(.) | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            "true",
+            r". as $x | path(reduce (.,.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Cannot index boolean with string",
+            5,
+        ),
+    ])
+}
+
+/// #4791: an empty `foreach` UPDATE followed by a stage that reads its input (`keys`, `.+1`, `length`) is
+/// not an emptied update the walk may claim: the stage after the `// 5` fallback or the `select` gate runs
+/// on the value the empty step left, and raises or refuses as jq does. Captured from `/usr/bin/jq` 1.7.1,
+/// both routes.
+#[test]
+fn test_emptied_foreach_update_behind_a_reading_stage_stays_unclaimed_4791() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (1,2) as $i (.; foreach empty as $y (.; .; .) // 5 | keys))",
+            "",
+            "number (5) has no keys",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (1,2) as $i (.; foreach empty as $y (.; .; .) // 5 | .+1))",
+            "",
+            "Invalid path expression with result 6",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (1,2) as $i (.; select(.) | foreach empty as $y (.; .; .) | keys))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (1,2) as $i (.; select(.a) | foreach empty as $y (.; .; .) // 5 | length))",
+            "",
+            "Cannot index number with string",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (1,2) as $i (.; foreach empty as $y (.; .; .) // 5 | tostring | length))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
+}
+
 /// #4793: a computed stage that moves nothing (`[1] | FE`, `1 | tostring | FE`, `not | FE`, `{a:1} | FE`)
 /// hands the caught foreign-`$x` `foreach` a value that is not the state, as a literal does, so the
 /// refusal names the state the empty step left (`null`), not that value. `if . then (1 | FE) else . end`
@@ -160849,6 +160926,13 @@ fn test_caught_foreign_marker_destructure_later_steps_run_on_the_state_left_4792
 #[test]
 fn test_caught_foreign_marker_destructure_behind_a_computed_stage_4793() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; [empty] | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
         (
             r#"{"a":{"b":1}}"#,
             r"path(.a as $x | reduce (1,2) as $i (.; [1] | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
