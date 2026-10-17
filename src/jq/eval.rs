@@ -49773,7 +49773,10 @@ fn fans_out(expr: &Expr) -> bool {
 /// runs its live stage against the carried register and trips the resolver's lost-register
 /// assertion. An operand with any other fan-out (a comma, a call) still counts, and so does
 /// one that reads a frozen variable (`$k`), a fold included: the marker re-establishes against
-/// the register the frame would now carry, which is the hazard #3145 withheld it for.
+/// the register the frame would now carry, which is the hazard #3145 withheld it for. The one
+/// exception is a `foreach` marked as reading the register the enclosing fold stands on (#4779,
+/// [`is_register_fold`]): it is handed that register with its position, so its marker certifies
+/// exactly, whichever sibling or `try` it sits under.
 fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
     use crate::jq::walk::{search_subexpr, Visit};
     search_subexpr(expr, &mut |e| match e {
@@ -49811,6 +49814,8 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         Expr::Reduce { .. } | Expr::Foreach { .. } if !mentions_non_null_marker(expr) => {
             Visit::Skip
         }
+        // #4779: a marked fold is entered with the register it reads, whichever sibling it is.
+        Expr::Foreach { .. } if is_register_fold(e) => Visit::Skip,
         Expr::Comma(_)
         | Expr::AsPattern { .. }
         | Expr::Reduce { .. }
@@ -49831,7 +49836,9 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
 /// so a `try` around the comma catches it as jq's own does. A builtin the register
 /// analysis does not list (`abs`) and a computed key (`.a[.b]`) are neither, so they keep the
 /// register withheld. A `foreach`/`reduce` that reads no frozen `$var` is uniform too (#4499): it
-/// takes the register from the frame it is entered with, as a pipe's stages do. A bare
+/// takes the register from the frame it is entered with, as a pipe's stages do. So is a `foreach`
+/// that does, when it is marked as reading the register the enclosing fold stands on (#4779,
+/// [`is_register_fold`]). A bare
 /// register-neutral builtin (`now`, `input_line_number`) is read by
 /// [`is_bare_register_neutral_builtin`] where a comma asks (#3960), not here: this predicate's
 /// other readers have holes of their own that a larger set would route programs into.
@@ -49870,6 +49877,7 @@ fn sibling_sees_register_uniformly(expr: &Expr) -> bool {
         // register the same way on every side (jq forks the comma at its entry).
         // Unless it reads a frozen `$var` (#3984): a marker in it can re-establish against the
         // register the comma would now carry, which is what #3145 withheld it for.
+        Expr::Foreach { .. } if is_register_fold(expr) => true,
         Expr::Foreach { .. } | Expr::Reduce { .. } => !mentions_non_null_marker(expr),
         // #4660: a verdict builtin hands its boolean on at the register it entered with and
         // resolves its operands live (they raise where jq raises), so a comma of them sees the
@@ -50709,12 +50717,9 @@ impl FoldRegister {
             // `try` catches -- `(foreach .a as $w (0; try (($w | .c | .z),
             // $w.b); .)) = 9` matched jq by writing nothing -- so a withheld
             // register still resolves register-less here.
-            // #4499: `fans_out` skips a fold unless it mentions a marker, so the second operand
-            // only ever widens the case of a marker-mentioning fold that is the whole UPDATE.
-            let carries = S::TAG == EvalTag::Jq
-                && self.trackable
-                && !tr
-                && (!fans_out(expr) || is_sole_update_foreach(expr));
+            // #4499, #4779: `fans_out` skips a marker-mentioning fold only when it is marked as
+            // reading the register ([`is_register_fold`]).
+            let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)
@@ -60517,6 +60522,10 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // it (`foreach ..., 1`) is not that, and stays unmarked.
                         let _sole_update_foreach =
                             sole_update_mark::<S>(&substituted, false, false);
+                        // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
+                        // read the register the step left.
+                        let _register_folds = (S::TAG == EvalTag::Jq)
+                            .then(|| fold_body::register_folds(register_fold_items(&substituted)));
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
                         match step_reg.unwrap_or(&reg).resolve::<S>(
@@ -60795,7 +60804,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // Loop-invariant, so read once; `drive_fork` applies it per INIT fork.
     let reads_enclosing_register_exactly = S::TAG == EvalTag::Jq
         && mentions_frozen_var
-        && fold_body::sole_update_foreach_here(input)
+        && fold_reads_enclosing_register(input)
         && !fold_mentions_frozen_var(patterns, &[input, init]);
     // #3580: everything but UPDATE leaves the register where the fold entered, so
     // an emission is at the entry exactly when the UPDATE output it came from was
@@ -61380,6 +61389,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 let _sole_extract_foreach =
                                     sole_update_mark::<S>(ext_expr, true, true);
                                 let _foreach_body = fold_body::foreach_body();
+                                // #4779: ...and the `foreach`es EXTRACT is made of read the register
+                                // this step left, as an UPDATE of that shape reads its fold's.
+                                let _register_folds = (S::TAG == EvalTag::Jq).then(|| {
+                                    fold_body::register_folds(register_fold_items(ext_expr))
+                                });
                                 // #4661: UPDATE navigated the register to `extract_reg` and EXTRACT
                                 // computed a value there without moving it (`foreach ... (1; try .a;
                                 // $i)`): jq emits from inside the loop, so its register is still on
@@ -61466,6 +61480,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // emits, so an inner source that is empty leaves this one emitting nothing.
                         let _sole_update_foreach =
                             sole_update_mark::<S>(&bound_update, true, false);
+                        // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
+                        // read the register the step left.
+                        let _register_folds = (S::TAG == EvalTag::Jq)
+                            .then(|| fold_body::register_folds(register_fold_items(&bound_update)));
                         let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                             if update_stays_if_stated {
                                 fold_body::foreach_body_stating()
@@ -67935,16 +67953,43 @@ fn raise_free_identity_passthrough(expr: &Expr, wide: bool) -> bool {
     }
 }
 
-/// #4499: whether `expr` is a `foreach` that is the whole UPDATE of the fold being resolved
-/// ([`fold_body::sole_update_foreach_here`]) and whose frozen `$var`s are confined to its UPDATE and
+/// #4499, #4779: whether the fold whose source is `source` is the whole UPDATE or the whole EXTRACT
+/// of the fold being resolved.
+fn fold_reads_enclosing_register(source: &Expr) -> bool {
+    fold_body::sole_update_foreach_here(source) || fold_body::register_fold_here(source)
+}
+
+/// #4779: the `foreach`es `expr` is made of, looking through the wrappers that add no movement of
+/// their own (a paren, a `try` without a handler, `?`) and a comma's items: each runs where the
+/// enclosing fold's register stands, as a fold that is the whole of the body does.
+fn register_fold_items(expr: &Expr) -> Vec<&Expr> {
+    fn collect<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match unwrap_paren(expr) {
+            Expr::Foreach { input, .. } => out.push(input),
+            Expr::Try {
+                expr: inner,
+                catch: None,
+            }
+            | Expr::Optional(inner) => collect(inner, out),
+            Expr::Comma(items) => items.iter().for_each(|item| collect(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    collect(expr, &mut out);
+    out
+}
+
+/// #4499, #4779: whether `fold` is a `foreach` marked as reading the register the enclosing fold
+/// stands on ([`fold_reads_enclosing_register`]) whose frozen `$var`s are confined to its UPDATE and
 /// EXTRACT. One in its INIT or source is the accumulator or element itself (or a binding the
 /// enclosing register does not certify: `. as $x | reduce .[]? as $i (.; foreach ($x | .[0]) as $y
 /// (.; .; .))`), which handing it the enclosing register accepted where jq refuses.
-fn is_sole_update_foreach(expr: &Expr) -> bool {
+fn is_register_fold(fold: &Expr) -> bool {
     matches!(
-        unwrap_paren(expr),
+        fold,
         Expr::Foreach { input, init, patterns, .. }
-            if fold_body::sole_update_foreach_here(input)
+            if fold_reads_enclosing_register(input)
                 && !fold_mentions_frozen_var(patterns, &[input, init])
     )
 }
@@ -70486,6 +70531,9 @@ mod fold_body {
         /// The body depth whose UPDATE is a bare `foreach` (#4709), and the address of that
         /// `foreach`'s source expression; `(0, 0)` for none.
         static SOLE_FOREACH: Cell<(u32, usize, bool, bool)> = const { Cell::new((0, 0, false, false)) };
+        /// The body depth whose UPDATE or EXTRACT is made of `foreach`es the register passes
+        /// through (#4779), and the address of each one's source expression.
+        static REGISTER_FOLDS: RefCell<(u32, Vec<usize>)> = const { RefCell::new((0, Vec::new())) };
         /// The body depth whose UPDATE is a pipe headed by a `foreach` (#4724), and a copy of that
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
@@ -70530,6 +70578,46 @@ mod fold_body {
     /// Whether the body being resolved is the one [`emissions_discarded`] marked.
     pub(crate) fn emissions_discarded_here() -> bool {
         depth() > 0 && DISCARD_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`register_folds`] mark.
+    pub(crate) struct RegisterFoldsGuard(Option<(u32, Vec<usize>)>);
+
+    /// Marks the body about to be entered (one level deeper than now) as one whose result is made
+    /// of the `foreach`es `folds` (#4779): each runs where the enclosing fold's register stands,
+    /// whichever sibling or `try` it sits under. The addresses identify the folds; a source that
+    /// was copied on the way down no longer matches, which reads as not being one of them.
+    pub(crate) fn register_folds(folds: Vec<&super::Expr>) -> RegisterFoldsGuard {
+        if folds.is_empty() {
+            return RegisterFoldsGuard(None);
+        }
+        let marked = (
+            depth() + 1,
+            folds
+                .into_iter()
+                .map(|source| (source as *const super::Expr) as usize)
+                .collect(),
+        );
+        RegisterFoldsGuard(Some(REGISTER_FOLDS.with(|a| a.replace(marked))))
+    }
+
+    impl Drop for RegisterFoldsGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                REGISTER_FOLDS.with(|a| *a.borrow_mut() = previous);
+            }
+        }
+    }
+
+    /// Whether the fold whose source is `source` is one [`register_folds`] marked for the body
+    /// being resolved.
+    pub(crate) fn register_fold_here(source: &super::Expr) -> bool {
+        let address = (source as *const super::Expr) as usize;
+        depth() > 0
+            && REGISTER_FOLDS.with(|a| {
+                let marked = a.borrow();
+                marked.0 == depth() && marked.1.contains(&address)
+            })
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
@@ -70999,6 +71087,16 @@ mod fold_body {
     }
 
     pub(crate) fn foreach_body_moved_here() -> bool {
+        false
+    }
+
+    pub(crate) struct RegisterFoldsGuard;
+
+    pub(crate) fn register_folds(_folds: alloc::vec::Vec<&super::Expr>) -> RegisterFoldsGuard {
+        RegisterFoldsGuard
+    }
+
+    pub(crate) fn register_fold_here(_source: &super::Expr) -> bool {
         false
     }
 

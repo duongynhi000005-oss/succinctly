@@ -806,9 +806,9 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   sample of all 474 fold operands moved 160 rows, all to MATCH. **Since the nested-fold `$var` change
   ([#4499](https://github.com/rust-works/succinctly/issues/4499), below)** a `foreach` that is another fold's whole
   `UPDATE` and reads that fold's frozen `$var` in its own `UPDATE`/`EXTRACT` answers as jq does; the `isempty(FOLD)` row
-  was closed before it. **Still divergent**: a fold *sibling* (a comma) or a fold in an `EXTRACT` that reads a frozen
-  `$var` stays out of the uniform siblings (a refusal, never a silent drop), and so does a `$var` in the inner fold's
-  `INIT` or source.
+  was closed before it. **Since [#4779](https://github.com/rust-works/succinctly/issues/4779)** the same holds for such a
+  fold under a `try`/`?`, as the whole `EXTRACT`, and as a comma item. **Still divergent**: a `$var` in the inner fold's
+  `INIT` or source stays refused (a refusal, never a silent drop).
 
   **Since [#4527](https://github.com/rust-works/succinctly/issues/4527) and
   [#4539](https://github.com/rust-works/succinctly/issues/4539)** a destructuring pattern's computed key that is an
@@ -917,13 +917,29 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   fold's step register now reaches the inner fold with its value *and* position (`FoldRegister::positioned`), so a `$w`
   marker certifies against it exactly and the `try` swallows only what jq's does. The admission is deliberately narrow:
   the inner fold must be the enclosing `foreach`/`reduce`'s whole `UPDATE`, or the head of the pipe that is
-  (`fold_body::sole_update_foreach_here`; the same shapes in an `EXTRACT`, as a comma sibling, behind a `try`, or under a
-  stage outside the enclosing fold keep #3984's withhold, which
+  (`fold_body::sole_update_foreach_here`; under a stage outside the enclosing fold #3984's withhold stays, which
   `jq-nested-fold-frozen-var-sweep.py` pins), and a `$var` in its `INIT` or source (`foreach (1,2) as $i ($w; try .b; .)`,
   where the accumulator *is* the register) stays refused. Over `scripts/jq-nested-fold-outer-var-sweep.py` (3,600 rows) 893
   rows flipped to MATCH, with no ACCEPT_WRONG, no lost match and no new DIFF; the 48 DIFF rows left are exit-5 rows
   whose pre-error stdout already differed on `main`. A `reduce` as the inner fold is not admitted (its `UPDATE` carries no
   sole-`UPDATE` mark).
+  **Since [#4779](https://github.com/rust-works/succinctly/issues/4779)** the inner `foreach` may also sit under a `try` or
+  `?` (no handler), be the enclosing fold's whole `EXTRACT`, or be an item of a comma in either position
+  (`fold_body::register_folds`, marked where the enclosing fold resolves its `UPDATE` and `EXTRACT`; `fans_out` and
+  `sibling_sees_register_uniformly` read the same mark through `is_register_fold`). jq forks a comma at its entry, so every
+  item starts from the register the comma was entered with, and a `try` adds no movement; an `EXTRACT` runs on the register
+  the step's `UPDATE` left, which `advance` states (an `UPDATE` that moved it, `.b?`, keeps the row refused, as jq does).
+  Over `scripts/jq-nested-fold-outer-var-sweep.py` (19,080 rows, 43 more outers than before) 2,018 rows flipped to MATCH with
+  no ACCEPT_WRONG, no lost match and no new DIFF, and `jq-nested-fold-frozen-var-sweep.py` gained 84 MATCH rows. Pinned by
+  `test_fold_under_try_extract_or_comma_reads_the_outer_frozen_var_4779`.
+  **Still refused, intentionally, with the reason**: a frozen `$var` in the inner fold's `INIT` (`path(foreach .a as $w (.;
+  foreach (1,2) as $i ($w; try .b; .); .))` prints `["a","b"]` in jq). The accumulator *is* the register by pointer, which
+  `positioned` does not model: handing the register to a fold whose INIT mentions the marker made `path()` print nothing and
+  `del`/`=` write nothing (292 new DIFF rows over the outer-var sweep, the ones inspected a silently dropped answer, because the `try`
+  inside the fold swallows the refusal of the first accumulator step), so the loud refusal stays. A `$var` in the source is
+  refused for the reason #4499 found (`jq-fold-body-register-grid-sweep.py`, `rd-nav/fe/x-idx`: the enclosing step's register is
+  not the one the source runs against). A fix needs the accumulator's identity with the register, a pointer comparison this
+  value model cannot make, modelled as its own provenance.
   **Since [#4596](https://github.com/rust-works/succinctly/issues/4596)** the `reduce` side of the same shape, and a bare
   (un-`try`'d) bind: with INIT `.` behind a source that navigates (`.[]?`, `.[0]?`, `.a?`) the source leaves jq's register on
   the element, so the accumulator is no node of it, the chain's first step fails `path_intact` and jq retries onto the bare
@@ -12461,7 +12477,7 @@ filtered content of `valid` after its error line. Under `-s` the same gap lets `
 readable files into output (`[]` when none opened) while still exiting 2; succinctly emits no
 output. Both are unfiled follow-ups to the exit-code change, not part of its scope.
 
-## Bare `..`/`recurse` on a `$var` off the register: a nested-fold refuse-only residual (#3048)
+## Bare `..`/`recurse` on a `$var` off the register (#3048; its nested-fold residual closed by #4779)
 
 `resolve_node_sink`'s bare-recursion arm (#2761) emits the identity seed of an untracked
 value, then raises `invalid_path_expression_near_iterate` if the continuation discards
@@ -12493,7 +12509,11 @@ snapshot from refusing here for a different, still-valid reason: real yq's lexer
 `recurse(f)` outright, so a marked `$var` reaching the walk below and correctly re-emitting
 its own mark is the intended behaviour there, not this bug.
 
-**One residual, refuse-only row remains**, unclosed by this fix and out of its scope
+**Closed by [#4779](https://github.com/rust-works/succinctly/issues/4779).** The inner `foreach` is the outer one's whole
+`EXTRACT`, which now reads the register the step left, and the row below answers as jq does (no output, exit 0). What follows is
+the analysis as it stood when the row was refused.
+
+**One residual, refuse-only row remained**, unclosed by this fix and out of its scope
 (confirmed live against jq 1.7.1, `main` `af43dc42b`):
 
 ```console

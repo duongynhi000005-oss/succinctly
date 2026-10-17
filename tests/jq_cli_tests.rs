@@ -74075,14 +74075,12 @@ fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Resul
 /// #4499: what the nested-fold admission above leaves refused, pinned so it stays loud. A frozen
 /// `$var` in the inner fold's `INIT` makes the accumulator the register itself, which the admission
 /// does not model (jq prints `["a","b"]`): a refusal that is loud, never a silently empty stream.
-/// A fold that is a comma sibling of the outer `UPDATE` keeps the register withheld too (jq prints
-/// `["a","b"]` twice, then raises on the sibling). The last row is a frozen `$x` in the inner
+/// (The comma sibling this once pinned is admitted since #4779.) The last row is a frozen `$x` in the inner
 /// fold's *source*, bound outside both folds: jq refuses it (the outer source moved the register
 /// onto the element), and handing the enclosing register to that source accepted it
 /// (`jq-fold-body-register-grid-sweep.py`, `rd-nav/fe/x-idx`).
 #[test]
-fn test_foreach_that_is_a_fold_update_keeps_init_marker_and_comma_sibling_refused_4499(
-) -> Result<()> {
+fn test_foreach_that_is_a_fold_update_keeps_init_marker_refused_4499() -> Result<()> {
     for (doc, filter, stderr_part) in [
         (
             r#"{"a":{"b":1}}"#,
@@ -74091,7 +74089,7 @@ fn test_foreach_that_is_a_fold_update_keeps_init_marker_and_comma_sibling_refuse
         ),
         (
             r#"{"a":{"b":1}}"#,
-            r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
+            r"path(foreach .a as $w (.; foreach (1,2) as $i ($w; .b; .); .))",
             "Invalid path expression",
         ),
         (
@@ -74106,6 +74104,115 @@ fn test_foreach_that_is_a_fold_update_keeps_init_marker_and_comma_sibling_refuse
         assert!(stderr.contains(stderr_part), "{filter}: {stderr}");
     }
     Ok(())
+}
+
+/// #4779: the fold that reads the enclosing fold's register is not only the whole `UPDATE`: a `try`
+/// or `?` around it, the whole `EXTRACT` (after an `UPDATE` that leaves the register where it was),
+/// and an item of a comma (jq forks the comma at its entry) read the same node, so `$w` certifies
+/// against it. Every jq side captured from jq 1.7.1; the controls at the end keep their verdict
+/// (a navigating sibling, an `UPDATE` that moved the register before the `EXTRACT`).
+#[test]
+fn test_fold_under_try_extract_or_comma_reads_the_outer_frozen_var_4779() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        // Under `try` and `?`.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .)); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; ((foreach (1,2) as $i (1; try ($w|.b); .)))?; .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .)); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        // As the whole EXTRACT, after an UPDATE that leaves the register.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; foreach (1,2) as $i (1; .; .); foreach (1,2) as $j (1; try ($w|.b); .)))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; .; try (foreach (1,2) as $j (1; try ($w|.b); .))))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(foreach .a as $w (.; foreach (1,2) as $i (1; .; .); foreach (1,2) as $j (1; try ($w|.b); .))) |= 9",
+            "{\"a\":{\"b\":9}}\n",
+            "",
+            0,
+        ),
+        // ...but not after an UPDATE that moved the register off `.a`: jq refuses.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; .b?; foreach (1,2) as $j (1; try ($w|.b); .)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\"",
+            5,
+        ),
+        // As a comma item: both folds run where the comma was entered.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), foreach (1,2) as $i (1; try ($w|.c); .)); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n[\"a\",\"c\"]\n[\"a\",\"c\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        // A `catch` handler is not a wrapper that adds no movement: the row keeps the answer jq
+        // gives, and a `reduce` as the enclosing fold keeps its refusal (jq raises too).
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .)) catch $w; .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .))))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        // A sibling that navigates the accumulator keeps the verdict jq gives.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; .; (.b?, foreach (1,2) as $j (1; try ($w|.b); .))))",
+            "",
+            "Invalid path expression near attempt to access element \"b\"",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; (1, foreach (1,2) as $i (1; try ($w|.b); .)); .))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
 }
 
 /// #4130: a `foreach` on an untracked entry emits from inside the loop, so the register an
@@ -110580,29 +110687,20 @@ fn test_bare_recurse_var_back_at_register_unaffected_by_3048() -> Result<()> {
     Ok(())
 }
 
-/// Documented, accepted refuse-only residual of #3048's fix (recorded in
-/// `docs/compliance/jq/limitations.md`'s "Bare `..`/`recurse` on a `$var`
-/// off the register" section): two nested `foreach` folds each hold their
-/// own copy of `$x`'s register, and by the time the inner extract runs
-/// jq's *actual* register has cycled back to where `$x` was bound, so jq
-/// accepts (empty stdout, exit 0 -- confirmed live against jq 1.7.1) where
-/// the fixed iterate check here — which cannot see either fold's own
-/// register state — refuses. Pinned so a future change to this arm
-/// surfaces as a deliberate decision, not a silent flip either direction.
+/// What was a documented refuse-only residual of #3048's fix (two nested `foreach` folds each hold
+/// their own copy of `$x`'s register, and by the time the inner extract runs jq's *actual* register
+/// has cycled back to where `$x` was bound, so jq accepts: empty stdout, exit 0, confirmed live
+/// against jq 1.7.1). Since #4779 the inner `foreach` is the outer one's `EXTRACT`, which reads the
+/// register the step left, and the iterate check sees it: the answer is jq's.
 #[test]
-fn test_bare_recurse_marked_var_nested_fold_refuse_only_residual_3048() -> Result<()> {
+fn test_bare_recurse_marked_var_nested_fold_follows_jq_3048_4779() -> Result<()> {
     let doc = r#"{"a":1}"#;
     for stage in ["..", "recurse"] {
         let filter = format!(
             "path(. as $x | foreach (1) as $i (0; 5; foreach (1) as $j (0; 6; $x | {stage} | select(false))))"
         );
         let (out, err, code) = run_jq_full(&["-c", &filter], Some(doc))?;
-        assert_eq!(code, 5, "{filter}: out={out:?} err={err:?}");
-        assert_eq!(out, "", "{filter}");
-        assert!(
-            err.contains("Invalid path expression near attempt to iterate through"),
-            "{filter}: err={err:?}"
-        );
+        assert_eq!((out.as_str(), err.as_str(), code), ("", "", 0), "{filter}");
     }
     Ok(())
 }
