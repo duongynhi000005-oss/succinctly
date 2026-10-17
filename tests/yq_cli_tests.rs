@@ -398,7 +398,7 @@ fn test_yq_path_f_lone_leaf_resolution_answers_what_it_did_4155() -> Result<()> 
     for (doc, filter, expected) in [
         (SEQ, "[.[] | path(. // .)]", "[[],[],[],[],[],[]]\n"),
         (SEQ, "[.[] | path(.a? // .)]", "[[],[],[],[],[],[]]\n"),
-        (SEQ, "[.[] | path(first(.a?))]", "[[\"a\"],[\"a\"]]\n"),
+        (SEQ, "[.[] | path(limit(1; .a?))]", "[[\"a\"],[\"a\"]]\n"),
         (
             SEQ,
             "[.[] | path(try .a catch empty)]",
@@ -406,7 +406,7 @@ fn test_yq_path_f_lone_leaf_resolution_answers_what_it_did_4155() -> Result<()> 
         ),
         (SEQ, "[.[] | path(. // empty)]", "[[],[],[],[],[],[]]\n"),
         (SEQ, "[path(.[] // .)]", "[[0],[1],[],[],[4],[5]]\n"),
-        (SEQ, "[path(first(.[]))]", "[[0]]\n"),
+        (SEQ, "[path(limit(1; .[]))]", "[[0]]\n"),
         (MAP, "[path(.a[])]", "[[\"a\",0],[\"a\",1]]\n"),
         (MAP, "[path((.a[])?)]", "[[\"a\",0],[\"a\",1]]\n"),
         (MAP, "[path(.b // .a)]", "[[\"a\"]]\n"),
@@ -906,7 +906,7 @@ fn test_yq_recurse_gated_cond_has_no_node_cap_3737() -> Result<()> {
             "12000\n",
         ),
         ("[limit(3; recurse(.[]?; true))] | length", "3\n"),
-        ("first(recurse(.[]?; true)) | length", "6000\n"),
+        ("limit(1; recurse(.[]?; true)) | length", "6000\n"),
     ] {
         let (stdout, code) = run_yq_stdin(filter, &doc, &args)?;
         assert_eq!((stdout.as_str(), code), (want, 0), "`{filter}`");
@@ -963,7 +963,7 @@ fn test_recurse_of_each_optional_has_no_node_cap_3703() -> Result<()> {
         ),
         ("[limit(3; recurse(.[]?))] | length", "3\n"),
         ("[limit(12002; recurse(.[]?))] | length", "12001\n"),
-        ("first(recurse(.[]?)) | length", "6000\n"),
+        ("limit(1; recurse(.[]?)) | length", "6000\n"),
     ] {
         let (stdout, code) = run_yq_stdin(filter, &doc, &args)?;
         assert_eq!(code, 0, "`{filter}`");
@@ -3541,7 +3541,7 @@ fn test_yq_paths_filter_duplicate_keys_under_a_stopping_consumer_1342() -> Resul
     let yaml = "a: 1\na: 2\nb: 3\n";
     let flags = &["-o=json", "-I=0", "--jq-extensions"];
     for (filter, expected) in [
-        ("first(paths(scalars))", r#"["a"]"#),
+        ("limit(1; paths(scalars))", r#"["a"]"#),
         ("[limit(2; paths(scalars))]", r#"[["a"],["a"]]"#),
         ("[limit(3; paths(scalars))] | length", "3"),
         ("isempty(paths(. == 2))", "false"),
@@ -3775,12 +3775,12 @@ fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
         // parse is the same `Expr::Negate`.
         ("(-length)", "-3"),
         // Under a lazy consumer these take `eval_each_generic`'s own arms.
-        // Its `Expr::Negate` arm bridged too, so `first(-length)` was the
+        // Its `Expr::Negate` arm bridged too, so `limit(1; -length)` was the
         // last spelling still answering `-2` once the arms above were fixed.
-        ("first(length + 0)", "3"),
-        ("first(-length)", "-3"),
+        ("limit(1; length + 0)", "3"),
+        ("limit(1; -length)", "-3"),
     ] {
-        let (out, code) = run_yq_stdin(filter, dup, &["-o=json", "-I=0"])?;
+        let (out, code) = run_yq_stdin(filter, dup, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "filter {filter}");
         assert_eq!(out.trim(), expected, "filter {filter}");
     }
@@ -3800,7 +3800,7 @@ fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
         (".b | style", "\"flow\""),
         (".b | (style + \"\")", "\"flow\""),
     ] {
-        let (out, code) = run_yq_stdin(filter, meta, &["-o=json", "-I=0"])?;
+        let (out, code) = run_yq_stdin(filter, meta, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "filter {filter}");
         assert_eq!(out.trim(), expected, "filter {filter}");
     }
@@ -3809,7 +3809,7 @@ fn test_arithmetic_reads_the_real_document_2626() -> Result<()> {
     // `di` already counted correctly.
     let multidoc = "a: 1\n---\nb: 2\n";
     for filter in ["di", "di + 0"] {
-        let (out, code) = run_yq_stdin(filter, multidoc, &["-o=json", "-I=0"])?;
+        let (out, code) = run_yq_stdin(filter, multidoc, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "filter {filter}");
         assert_eq!(out, "0\n1\n", "filter {filter}");
     }
@@ -3941,19 +3941,21 @@ fn test_arithmetic_validates_only_what_it_reads_2626() -> Result<()> {
         ("length", "2"),
         ("length + 0", "2"),
         ("0 + length", "2"),
-        ("first(length + 0)", "2"),
+        ("limit(1; length + 0)", "2"),
         ("(keys|length)", "2"),
         ("(keys|length) + 0", "2"),
         ("(-length)", "-2"),
     ] {
-        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "`{filter}` -- stderr: {stderr:?}");
         assert_eq!(stdout.trim(), expected, "`{filter}` -- stderr: {stderr:?}");
     }
 
     // Navigating past the bad scalar is likewise unaffected by the `+ 0`.
     for (filter, expected) in [(".b", "5"), (".b + 0", "5")] {
-        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "`{filter}` -- stderr: {stderr:?}");
         assert_eq!(stdout.trim(), expected, "`{filter}` -- stderr: {stderr:?}");
     }
@@ -3962,7 +3964,8 @@ fn test_arithmetic_validates_only_what_it_reads_2626() -> Result<()> {
     // an arithmetic that actually *reads* the malformed scalar still
     // raises, exactly as the bare read does.
     for filter in [".a", ".a + \"\"", "(.a + \"\") | length"] {
-        let (_, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        let (_, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_ne!(code, 0, "`{filter}` -- stderr: {stderr:?}");
         assert!(
             stderr.contains("invalid escape sequence"),
@@ -17005,17 +17008,21 @@ fn test_jq_mode_float_threshold_matches_oracle_2438_2456() -> Result<()> {
 #[test]
 fn test_first_last_wrapping_computation_gets_scientific_notation_997() -> Result<()> {
     for (filter, want) in [
-        ("first(.a * 1e100)", "1e+100"),
+        ("limit(1; .a * 1e100)", "1e+100"),
         ("last(.a * 1e100)", "1e+100"),
     ] {
-        let (out, code) = run_yq_stdin(filter, "a: 1\n", &["-o=json", "-I=0"])?;
+        let (out, code) = run_yq_stdin(filter, "a: 1\n", &["--jq-extensions", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "exit code for {filter:?}");
         assert_eq!(out.trim(), want, "for {filter:?}");
     }
-    // Pure-navigation first(f)/last(f) must still take the M2 fast path
+    // Pure-navigation limit(1; f)/last(f) must still take the M2 fast path
     // (preserving duplicate mapping keys, #631) -- this is a non-regression
     // check, not new #997 behavior.
-    let (out, code) = run_yq_stdin("first(.a[])", "a: [1, 2, 3]\n", &["-o=json", "-I=0"])?;
+    let (out, code) = run_yq_stdin(
+        "limit(1; .a[])",
+        "a: [1, 2, 3]\n",
+        &["--jq-extensions", "-o=json", "-I=0"],
+    )?;
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "1");
     Ok(())
@@ -17031,17 +17038,29 @@ fn test_first_last_wrapping_computation_gets_scientific_notation_997() -> Result
 #[test]
 fn test_yq_last_of_an_empty_stream_is_null_1521() -> Result<()> {
     // M2/streaming route.
-    let (out, code) = run_yq_stdin("last(.a[])", "a: []\n", &["-o=json", "-I=0"])?;
+    let (out, code) = run_yq_stdin(
+        "last(.a[])",
+        "a: []\n",
+        &["--jq-extensions", "-o=json", "-I=0"],
+    )?;
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "null");
 
     // DOM fallback route (`--sort-keys` forces it past `can_use_m2_streaming`).
-    let (out, code) = run_yq_stdin("last(.a[])", "a: []\n", &["-o=json", "-I=0", "--sort-keys"])?;
+    let (out, code) = run_yq_stdin(
+        "last(.a[])",
+        "a: []\n",
+        &["--jq-extensions", "-o=json", "-I=0", "--sort-keys"],
+    )?;
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "null");
 
     // `first` stays asymmetric here too, same as jq mode (#1521).
-    let (out, code) = run_yq_stdin("first(.a[])", "a: []\n", &["-o=json", "-I=0"])?;
+    let (out, code) = run_yq_stdin(
+        "limit(1; .a[])",
+        "a: []\n",
+        &["--jq-extensions", "-o=json", "-I=0"],
+    )?;
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "");
     Ok(())
@@ -38918,8 +38937,11 @@ fn test_yq_sub_arity3_pattern_escape_reports_bare_not_prefix_then_raise() -> Res
 /// (`first(.[] | stderr)`) the jq-side fix closed.
 #[test]
 fn test_yq_first_over_pipe_stops_at_first_element_1461() -> Result<()> {
-    let (stdout, stderr, code) =
-        run_yq_stdin_with_stderr("first(.[] | stderr)", "- 1\n- 2\n", &["-o=json", "-I=0"])?;
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr(
+        "limit(1; .[] | stderr)",
+        "- 1\n- 2\n",
+        &["--jq-extensions", "-o=json", "-I=0"],
+    )?;
     assert_eq!(code, 0, "stdout: {stdout:?} stderr: {stderr:?}");
     assert_eq!(stdout, "1\n");
     assert_eq!(stderr, "1", "must not visit the second element");
@@ -39097,19 +39119,19 @@ fn test_first_over_lazy_prefix_applies_every_stage_1565() -> Result<()> {
     let cases: &[(&str, &str, &str)] = &[
         // `Owned` arm, via `length`.
         (
-            "first(keys | length | tostring)",
+            "limit(1; keys | length | tostring)",
             "a: 1\nb: 2\nc: 3\n",
             "\"3\"\n",
         ),
         // `OneCursor` arm, via `first` over a `LazyKeys` cons-list walk.
         (
-            "first(keys | first | ascii_upcase)",
+            "limit(1; keys | first | ascii_upcase)",
             "a: 1\nb: 2\n",
             "\"A\"\n",
         ),
         // `Owned` arm again, but from a `LazySeq` (`map(f)`) source.
         (
-            "first(map(. + 1) | first | . + 100)",
+            "limit(1; map(. + 1) | first | . + 100)",
             "- 1\n- 2\n- 3\n",
             "102\n",
         ),
@@ -39148,7 +39170,7 @@ fn test_lazy_keys_streaming_preserves_yaml_duplicates_1599() -> Result<()> {
 
     // Through the streaming arm: stops at the first key.
     let (out, code) = run_yq_stdin(
-        "first(keys | .[])",
+        "limit(1; keys | .[])",
         dup,
         &["--jq-extensions", "-o=json", "-I=0"],
     )?;
@@ -39159,7 +39181,7 @@ fn test_lazy_keys_streaming_preserves_yaml_duplicates_1599() -> Result<()> {
     // matching -- so the repeated key is reached, and must not end the
     // walk early or be treated as a collapse.
     let (out, code) = run_yq_stdin(
-        "[first(keys | .[] | select(. == \"zzz\"))]",
+        "[limit(1; keys | .[] | select(. == \"zzz\"))]",
         dup,
         &["--jq-extensions", "-o=json", "-I=0"],
     )?;
@@ -39170,7 +39192,7 @@ fn test_lazy_keys_streaming_preserves_yaml_duplicates_1599() -> Result<()> {
     // continuing correctly through the repeated "a".
     let mid = "a: 1\nb: 2\nc: 3\na: 4\nd: 5\n";
     let (out, code) = run_yq_stdin(
-        "first(keys | .[] | select(. == \"d\"))",
+        "limit(1; keys | .[] | select(. == \"d\"))",
         mid,
         &["--jq-extensions", "-o=json", "-I=0"],
     )?;
@@ -60363,10 +60385,9 @@ fn recurse_through_a_bound_still_resolves_explicit_tags_2693() -> Result<()> {
     assert_eq!(stdout.trim_end(), resolved, "the oracle row itself");
 
     for filter in [
-        "[first(recurse(.[]?))]",
         "[limit(1; recurse(.[]?))]",
         "[nth(0; recurse(.[]?))]",
-        "[first(recurse(.[]?; true))]",
+        "[limit(1; recurse(.[]?; true))]",
     ] {
         let (stdout, code) = run_yq_stdin(filter, doc, &["--jq-extensions", "-o=json", "-I0"])?;
         assert_eq!(code, 0, "{filter}: {stdout}");
@@ -61198,7 +61219,7 @@ fn test_skip_count_generators_extension_2934() -> Result<()> {
         ("[skip(.counts[];.values[])]", "[10,20,30,20,30]\n"),
         (r#"[skip(empty;error("BODY"))]"#, "[]\n"),
         (
-            r#"[first(skip((0,error("COUNT"));10,error("BODY")))]"#,
+            r#"[limit(1; skip((0,error("COUNT"));10,error("BODY")))]"#,
             "[10]\n",
         ),
         (r#"[limit(2;skip(1;10,20,30,error("TAIL")))]"#, "[20,30]\n"),
@@ -61488,7 +61509,7 @@ fn test_yq_any_all_cond_isvalid_loops_keep_eager_answers_2658() -> Result<()> {
         ("a: 1\n", "isvalid(.a)", "true"),
         ("a: 1\n", "isvalid(.a | tonumber)", "true"),
         ("a: x\n", "isvalid(.a | tonumber)", "false"),
-        ("0\n", "first(while(true; . + 1))", "0"),
+        ("0\n", "limit(1; while(true; . + 1))", "0"),
         // Aliases: the arms read through them like any other node.
         ("a: &x [1, 2]\nb: *x\n", ".b | any(. == 2)", "true"),
         (
@@ -62931,11 +62952,11 @@ fn test_yq_jq_extensions_path_foreach_update_by_demand_3507() -> Result<()> {
     let doc = r#"{"a":{"a":1}}"#;
     for (filter, expected) in [
         (
-            r#"del(first(foreach 1 as $x (.; .[("a"|stderr), ("b"|stderr)])))"#,
+            r#"del(limit(1; foreach 1 as $x (.; .[("a"|stderr), ("b"|stderr)])))"#,
             "{}\n",
         ),
         (
-            r#"first(foreach 1 as $x (.; .[("a"|stderr), ("b"|stderr)])) = 5"#,
+            r#"limit(1; foreach 1 as $x (.; .[("a"|stderr), ("b"|stderr)])) = 5"#,
             "{\"a\":5}\n",
         ),
     ] {
@@ -62963,7 +62984,7 @@ fn test_yq_jq_extensions_bounded_pipe_stops_at_the_bound_3514() -> Result<()> {
     for (yaml, filter, want_out, want_err, want_code) in [
         (
             flat,
-            r#".a | first(.[] | if ("A"|stderr) then . else . end) | key"#,
+            r#".a | limit(1; .[] | if ("A"|stderr) then . else . end) | key"#,
             "0\n",
             "A",
             0,
@@ -62977,7 +62998,7 @@ fn test_yq_jq_extensions_bounded_pipe_stops_at_the_bound_3514() -> Result<()> {
         ),
         (
             nested,
-            r#".a | first(.[] | .[(0, error("x"))]) | key"#,
+            r#".a | limit(1; .[] | .[(0, error("x"))]) | key"#,
             "",
             "Error: x\n",
             1,
@@ -63013,7 +63034,7 @@ fn test_yq_jq_extensions_bounded_walk_streams_try_and_nested_pipes_4014() -> Res
     for (yaml, filter, want_out, want_err, want_code) in [
         (
             flat,
-            r#".a | first(try (.[] | if ("A"|stderr) then . else . end)) | key"#,
+            r#".a | limit(1; try (.[] | if ("A"|stderr) then . else . end)) | key"#,
             "0\n",
             "A",
             0,
@@ -63027,14 +63048,14 @@ fn test_yq_jq_extensions_bounded_walk_streams_try_and_nested_pipes_4014() -> Res
         ),
         (
             nested,
-            r#".a | first(.. | if ("C"|stderr) then . else . end) | key"#,
+            r#".a | limit(1; .. | if ("C"|stderr) then . else . end) | key"#,
             "\"a\"\n",
             "C",
             0,
         ),
         (
             nested,
-            r#".a | first(try .[(0, error("x"))] catch "caught") | key"#,
+            r#".a | limit(1; try .[(0, error("x"))] catch "caught") | key"#,
             "\"a\"\n",
             "",
             0,
@@ -63249,7 +63270,7 @@ fn yq_last_f_wrappers_and_type_filters_do_not_keep_the_path_register_3653() -> R
     for filter in [
         "del(. as $x | last(.a)? | $x.k)",
         "del(. as $x | try last(.a) | $x.k)",
-        "del(. as $x | first(last(.a)) | $x.k)",
+        "del(. as $x | limit(1; last(.a)) | $x.k)",
         "del(. as $x | 1 | numbers | $x.k)",
         "del(. as $x | 1 | (numbers)? | $x.k)",
         // #3767
@@ -70973,5 +70994,60 @@ fn test_filtered_assignment_target_that_matches_nothing_keeps_yaml_output_4593()
             "`{filter}`: {stderr:?}"
         );
     }
+    Ok(())
+}
+
+/// #2377: yq's `first(f)` is the first child of the context for which `f` is truthy -- not jq's
+/// "first output of `f`" -- and the child keeps its path. Every row is captured from yq v4.53.3's
+/// behaviour (`-o=json -I0`).
+#[test]
+fn test_first_f_is_the_first_child_where_f_is_truthy_2377() -> Result<()> {
+    let seq = r#"[{"a":0},{"a":null},{"a":false},{"a":2},{"a":3}]"#;
+    let map = r#"{"x":{"a":1},"y":{"a":2}}"#;
+    let rows: &[(&str, &str, &str)] = &[
+        (seq, "first(.a)", "{\"a\":0}\n"),
+        (seq, "first(.z)", ""),
+        (seq, "first(.a == 99)", ""),
+        (seq, "first(true)", "{\"a\":0}\n"),
+        (seq, "first(false)", ""),
+        (
+            r#"[{"a":null,"b":1},{"a":3}]"#,
+            "first(.b, .a)",
+            "{\"a\":null,\"b\":1}\n",
+        ),
+        (r#"[1,{"a":2}]"#, "first(.a)", "{\"a\":2}\n"),
+        (r#"[null,0,"",false,[],{}]"#, "first(.)", "0\n"),
+        (r"[[1,2],[3]]", "first(length == 1)", "[3]\n"),
+        (r"[[1,2],[3]]", ".[] | first(.)", "1\n3\n"),
+        ("null", "first(.a)", ""),
+        ("5", "first(.)", ""),
+        ("[]", "first(.a)", ""),
+        (map, "first(.a == 2)", "{\"a\":2}\n"),
+        (map, "first(.a == 2) | key", "\"y\"\n"),
+        (map, "first(.a == 2) | path", "[\"y\"]\n"),
+        (map, "first(.a == 2) |= 3", "{\"x\":{\"a\":1},\"y\":3}\n"),
+        (
+            r#"[{"a":1},{"a":2}]"#,
+            "first(.a == 2) |= {\"z\":1}",
+            "[{\"a\":1},{\"z\":1}]\n",
+        ),
+        (
+            r#"[{"a":1},{"a":2}]"#,
+            "del(first(.a == 2))",
+            "[{\"a\":1}]\n",
+        ),
+        (r#"[{"a":1},{"a":2}]"#, "[first(.a == 2)]", "[{\"a\":2}]\n"),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc}: {stderr:?}"
+        );
+    }
+    // The argument's own error still surfaces, and a field read on a non-mapping child raises.
+    let (_, _, code) = run_yq_stdin_with_stderr("first(error(\"x\"))", "[1,2]", &[])?;
+    assert_eq!(code, 1);
     Ok(())
 }

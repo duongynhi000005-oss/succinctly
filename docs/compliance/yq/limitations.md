@@ -5057,8 +5057,16 @@ Three narrower residuals of the same fix, each captured live from v4.53.3:
 - A `key | <metadata>` nested inside a bounded consumer (`first`/`limit`/`last`) or an `as`
   *source* still answers the default when a later stage also reads path context
   (`.a.b | first(key | line) | path`). The bounded consumers are not real yq builtins
-  anyway — its lexer rejects `limit`, `last` and `try`, and its own `first(f)` ignores `f`
-  (#2377) — so these shapes are succinctly extensions.
+  anyway — its lexer rejects `limit`, `last` and `try`, and its own `first(f)` is the first
+  child for which `f` is truthy, which `succinctly yq` implements as `first(.[] | select(f))`
+  (#2377) — so these shapes (spelled `limit(1; …)`) are succinctly extensions.
+  Two residuals of #2377: yq vivifies an absent key read inside `f` into the child it
+  returns (`[{"a":0}] | first(.a, .b)` is `{"a":0,"b":null}`; the #2435 family), and
+  `first(f).a` (a postfix after the call) is a parse error here. yq also raises its own comparison
+  errors for a child `f` cannot compare (`[[],[1]] | first(. > 1)` is `arrays not yet supported
+  for comparison`; here `[]`), and a write through `first(f)` on a `null` context answers `[]`
+  in yq and `null` here. The change applies under `--jq-extensions` too: `first(f)` is a real yq
+  builtin, so the flag does not restore jq's meaning (spell it `limit(1; f)`).
 - Metadata through a *constructed* container is the container's, not the key's:
   `map_values(key | line)` is `a: 1` in yq and `a: 0` here, as are
   `to_entries[0].key | line` and `[.a | key] | .[0] | line`.

@@ -4059,6 +4059,9 @@ impl<'a> Parser<'a> {
     /// Parse a first expression.
     /// Syntax: first or first(expr)
     ///
+    /// In yq mode `first(f)` is not jq's first output of `f` but yq's first child for which `f`
+    /// is truthy, so it is built as `first(.[]? | select(f))` (#2377).
+    ///
     /// #2237: bare `first` (0 args) is already valid syntax
     /// (`Builtin::First`), so the only wrong-arity shape here is a 2nd
     /// `;`-separated argument (`first(1;2)`), which rewinds jq-mode-only,
@@ -4077,6 +4080,15 @@ impl<'a> Parser<'a> {
                 return self.wrong_arity_or_expect(start_pos, ')', vec![expr]);
             }
             self.next();
+            if self.mode == ParserMode::Yq {
+                // #2377: yq's `first(f)` is not jq's "first output of f" -- it is the first
+                // child of the context for which `f` is truthy, i.e. `first(.[] | select(f))`,
+                // with the child's path (so `first(f) |= x`, `path` and `key` follow).
+                return Ok(Expr::FirstExpr(Box::new(Expr::pipe(vec![
+                    Expr::Optional(Box::new(Expr::Iterate)),
+                    Expr::Builtin(Builtin::Select(Box::new(expr))),
+                ]))));
+            }
             Ok(Expr::FirstExpr(Box::new(expr)))
         } else {
             Ok(Expr::Builtin(Builtin::First))
