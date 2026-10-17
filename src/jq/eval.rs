@@ -51404,6 +51404,10 @@ fn is_register_navigation(e: &Expr) -> bool {
         | Expr::Builtin(Builtin::First | Builtin::Last | Builtin::Nth(_)) => true,
         Expr::Optional(inner) => is_register_navigation(inner),
         Expr::Pipe(stages) => stages.iter().all(is_register_navigation),
+        // #4790: `..` walks `.[]?` steps, and a comma runs each navigation from the same node, so each
+        // output of either is a node the register is left on.
+        Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown) => true,
+        Expr::Comma(items) => items.iter().all(is_register_navigation),
         _ => false,
     }
 }
@@ -52409,7 +52413,8 @@ fn foreign_in_off_body<S: EvalSemantics>(ambient: &FoldSourceAmbient<'_>) -> boo
 /// to it by kind (`null`/booleans compare by value). A pattern's tracked `INDEX` step on such a node
 /// is path-checked against the register and raises, whether the source is a `foreach` or a `reduce`
 /// that backtracks it. Empty in the body of a `reduce` whose source moved the register, where the
-/// register is on an element and the ambient position is not its own, and unless the source holds
+/// register is on an element and the ambient position is not its own (but see
+/// [`foreign_register_markers_with`]: a `null` marker is read there, #4777/#4790), and unless the source holds
 /// a destructuring bind. Each is paired with whether it holds a truthy value, which a `select`
 /// on it needs ([`collapse_marker_pipes`]). `passing` are the `select` conditions decided by the
 /// markers' values ([`passing_marker_selects`]), which skip nothing ([`source_always_reaches_destructure`]).
@@ -52428,7 +52433,8 @@ fn foreign_register_markers<S: EvalSemantics>(
 ///
 /// `moved_at` (#4777) is the position of the element a `reduce` source moved the register onto, in
 /// the body of that `reduce`: the markers read are then those bound at another position, again only a
-/// container (a scalar compares by representation, `null`/booleans by kind). Without it the body of
+/// container (a scalar compares by representation, `null`/booleans by kind), or a `null` on a step whose
+/// element is known not to be (#4790; a boolean `$x` raises a type error the `try` catches). Without it the body of
 /// such a `reduce` reads nothing, the register being on an element the ambient position is not.
 fn foreign_register_markers_with<S: EvalSemantics>(
     source: &Expr,
@@ -52447,7 +52453,9 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns)
     };
     if S::TAG != EvalTag::Jq
-        || (fold_body::source_moved_here() && moved_at.is_none())
+        || (fold_body::source_moved_here()
+            && moved_at.is_none()
+            && !fold_body::source_moved_onto_non_null_here())
         || !any_subexpr(
             source,
             &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if pattern_destructures(patterns)),
@@ -52470,6 +52478,11 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     let selects = any_subexpr(source, &mut |e| {
         matches!(e, Expr::Builtin(Builtin::Select(_)))
     });
+    // #4790: a source that moved the register without naming the element's position. Only reached
+    // past the entry gate above, which lets it through for an element known not to be `null`; the
+    // per-marker arm below reads nothing but a `null` marker there.
+    let moved_unplaced = moved_at.is_none() && fold_body::source_moved_here();
+    debug_assert!(!moved_unplaced || fold_body::source_moved_onto_non_null_here());
     // An `empty` body of a bind runs after the pattern's step, so it skips nothing in front of it
     // (#4626); read it as `.` (off-body route, #4626, and #4604's marker route).
     if off_body {
@@ -52509,6 +52522,15 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             if selects && matches!(marker.value, OwnedValue::Null | OwnedValue::Bool(false)) {
                 return false;
             }
+            // #4790: a source that moved the register without naming the element's position (`..`, a
+            // comma) leaves it on a node known not to be `null`: a `null` marker is not that node,
+            // wherever it was bound, and nothing else is read.
+            if moved_unplaced {
+                if matches!(&marker.value, OwnedValue::Null) {
+                    markers.push((Rc::as_ptr(marker), false));
+                }
+                return false;
+            }
             let elsewhere = match &marker.origin {
                 Origin::At { invocation, path } | Origin::SnapshotAt { invocation, path } => {
                     *invocation == ambient.frame.invocation
@@ -52525,6 +52547,13 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             };
             let provably_other = if off_body || moved_at.is_some() {
                 matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
+                    // #4790: a `null` is `jv_identical` to the register by kind, so it is the register
+                    // on a step whose element is `null`, and only there: onto a node known not to be
+                    // `null` its destructure's step raises (a `null` `$x` is the one scalar that
+                    // destructures without a type error to catch).
+                    || (moved_at.is_some()
+                        && matches!(&marker.value, OwnedValue::Null)
+                        && fold_body::source_moved_onto_non_null_here())
             } else {
                 !marker_identical::<S>(marker, ambient.value, &ambient.frame)
                     && !null_bool_identical(&marker.value, ambient.value)
