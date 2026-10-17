@@ -154691,6 +154691,116 @@ fn test_foreach_source_null_or_null_marker_headed_chain_walks_the_null_register_
     Ok(())
 }
 
+/// #4774: a `foreach` source that is a `?//` chain behind a head that reaches it some other way than a
+/// bare `null` or `$x` (#4756): a comma that mixes `null` with `.`, a `null` behind `try`/`?`/`first`/
+/// `limit`/`nth`, or a pipe or comma of those. Every `null` is `jv_identical` to a `null` register by
+/// kind, so the chain behind the `null` outputs walks the register (`["a"]`) where the by-value drive
+/// answered the root (`[]`); `.` after `1 |` is no node of it, so a comma's other output keeps `[]`.
+/// The write side (`= 5`, `|= 5`, `del`) lands on the walked member. On a document that is not `null`
+/// the same heads answer as they did. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_mixed_or_wrapped_null_head_walks_the_null_register_4774() -> Result<()> {
+    let chain = "(.|.) as {a:$a} ?// $a | .";
+    let rows: Vec<(&str, String, &str, &str, i32)> = vec![
+        ("null", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (($x, .) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n[]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((., $x) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (first($x) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (($x | .) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach ((null, .) | {chain}) as $k (.; .; .))"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach ((., null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach (try null | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach (first(null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach ((null | .) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (try null | {chain}) as $k (.; .; .)); .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach ((null | .) | {chain}) as $k (.; .; .)); .)) | $x)"), "[\"a\"]\n[\"a\"]\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x) = 5"), "5\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x) |= 5"), "5\n", "", 0),
+        ("null", format!("del(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x) = 5"), "5\n", "", 0),
+        ("null", format!("del(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x) = 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x) |= 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("del(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x) = 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x) |= 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("del(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x) = 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x) |= 5"), "{\"a\":5}\n", "", 0),
+        ("null", format!("del(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x.a?)"), "null\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("[[1],[1]]", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":1}", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":null}", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((., null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach (try null | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach (first(null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((null | .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((null)? | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach (limit(1; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach (nth(0; null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((null | (., null)) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach ((null|null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("true", format!("path(. as $x | 1 | (foreach (try (null, .) | {chain}) as $k (.; .; .)) | $x)"), "[]\n[]\n", "", 0),
+    ];
+    for (doc, program, stdout, stderr, code) in rows {
+        let program: &'static str = Box::leak(program.into_boxed_str());
+        assert_path_rows_both_routes_3749(&[(doc, program, stdout, stderr, code)])?;
+    }
+    Ok(())
+}
+
 /// #4757: a `?//` chain under a `reduce` inside a `foreach` UPDATE, entered on an untracked value
 /// (`1 |`), whether the chain is the `reduce`'s UPDATE, a `foreach` source in it, its source (also
 /// behind a call with arguments or a nested `foreach`) or under a handler-less `try`. A `reduce`

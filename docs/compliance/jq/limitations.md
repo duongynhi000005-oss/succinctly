@@ -2843,9 +2843,20 @@ is the revert that established what the other one costs.
    2,526 -> 2,520, DIFF 127 -> 123, ACCEPT_WRONG (44) unchanged, 0 regressions. `scripts/jq-nested-fold-frozen-var-sweep.py` (2,673 rows, which `mentions_non_null_marker` reaches): identical to
    `main`, 0 lost; `scripts/jq-bind-origin-fuzz.py` (6,000 programs, `--seed 4756 --fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only.
    The sweep's first full run lost 3 matches (`first(null | CHAIN)` under `del` on an untracked entry, where the routed source's refused emission is not counted against
-   the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` stays with the by-value drive.
-   Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with the register (`(null, .) | CHAIN`,
-   `(., null) | CHAIN`) on an untracked entry, a `null` behind `try`, `first(null)` or `(null | .)` in front of the chain, and, on an untracked entry, a chain
+   the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` that holds a chain (`first(null | CHAIN)`, `limit(2; null | CHAIN)`) stays with the by-value drive
+   (`path(. as $x | 1 | (foreach (first(null | CHAIN)) as $k (.; .; .)) | $x)` on `null` is `["a"]` then `[]` in jq and `[]` twice here; on a document that is not `null`
+   it prints `[]` twice where jq prints it once, #4669's mechanism).
+   A head that reaches the chain some other way than a bare `null`/`$x` is walked too ([#4774](https://github.com/rust-works/succinctly/issues/4774)): a comma that
+   mixes `null` with `.` (`(null, .) | CHAIN` is `["a"]` then `[]` on an untracked entry; `.` after `1 |` is no node of the register), a `null` behind `try`, `?`, `first`,
+   `limit` or `nth` (`try null`, `first(null)`, `limit(1; null)`, `nth(0; null)`), and a pipe or comma of those (`(null | .)`, `(null | null)`, `(null | (., null))`),
+   with the `=`/`|=`/`del` that write through them. `null_leaves_of` reads every one of those heads for both the spine walk and the `foreach` UPDATE gate
+   (`is_null_head`), which used to read only a bare `null` and a `null` marker. A wrapper is read for its leaves alone (`first(null)` holds no chain to retry after the consumer's
+   stop), so it no longer takes the `counted` cut below. (`(. as $x | 1 | (foreach ((., null) | CHAIN) as $k (.; .; .)) | $x) |= 5` on `null` exits 5 as jq does, with a different message: jq's is `Paths must be specified as an array`, the `_modify` VM-stack quirk of #2974.) Pinned by `test_foreach_source_mixed_or_wrapped_null_head_walks_the_null_register_4774`.
+   Over the 28 operands added for #4774 (`--stage-only`, 58,267 rows, jq 1.7.1, candidate vs a `main` build): MATCH 50,178 -> 50,276, REFUSE_WRONG 7,896 -> 7,875,
+   DIFF 193 -> 116, ACCEPT_WRONG (0) unchanged, 0 regressions.
+   Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with `.` or a `1` (`(null, .)`, `(., null)`,
+   `(null, 1)`) inside another `foreach`'s UPDATE, where a register on only some outputs is not read (`Reach::Partial` is withheld inside a fold body); a `null` that is
+   produced by `select(true)` or by a `try error(1) catch null` handler; and, on an untracked entry, a chain
    with a computed key (`chain_may_retry_on_a_key`): a key that raises retries onto the bare alternative, which leaves the register at the entry
    (`{(error("q")):$a} ?// $a` then `| $x | .z` is `["z"]`, pinned by `test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756`), and the route
    does not model that retry, so a key that cannot raise (`$x as {("b"):$b} ?// $b | .`, `["b"]` in jq) is `[]` here too, as on `main`.
