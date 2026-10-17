@@ -161062,6 +161062,7 @@ fn test_caught_foreign_marker_destructure_behind_a_computed_stage_4793() -> Resu
 /// row captured from `/usr/bin/jq` 1.7.1, both routes, with the `null` document controls (where `$x`
 /// is the register and the `foreach` runs).
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)]
 fn test_caught_foreign_marker_destructure_behind_a_multi_output_head_4797() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
@@ -161193,6 +161194,7 @@ fn test_caught_foreign_marker_destructure_behind_a_multi_output_head_4797() -> R
 /// left) and `del`/`|=` refuse as jq does. It was read as a bare `foreach` only, which named the literal
 /// stage's value. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
+#[allow(clippy::literal_string_with_formatting_args)]
 fn test_caught_foreign_marker_destructure_foreach_update_behind_a_gate_or_fallback_4797(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
