@@ -40305,6 +40305,27 @@ fn catching_wrapper_inner(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// The operand of a wrapper that emits nothing for an operand that emits nothing and raises nothing,
+/// in an UPDATE (#4763): [`catching_wrapper_inner`]'s, a `try ... catch H` for any `H` (the handler
+/// runs only for a raise, and an emptied `foreach` raises none), a `first(..)` and a `limit`/`nth` with a literal count. Not for a `foreach`
+/// source, where `catch H` runs on the raise the `try` is there for and emits.
+fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
+    match unwrap_paren(expr) {
+        Expr::Try { expr: inner, .. }
+        | Expr::FirstExpr(inner)
+        | Expr::Builtin(Builtin::FirstStream(inner)) => Some(inner),
+        // A literal count raises nothing; any other is evaluated and may.
+        Expr::Limit { n, expr: inner }
+        | Expr::NthExpr { n, expr: inner }
+        | Expr::Builtin(Builtin::NthStream(n, inner))
+            if matches!(unwrap_paren(n), Expr::Literal(_)) =>
+        {
+            Some(inner)
+        }
+        other => catching_wrapper_inner(other),
+    }
+}
+
 /// What a fold UPDATE leaves behind when the `foreach` that heads it emits nothing (#4754).
 struct EmptiedUpdate<'a> {
     /// The `foreach`'s source.
@@ -40368,8 +40389,8 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
                     .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
             (plain || !surrounded).then_some(emptied)
         }
-        e if catching_wrapper_inner(e).is_some() => {
-            emptied_update(catching_wrapper_inner(e)?, in_foreach)
+        e if emptied_wrapper_inner(e).is_some() => {
+            emptied_update(emptied_wrapper_inner(e)?, in_foreach)
         }
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left, in_foreach)?;

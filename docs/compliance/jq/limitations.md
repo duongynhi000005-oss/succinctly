@@ -2497,7 +2497,13 @@ is the revert that established what the other one costs.
    `// empty` or `// LITERAL` (the state is then the literal: `result 5`), and `if . then FE else . end` while `.` is truthy
    (`emptied_update`; a source may also nest `try`s and end `// empty`; pinned by
    `test_caught_foreign_marker_destructure_wrapped_in_a_reduce_update_and_catchable_4754`,
-   [#4754](https://github.com/rust-works/succinctly/issues/4754)). The refusal is jq's own end-of-path one, raised after the
+   [#4754](https://github.com/rust-works/succinctly/issues/4754)); also under `try ... catch H` for any handler `H`, `first(..)`, and `limit`/`nth` with a
+   literal count ([#4763](https://github.com/rust-works/succinctly/issues/4763): `emptied_wrapper_inner`: the handler runs only for a raise and the emptied `foreach` raises none;
+   a `foreach` *source*'s own `catch H` is not this, its handler runs on the destructure's raise and emits; pinned by
+   `test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_reduce_update_4763`). Not read: a `limit` whose count is not a literal
+   (`limit(.a; FE)` on `{"a":null}` is answered `[[]]` where jq refuses, a count that raises being the reason the count has to be a literal) and what jq does with the
+   `null` state after the `reduce` (`reduce ... FE | try .b` is `[]` in jq and refused here, `... // .a` is `[["a"]]`; `| .b?`, `| .[]?`, `// 3` and `[FE][0]?` raise in both with a different
+   message): the refusal is raised at the `reduce`, where jq's `null` state flows on to the next stage as an unplaced value. The refusal is jq's own end-of-path one, raised after the
    fold, so an outer `?`/`try` around the `path()` catches it (pinned by
    `test_caught_foreign_marker_refusal_is_caught_by_an_outer_try_4730`,
    [#4730](https://github.com/rust-works/succinctly/issues/4730)). Still accepted: a `foreach` UPDATE that wraps the
