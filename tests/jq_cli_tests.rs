@@ -163135,6 +163135,34 @@ fn test_chain_rewrite_covers_unread_variables_bare_chains_and_scalar_inputs_4813
     assert_path_rows_both_routes_3749(&[
         (
             r"null",
+            r"path(. as $x | 1 | (foreach (1,2) as $i (.; foreach (limit($i; . as {a:$b} ?// $a | $a)) as $k (.; .; $k); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"path(. as $x | "s" | (foreach (1,2) as $i (.; foreach (limit(1,2; . as {a:$b} ?// $a | $a)) as $k (.; .; $k); .)) | $x)"#,
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r#"path(. as $x | "s" | (foreach (1,2) as $i (.; foreach (first(. as {a:$b} ?// $a | $a)) as $k (.; .; $k); .)) | $x)"#,
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(. as $x | 1 | (foreach (1,2) as $i (.; foreach (limit($i; . as {a:$b} ?// $a | $a)) as $k (.; .; $k); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
             r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach ((. as {a:$b} ?// $a | $a)) as $k (.; .; $k); .)) | $x)",
             "[]\n[]\n",
             "",

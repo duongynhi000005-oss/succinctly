@@ -2928,8 +2928,8 @@ is the revert that established what the other one costs.
    alternative raises at its first step and only the bare one emits, where the by-value drive of the whole chain emitted the destructured alternative's output as well
    (`path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)` on `null` printed `[]` four times, jq twice; pinned by
    `test_foreach_source_chain_on_a_fresh_container_emits_once_in_a_fold_update_4775`). Only for a chain the wrappers hold directly (or a bare chain: [#4813](https://github.com/rust-works/succinctly/issues/4813)) whose earlier alternatives are plain patterns (literal keys)
-   and whose body never reads a variable only an earlier alternative binds, and for an input of any kind that is not the register's value (the frame holds the register live; `jv_identical` holds an unequal
-   value of no kind to it). A head that is the register (`select(true) |`, `$x |`, `first(., 1) |`), a top-level fold and a container that holds the chain's key are pinned as controls
+   and whose body never reads a variable only an earlier alternative binds, and for an input of any kind that is not the register's value (the frame holds the register live; `jv_identical` never holds an unequal
+   value of any kind to it). A head that is the register (`select(true) |`, `$x |`, `first(., 1) |`), a top-level fold and a container that holds the chain's key are pinned as controls
    (`test_chain_rewrite_covers_unread_variables_bare_chains_and_scalar_inputs_4813`). Still by value: a chain whose body reads the earlier variable (`. as {a:$b} ?// $a | [$a,$b]`: its `null` binding
    is observable), and a last alternative that is itself a pattern. On a document that is not `null` the same programs are still refused where jq answers.
    A head that reaches the chain some other way than a bare `null`/`$x` is walked too ([#4774](https://github.com/rust-works/succinctly/issues/4774)): a comma that

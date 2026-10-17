@@ -55546,17 +55546,17 @@ fn bare_last_alternative(e: &Expr) -> Option<Expr> {
         }
         // #4813: a variable only an earlier alternative binds is `null` in the retry, which nothing
         // observes when the body never reads it.
-        earlier_names
-            .iter()
-            .all(|name| {
-                last_names.contains(name)
-                    || !any_subexpr(body, &mut |e| matches!(e, Expr::Var(var) if var == name))
-            })
-            .then(|| Expr::AsPattern {
-                expr: expr.clone(),
-                patterns: vec![last.clone()],
-                body: body.clone(),
-            })
+        earlier_names.retain(|name| !last_names.contains(name));
+        (earlier_names.is_empty()
+            || !any_subexpr(
+                body,
+                &mut |e| matches!(e, Expr::Var(var) if earlier_names.contains(var)),
+            ))
+        .then(|| Expr::AsPattern {
+            expr: expr.clone(),
+            patterns: vec![last.clone()],
+            body: body.clone(),
+        })
     }
     fn through_wrappers(e: &Expr, budget: u8) -> Option<Expr> {
         let budget = budget.checked_sub(1)?;
