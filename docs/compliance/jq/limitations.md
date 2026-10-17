@@ -2879,7 +2879,7 @@ is the revert that established what the other one costs.
    produced by `select(true)` or by a `try error(1) catch null` handler; and, on an untracked entry, a chain
    with a computed key that may raise (`chain_may_retry_on_a_key`): a key that raises retries onto the bare alternative, which leaves the register at the entry
    (`{(error("q")):$a} ?// $a` then `| $x | .z` is `["z"]`, pinned by `test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756`), and the route
-   does not model that retry. A key that is a string literal (`$x as {("b"):$b} ?// $b | .`, `["b"]` in jq) cannot raise and is read as the literal key
+   does not model that retry. A key that is a string literal (`$x as {("b"):$b} ?// $b | .`, `["b"]` in jq) cannot raise when evaluated, so its pattern step is the literal key's and it is read as the literal key
    is ([#4772](https://github.com/rust-works/succinctly/issues/4772); pinned by
    `test_foreach_source_chain_with_a_literal_computed_key_walks_the_null_register_4772`); any other computed key (`("b"|ascii_downcase)`, `.a`) keeps the
    by-value drive.

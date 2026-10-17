@@ -151114,6 +151114,13 @@ fn test_foreach_source_chain_with_a_literal_computed_key_walks_the_null_register
             "Invalid path expression with result {\"b\":1}",
             5,
         ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {("b"|ascii_downcase):$b} ?// $b | .) as $k (.; .; .)) | $x)"#,
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
     ])
 }
 
