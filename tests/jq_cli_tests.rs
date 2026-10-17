@@ -156185,7 +156185,7 @@ fn test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_re
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_caught_foreign_null_marker_in_a_reduce_body_whose_source_moved_the_register_4790(
 ) -> Result<()> {
-    assert_path_rows_both_routes_3749(&[
+    let rows: Vec<PathRow3289> = vec![
         (
             r#"{"a":null}"#,
             r"path(.a as $x | reduce .. as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
@@ -158391,7 +158391,11 @@ fn test_caught_foreign_null_marker_in_a_reduce_body_whose_source_moved_the_regis
             "Invalid path expression with result null",
             5,
         ),
-    ])
+    ];
+    for row in rows {
+        assert_path_rows_both_routes_3749(&[row])?;
+    }
+    Ok(())
 }
 
 /// #4754 (the wrappers #4732 left) and #4730: a caught foreign-`$x` destructure in a `foreach` source whose
