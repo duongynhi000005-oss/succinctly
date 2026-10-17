@@ -41,6 +41,27 @@ OUTER = [
     # navigations leave it on the element each output is, so a `null` `$x` is not it unless that element is `null`
     ("rd-rec", "reduce .. as $i (.; {I})"),
     ("rd-comma", "reduce (.a?, .) as $i (.; {I})"),
+    # (#4795) a subset of navigation's outputs (`first`/`last`/`limit`/`nth`) and a `select` stage after one
+    # leave the register on the node each output is; the computed ones (`tostring`, a literal) and an empty
+    # `last` (which yields `null`) are the controls that must not
+    ("rd-first-rec", "reduce first(..) as $i (.; {I})"),
+    ("rd-last-rec", "reduce last(..) as $i (.; {I})"),
+    ("rd-limit1-rec", "reduce limit(1; ..) as $i (.; {I})"),
+    ("rd-limit2-rec", "reduce limit(2; ..) as $i (.; {I})"),
+    ("rd-nth-rec", "reduce nth(1; ..) as $i (.; {I})"),
+    ("rd-sel-rec", "reduce (.. | select(. != 5)) as $i (.; {I})"),
+    ("rd-sel-null", "reduce (.. | select(. == null)) as $i (.; {I})"),
+    ("rd-sel-nav", "reduce (.[]? | select(. != 5)) as $i (.; {I})"),
+    ("rd-first-nav", "reduce first(.[]?) as $i (.; {I})"),
+    ("rd-last-nav", "reduce last(.[]?) as $i (.; {I})"),
+    ("rd-last-nava", "reduce last(.a?) as $i (.; {I})"),
+    ("rd-last-comma", "reduce last(.a?, .) as $i (.; {I})"),
+    ("rd-last-empty", "reduce last(empty) as $i (.; {I})"),
+    ("rd-first-str", "reduce first(.[]? | tostring) as $i (.; {I})"),
+    ("rd-limit-lit", "reduce limit(2; 1, 2) as $i (.; {I})"),
+    ("rd-sel-str", "reduce (.. | select(. != 5) | tostring) as $i (.; {I})"),
+    ("fe-first-rec", "foreach first(..) as $i (.; {I}; .)"),
+    ("fe-sel-rec", "foreach (.. | select(. != 5)) as $i (.; {I}; .)"),
     # (#4627) EXTRACT is the loop element, which a navigating source leaves at jq's register
     ("fe-nav-i", "foreach .[]? as $i (.; {I}; $i)"),
     ("fe-nava-i", "foreach .a? as $i (.; {I}; $i)"),

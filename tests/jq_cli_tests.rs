@@ -158496,6 +158496,174 @@ fn test_caught_foreign_null_marker_in_a_reduce_body_whose_source_moved_the_regis
     Ok(())
 }
 
+/// #4795: #4790's reading of a `null` `$x` in a moved `reduce` body needs the source to be navigation, and
+/// `first(f)`, `last(f)`, `limit(n; f)`, `nth(n; f)` and a `select(c)` stage after one hand on some of its
+/// outputs, each a node the register is left on. Read as computed, the fold got no element kind and a `null`
+/// `$x` answered `[]` (and `del`/`=` wrote) where jq refuses with `result null`. The controls keep their
+/// answers: `first(.c)`, `.. | select(. == null)` and, on `{"a":null,"c":null}`, `nth(1; ..)` and
+/// `last(.a, .c)` reach only a `null` element, which the `null` `$x` is. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_caught_foreign_null_marker_behind_first_limit_or_select_source_4795() -> Result<()> {
+    let rows: Vec<PathRow3289> = vec![
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce first(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"del(.c as $x | reduce first(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"(.c as $x | reduce first(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) = 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce limit(1; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce limit(2; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce last(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"del(.c as $x | reduce last(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"(.c as $x | reduce last(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) = 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce nth(1; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"del(.c as $x | reduce nth(1; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"(.c as $x | reduce nth(1; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) = 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce last(.a, .c) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce first(.[]?) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce (.. | select(. != 5)) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce (.[]? | select(. != 5)) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce first(.c) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1,"c":null}"#,
+            r"path(.c as $x | reduce (.. | select(. == null)) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"c":null}"#,
+            r"path(.c as $x | reduce nth(1; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"c":null}"#,
+            r"path(.c as $x | reduce nth(2; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"c":null}"#,
+            r"path(.c as $x | reduce last(.a, .c) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null,"c":null}"#,
+            r"path(.c as $x | reduce last(..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null,"c":null}"#,
+            r"path(.c as $x | reduce limit(2; ..) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+    ];
+    assert_path_rows_both_routes_3749(&rows)
+}
+
 /// #4754 (the wrappers #4732 left) and #4730: a caught foreign-`$x` destructure in a `foreach` source whose
 /// `foreach` is the UPDATE of a `reduce` through a `select(.)` stage, a `try`/`?`, an `// empty` or `// LITERAL`, an
 /// `if . then FE else . end` or a `label`/`break` scope still leaves the state `null` (or the literal), which the end
