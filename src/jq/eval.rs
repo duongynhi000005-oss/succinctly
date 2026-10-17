@@ -40350,16 +40350,9 @@ struct EmptiedUpdate<'a> {
     has_fallback: bool,
     /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
     truthy: bool,
-    /// The conditions the register decides, outermost first (#4778): a `select(C)` ahead of the
-    /// `foreach` or the condition of an `if C then FE else . end` around it, `C` a pure function of `.`
-    /// other than `.` itself (that one is `truthy`).
-    gates: Vec<&'a Expr>,
     /// Whether a literal stage runs ahead of the `foreach` (`1 | FE`, #4782): it hands the `foreach` a
     /// value that is not the state, and leaves jq's register where it was.
     literal_head: bool,
-    /// Whether stages run on the fallback literal ([`EmptiedUpdate::has_fallback`]) before it is the state
-    /// (#4778): `(. | FE) // 5 | tostring` leaves `"5"`.
-    has_after: bool,
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
@@ -40392,8 +40385,9 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
     }
 }
 
-/// Whether `e` is a stage that emits one value and neither raises on any input nor moves jq's path
-/// register (#4782, #4793): a literal, a container of literals, or a builtin that only reads its input
+/// Whether `e` is a stage that emits at least one value and neither raises on any input nor moves jq's path
+/// register (#4782, #4793, #4797): a literal, a container of literals (an object whose value is a comma
+/// emits one per combination), or a builtin that only reads its input
 /// (`tostring`, `tojson`, `type`, `isnull`, `not`). The next stage is handed a value that is not the
 /// state, as it is after a literal.
 fn is_value_head(e: &Expr) -> bool {
@@ -40405,15 +40399,23 @@ fn is_value_head(e: &Expr) -> bool {
             other => single(other),
         }
     }
-    /// Exactly one value: a literal, or a container of such (an object's value that is a comma or
-    /// `empty` emits several values or none, so it is not).
+    /// An object value that emits at least once: a literal or container ([`single`]), or a comma of
+    /// such (`{a:(1,2)}` emits one object per value, #4797). Not `empty`, which emits none.
+    fn generator(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Comma(parts) => parts.iter().all(generator),
+            other => single(other),
+        }
+    }
+    /// A literal, or a container of such: one value, or, where an object's value is a comma
+    /// ([`generator`]), several (one per combination). Never none (`{a:empty}` is not read).
     fn single(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Literal(_) => true,
             Expr::Array(inner) => items(inner),
             Expr::Object(entries) => entries
                 .iter()
-                .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && single(&entry.value)),
+                .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && generator(&entry.value)),
             _ => false,
         }
     }
@@ -40439,9 +40441,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             source: input,
             has_fallback: false,
             truthy: false,
-            gates: Vec::new(),
             literal_head: false,
-            has_after: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either.
@@ -40460,17 +40460,13 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
         },
         Expr::Pipe(stages) => {
             // #4778: a `select(C)` with `C` a pure function of the state is a stage like `select(.)`:
-            // the state decides, so it is a gate.
-            let mut gates = Vec::new();
+            // the state decides, so it only skips the step.
             let mut skipped = 0;
             let mut literal_head = false;
             for stage in stages {
                 match unwrap_paren(stage) {
                     Expr::Builtin(Builtin::Select(cond))
-                        if !literal_head && is_pure_of_dot(cond) =>
-                    {
-                        gates.push(&**cond);
-                    }
+                        if !literal_head && is_pure_of_dot(cond) => {}
                     other if is_identity_or_select_dot(other) => {}
                     other if is_value_head(other) => literal_head = true,
                     _ => break,
@@ -40488,13 +40484,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
             let plain = !emptied.has_fallback && !emptied.truthy;
             if plain {
-                emptied.gates.splice(0..0, gates);
                 return Some(emptied);
             }
             if after.iter().all(is_pure_of_dot) {
                 // #4778: the fallback is the state once the stages around it have run on it.
-                emptied.gates.splice(0..0, gates);
-                emptied.has_after |= !after.is_empty();
                 return Some(emptied);
             }
             (after.is_empty() && !guarded).then_some(emptied)
@@ -40524,8 +40517,6 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
             if on_dot && !emptied.literal_head {
                 emptied.truthy = true;
-            } else {
-                emptied.gates.insert(0, &**cond);
             }
             Some(emptied)
         }
@@ -40550,18 +40541,9 @@ fn sole_update_mark<S: EvalSemantics>(
         }
         e => {
             let emptied = emptied_update(e)?;
-            // #4778, #4782: what the state decides, the stages after a fallback and a literal stage
-            // ahead are read for a `reduce` UPDATE; a `foreach` reads the plain literal stage only.
-            if in_foreach
-                && (emptied.gates.iter().any(|gate| {
-                    !matches!(unwrap_paren(gate), Expr::Identity)
-                        || emptied.has_fallback
-                        || emptied.literal_head
-                }) || emptied.has_after
-                    || (emptied.literal_head && (emptied.has_fallback || emptied.truthy)))
-            {
-                return None;
-            }
+            // #4778, #4782, #4797: what the state decides, the stages after a fallback and a literal
+            // stage ahead are read for a `reduce` UPDATE and a `foreach` UPDATE or EXTRACT alike: the
+            // step is empty exactly when the `foreach` is, whichever of them surround it.
             Some(fold_body::sole_update_pipe_head(
                 emptied.source,
                 in_foreach,
