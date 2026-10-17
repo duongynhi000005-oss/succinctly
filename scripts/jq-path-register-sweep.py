@@ -791,6 +791,23 @@ OPERANDS = [
     "(foreach (1,2) as $j (.; (foreach ((null, null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     "(foreach (1,2) as $j (.; (foreach (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     "(reduce (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .))",
+    # (#4772) a chain whose key is computed but cannot raise (a string literal) walks the `null` register as a
+    # literal key does: it never retries onto the bare alternative. The contrasts are a key that may raise
+    # (`error("q")`, `.a`), which retries and leaves the register at the entry, a body that navigates, and a
+    # `reduce`, which backtracks its source.
+    "(foreach (null | (.|.) as {(\"a\"):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (null | . as {(\"a\"):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (null | (.|.) as {(\"a\"):$a} ?// [$a] ?// $b | .) as $k (.; .; .))",
+    "(foreach (null | (.|.) as {(\"a\"|ascii_downcase):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (null | (.|.) as {(error(\"q\")):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (null | (.|.) as {(.a):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (null | (.|.) as {(\"a\"):$a} ?// $a | .a?) as $k (.; .; .))",
+    "(. as $x | foreach ($x as {(\"a\"):$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach ($x as {(\"a\"):$a} ?// $a | $a) as $k (.; .; .))",
+    "(.a as $x | foreach ($x as {(\"a\"):$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach ($x as {(error(\"q\")):$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (1,2) as $j (.; (foreach (null | (.|.) as {(\"a\"):$a} ?// $a | .) as $k (.; .; .)); .))",
+    "(reduce (null | (.|.) as {(\"a\"):$a} ?// $a | .) as $k (.; .))",
     # (#4763) the caught foreign-`$x` destructure `foreach` as the UPDATE of a `reduce`, wrapped by `try ... catch H`,
     # `first`, or `limit`/`nth`: the `foreach` emits nothing and raises nothing, so the wrapper emits nothing and the
     # state is `null`. The contrasts are a wrapper around a `foreach` that emits, a count that is not a literal

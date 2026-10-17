@@ -151028,6 +151028,95 @@ fn test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756() -> Re
     ])
 }
 
+/// #4772: the #4756 chain whose key is *computed* but cannot raise (a string literal, `{("b"):$b}`) walks the `null`
+/// register as the literal key `{b:$b}` does: it never retries onto the bare alternative, so nothing leaves the
+/// register at the entry. It was read as one that may retry and answered the root (`[]`). The last rows are the
+/// contrasts that still retry or navigate: a key that raises (`error("q")`) and a body that navigates (jq refuses). Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_chain_with_a_literal_computed_key_walks_the_null_register_4772() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .) as $k (.; .; .)) | $x)"#,
+            "[\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {("a"):$a} ?// $a | .) as $k (.; .; .)) | $x)"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {("a"):$a} ?// [$a] ?// $b | .) as $k (.; .; .)) | $x)"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (1,2) as $j (.; (foreach (null | (.|.) as {("a"):$a} ?// $a | .) as $k (.; .; .)); .)) | $x)"#,
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"(. as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .) as $k (.; .; .)) | $x) = 5"#,
+            "{\"b\":5}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"(. as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .) as $k (.; .; .)) | $x) |= 5"#,
+            "{\"b\":5}\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"del(. as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .) as $k (.; .; .)) | $x)"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .a?) as $k (.; .; .)) | $x)"#,
+            "",
+            "Invalid path expression near",
+            5,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {("a"):$a} ?// $a | .) as $k (.; .; .)) | $x | .z)"#,
+            "[\"a\",\"z\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#"path(. as $x | 1 | (foreach (null | (.|.) as {(error("q")):$a} ?// $a | .) as $k (.; .; .)) | $x | .z)"#,
+            "[\"z\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(.a as $x | 1 | (foreach ($x as {("b"):$b} ?// $b | .) as $k (.; .; .)) | $x)"#,
+            "",
+            "Invalid path expression with result {\"b\":1}",
+            5,
+        ),
+    ])
+}
+
 /// #4760 (the parameter residual of #4739): a call whose `def` body is `$x // BRANCH` with an argument that is
 /// never truthy runs `BRANCH` on the register, so a destructure there is the source's own: jq raises on a
 /// non-null document and walks the register on `null`. It was accepted. A truthy argument, or a body that
