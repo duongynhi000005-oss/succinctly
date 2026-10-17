@@ -1300,10 +1300,15 @@ validate:
   and `true: 1` both parse as two complete values in real yq, confirmed live against
   v4.53.3, not a mapping and not an error), so an earlier version of this fix that rejected
   every bare `key: value` outright was reverted before merge -- it over-rejected input real
-  yq accepts. The streaming behavior itself is unimplemented and tracked separately as
-  [#2839](https://github.com/rust-works/succinctly/issues/2839); succinctly still parses a
-  quoted/keyword-keyed bare `key: value` as one YAML mapping rather than two streamed
-  values, a pre-existing divergence this fix does not widen.
+  yq accepts. Several top-level values are now read as a stream (#2839): an input that opens with a scalar
+  (`"a": 1`, `true: 1`, `1 2`) is cut into its values first, and one that opens with `{`/`[` is cut
+  only after its single-value parse has failed (so a well-formed object or array pays nothing),
+  each value (whitespace, `,` or `:` between them) re-read as one document. `1 2`, `{"a":1}{"a":2}`,
+  `[1][2]`, `1,2`, `"a": 1` and `true: 1` match yq on stdin and on a file. Two gaps remain: a stream
+  whose *later* value is malformed (`1 2 ]`, `{"a":1} x`) fails outright where yq prints the
+  values before it and then errors, and `--slurp`/`--eval-all`/`--inplace` read JSON through a
+  different path and do not stream. The index addresses the rewritten `v1\n---\nv2` text, so a byte offset,
+  `line` or `column` of a streamed value counts the inserted separators.
 - `?` (the explicit-key indicator), in *both* the block-context and flow-mapping (`{? "a":
   1}`) spellings — a structural rejection of the marker itself, not a key-grammar check, so
   it stays in scope even though mapping-key *text* grammar (#2777) does not.

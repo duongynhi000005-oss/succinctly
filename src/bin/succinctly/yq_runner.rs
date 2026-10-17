@@ -1002,6 +1002,130 @@ fn substitute_json_utf8(
     succinctly::text::utf8::substitute_invalid_utf8_per_byte(&bytes)
 }
 
+/// Rewrites a `-p json` input that holds several top-level values as a multi-document stream
+/// (`v1\n---\nv2`), or answers `None` when it holds fewer than two or something other than a
+/// value start follows one (#2839).
+///
+/// Real yq reads JSON with a decoder it calls until the input is drained, so `1 2`,
+/// `{"a":1}{"a":2}`, `[1][2]` and even `true: 1` / `1,2` are two values each, and the filter runs on
+/// each. A separator is whatever sits between two values; only whitespace, `,` and `:` are skipped
+/// here, anything else keeps the original error. Containers and strings are cut by bracket and
+/// string depth, a bare token must be a JSON literal, and each piece is then re-read by the strict
+/// JSON parser, which rejects a malformed one.
+///
+/// Called only after the single-value parse has failed, so well-formed input pays nothing.
+fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
+    let is_sep = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b',' | b':');
+    let mut out = Vec::with_capacity(bytes.len() + 16);
+    let mut values = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if is_sep(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        match bytes[i] {
+            b'{' | b'[' => {
+                let mut depth = 0usize;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                i += if bytes[i] == b'\\' { 2 } else { 1 };
+                            }
+                        }
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth = depth.checked_sub(1)?;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                if depth != 0 {
+                    return None;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                i += 1;
+            }
+            b if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'+' | b'.') => {
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'-' | b'+' | b'.'))
+                {
+                    i += 1;
+                }
+                // Only a JSON literal is a value: `foo bar` and `1.2.3` stay the single-value
+                // parse's error.
+                let token = &bytes[start..i];
+                let is_literal = matches!(token, b"true" | b"false" | b"null")
+                    || (matches!(token[0], b'-' | b'0'..=b'9')
+                        && std::str::from_utf8(token).is_ok_and(|t| t.parse::<f64>().is_ok()));
+                if !is_literal {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if values > 0 {
+            out.extend_from_slice(b"\n---\n");
+        }
+        out.extend_from_slice(&bytes[start..i.min(bytes.len())]);
+        values += 1;
+    }
+    (values > 1).then_some(out)
+}
+
+/// The streamed form of a JSON input that is *not* a single well-formed value, when it is one.
+///
+/// An input opening with a scalar (`"a": 1`, `true: 1`, `1 2`) may parse as a YAML mapping or
+/// fail, so it is cut into values first (a lone scalar or an unparsable cut is `None`, and costs
+/// one pass over a document that is usually short); an input opening with `{`/`[` is only cut
+/// after its single-value parse has failed (`parse_failed`), so a well-formed object or array
+/// pays nothing (#2839).
+fn json_value_stream_for(bytes: &[u8], parse_failed: bool) -> Option<Vec<u8>> {
+    let opens_container = bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| matches!(b, b'{' | b'['));
+    (parse_failed || !opens_container)
+        .then(|| json_value_stream_to_documents(bytes))
+        .flatten()
+}
+
+/// [`YamlIndex::build_json_sourced`], reading several top-level values as several documents
+/// (#2839). When the input was rewritten, the second element is the stream the index addresses;
+/// the caller must evaluate against it instead of `bytes`.
+fn build_json_sourced_streaming(
+    bytes: &[u8],
+) -> Result<(YamlIndex, Option<Vec<u8>>), succinctly::yaml::YamlError> {
+    if let Some(stream) = json_value_stream_for(bytes, false) {
+        if let Ok(index) = YamlIndex::build_json_sourced(&stream) {
+            return Ok((index, Some(stream)));
+        }
+    }
+    match YamlIndex::build_json_sourced(bytes) {
+        Ok(index) => Ok((index, None)),
+        Err(e) => match json_value_stream_for(bytes, true) {
+            Some(stream) => Ok((YamlIndex::build_json_sourced(&stream)?, Some(stream))),
+            None => Err(e),
+        },
+    }
+}
+
 /// For a YAML/Auto-format input, always rejects a non-UTF-8 byte stream
 /// outright (#1242) -- this half is unconditional, not gated on
 /// `--validate`, matching real yq's own refusal of a stray byte. Then, only
@@ -1619,7 +1743,7 @@ struct DirectEvalOptions {
 /// `target_doc` will be evaluated (where global index = global_offset + local_doc_index).
 /// Returns the number of documents in this file for proper global index tracking.
 fn evaluate_yaml_direct_filtered(
-    bytes: &[u8],
+    source: &[u8],
     expr: &Expr,
     doc_filter: Option<(usize, usize)>,
     sink: &mut ErrorSink,
@@ -1634,12 +1758,18 @@ fn evaluate_yaml_direct_filtered(
     // #2279: build_json_sourced parses with JSON's flow-sequence delimiter
     // rules *and* marks the index; the two cannot be applied separately,
     // since `[1,]` is already accepted by the time a post-build mark runs.
+    // #2839: several top-level values are several documents; the index then addresses the
+    // rewritten stream, which is only built once the single-value parse has failed.
+    let mut streamed: Option<Vec<u8>> = None;
     let index = if mark_json_sourced {
-        YamlIndex::build_json_sourced(bytes)
+        let (index, stream) = build_json_sourced_streaming(source)
+            .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+        streamed = stream;
+        index
     } else {
-        YamlIndex::build(bytes)
-    }
-    .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+        YamlIndex::build(source).map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?
+    };
+    let bytes: &[u8] = streamed.as_deref().unwrap_or(source);
     let root = index.root(bytes);
 
     // YAML documents are wrapped in a sequence at the root
@@ -8978,13 +9108,20 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             if let Some(code) = yaml_validate_guard(&yaml_bytes, fmt, args.validate, None) {
                 return Ok(code);
             }
+            let mut yaml_bytes = yaml_bytes;
             let mut index = if fmt == InputFormat::Json {
                 // #2279: see `evaluate_yaml_direct_filtered`'s own call.
-                YamlIndex::build_json_sourced(&yaml_bytes)
+                // #2839: several top-level values are several documents.
+                let (index, stream) = build_json_sourced_streaming(&yaml_bytes)
+                    .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+                if let Some(stream) = stream {
+                    yaml_bytes = stream;
+                }
+                index
             } else {
                 YamlIndex::build(&yaml_bytes)
-            }
-            .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?
+            };
             // #2795: `-N` also drops the `---` lines of the first
             // document's verbatim header, as real yq does.
             if args.no_doc {
@@ -9173,8 +9310,14 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     return Ok(code);
                 }
                 // #2279: see `evaluate_yaml_direct_filtered`'s own call.
+                let mut yaml_bytes = yaml_bytes;
                 let built = if fmt == InputFormat::Json {
-                    YamlIndex::build_json_sourced(&yaml_bytes)
+                    build_json_sourced_streaming(&yaml_bytes).map(|(index, stream)| {
+                        if let Some(stream) = stream {
+                            yaml_bytes = stream;
+                        }
+                        index
+                    })
                 } else {
                     YamlIndex::build(&yaml_bytes)
                 };
