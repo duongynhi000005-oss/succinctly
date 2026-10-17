@@ -40393,12 +40393,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
         Expr::Pipe(stages) => {
             let skipped = stages
                 .iter()
-                .take_while(|stage| {
-                    // #4776: a literal emits once, and the `foreach` after it is empty whatever its
-                    // input is.
-                    is_identity_or_select_dot(stage)
-                        || matches!(unwrap_paren(stage), Expr::Literal(_))
-                })
+                .take_while(|stage| is_identity_or_select_dot(stage))
                 .count();
             let emptied = emptied_update(stages.get(skipped)?)?;
             // A fallback or a state-dependent head hands a value on to the stages around it: a

@@ -2512,11 +2512,12 @@ is the revert that established what the other one costs.
    `test_caught_foreign_marker_refusal_is_caught_by_an_outer_try_4730`,
    [#4730](https://github.com/rust-works/succinctly/issues/4730)). A `foreach` UPDATE that wraps the
    `foreach` in a fallback (`(. | FE) // 3`, `if . then FE else . end`: the step after an empty one reads the `null` it left, so the `if`
-   raises `result null` from a second source item on), a `foreach` EXTRACT that is the `foreach` (`. | FE`) and a `1 | FE` stage
+   raises `result null` from a second source item on), a `foreach` EXTRACT that is the `foreach` (`. | FE`)
    behave as jq does too (`emptied_update`, `sole_update_mark`; pinned by
    `test_caught_foreign_marker_destructure_behind_a_fallback_or_if_in_a_foreach_update_or_extract_4776`,
-   [#4776](https://github.com/rust-works/succinctly/issues/4776)); the `1 | FE` stage of a `reduce` UPDATE is still refused with
-   `result 1` where jq says `result null`. Still accepted: a `select`/`if` condition other than `.` (`select(.a) | FE`), and a fallback or `if` head with a stage around it (`(. | FE) // 5 | tostring`, `select(.) | (FE // 5)`: the stage transforms the value, or a falsy state drops it, so the message differs). A condition that is not a pure function
+   [#4776](https://github.com/rust-works/succinctly/issues/4776)). Still refused where jq emits nothing (or `result null`): a `1 | FE`
+   stage (`result 1`; the fold's marker check compares `$x` with the literal, not the register, so skipping the literal answered a
+   `null` document where jq refuses). Still accepted: a `select`/`if` condition other than `.` (`select(.a) | FE`), and a fallback or `if` head with a stage around it (`(. | FE) // 5 | tostring`, `select(.) | (FE // 5)`: the stage transforms the value, or a falsy state drops it, so the message differs). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
