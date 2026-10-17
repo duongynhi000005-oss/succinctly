@@ -52408,7 +52408,8 @@ fn foreign_in_off_body<S: EvalSemantics>(ambient: &FoldSourceAmbient<'_>) -> boo
 /// to it by kind (`null`/booleans compare by value). A pattern's tracked `INDEX` step on such a node
 /// is path-checked against the register and raises, whether the source is a `foreach` or a `reduce`
 /// that backtracks it. Empty in the body of a `reduce` whose source moved the register, where the
-/// register is on an element and the ambient position is not its own, and unless the source holds
+/// register is on an element and the ambient position is not its own (but see
+/// [`foreign_register_markers_with`]: a `null` marker is read there, #4777/#4790), and unless the source holds
 /// a destructuring bind. Each is paired with whether it holds a truthy value, which a `select`
 /// on it needs ([`collapse_marker_pipes`]). `passing` are the `select` conditions decided by the
 /// markers' values ([`passing_marker_selects`]), which skip nothing ([`source_always_reaches_destructure`]).
@@ -52472,6 +52473,11 @@ fn foreign_register_markers_with<S: EvalSemantics>(
     let selects = any_subexpr(source, &mut |e| {
         matches!(e, Expr::Builtin(Builtin::Select(_)))
     });
+    // #4790: a source that moved the register without naming the element's position. Only reached
+    // past the entry gate above, which lets it through for an element known not to be `null`; the
+    // per-marker arm below reads nothing but a `null` marker there.
+    let moved_unplaced = moved_at.is_none() && fold_body::source_moved_here();
+    debug_assert!(!moved_unplaced || fold_body::source_moved_onto_non_null_here());
     // An `empty` body of a bind runs after the pattern's step, so it skips nothing in front of it
     // (#4626); read it as `.` (off-body route, #4626, and #4604's marker route).
     if off_body {
@@ -52514,11 +52520,9 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             // #4790: a source that moved the register without naming the element's position (`..`, a
             // comma) leaves it on a node known not to be `null`: a `null` marker is not that node,
             // wherever it was bound, and nothing else is read.
-            let moved_unplaced = moved_at.is_none() && fold_body::source_moved_here();
             if moved_unplaced {
                 if matches!(&marker.value, OwnedValue::Null) {
-                    let truthy = false;
-                    markers.push((Rc::as_ptr(marker), truthy));
+                    markers.push((Rc::as_ptr(marker), false));
                 }
                 return false;
             }
