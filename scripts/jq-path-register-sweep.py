@@ -815,6 +815,29 @@ OPERANDS = [
     "(.a as $x | reduce (1,2) as $i (.; try (foreach (1,2) as $q (.; .; .)) catch .))",
     "(.a as $x | reduce (1,2) as $i (.; first(foreach (1,2) as $q (.; .; .))))",
     "(.a as $x | reduce (1,2) as $i (.; try (foreach (try error(\"z\")) as $q (.; .; .)) catch .))",
+    # (#4784) a `//` head: it emits its right operand's outputs only when the left has no truthy one, so
+    # it is the `null` register by kind on every output when the left is falsy throughout and the right is `null`.
+    # The contrasts have a truthy output (`null // 1`, `1 // null`, `true // null`), none that is `null`
+    # (`false // false`) or none at all (`null // empty`).
+    "(foreach ((null // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((false // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null // null // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null // .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((. // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((empty // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null // empty) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null // 1) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((1 // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((false // false) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((true // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((try (null // null)) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (first(null // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (((null // null) | .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (((null // null), 1) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach ((null // $x) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x // $x) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (1,2) as $j (.; (foreach ((null // null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     # (#4757) the chain under a `reduce`, which the `untracked-foreach-update*` and
     # `untracked-reduce-update` contexts put in another fold's body: a `reduce` backtracks its
     # source and UPDATE, so the register it leaves is INIT's. The contrasts navigate in INIT, the

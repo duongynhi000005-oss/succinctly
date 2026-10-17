@@ -48107,6 +48107,22 @@ fn is_null_head(e: &Expr) -> bool {
     null_leaves_of(e, true, false, &|_| true)
 }
 
+/// Whether `stage` emits no truthy output: every output is `null` by kind ([`null_leaves_of`]), a
+/// `false` literal, or there is none (`empty`), so a `//` after it takes its right operand (#4784).
+fn falsy_leaves_of(
+    stage: &Expr,
+    input_null: bool,
+    marker_ok: &dyn Fn(&Rc<Tracked>) -> bool,
+) -> bool {
+    match unwrap_paren(stage) {
+        Expr::Literal(Literal::Bool(false)) | Expr::Builtin(Builtin::Empty) => true,
+        Expr::Comma(items) => items
+            .iter()
+            .all(|item| falsy_leaves_of(item, input_null, marker_ok)),
+        other => null_leaves_of(other, true, input_null, marker_ok),
+    }
+}
+
 /// Whether `stage` is the `null` register by kind (#4756) on every output (`every`) or on some, where
 /// `.` is that register when `input_null` says so: a `null` literal, a `$x` marker holding `null`
 /// that `marker_ok` accepts, `.` after one, or a comma, a pipe or a handler-less `try`/`?`/`first`/
@@ -48132,6 +48148,12 @@ fn null_leaves_of(
         Expr::Identity => input_null,
         Expr::Literal(Literal::Null) => true,
         Expr::TrackedVar(marker) => matches!(marker.value, OwnedValue::Null) && marker_ok(marker),
+        // #4784: `A // B` emits B's outputs only when A has no truthy one, and A's own falsy outputs
+        // never reach the pipe, so its `null` outputs are B's, and only when A is falsy throughout.
+        Expr::Alternative(left, right) => {
+            falsy_leaves_of(left, input_null, marker_ok)
+                && null_leaves_of(right, every, input_null, marker_ok)
+        }
         wrapper @ (Expr::Optional(_)
         | Expr::Try { catch: None, .. }
         | Expr::FirstExpr(_)
@@ -53661,6 +53683,14 @@ impl<'e> RegisterSpine<'e> {
                 if !self.fresh_only
                     && self.null_register
                     && self.markers.contains(&Rc::as_ptr(marker)) =>
+            {
+                Reach::HandsOn
+            }
+            // #4784: and a `//` whose every output is, by kind ([`null_leaves_of`]).
+            alternative @ Expr::Alternative(..)
+                if !self.fresh_only
+                    && (self.null_register || self.null_by_kind)
+                    && self.null_leaves(alternative, true) =>
             {
                 Reach::HandsOn
             }
