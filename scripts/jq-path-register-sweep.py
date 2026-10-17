@@ -794,7 +794,10 @@ OPERANDS = [
     # (#4763) the caught foreign-`$x` destructure `foreach` as the UPDATE of a `reduce`, wrapped by `try ... catch H`,
     # `first`, or `limit`/`nth`: the `foreach` emits nothing and raises nothing, so the wrapper emits nothing and the
     # state is `null`. The contrasts are a wrapper around a `foreach` that emits, a count that is not a literal
-    # (`limit(.a; ..)`), and a `foreach` whose source raises.
+    # (`limit(.a; ..)`), and a `foreach` whose source raises; the bare `try (..)` and `(..)?` are the wrappers #4754 read,
+    # which refuse in a later-stage context (`(..) // .a`, `try (-(..))`) where jq answers: the new ones now do the same.
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .))?))",
     "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch .))",
     "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch \"c\"))",
     "(.a as $x | reduce (1,2) as $i (.; first(foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",

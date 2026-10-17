@@ -2503,7 +2503,11 @@ is the revert that established what the other one costs.
    `test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_reduce_update_4763`). Not read: a `limit` whose count is not a literal
    (`limit(.a; FE)` on `{"a":null}` is answered `[[]]` where jq refuses, a count that raises being the reason the count has to be a literal) and what jq does with the
    `null` state after the `reduce` (`reduce ... FE | try .b` is `[]` in jq and refused here, `... // .a` is `[["a"]]`; `| .b?`, `| .[]?`, `// 3` and `[FE][0]?` raise in both with a different
-   message): the refusal is raised at the `reduce`, where jq's `null` state flows on to the next stage as an unplaced value. The refusal is jq's own end-of-path one, raised after the
+   message): the refusal is raised at the `reduce`, where jq's `null` state flows on to the next stage as an unplaced value. The wrappers #4763 reads now share that
+   residual with the bare `try (FE)`: a later stage that consumes the state as a value (`(REDUCE) // .a`, `try (-(REDUCE))`, a `?`/`try` that gives it a name) is refused where jq answers.
+   Over the 19 operands added for #4763 (`--stage-only`, 39,547 rows, jq 1.7.1, candidate vs a `main` build) the 248 rows that stopped matching are those four contexts
+   (`alt-wrap`, `try-del`, `optional`, `var-rebind-nav`) for the wrappers `main` answered by accident (they were wrong the other way on the direct `path()`/`del`/`=` rows: the write landed on the root);
+   ACCEPT_WRONG stays 0, and `scripts/jq-fold-body-register-grid-sweep.py --only try-xpat,try-chain,try-var,try-arr,try-empty` loses 0 matches. The refusal is jq's own end-of-path one, raised after the
    fold, so an outer `?`/`try` around the `path()` catches it (pinned by
    `test_caught_foreign_marker_refusal_is_caught_by_an_outer_try_4730`,
    [#4730](https://github.com/rust-works/succinctly/issues/4730)). Still accepted: a `foreach` UPDATE that wraps the
