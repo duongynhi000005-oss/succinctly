@@ -57493,7 +57493,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                 || (S::TAG == EvalTag::Jq
                                     && !is_last
                                     && (fold_body::depth() == 0
-                                        || fold_body::acc_is_register_here())
+                                        || fold_body::acc_is_register_here()
+                                        || fold_body::acc_off_register_here())
                                     && matches!(
                                         &escape,
                                         EvalEscape::Error(e) if e.is_untracked_navigation_error()
