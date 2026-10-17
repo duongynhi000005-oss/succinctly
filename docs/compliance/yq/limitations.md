@@ -1688,6 +1688,20 @@ every CLI-reachable case: `Expr`, `Builtin`, `eval`, and `YqSemantics` are publi
 directly and evaluate it with `YqSemantics`, bypassing the parser (and any CLI flag) entirely
 — deleting the check would reopen #723's bug for that surface specifically.
 
+### `;` is a parse error here; in yq it is the BLOCK operator, which evaluates to nothing (#2881)
+
+Real yq lexes `;` as a binary operator (`BLOCK`) wherever an expression is allowed, so
+`select(1;2)`, `has(1;2)`, `join(1;2)`, `(1; 2)` and `[1; 2]` all parse. `succinctly yq` rejects each with
+`expected ')', found ';'` (and a top-level `.a; .b` with `unexpected character ';'`). Captured
+against yq v4.53.3, the operator has no value to mirror: a `;` expression yields *no results*
+whatever its operands are — `.a; .b`, `1; 2; 3`, `.a = 5; .` and `(.a = 5; .b = 7)` print nothing and
+leave the document alone, `[1; 2]` is `[]`, `has("a"; "q")` and `has("q"; "a")` are both `false`, and
+`del(.a; .b)` deletes nothing. The only observable effect of accepting it would be to turn a
+parse error into silence, so this stays a deliberate, stricter rejection: a script that spells `;`
+in a yq filter is far more likely to be a jq habit (`limit(1; f)`, `reduce`, `foreach`) than to want an
+empty result, and a loud error is the safer answer to it. The jq-style multi-argument forms that
+`--jq-extensions` enables (`limit`, `range`, `sub`, ...) are unaffected.
+
 ### 3-argument `sub(re; s; flags)` — resolved, real yq ignores everything past the pattern
 
 [#1122](https://github.com/rust-works/succinctly/issues/1122) resolved what had looked like an
