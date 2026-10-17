@@ -67805,10 +67805,17 @@ fn mentions_marker(expr: &Expr) -> bool {
 /// the next alternative, and a bare `$var` there leaves jq's register at the fold's entry
 /// (`null | (.|.) as {(error("q")):$a} ?// $a | .` is `[]`), which the `null`-by-kind route
 /// ([`RegisterSpine::null_by_kind`]) does not model, so such a source keeps the by-value drive.
+/// A key that is a string literal (`("b")`) cannot raise when it is evaluated, so it never retries, and its
+/// pattern step then behaves as the literal key `{b:$b}`'s does (#4772).
 fn chain_may_retry_on_a_key(source: &Expr) -> bool {
     any_subexpr(source, &mut |e| {
         matches!(e, Expr::AsPattern { patterns, .. }
-            if patterns.len() > 1 && patterns.iter().any(pattern_has_computed_key))
+        if patterns.len() > 1
+            && patterns.iter().any(|pattern| {
+                crate::jq::walk::any_pattern_key(pattern, &mut |key| {
+                    !matches!(unwrap_bind_source(key), Expr::Literal(Literal::String(_)))
+                })
+            }))
     })
 }
 
