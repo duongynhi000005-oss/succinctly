@@ -50379,17 +50379,12 @@ impl FoldRegister {
     /// 31 of 39,210 sampled path-register rows lost a jq match that way (`foreach (1,2) as $i
     /// (1; try .a; .)`). #3770 declined it for a fold whose register *is* tracked (a tracked
     /// register keeps the frame as it was), which is why that arm is not touched.
-    fn withhold_untracked_register(&mut self, spare_live_null_bool: bool) {
+    fn withhold_untracked_register(&mut self) {
         // An already-recorded loss is kept: `LostAt` is the more precise statement, and
         // widening it would make loud a refusal #3267 keeps exact. The live register is
         // dropped, as `Frame::unknown` drops it, so the frame never records a loss while
         // carrying a register (#3456 D2).
-        // #4756: not a live `null`/boolean register: those are `jv_identical` by kind, so no frozen
-        // `$var` is the register by pointer and the refusal of its navigation is jq's own verdict.
-        if !self.trackable
-            && !self.frame.register_loss.is_lost()
-            && (!spare_live_null_bool || !self.live_register().is_some_and(is_null_or_bool))
-        {
+        if !self.trackable && !self.frame.register_loss.is_lost() {
             self.frame = self
                 .frame
                 .with_register(None)
@@ -51881,59 +51876,6 @@ fn source_destructures_fresh(
         moved: false,
     };
     walk.reach(source) == Reach::Destructures
-}
-
-/// Whether a `foreach` source is a plain `?//` chain behind a `null` literal or a `$x` marker
-/// (#4756): `null | (.|.) as {a:$a} ?// $a | .`, `$x | CHAIN`, `$x as {b:$b} ?// $b | .`. jq's
-/// register is `jv_identical` to either head by kind when it is `null`, so the chain's first
-/// alternative walks it. Only a chain that cannot take its fallback alternative: literal keys over
-/// bare `$var`s (`null | .a` succeeds) and a body that is `.`. A key that raises, or a body that
-/// errors or is cut short (`first`/`limit`), retries onto the bare alternative, which leaves the
-/// register at the root, and the register handling this enables does not model that row.
-fn head_is_null_or_marker(source: &Expr) -> bool {
-    fn leaf(e: &Expr) -> bool {
-        matches!(
-            unwrap_paren(e),
-            Expr::Literal(Literal::Null) | Expr::TrackedVar(_)
-        )
-    }
-    fn identities(e: &Expr) -> bool {
-        match unwrap_paren(e) {
-            Expr::Identity => true,
-            Expr::Pipe(stages) => stages.iter().all(identities),
-            _ => false,
-        }
-    }
-    fn plain(pattern: &Pattern) -> bool {
-        match pattern {
-            Pattern::Var(_) => true,
-            Pattern::Object(entries) => entries.iter().all(|entry| {
-                matches!(entry.key, ObjectKey::Literal(_))
-                    && entry.bind.is_none()
-                    && matches!(entry.pattern, Pattern::Var(_))
-            }),
-            Pattern::Array(_) => false,
-        }
-    }
-    let chain = |e: &Expr, headed: bool| match unwrap_paren(e) {
-        Expr::AsPattern {
-            expr,
-            patterns,
-            body,
-        } => {
-            matches!(unwrap_paren(body), Expr::Identity)
-                && patterns.iter().all(plain)
-                && if headed { identities(expr) } else { leaf(expr) }
-        }
-        _ => false,
-    };
-    match unwrap_paren(source) {
-        Expr::Pipe(stages) => match stages.as_slice() {
-            [head, rest] => leaf(head) && chain(rest, true),
-            _ => false,
-        },
-        other => chain(other, false),
-    }
 }
 
 /// The `$x` markers in a `foreach` `source` that the spine walk reads as the register (#4320).
@@ -53934,16 +53876,24 @@ impl<'e> RegisterSpine<'e> {
             }
             // #4278: a variable the spine bound to the register hands it on as `.` does.
             Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
-            // #4756: on a `null` register a `null` literal is `jv_identical` to it, and so is a
-            // `$x` bound outside the source that is the register at the fold, so each hands it on
-            // as `.` does: the chain behind it walks the register.
-            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_register => {
+            // #4756: on a `null` register a `null` literal is `jv_identical` to it by kind, and so is a
+            // `$x` bound outside the source that the caller certified as the register at the fold, so
+            // each hands it on as `.` does: the chain behind it walks the register, and so does the stage
+            // after `null | ` or `$x | `. One pair of arms for both ways the register is known `null`
+            // (#4773): `null_register` (`.` is that register, tracked) and `null_by_kind` (only a `null`
+            // is, on an untracked entry; see [`null_leaves_of`] for what else is one). The marker's own
+            // value is checked under `null_by_kind` only: under `null_register` the caller certified it
+            // against a `null` register ([`fold_source_register_markers`]), so it is `null` already.
+            Expr::Literal(Literal::Null)
+                if !self.fresh_only && (self.null_register || self.null_by_kind) =>
+            {
                 Reach::HandsOn
             }
             Expr::TrackedVar(marker)
                 if !self.fresh_only
-                    && self.null_register
-                    && self.markers.contains(&Rc::as_ptr(marker)) =>
+                    && self.markers.contains(&Rc::as_ptr(marker))
+                    && (self.null_register
+                        || (self.null_by_kind && matches!(marker.value, OwnedValue::Null))) =>
             {
                 Reach::HandsOn
             }
@@ -54096,18 +54046,6 @@ impl<'e> RegisterSpine<'e> {
                 }
             }
             Expr::Comma(branches) => self.reach_any(branches, true),
-            // #4756: on a `null` register a `null` literal is the register by kind (`jv_identical`),
-            // as is a `$x` marker the caller certified, so the stage after `null | ` or `$x | `
-            // meets the register where the pipe did.
-            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_by_kind => Reach::HandsOn,
-            Expr::TrackedVar(marker)
-                if !self.fresh_only
-                    && self.null_by_kind
-                    && matches!(marker.value, OwnedValue::Null)
-                    && self.markers.contains(&Rc::as_ptr(marker)) =>
-            {
-                Reach::HandsOn
-            }
             // #4566: either operand of a `//` meets `.` where the `//` did, and the resolver runs
             // only the one jq does, so a fresh destructure in either is the source's own. For the
             // `fresh_only` walk only: the register walks read a `//` as opaque.
@@ -60272,7 +60210,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         let (mut reg, acc) =
             FoldRegister::enter(init_branch, value, trackable, init_keeps_register, frame);
         if mentions_frozen_var {
-            reg.withhold_untracked_register(false); // #3984
+            reg.withhold_untracked_register(); // #3984
         }
 
         // #2031: SOURCE runs immediately after INIT against the same
@@ -61049,7 +60987,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             if reads_enclosing_register_exactly && reg.register_is_positioned() {
                 reg.positioned = true;
             } else {
-                reg.withhold_untracked_register(head_is_null_or_marker(input)); // #3984
+                reg.withhold_untracked_register(); // #3984
             }
         }
 
