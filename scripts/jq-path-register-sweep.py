@@ -758,6 +758,39 @@ OPERANDS = [
     "(1 as $x | foreach ($x as {a:$a} ?// $a | .) as $k (.; .; .))",
     "(. as $x | foreach (1,2) as $j (.; (foreach ($x | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     "(. as $x | reduce ($x | (.|.) as {a:$a} ?// $a | .) as $k (.; .))",
+    # (#4774) a head that reaches the chain some other way than a bare `null`/`$x`: a comma mixing
+    # `null` with `.`, a `null` behind `try`/`?`/`first`/`limit`/`nth`, or a pipe/comma of those. The
+    # `null` outputs are the register by kind and walk it; `.` on an untracked entry is no node of it.
+    # The contrasts are a head that is not `null` on any leaf (`first(null, .)` takes the `null`),
+    # one that navigates (`null | .a?`) and one whose `null` is produced by a handler.
+    "(foreach ((., null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null, .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null)? | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (first(null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (limit(1; null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (nth(0; null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | (., null)) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null, (., null)) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (try (null, .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | select(true)) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | first(.)) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (first(null, .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (limit(2; null, .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((try error(1) catch null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | .a?) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach ((null | try .a) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x, .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach ((., $x) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (first($x) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (($x | .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(. as $x | foreach (try $x | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .))",
+    "(foreach (1,2) as $j (.; (foreach ((null | .) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
+    "(foreach (1,2) as $j (.; (foreach ((null, null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
+    "(foreach (1,2) as $j (.; (foreach (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
+    "(reduce (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .))",
     # (#4757) the chain under a `reduce`, which the `untracked-foreach-update*` and
     # `untracked-reduce-update` contexts put in another fold's body: a `reduce` backtracks its
     # source and UPDATE, so the register it leaves is INIT's. The contrasts navigate in INIT, the
