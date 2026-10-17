@@ -55544,9 +55544,14 @@ fn bare_last_alternative(e: &Expr) -> Option<Expr> {
         for pattern in earlier {
             collect_pattern_var_names(pattern, &mut earlier_names);
         }
+        // #4813: a variable only an earlier alternative binds is `null` in the retry, which nothing
+        // observes when the body never reads it.
         earlier_names
             .iter()
-            .all(|name| last_names.contains(name))
+            .all(|name| {
+                last_names.contains(name)
+                    || !any_subexpr(body, &mut |e| matches!(e, Expr::Var(var) if var == name))
+            })
             .then(|| Expr::AsPattern {
                 expr: expr.clone(),
                 patterns: vec![last.clone()],
@@ -55574,10 +55579,16 @@ fn bare_last_alternative(e: &Expr) -> Option<Expr> {
                 n: n.clone(),
                 expr: Box::new(through_wrappers(expr, budget)?),
             }),
+            Expr::Builtin(Builtin::FirstStream(inner)) => Some(Expr::Builtin(
+                Builtin::FirstStream(Box::new(through_wrappers(inner, budget)?)),
+            )),
+            Expr::Builtin(Builtin::NthStream(n, inner)) => Some(Expr::Builtin(Builtin::NthStream(
+                n.clone(),
+                Box::new(through_wrappers(inner, budget)?),
+            ))),
             other => chain(other),
         }
     }
-    take_wrapped_bare_chain(e)?;
     through_wrappers(e, WRAPPED_CHAIN_DEPTH)
 }
 
@@ -55604,14 +55615,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
     } else {
         source
     };
-    // #4775: a `first`/`limit`/`nth` of a `?//` chain on a container that is provably no node of the
-    // register (it is not the register's value, which the frame holds live): the destructuring
-    // alternatives raise and only the bare one emits.
+    // #4775: a `first`/`limit`/`nth` of a `?//` chain on a value that is provably no node of the register
+    // (it is not the register's value, which the frame holds live, and `jv_identical` holds an unequal
+    // value of any kind apart from it): the destructuring alternatives raise and only the bare one emits.
     let bare_last_resolved = (S::TAG == EvalTag::Jq
         && foreach_source
         && !ambient.trackable
         && matches!(ambient.snapshot, Snapshot::No)
-        && matches!(ambient.value, OwnedValue::Array(_) | OwnedValue::Object(_))
         && !ambient.frame.register_loss.is_lost()
         && ambient
             .frame
