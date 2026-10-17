@@ -40365,9 +40365,10 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 /// on once (`.`, `select(.)`), a `label` scope, nested pipes (#4732), a `try`/`?` (it catches
 /// nothing: the emptiness raises nothing) and an `// empty`, `// LITERAL` or `if . then FE else .
 /// end` around it (#4754): the stages after it run once per output, so an empty `foreach` leaves
-/// the whole UPDATE empty. `in_foreach` is a `foreach` UPDATE: a step that falls back to a value
-/// or reads the `null` an earlier empty step left behind emits it, so those shapes are left alone.
-fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
+/// the whole UPDATE empty. In a `foreach` UPDATE a step that falls back to a value or reads the
+/// `null` an earlier empty step left behind emits it (#4776), which the fold's own walk does once
+/// it knows the step is empty.
+fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(expr) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
             source: input,
@@ -40385,9 +40386,9 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
                 if heads.next().is_some() {
                     return None;
                 }
-                emptied_update(head, in_foreach)
+                emptied_update(head)
             }
-            body => emptied_update(body, in_foreach),
+            body => emptied_update(body),
         },
         Expr::Pipe(stages) => {
             let skipped = stages
@@ -40399,7 +40400,7 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
                         || matches!(unwrap_paren(stage), Expr::Literal(_))
                 })
                 .count();
-            let emptied = emptied_update(stages.get(skipped)?, in_foreach)?;
+            let emptied = emptied_update(stages.get(skipped)?)?;
             // A fallback or a state-dependent head hands a value on to the stages around it: a
             // later stage transforms it (`// 5 | tostring`), and a `select(.)` ahead of it drops a
             // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
@@ -40410,11 +40411,9 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
                     .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
             (plain || !surrounded).then_some(emptied)
         }
-        e if emptied_wrapper_inner(e).is_some() => {
-            emptied_update(emptied_wrapper_inner(e)?, in_foreach)
-        }
+        e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
         Expr::Alternative(left, right) => {
-            let mut emptied = emptied_update(left, in_foreach)?;
+            let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
                 Expr::Builtin(Builtin::Empty) => {}
                 Expr::Literal(literal) => {
@@ -40431,7 +40430,7 @@ fn emptied_update(expr: &Expr, in_foreach: bool) -> Option<EmptiedUpdate<'_>> {
         } if matches!(unwrap_paren(cond), Expr::Identity)
             && matches!(unwrap_paren(else_branch), Expr::Identity) =>
         {
-            let mut emptied = emptied_update(then_branch, in_foreach)?;
+            let mut emptied = emptied_update(then_branch)?;
             emptied.truthy = true;
             Some(emptied)
         }
@@ -40451,7 +40450,7 @@ fn sole_update_mark<S: EvalSemantics>(
     }
     match unwrap_paren(body) {
         Expr::Foreach { input, .. } => Some(fold_body::sole_update_foreach(input, in_foreach)),
-        e => emptied_update(e, in_foreach).map(|emptied| {
+        e => emptied_update(e).map(|emptied| {
             fold_body::sole_update_pipe_head(
                 emptied.source,
                 in_foreach,
