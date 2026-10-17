@@ -71102,3 +71102,61 @@ fn test_json_input_streams_concatenated_top_level_values_2839() -> Result<()> {
     }
     Ok(())
 }
+
+/// #4268: a scalar item's `- # c` comment is the scalar's head comment (yq answers `c`); a
+/// trailing `- x # t` stays a line comment, and a mapping item keeps its comment on the dash.
+#[test]
+fn test_scalar_item_dash_comment_is_its_head_comment_4268() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "a:\n  - # c\n    plain\n  - y\n",
+            ".a[0] | head_comment",
+            "c\n",
+        ),
+        (
+            "a:\n  - x\n  - # c\n    plain\n",
+            ".a[1] | head_comment",
+            "c\n",
+        ),
+        (
+            "a:\n  - # c\n    \"q\"\n  - y\n",
+            ".a[0] | head_comment",
+            "c\n",
+        ),
+        ("a:\n  - # c\n    1\n  - y\n", ".a[0] | head_comment", "c\n"),
+        ("a:\n  - # c\n    1\n  - y\n", ".a[0] | line_comment", "\n"),
+        (
+            "a:\n  # h\n  - # c\n    plain\n",
+            ".a[0] | head_comment",
+            "h\nc\n",
+        ),
+        ("a:\n  - # d\n    |\n    x\n", ".a[0] | head_comment", "d\n"),
+        ("a:\n  - # e\n    &an v\n", ".a[0] | head_comment", "e\n"),
+        (
+            "a:\n  - # f\n    \"multi\n    line\"\n",
+            ".a[0] | head_comment",
+            "f\n",
+        ),
+        ("a:\n  - x # t\n  - y\n", ".a[0] | head_comment", "\n"),
+        ("a:\n  - x # t\n  - y\n", ".a[0] | line_comment", "t\n"),
+        (
+            "a:\n  - # c\n    k: 1\n  - y\n",
+            ".a[0] | head_comment",
+            "\n",
+        ),
+        (
+            "a:\n  - # c\n    plain\n  - y\n",
+            ".z = 1",
+            "a:\n  # c\n  - plain\n  - y\nz: 1\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    Ok(())
+}
