@@ -67014,10 +67014,7 @@ fn resolve_terminal_sink<'a, S: EvalSemantics>(
                 let identical = S::TAG == EvalTag::Jq && null_bool_identical(&branch.value, input);
                 // #4800: ...and not for a branch that states the register lost, which a computed
                 // emission of a fold whose UPDATE may have moved it off the root does.
-                let register_lost = matches!(
-                    branch.register,
-                    BranchRegister::LostAt(_) | BranchRegister::LostSomewhere
-                );
+                let register_lost = matches!(branch.register, BranchRegister::LostSomewhere);
                 if identical && !register_lost && (near_iterate || branch.path.depth() == 0) {
                     // emission: mirror the navigation family's identical
                     // seed (#2691) -- the identical literal carried through
