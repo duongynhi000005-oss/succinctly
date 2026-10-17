@@ -3059,6 +3059,31 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         Some(raw.strip_prefix("# ").unwrap_or(raw))
     }
 
+    /// #4268: the `# c` of a scalar sequence item written `- # c` / `    value`. The parser keys it
+    /// as the item's line comment (the wrapper and a scalar value share one node), but it sits
+    /// *before* the value, which is where yq reads a head comment from; an ordinary trailing
+    /// comment (`- value # c`) follows the value and stays a line comment.
+    fn dash_comment_of_scalar_item(&self) -> Option<&str> {
+        // The cheapest test first: almost no item's wrapper holds a comment.
+        let wrapper = self.parent()?;
+        let &(start, end) = self.index.get_line_comments(wrapper.bp_pos).first()?;
+        let wrapper_pos = wrapper.text_position()?;
+        // Only the `-` wrapper of a sequence item, and only when this node is its value.
+        if !starts_seq_entry(self.text, wrapper_pos)
+            || wrapper.first_child()?.bp_pos != self.bp_pos
+            || (start as usize) >= self.text_position()?
+        {
+            return None;
+        }
+        // A block mapping or sequence value keeps its comment on the dash line (#4231), not as
+        // its head; a flow collection and a scalar take it as their head, as in yq.
+        if self.is_container() {
+            return None;
+        }
+        let raw = core::str::from_utf8(&self.text[start as usize..end as usize]).ok()?;
+        Some(raw.strip_prefix("# ").unwrap_or(raw))
+    }
+
     /// The standalone `#` comment lines directly above this node — its
     /// *head* comment (#798) — raw, `#` and all, one entry per line in
     /// source order. Empty when there are none.
@@ -7812,9 +7837,29 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
 
     #[inline]
     fn head_comment(&self) -> Vec<String> {
-        YamlCursor::head_comment(self)
+        let mut lines: Vec<String> = YamlCursor::head_comment(self)
             .map(ToString::to_string)
-            .collect()
+            .collect();
+        // #4268: a scalar item's `- # c` comment is the scalar's head comment in yq, after any
+        // standalone block above the dash. A head that is itself a floated dash comment of an
+        // absent item before this one (`- # c1` / `- # c2` / `  x`, #1079) is yq's whole answer.
+        let floated = self
+            .index
+            .get_head_comments(self.bp_pos)
+            .iter()
+            .any(|&(start, _)| {
+                let line_start = self.text[..start as usize]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |i| i + 1);
+                self.text[line_start..start as usize]
+                    .iter()
+                    .any(|b| !matches!(b, b' ' | b'\t'))
+            });
+        if !floated {
+            lines.extend(self.dash_comment_of_scalar_item().map(ToString::to_string));
+        }
+        lines
     }
 
     #[inline]
