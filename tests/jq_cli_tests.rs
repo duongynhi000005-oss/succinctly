@@ -155118,6 +155118,200 @@ fn test_foreach_source_alternative_null_head_walks_the_null_register_4784() -> R
     Ok(())
 }
 
+/// #4773: a `foreach` source that is a `?//` chain behind a `null` or `$x` head on a `true`/`false`
+/// document. A boolean register is `jv_identical` to a boolean by kind, but a `null` head is not one, so
+/// the chain behind it takes its bare alternative and the register stays where the fold entered
+/// (`[]`), at the top level, on an untracked entry and through `del`. #4769 spared a live boolean
+/// register from the frozen-`$var` withhold for this; #4770's `null`-only exemption decides the same
+/// rows, which these pin. Every row captured from jq 1.7.1 with `-c`.
+#[test]
+fn test_foreach_source_null_or_marker_headed_chain_on_a_boolean_register_4773() -> Result<()> {
+    let chain = "(.|.) as {a:$a} ?// $a | .";
+    let rows: Vec<(&str, String, &str, &str, i32)> = vec![
+        (
+            "true",
+            format!("path(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | foreach (null | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("del(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x.a?)"),
+            "true\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | 1 | (foreach ($x | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | foreach ($x | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | 1 | (foreach (($x | .) | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | foreach (($x | .) | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!(
+                "path(. as $x | 1 | (foreach ((null // null) | {chain}) as $k (.; .; .)) | $x)"
+            ),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | foreach ((null // null) | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!(
+                "del(. as $x | 1 | (foreach ((null // null) | {chain}) as $k (.; .; .)) | $x.a?)"
+            ),
+            "true\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | 1 | (foreach ((null, $x) | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            format!("path(. as $x | foreach ((null, $x) | {chain}) as $k (.; .; .))"),
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | foreach (null | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("del(. as $x | 1 | (foreach (null | {chain}) as $k (.; .; .)) | $x.a?)"),
+            "false\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | 1 | (foreach ($x | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | foreach ($x | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | 1 | (foreach (($x | .) | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | foreach (($x | .) | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!(
+                "path(. as $x | 1 | (foreach ((null // null) | {chain}) as $k (.; .; .)) | $x)"
+            ),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | foreach ((null // null) | {chain}) as $k (.; .; .))"),
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!(
+                "del(. as $x | 1 | (foreach ((null // null) | {chain}) as $k (.; .; .)) | $x.a?)"
+            ),
+            "false\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | 1 | (foreach ((null, $x) | {chain}) as $k (.; .; .)) | $x)"),
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            format!("path(. as $x | foreach ((null, $x) | {chain}) as $k (.; .; .))"),
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ];
+    for (doc, program, stdout, stderr, code) in rows {
+        let program: &'static str = Box::leak(program.into_boxed_str());
+        assert_path_rows_both_routes_3749(&[(doc, program, stdout, stderr, code)])?;
+    }
+    Ok(())
+}
+
 /// #4757: a `?//` chain under a `reduce` inside a `foreach` UPDATE, entered on an untracked value
 /// (`1 |`), whether the chain is the `reduce`'s UPDATE, a `foreach` source in it, its source (also
 /// behind a call with arguments or a nested `foreach`) or under a handler-less `try`. A `reduce`

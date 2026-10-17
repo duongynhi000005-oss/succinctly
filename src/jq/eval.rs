@@ -53666,7 +53666,9 @@ impl<'e> RegisterSpine<'e> {
             // each hands it on as `.` does: the chain behind it walks the register, and so does the stage
             // after `null | ` or `$x | `. One pair of arms for both ways the register is known `null`
             // (#4773): `null_register` (`.` is that register, tracked) and `null_by_kind` (only a `null`
-            // is, on an untracked entry; see [`null_leaves_of`] for what else is one).
+            // is, on an untracked entry; see [`null_leaves_of`] for what else is one). The marker's own
+            // value is checked under `null_by_kind` only: under `null_register` the caller certified it
+            // against a `null` register ([`fold_source_register_markers`]), so it is `null` already.
             Expr::Literal(Literal::Null)
                 if !self.fresh_only && (self.null_register || self.null_by_kind) =>
             {
