@@ -12477,7 +12477,7 @@ filtered content of `valid` after its error line. Under `-s` the same gap lets `
 readable files into output (`[]` when none opened) while still exiting 2; succinctly emits no
 output. Both are unfiled follow-ups to the exit-code change, not part of its scope.
 
-## Bare `..`/`recurse` on a `$var` off the register: a nested-fold refuse-only residual (#3048)
+## Bare `..`/`recurse` on a `$var` off the register (#3048; its nested-fold residual closed by #4779)
 
 `resolve_node_sink`'s bare-recursion arm (#2761) emits the identity seed of an untracked
 value, then raises `invalid_path_expression_near_iterate` if the continuation discards

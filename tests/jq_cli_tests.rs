@@ -74080,8 +74080,7 @@ fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Resul
 /// onto the element), and handing the enclosing register to that source accepted it
 /// (`jq-fold-body-register-grid-sweep.py`, `rd-nav/fe/x-idx`).
 #[test]
-fn test_foreach_that_is_a_fold_update_keeps_init_marker_refused_4499(
-) -> Result<()> {
+fn test_foreach_that_is_a_fold_update_keeps_init_marker_refused_4499() -> Result<()> {
     for (doc, filter, stderr_part) in [
         (
             r#"{"a":{"b":1}}"#,
@@ -74180,6 +74179,22 @@ fn test_fold_under_try_extract_or_comma_reads_the_outer_frozen_var_4779() -> Res
             r"path(foreach .a as $w (.; (foreach (1,2) as $i (1; try ($w|.b); .), 1); .))",
             "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
             "Invalid path expression with result 1",
+            5,
+        ),
+        // A `catch` handler is not a wrapper that adds no movement: the row keeps the answer jq
+        // gives, and a `reduce` as the enclosing fold keeps its refusal (jq raises too).
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .)) catch $w; .))",
+            "[\"a\",\"b\"]\n[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce .a as $w (.; try (foreach (1,2) as $i (1; try ($w|.b); .))))",
+            "",
+            "Invalid path expression with result",
             5,
         ),
         // A sibling that navigates the accumulator keeps the verdict jq gives.

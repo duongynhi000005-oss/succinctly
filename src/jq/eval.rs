@@ -49773,7 +49773,10 @@ fn fans_out(expr: &Expr) -> bool {
 /// runs its live stage against the carried register and trips the resolver's lost-register
 /// assertion. An operand with any other fan-out (a comma, a call) still counts, and so does
 /// one that reads a frozen variable (`$k`), a fold included: the marker re-establishes against
-/// the register the frame would now carry, which is the hazard #3145 withheld it for.
+/// the register the frame would now carry, which is the hazard #3145 withheld it for. The one
+/// exception is a `foreach` marked as reading the register the enclosing fold stands on (#4779,
+/// [`is_register_fold`]): it is handed that register with its position, so its marker certifies
+/// exactly, whichever sibling or `try` it sits under.
 fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
     use crate::jq::walk::{search_subexpr, Visit};
     search_subexpr(expr, &mut |e| match e {
@@ -49833,7 +49836,9 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
 /// so a `try` around the comma catches it as jq's own does. A builtin the register
 /// analysis does not list (`abs`) and a computed key (`.a[.b]`) are neither, so they keep the
 /// register withheld. A `foreach`/`reduce` that reads no frozen `$var` is uniform too (#4499): it
-/// takes the register from the frame it is entered with, as a pipe's stages do. A bare
+/// takes the register from the frame it is entered with, as a pipe's stages do. So is a `foreach`
+/// that does, when it is marked as reading the register the enclosing fold stands on (#4779,
+/// [`is_register_fold`]). A bare
 /// register-neutral builtin (`now`, `input_line_number`) is read by
 /// [`is_bare_register_neutral_builtin`] where a comma asks (#3960), not here: this predicate's
 /// other readers have holes of their own that a larger set would route programs into.
