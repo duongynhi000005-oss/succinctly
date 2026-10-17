@@ -70626,6 +70626,7 @@ mod fold_body {
     /// any wrapper around one that [`super::emptied_update`] sees through (#4754): its later
     /// stages run once per output, so an empty `foreach` leaves the whole UPDATE empty (or on
     /// `fallback`).
+    #[allow(clippy::fn_params_excessive_bools)] // STYLE-0004: independent mark bits, each named at the three call sites
     pub(crate) fn sole_update_pipe_head(
         source: &super::Expr,
         in_foreach: bool,
