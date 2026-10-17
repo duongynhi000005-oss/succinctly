@@ -2803,14 +2803,44 @@ is the revert that established what the other one costs.
    REFUSE_WRONG 3,641 -> 3,580, ACCEPT_WRONG (93) and DIFF (122) unchanged, 0 regressions; a 60,027-row whole-grid sample
    (`--stage-only --sample 60000 --seed 77`): MATCH 57,502 -> 57,514, REFUSE_WRONG 2,352 -> 2,340, ACCEPT_WRONG (41) and DIFF (130)
    unchanged, 0 regressions.
-   Still refused: the same source inside a `reduce` in a `foreach` UPDATE (`foreach (1,2) as $j (.; (reduce 1 as $m (.; CHAIN)); .)`),
-   and a chain beneath `first`/`limit`/`nth` there. The sweep's first version read those too and a row came back as a wrong
-   answer instead of a refusal (`foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on
-   `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the stop emitting once more), so the nested read
-   (`source_moves_register_only_by_binds_in_update`) leaves them out, and every bound expression and every stage before the last
-   must be the register itself: a chain over `$x` or `null` walks the register in jq (`["a"]` twice on a `null` document, where
-   this prints `[]` twice), so it stays refused on a non-`null` document, where it was refused before. On a `null` document the
-   `[]` twice is `main`'s own answer too (the top-level `foreach (null | CHAIN)` has it as well), unchanged by this.
+   A chain whose bound expression is re-rooted by a `null` literal or a `$x` bound to `null` walks the register on a `null`
+   document ([#4756](https://github.com/rust-works/succinctly/issues/4756)): every `null` is `jv_identical` to a `null` register by kind, so the first
+   alternative's `INDEX` steps move it (`path(. as $x | 1 | (foreach (null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)) | $x)` on `null` is `["a"]`
+   in jq; `$x | CHAIN` and `$x as {b:$b} ?// $b | .` are the same, at the top level, on an untracked entry and inside another `foreach`'s UPDATE, and so
+   are the `=`/`|=`/`del` that write through them: `= 5` wrote the document `5` where jq writes `{"a":5}`). The by-value drive reported the bare alternative's
+   unmoved register, so `RegisterSpine` (`null_by_kind`) now reads a `null` stage, a `null` marker and a comma of those as the register, which sends the
+   source to the resolver, and `mentions_frozen_var` (#3984) no longer withholds a live `null` register from a fold whose only `$x` is a `null`
+   marker (`mentions_non_null_marker`). Inside another fold's body this holds only in the UPDATE of a `foreach` that reads the statement the inner fold
+   makes: a first version routed it everywhere and lost 21 matches under `try (-(FOREACH))` in a `foreach` UPDATE, where the routed refusal is a guess a
+   `try` cannot catch. A stage that is not `null` (`1 |`, `false |`, a navigation in front), a body that navigates and a `reduce`, which backtracks its source,
+   are as they were. On a document that is not `null` a chain over `$x` on an untracked entry is still refused where jq answers `[]`
+   (`. as $x | 1 | (foreach ($x | CHAIN) as $k (.; .; .)) | $x` on `[[1],[1]]`): it was refused before, and pinned by
+   `test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_4615`. A `true`/`false` register is `jv_identical` by kind too and is not read
+   (the sweep's `false |` contrast matches jq). Pinned by `test_foreach_source_null_or_null_marker_headed_chain_walks_the_null_register_4756`.
+   A chain under a `reduce` inside a `foreach` UPDATE ([#4757](https://github.com/rust-works/succinctly/issues/4757)) is answered too: as the `reduce`'s UPDATE
+   (`foreach (1,2) as $j (.; (reduce 1 as $m (.; CHAIN)); .)`), as a `foreach` source in it, as its own source (also behind a call with arguments or a nested
+   `foreach`) and under a handler-less `try`. A `reduce` backtracks its source and UPDATE, so the register it leaves is INIT's; the enclosing `foreach` marks the
+   body (`fold_body::foreach_body_stating`) when its UPDATE is such a `reduce` (`update_states_it`), and the `reduce` states `AtEntry` where its frame holds no
+   register. Pinned by `test_foreach_update_reduce_with_a_chain_on_untracked_entry_4757`.
+   Over the 55 operands added for #4756 and #4757 (`--stage-only`, 114,427 rows, jq 1.7.1, candidate vs a `main` build): MATCH 99,148 -> 99,458,
+   REFUSE_WRONG 14,236 -> 14,079, DIFF 841 -> 688, ACCEPT_WRONG (202) unchanged, 0 regressions. The 208 `foreach` operands with a `?//` source
+   (`--stage-only --sample 30000 --seed 4757`): MATCH 26,997 -> 27,011, REFUSE_WRONG 2,850 -> 2,845, DIFF 120 -> 111, ACCEPT_WRONG (60) unchanged, 0
+   regressions; a 60,027-row whole-grid sample (`--stage-only --sample 60000 --seed 77`, one base commit earlier): MATCH 57,326 -> 57,336, REFUSE_WRONG
+   2,526 -> 2,520, DIFF 127 -> 123, ACCEPT_WRONG (44) unchanged, 0 regressions. `scripts/jq-nested-fold-frozen-var-sweep.py` (2,673 rows, which `mentions_non_null_marker` reaches): identical to
+   `main`, 0 lost; `scripts/jq-bind-origin-fuzz.py` (6,000 programs, `--seed 4756 --fold-p 0.6 --destructure-bind-p 0.6`): 0 fabricate, 0 mismatch, 0 refuse-only.
+   The sweep's first full run lost 3 matches (`first(null | CHAIN)` under `del` on an untracked entry, where the routed source's refused emission is not counted against
+   the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` stays with the by-value drive.
+   Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with the register (`(null, .) | CHAIN`,
+   `(., null) | CHAIN`) on an untracked entry, a `null` behind `try`, `first(null)` or `(null | .)` in front of the chain, and, on an untracked entry, a chain
+   with a computed key (`chain_may_retry_on_a_key`): a key that raises retries onto the bare alternative, which leaves the register at the entry
+   (`{(error("q")):$a} ?// $a` then `| $x | .z` is `["z"]`, pinned by `test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756`), and the route
+   does not model that retry, so a key that cannot raise (`$x as {("b"):$b} ?// $b | .`, `["b"]` in jq) is `[]` here too, as on `main`.
+   Still refused where jq answers: a chain beneath `first`/`limit`/`nth` in a `foreach` UPDATE (and a `reduce` UPDATE that is `first(CHAIN)`) and a
+   `reduce` or `foreach` UPDATE inside a `reduce` UPDATE. The first kind came back as a wrong answer when read (`foreach (1,2) as $i (.; foreach
+   (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the
+   stop emitting once more), so `source_moves_register_only_by_binds_in_update` leaves them out; reading them needs the refused emission's count
+   carried through the enclosing fold's emission, which is its own change. (On a `null` document the entry `{a:{b:1}}` row prints those four paths on
+   `main` already, unchanged by this.) The second is a `reduce` that is not itself the `foreach`'s UPDATE, which nothing marks.
    [#4320](https://github.com/rust-works/succinctly/issues/4320)'s fourth part: a destructure of a *later bare
    alternative* of a `?//` chain in a `foreach` source (`. as $x ?// $y | $y as {a:$a} | .`) is the register's, at the
    top level. jq binds `$y` to `null` while the first alternative runs, so destructuring it steps the register off a node

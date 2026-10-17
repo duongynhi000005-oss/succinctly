@@ -37293,7 +37293,7 @@ fn foreach_source_is_path_checked(e: &Expr) -> bool {
     // in jq and here). The loop pattern of a nested `reduce` may be a chain too when it is immaterial (`nested_fold_keeps_state`).
     cannot_move_register(e)
         || navigation(e, None)
-        || foreach_source_destructures_register(e, Vec::new(), false)
+        || foreach_source_destructures_register(e, Vec::new(), false, false)
 }
 
 /// Whether `e` is a no-op in path position: `.`, or a pipe or parenthesised group of
@@ -47865,7 +47865,12 @@ fn reduce_leaves_register_in_place(input: &Expr, init: &Expr, update: &Expr) -> 
 /// admitted: not inside another fold's body, where the ambient register is not known to be jq's
 /// (#4613).
 fn reduce_source_is_bare_final_bind_chain(input: &Expr) -> bool {
-    fold_body::depth() == 0 && source_moves_register_only_by_binds(input)
+    (fold_body::depth() == 0 && source_moves_register_only_by_binds(input))
+        // #4757: or the UPDATE of a `foreach` that reads the statement a `reduce` makes.
+        || (fold_body::foreach_body_stating_here()
+            // `true`: the enclosing `foreach` marked this body only after reading this source with its own register
+            // in hand (`update_states_it`), so a `null` head is the register here.
+            && source_moves_register_only_by_binds_in_update(input, true))
 }
 
 /// [`register_movement_tracked`] for a fold's `UPDATE`, which also admits a `try`
@@ -47955,9 +47960,23 @@ fn source_moves_register_only_by_binds(expr: &Expr) -> bool {
 /// - every bound expression and every stage before the last is the register itself: a chain over
 ///   `$x` or `null` (`foreach ($x | CHAIN)`, `foreach (null | CHAIN)`) walks the register in jq, and
 ///   the statement would name the entry (`["a"]` where this printed `[]`).
-fn source_moves_register_only_by_binds_in_update(expr: &Expr) -> bool {
+///
+/// With `null_register` (#4756: jq's register is a known `null`) a `null` literal or a `null`
+/// marker also counts as the register, as `.` does: every `null` is `jv_identical` to a `null`
+/// register by kind, so the chain behind it walks the register and the resolver places it.
+fn source_moves_register_only_by_binds_in_update(expr: &Expr, null_register: bool) -> bool {
     let mut gate = BindGate::new(true);
+    gate.null_register = null_register;
     moves_register_only_by_binds(expr, &mut gate)
+}
+
+/// Whether `e` is a `null` literal or a `$x` marker holding `null` (#4756).
+fn is_null_head(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Literal(Literal::Null) => true,
+        Expr::TrackedVar(marker) => matches!(marker.value, OwnedValue::Null),
+        _ => false,
+    }
 }
 
 /// What [`moves_register_only_by_binds`] has left to spend (`budget`), and whether it reads the
@@ -47965,6 +47984,8 @@ fn source_moves_register_only_by_binds_in_update(expr: &Expr) -> bool {
 struct BindGate {
     budget: u32,
     inside_update: bool,
+    /// Whether a `null` head is the register ([`source_moves_register_only_by_binds_in_update`]).
+    null_register: bool,
 }
 
 impl BindGate {
@@ -47972,6 +47993,7 @@ impl BindGate {
         Self {
             budget: SPINE_CALL_BUDGET,
             inside_update,
+            null_register: false,
         }
     }
 }
@@ -47992,7 +48014,9 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
             body,
             ..
         } if patterns.len() > 1 && matches!(patterns.last(), Some(Pattern::Var(_))) => {
-            (!calls.inside_update || bind_hands_on_the_register(bound))
+            (!calls.inside_update
+                || bind_hands_on_the_register(bound)
+                || (calls.null_register && is_null_head(bound)))
                 && moves_register_only_by_binds(body, calls)
         }
         Expr::As { body, .. } | Expr::Label { body, .. } => {
@@ -48006,7 +48030,8 @@ fn moves_register_only_by_binds(expr: &Expr, calls: &mut BindGate) -> bool {
                     unwrap_paren(stage),
                     Expr::AsPattern { .. } | Expr::As { .. }
                 )
-                || yields_only_the_register(stage))
+                || yields_only_the_register(stage)
+                || (calls.null_register && is_null_head(stage)))
                 && moves_register_only_by_binds(stage, calls)
         }),
         Expr::Comma(stages) => stages
@@ -49383,7 +49408,9 @@ fn fans_out_with(expr: &Expr, patterns_fan_out: bool) -> bool {
         // try .a; .))` ran its operand against the register the frame carries, as a fold
         // outside it does, and counting it dropped the caught step: `isempty` answered `true`
         // where jq's inner fold emitted.
-        Expr::Reduce { .. } | Expr::Foreach { .. } if !mentions_marker(expr) => Visit::Skip,
+        Expr::Reduce { .. } | Expr::Foreach { .. } if !mentions_non_null_marker(expr) => {
+            Visit::Skip
+        }
         Expr::Comma(_)
         | Expr::AsPattern { .. }
         | Expr::Reduce { .. }
@@ -49443,7 +49470,7 @@ fn sibling_sees_register_uniformly(expr: &Expr) -> bool {
         // register the same way on every side (jq forks the comma at its entry).
         // Unless it reads a frozen `$var` (#3984): a marker in it can re-establish against the
         // register the comma would now carry, which is what #3145 withheld it for.
-        Expr::Foreach { .. } | Expr::Reduce { .. } => !mentions_marker(expr),
+        Expr::Foreach { .. } | Expr::Reduce { .. } => !mentions_non_null_marker(expr),
         // #4660: a verdict builtin hands its boolean on at the register it entered with and
         // resolves its operands live (they raise where jq raises), so a comma of them sees the
         // register the same way on every side. `isempty` as [`fans_out_with`] reads it; `any`/`all`
@@ -51048,8 +51075,9 @@ fn foreach_source_destructures_register(
     source: &Expr,
     markers: Vec<*const Tracked>,
     null_register: bool,
+    null_by_kind: bool,
 ) -> bool {
-    source_destructures_register_with(source, false, markers, null_register)
+    source_destructures_register_with(source, false, markers, null_register, null_by_kind)
 }
 
 /// [`foreach_source_destructures_register`], optionally reading through a nested
@@ -51064,7 +51092,7 @@ fn foreach_source_destructures_register(
 /// resolver, so the caller routes a source that holds one through it when the
 /// accumulator is not known to be the register.
 fn source_destructures_register(source: &Expr, through_reduce: bool) -> bool {
-    source_destructures_register_with(source, through_reduce, Vec::new(), false)
+    source_destructures_register_with(source, through_reduce, Vec::new(), false, false)
 }
 
 /// [`source_destructures_register`] with the `$x` markers of the source that are jq's register at
@@ -51075,11 +51103,13 @@ fn source_destructures_register_with(
     through_reduce: bool,
     markers: Vec<*const Tracked>,
     null_register: bool,
+    null_by_kind: bool,
 ) -> bool {
     let mut walk = RegisterSpine {
         through_reduce,
         fresh_only: false,
         null_register,
+        null_by_kind,
         non_null_register: false,
         vars: Vec::new(),
         defs: Vec::new(),
@@ -51401,6 +51431,7 @@ fn source_destructures_fresh(
         through_reduce: true,
         fresh_only: true,
         null_register: false,
+        null_by_kind: false,
         non_null_register,
         vars: Vec::new(),
         defs: Vec::new(),
@@ -51490,32 +51521,30 @@ fn fold_source_register_markers<S: EvalSemantics>(
     ambient: &FoldSourceAmbient<'_>,
 ) -> Vec<*const Tracked> {
     let mut markers = Vec::new();
-    // #4756: an untracked ambient whose register jq still holds as the document's `null`: a `null`
-    // `$x` is `jv_identical` to it by kind, as on a trackable `null` ambient.
-    let null_register = S::TAG == EvalTag::Jq
-        && !ambient.trackable
-        && head_is_null_or_marker(source)
+    // #4756: an untracked entry that holds jq's register live, as a `null`: `.` is no node of it,
+    // but a `null` marker is by kind, so only those are read.
+    let null_by_kind_only = !ambient.trackable
         && ambient.register_null
-        && !ambient.register_null_off_root;
+        && (fold_body::depth() == 0 || fold_body::foreach_body_stating_here())
+        && !chain_may_retry_on_a_key(source);
     if S::TAG != EvalTag::Jq
-        || !(ambient.trackable || null_register)
-        || !(fold_body::depth() == 0
+        || !(ambient.trackable || null_by_kind_only)
+        || !(null_by_kind_only
+            || fold_body::depth() == 0
             || fold_body::acc_is_register_here()
-            || null_register
             || matches!(ambient.value, OwnedValue::Null))
     {
         return markers;
     }
-    let register_value = if null_register {
-        &OwnedValue::Null
-    } else {
-        ambient.value
-    };
     // Only a source that destructures something can ask: the certification below compares a
     // marker's value with the register's, which is O(document) when their storage is not shared.
+    // #4756: and, on a `null` ambient, a `?//` chain with a bare alternative, which destructures the
+    // register there ([`RegisterSpine::null_register`]).
+    let null_ambient = matches!(ambient.value, OwnedValue::Null) || ambient.register_null;
     if !any_subexpr(source, &mut |e| {
-        matches!(e, Expr::AsPattern { patterns, .. } if routes_destructuring(patterns)
-                || (null_register && routes_destructuring_chain(patterns)))
+        matches!(e, Expr::AsPattern { patterns, .. }
+            if routes_destructuring(patterns)
+                || (null_ambient && routes_destructuring_chain(patterns)))
             || matches!(e, Expr::Foreach { .. } | Expr::Reduce { .. })
     }) {
         return markers;
@@ -51527,8 +51556,12 @@ fn fold_source_register_markers<S: EvalSemantics>(
             // (`.a as $x | foreach ($x as {b:$b} | .) ...`): every marker is read. In the one
             // body `acc_is_register` marked, only a marker that is the register is, since a
             // `$it` of the enclosing fold is another node jq answers for.
-            if fold_body::depth() == 0
-                || marker_identical::<S>(marker, register_value, &ambient.frame)
+            if null_by_kind_only {
+                if matches!(marker.value, OwnedValue::Null) {
+                    markers.push(Rc::as_ptr(marker));
+                }
+            } else if fold_body::depth() == 0
+                || marker_identical::<S>(marker, ambient.value, &ambient.frame)
             {
                 markers.push(Rc::as_ptr(marker));
             }
@@ -52447,6 +52480,12 @@ struct RegisterSpine<'e> {
     /// inside an outer `path()` jq reports `[]` where the resolver reports `["a"]` in the
     /// refusal's text (both raise).
     null_register: bool,
+    /// Whether jq's register is a known `null` where the walk starts, wherever `.` is (#4756). A
+    /// `null` literal, and a `$x` marker holding `null`, are `jv_identical` to it by kind, so a pipe
+    /// headed by one meets the register where it began: `null | CHAIN` on an untracked entry whose
+    /// register is `null` walks it as `. | CHAIN` does on a trackable one. `.` is not the register
+    /// for that reason ([`null_register`](Self::null_register) says so), only what follows such a stage.
+    null_by_kind: bool,
     /// For a `fresh_only` walk, whether jq's register is known to be the document and not `null`
     /// (#4566): the first alternative of a `?//` chain then raises on the register's destructure
     /// of a variable it leaves `null`, and the retry binds the later bare alternative. On a `null`
@@ -52534,6 +52573,22 @@ impl<'e> RegisterSpine<'e> {
             self.binds_fresh(e, true)
         } else {
             self.binds_register_first(e)
+        }
+    }
+
+    /// Whether `stage` is the `null` register by kind ([`Self::null_by_kind`], #4756) on every
+    /// output (`every`) or on some: a `null` literal, a `null` marker the caller certified, or a comma
+    /// of those.
+    fn null_leaves(&self, stage: &Expr, every: bool) -> bool {
+        match unwrap_paren(stage) {
+            Expr::Comma(items) if every => items.iter().all(|item| self.null_leaves(item, every)),
+            Expr::Comma(items) => items.iter().any(|item| self.null_leaves(item, every)),
+            Expr::Literal(Literal::Null) => true,
+            Expr::TrackedVar(marker) => {
+                matches!(marker.value, OwnedValue::Null)
+                    && self.markers.contains(&Rc::as_ptr(marker))
+            }
+            _ => false,
         }
     }
 
@@ -53498,14 +53553,18 @@ impl<'e> RegisterSpine<'e> {
                 {
                     return Reach::Destructures;
                 }
+                // #4756: and a `null` marker bound directly, which is the register by kind.
+                let null_here = self.null_register
+                    || (self.null_by_kind
+                        && bare_marker(expr).is_some_and(|m| matches!(m.value, OwnedValue::Null)));
                 if !self.fresh_only
                     && (routes_destructuring(patterns)
                         || patterns_all_destructuring_chain(patterns)
-                        || (self.null_register && routes_destructuring_chain(patterns)))
+                        || (null_here && routes_destructuring_chain(patterns)))
                     && (self.binds_register(expr)
                         || (patterns.len() == 1 && self.first_output_is_register(expr)))
                     && (patterns.len() == 1
-                        || self.null_register
+                        || null_here
                         || (patterns_all_destructuring_chain(patterns)
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
@@ -53544,6 +53603,18 @@ impl<'e> RegisterSpine<'e> {
                 }
             }
             Expr::Comma(branches) => self.reach_any(branches, true),
+            // #4756: on a `null` register a `null` literal is the register by kind (`jv_identical`),
+            // as is a `$x` marker the caller certified, so the stage after `null | ` or `$x | `
+            // meets the register where the pipe did.
+            Expr::Literal(Literal::Null) if !self.fresh_only && self.null_by_kind => Reach::HandsOn,
+            Expr::TrackedVar(marker)
+                if !self.fresh_only
+                    && self.null_by_kind
+                    && matches!(marker.value, OwnedValue::Null)
+                    && self.markers.contains(&Rc::as_ptr(marker)) =>
+            {
+                Reach::HandsOn
+            }
             // #4566: either operand of a `//` meets `.` where the `//` did, and the resolver runs
             // only the one jq does, so a fresh destructure in either is the source's own. For the
             // `fresh_only` walk only: the register walks read a `//` as opaque.
@@ -53618,9 +53689,21 @@ impl<'e> RegisterSpine<'e> {
             }
             Expr::Pipe(stages) => {
                 let mut reach = Reach::HandsOn;
+                let entry_null_register = self.null_register;
                 for stage in stages {
-                    match self.reach(stage) {
+                    let stage_reach = self.reach(stage);
+                    match stage_reach {
+                        // #4756: a `null` stage (or a `null` marker) is the register by kind, so `.`
+                        // is the null register for the stages after it.
+                        Reach::HandsOn if self.null_by_kind && self.null_leaves(stage, true) => {
+                            self.null_register = true;
+                        }
                         Reach::HandsOn => {}
+                        // #4756: a comma with a `null` leaf is the null register on that leaf's output.
+                        Reach::Partial if self.null_by_kind && self.null_leaves(stage, false) => {
+                            reach = Reach::Partial;
+                            self.null_register = true;
+                        }
                         // A second such stage fans the register out again, and the next stage
                         // meets it on the outputs that are it, as after the first (#4485). The
                         // walk used to stop here because the resolver aborted partway when a nested
@@ -53628,9 +53711,13 @@ impl<'e> RegisterSpine<'e> {
                         // was the marks a `foreach` emits at ([`resolve_foreach`]), not this stage, and
                         // a pipe of commas alone never needed the stop.
                         Reach::Partial => reach = Reach::Partial,
-                        other => return other,
+                        other => {
+                            self.null_register = entry_null_register;
+                            return other;
+                        }
                     }
                 }
+                self.null_register = entry_null_register;
                 reach
             }
             // #4278: the condition runs as a subexpression, so either branch meets the
@@ -53840,7 +53927,21 @@ impl<'e> RegisterSpine<'e> {
                 }
                 let peeled = peel_register_transparent(other);
                 if !core::ptr::eq(peeled, other) {
-                    self.reach(peeled)
+                    // #4756: a chain behind `null |` under `first`/`limit`/`nth` retries after the
+                    // consumer's stop and emits once more (#4537), which the router cannot yet count
+                    // against a `$x.a?` that follows: those stay with the by-value drive.
+                    let counted = matches!(
+                        unwrap_bind_source(other),
+                        Expr::FirstExpr(_)
+                            | Expr::Limit { .. }
+                            | Expr::NthExpr { .. }
+                            | Expr::Builtin(Builtin::FirstStream(_) | Builtin::NthStream(..))
+                    );
+                    let entry = self.null_by_kind;
+                    self.null_by_kind &= !counted;
+                    let reach = self.reach(peeled);
+                    self.null_by_kind = entry;
+                    reach
                 } else if yields_only_the_register(other) {
                     // `select(literal)` (#3956).
                     Reach::HandsOn
@@ -53960,7 +54061,7 @@ fn is_fold_with_destructured_register_source(e: &Expr, markers: &[*const Tracked
             input, patterns, ..
         } => {
             routes_destructuring(patterns)
-                && foreach_source_destructures_register(input, markers.to_vec(), false)
+                && foreach_source_destructures_register(input, markers.to_vec(), false, false)
         }
         _ => false,
     }
@@ -54008,7 +54109,7 @@ fn is_fold_with_destructuring_body(e: &Expr, foreach_source: bool, known: NotReg
         }
         (register_read
             && !may_skip_or_branch(body)
-            && foreach_source_destructures_register(body, markers, false))
+            && foreach_source_destructures_register(body, markers, false, false))
             || source_destructures_fresh(body, false, false, known)
     };
     [Some(&**init), Some(&**update), extract]
@@ -55112,6 +55213,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 true,
                 unplaced_markers.clone(),
                 false,
+                false,
             )
         };
     // The foreign markers recognise the destructure of the marker's own value (`$x as P`,
@@ -55142,7 +55244,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
             &passing_selects,
             false,
         );
-        source_destructures_register_with(&plain, true, foreign_markers.clone(), false)
+        source_destructures_register_with(&plain, true, foreign_markers.clone(), false, false)
             || (foreign_select_passes && {
                 let selected = collapse_marker_pipes(
                     foreign_source,
@@ -55154,7 +55256,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 // #4604: dropping the `select` also exposes a destructure of `.`, which a `reduce`
                 // source backtracks and answers, as does a `foreach` one where the accumulator is
                 // the register: only a destructure of a marker is read there.
-                source_destructures_register_with(&selected, true, foreign_markers, false)
+                source_destructures_register_with(&selected, true, foreign_markers, false, false)
                     && ((foreach_source && select_passes)
                         || !source_destructures_register_with(
                             &collapse_marker_pipes(
@@ -55166,6 +55268,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                             ),
                             true,
                             Vec::new(),
+                            false,
                             false,
                         ))
             })
@@ -55210,13 +55313,15 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::depth() != 0
         && certain_fresh_destructure(source);
     let _fresh_mark = certain_fresh.then(fold_body::fresh_source);
-    // #4756: ...or an untracked ambient whose register jq still holds as the document's `null`.
-    let null_register_at_fold = (ambient.trackable && matches!(ambient.value, OwnedValue::Null))
-        || (S::TAG == EvalTag::Jq
-            && foreach_source
-            && head_is_null_or_marker(source)
-            && ambient.register_null
-            && !ambient.register_null_off_root);
+    let null_register_at_fold = ambient.trackable && matches!(ambient.value, OwnedValue::Null);
+    // #4756: jq's register is a known `null` (also on an untracked entry that holds it live).
+    // Inside another fold's body only where that fold reads the statement this one makes (the UPDATE
+    // of a `foreach`, [`fold_body::foreach_body_stating_here`]): elsewhere the routed source refuses
+    // with a guess a `try` around it cannot catch (`foreach .a? as $k ([]; try (-(FOREACH)); $k)`).
+    let null_by_kind_at_fold = S::TAG == EvalTag::Jq
+        && ambient.register_null
+        && (fold_body::depth() == 0 || fold_body::foreach_body_stating_here())
+        && !chain_may_retry_on_a_key(source);
     let has_navigation = any_subexpr(source, &mut |e| {
         is_fold_source_navigation(e)
             || (S::TAG == EvalTag::Jq
@@ -55241,6 +55346,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
             source,
             register_markers.clone(),
             null_register_at_fold,
+            null_by_kind_at_fold,
         ))
         || destructures_unplaced_register
         // #4677/#4682: the part of a bare `//` or `try ... catch` source that always runs.
@@ -55251,6 +55357,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                     branch,
                     register_markers.clone(),
                     null_register_at_fold,
+                    null_by_kind_at_fold,
                 )
             }))
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
@@ -59498,8 +59605,18 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // narrower one, which misses a computed key (`.[1+1]`) and so let the
     // slice rule accept `path(reduce .[1+1] as $a (.; .[0:]))` where jq refuses.
     // #3710: a property of the `reduce`'s syntax, so answered once rather than per INIT fork.
-    let leaves_in_place =
-        S::TAG == EvalTag::Jq && reduce_leaves_register_in_place(input, init, update);
+    // #4757: the UPDATE of a `foreach` that reads the statement this `reduce` makes
+    // ([`fold_body::foreach_body_stating_here`]).
+    let update_of_stating_fold = S::TAG == EvalTag::Jq && fold_body::foreach_body_stating_here();
+    let leaves_in_place = S::TAG == EvalTag::Jq
+        && (reduce_leaves_register_in_place(input, init, update)
+            // ...whose own UPDATE moves the register only by a bind, which it backtracks.
+            || (update_of_stating_fold
+                && patterns_all_bare(patterns)
+                && cannot_move_register(init)
+                && cannot_move_register(input)
+                // `true`: as in `reduce_source_is_bare_final_bind_chain`, the enclosing `foreach` read this UPDATE.
+                && source_moves_register_only_by_binds_in_update(update, true)));
     let register_unmoved = leaves_in_place && trackable;
     // #3984: jq mode only, like every register admission here. A syntactic property of the
     // `reduce`, so answered once rather than per INIT fork.
@@ -60104,6 +60221,10 @@ fn resolve_reduce<'a, S: EvalSemantics>(
             if let Some(register) = frame.register() {
                 emitted =
                     emitted.with_register(BranchRegister::Unmoved(Cow::Owned(register.clone())));
+            } else if update_of_stating_fold {
+                // #4757: a fold inside another fold's body has no register of its own to state; the
+                // enclosing `foreach` holds it, so the emission says it is where the fold entered.
+                emitted = emitted.with_register(BranchRegister::AtEntry);
             }
         }
         if sink(emitted) == Demand::Stop {
@@ -60190,14 +60311,20 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && trackable
         && foreach_cannot_move_register(patterns, input, init, update, extract);
     // #3984: see `resolve_reduce`'s identical flag; EXTRACT counts too.
-    let mentions_frozen_var = S::TAG == EvalTag::Jq
-        && fold_mentions_frozen_var(
-            patterns,
-            &[input, init, update]
-                .into_iter()
-                .chain(extract)
-                .collect::<Vec<_>>(),
-        );
+    // #4756: ...except a `null` marker beside a live `null` register: `jv_identical` holds by kind
+    // for any `null`, so the marker is the register wherever it came from and there is no pointer
+    // to guess at.
+    let mentions_frozen_var = S::TAG == EvalTag::Jq && {
+        let fold_parts = [input, init, update]
+            .into_iter()
+            .chain(extract)
+            .collect::<Vec<_>>();
+        let null_markers_beside_null_register = !trackable
+            && matches!(frame.register(), Some(OwnedValue::Null))
+            && !frame.register_loss.is_lost()
+            && fold_markers_are_all_null(patterns, &fold_parts);
+        fold_mentions_frozen_var(patterns, &fold_parts) && !null_markers_beside_null_register
+    };
     // #3580: everything but UPDATE leaves the register where the fold entered, so
     // an emission is at the entry exactly when the UPDATE output it came from was
     // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
@@ -60225,9 +60352,34 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4615: an UPDATE that is itself a `foreach` whose source moves the register only by a bind
     // leaves it at the entry on the emissions that foreach states so, which the stage reads per
     // emission (a `foreach` inside another fold's body).
+    let null_register_here = !trackable && matches!(frame.register(), Some(OwnedValue::Null));
     let update_states_it = states_untracked
-        && matches!(unwrap_paren(update), Expr::Foreach { .. })
-        && source_moves_register_only_by_binds_in_update(update);
+        && match unwrap_paren(update) {
+            Expr::Foreach { .. } => {
+                source_moves_register_only_by_binds_in_update(update, null_register_here)
+            }
+            // #4757: and a `reduce` whose source and INIT cannot move the register and whose UPDATE
+            // moves it only by a bind: it backtracks both, so the register is INIT's.
+            Expr::Reduce {
+                input: reduce_input,
+                patterns: reduce_patterns,
+                init: reduce_init,
+                update: reduce_update,
+            } => {
+                patterns_all_bare(reduce_patterns)
+                    && (cannot_move_register(reduce_input)
+                        || source_moves_register_only_by_binds_in_update(
+                            reduce_input,
+                            null_register_here,
+                        ))
+                    && cannot_move_register(reduce_init)
+                    && source_moves_register_only_by_binds_in_update(
+                        reduce_update,
+                        null_register_here,
+                    )
+            }
+            _ => false,
+        };
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
         let _after_the_loop = fold_body::restore(entry_marks);
         if register_unmoved && !branch.trackable {
@@ -60321,7 +60473,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && if entry_depth == 0 {
             source_moves_register_only_by_binds(input)
         } else {
-            update_of_stating_fold && source_moves_register_only_by_binds_in_update(input)
+            // The enclosing `foreach` accepted this source with its own register in hand.
+            update_of_stating_fold && source_moves_register_only_by_binds_in_update(input, true)
         };
     let update_stays_if_stated = update_states_it
         && init_keeps_register
@@ -67324,6 +67477,28 @@ fn mentions_marker(expr: &Expr) -> bool {
     crate::jq::walk::any_subexpr(expr, &mut |e| matches!(e, Expr::TrackedVar(_)))
 }
 
+/// Whether `source` holds a `?//` chain with a computed key (#4756): a key that raises retries onto
+/// the next alternative, and a bare `$var` there leaves jq's register at the fold's entry
+/// (`null | (.|.) as {(error("q")):$a} ?// $a | .` is `[]`), which the `null`-by-kind route
+/// ([`RegisterSpine::null_by_kind`]) does not model, so such a source keeps the by-value drive.
+fn chain_may_retry_on_a_key(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { patterns, .. }
+            if patterns.len() > 1 && patterns.iter().any(pattern_has_computed_key))
+    })
+}
+
+/// [`mentions_marker`] for a marker that holds something other than `null` (#4756). A `null`
+/// marker is `jv_identical` to a `null` register by kind and to nothing else, so it carries no
+/// pointer that could re-establish against the register the frame would now carry (the hazard
+/// #3145 withholds the register for): the fold reads it exactly as it reads a `null` literal.
+fn mentions_non_null_marker(expr: &Expr) -> bool {
+    crate::jq::walk::any_subexpr(
+        expr,
+        &mut |e| matches!(e, Expr::TrackedVar(m) if !matches!(m.value, OwnedValue::Null)),
+    )
+}
+
 /// Whether a `reduce`/`foreach` mentions a frozen `$var` marker anywhere it can navigate
 /// one: its SOURCE, INIT, UPDATE and EXTRACT (`parts`), or a computed key of a
 /// destructuring pattern (`{($x|.k):$q}`). One definition for both fold kinds, so the
@@ -67332,6 +67507,20 @@ fn fold_mentions_frozen_var(patterns: &[Pattern], parts: &[&Expr]) -> bool {
     parts.iter().any(|part| mentions_marker(part))
         || patterns.iter().any(|pattern| {
             crate::jq::walk::any_pattern_key(pattern, &mut |key| mentions_marker(key))
+        })
+}
+
+/// Whether every variable marker [`fold_mentions_frozen_var`] looks at holds `null` (#4756).
+fn fold_markers_are_all_null(patterns: &[Pattern], parts: &[&Expr]) -> bool {
+    let non_null =
+        |e: &Expr| matches!(e, Expr::TrackedVar(m) if !matches!(m.value, OwnedValue::Null));
+    !parts
+        .iter()
+        .any(|part| crate::jq::walk::any_subexpr(part, &mut |e| non_null(e)))
+        && !patterns.iter().any(|pattern| {
+            crate::jq::walk::any_pattern_key(pattern, &mut |key| {
+                crate::jq::walk::any_subexpr(key, &mut |e| non_null(e))
+            })
         })
 }
 
