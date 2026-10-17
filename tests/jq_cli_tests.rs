@@ -155646,9 +155646,9 @@ fn test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_re
         ),
         (
             r#"{"a":{"b":1}}"#,
-            r#"[path(.a as $x | reduce (1,2) as $i (.; nth(-1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))]"#,
+            r"[path(.a as $x | reduce (1,2) as $i (.; nth(-1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))]",
             "",
-            r#"nth doesn't support negative indices"#,
+            r"nth doesn't support negative indices",
             5,
         ),
         (
