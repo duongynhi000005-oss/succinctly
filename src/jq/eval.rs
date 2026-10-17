@@ -40346,8 +40346,8 @@ fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
 struct EmptiedUpdate<'a> {
     /// The `foreach`'s source.
     source: &'a Expr,
-    /// The literal a trailing `// LITERAL` falls back to: the UPDATE then emits that, not nothing.
-    fallback: Option<OwnedValue>,
+    /// Whether a trailing `// LITERAL` falls back to a literal: the UPDATE then emits that, not nothing.
+    has_fallback: bool,
     /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
     truthy: bool,
     /// The conditions the register decides, outermost first (#4778): a `select(C)` ahead of the
@@ -40357,9 +40357,9 @@ struct EmptiedUpdate<'a> {
     /// Whether a literal stage runs ahead of the `foreach` (`1 | FE`, #4782): it hands the `foreach` a
     /// value that is not the state, and leaves jq's register where it was.
     literal_head: bool,
-    /// The stages that run on the fallback literal ([`EmptiedUpdate::fallback`]) before it is the state
+    /// Whether stages run on the fallback literal ([`EmptiedUpdate::has_fallback`]) before it is the state
     /// (#4778): `(. | FE) // 5 | tostring` leaves `"5"`.
-    after: Vec<&'a Expr>,
+    has_after: bool,
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
@@ -40397,14 +40397,23 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 /// (`tostring`, `tojson`, `type`, `isnull`, `not`). The next stage is handed a value that is not the
 /// state, as it is after a literal.
 fn is_value_head(e: &Expr) -> bool {
-    fn constant(e: &Expr) -> bool {
+    /// The items of an array construction: any number of literals (`[1,2]`, `[]`), still one value.
+    fn items(e: &Expr) -> bool {
         match unwrap_paren(e) {
-            Expr::Literal(_) | Expr::Builtin(Builtin::Empty) => true,
-            Expr::Comma(items) => items.iter().all(constant),
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Comma(parts) => parts.iter().all(items),
+            other => single(other),
+        }
+    }
+    /// Exactly one value: a literal, or a container of such (an object's value that is a comma or
+    /// `empty` emits several values or none, so it is not).
+    fn single(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Literal(_) => true,
+            Expr::Array(inner) => items(inner),
             Expr::Object(entries) => entries
                 .iter()
-                .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && constant(&entry.value)),
-            Expr::Array(inner) => constant(inner),
+                .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && single(&entry.value)),
             _ => false,
         }
     }
@@ -40413,8 +40422,7 @@ fn is_value_head(e: &Expr) -> bool {
         | Expr::Builtin(Builtin::Type | Builtin::IsNull | Builtin::ToString | Builtin::ToJson) => {
             true
         }
-        Expr::Array(_) | Expr::Object(_) => constant(e),
-        other => matches!(other, Expr::Literal(_)),
+        other => single(other),
     }
 }
 
@@ -40429,11 +40437,11 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(expr) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
             source: input,
-            fallback: None,
+            has_fallback: false,
             truthy: false,
             gates: Vec::new(),
             literal_head: false,
-            after: Vec::new(),
+            has_after: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either.
@@ -40478,7 +40486,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             // A fallback or a state-dependent head hands a value on to the stages around it: a
             // later stage transforms it (`// 5 | tostring`), and a `select(.)` ahead of it drops a
             // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
-            let plain = emptied.fallback.is_none() && !emptied.truthy;
+            let plain = !emptied.has_fallback && !emptied.truthy;
             if plain {
                 emptied.gates.splice(0..0, gates);
                 return Some(emptied);
@@ -40486,7 +40494,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if after.iter().all(is_pure_of_dot) {
                 // #4778: the fallback is the state once the stages around it have run on it.
                 emptied.gates.splice(0..0, gates);
-                emptied.after.extend(after.iter());
+                emptied.has_after |= !after.is_empty();
                 return Some(emptied);
             }
             (after.is_empty() && !guarded).then_some(emptied)
@@ -40496,9 +40504,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
                 Expr::Builtin(Builtin::Empty) => {}
-                Expr::Literal(literal) => {
-                    emptied.fallback = Some(literal_to_owned(literal));
-                }
+                Expr::Literal(_) => emptied.has_fallback = true,
                 _ => return None,
             }
             Some(emptied)
@@ -40549,10 +40555,10 @@ fn sole_update_mark<S: EvalSemantics>(
             if in_foreach
                 && (emptied.gates.iter().any(|gate| {
                     !matches!(unwrap_paren(gate), Expr::Identity)
-                        || emptied.fallback.is_some()
+                        || emptied.has_fallback
                         || emptied.literal_head
-                }) || !emptied.after.is_empty()
-                    || (emptied.literal_head && (emptied.fallback.is_some() || emptied.truthy)))
+                }) || emptied.has_after
+                    || (emptied.literal_head && (emptied.has_fallback || emptied.truthy)))
             {
                 return None;
             }

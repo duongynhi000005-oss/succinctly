@@ -2548,8 +2548,8 @@ is the revert that established what the other one costs.
    `test_caught_foreign_marker_destructure_behind_a_literal_stage_4782`): the markers are compared with the register the frame names, not
    with the literal, so a `null` `$x` stays the register by kind (comparing with the literal answered where jq refuses on a `null` document, #4780's first attempt). A stage that only computes from its input and moves nothing is the same head
    ([#4793](https://github.com/rust-works/succinctly/issues/4793), `is_value_head`): a container of literals (`[1] | FE`, `{a:1} | FE`) and `tostring`, `tojson`, `type`, `isnull` and `not` (none of them raises on any input), and in a `reduce` UPDATE
-   `if . then (1 | FE) else . end` reads its condition on the state (pinned by `test_caught_foreign_marker_destructure_behind_a_computed_stage_4793`). Not read: a literal stage under an
-   `if . then` or under a fallback or `(FE, 7)` in a `foreach` UPDATE, and a stage that can raise or navigates (`length`, `.a`, `has("a")`).
+   `if . then (1 | FE) else . end` reads its condition on the state (pinned by `test_caught_foreign_marker_destructure_behind_a_computed_stage_4793`). Not read, in a `foreach` UPDATE or EXTRACT: such a head under an
+   `if . then`, a fallback or `(FE, 7)`. Not read anywhere: a stage that can raise, navigates or does not emit exactly once (`length`, `.a`, `has("a")`, `{a:(1,2)}`).
 
    In the body of a `reduce` whose source moves the register (`..`, `recurse`, `(.,.a)`) the same `foreach` is read by the position of each step's element
    ([#4777](https://github.com/rust-works/succinctly/issues/4777), `foreign_register_markers_with`'s `moved_at`, pinned by
