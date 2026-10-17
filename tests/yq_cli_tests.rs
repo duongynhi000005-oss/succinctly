@@ -71084,8 +71084,19 @@ fn test_json_input_streams_concatenated_top_level_values_2839() -> Result<()> {
     // YAML output separates the documents.
     let (stdout, _, code) = run_yq_stdin_with_stderr(".", "1 2", &["-p=json"])?;
     assert_eq!((code, stdout.as_str()), (0, "1\n---\n2\n"));
-    // A malformed value in the stream, or a stray byte between values, still fails.
-    for doc in ["1 2 ]", "{\"a\":1} x", "[1 2"] {
+    // `--doc` selects among the streamed values, and a file reads like stdin.
+    let (stdout, _, code) =
+        run_yq_stdin_with_stderr(".a", "{\"a\":1}{\"a\":2}", &["-p=json", "--doc", "1"])?;
+    assert_eq!((code, stdout.as_str()), (0, "2\n"));
+    let mut file = NamedTempFile::new()?;
+    std::io::Write::write_all(&mut file, b"{\"a\":1}\n{\"a\":2}\n")?;
+    let path = file.path().to_string_lossy().into_owned();
+    let (stdout, code) = run_yq_file(".a", &path, &["-p=json", "-o=json", "-I=0"])?;
+    assert_eq!((code, stdout.as_str()), (0, "1\n2\n"));
+    // A malformed value in the stream, a stray byte between values (`{\"a\":1}: x` too: yq
+    // prints the first value before it fails), or a bare token that is not a JSON literal still
+    // fails.
+    for doc in ["1 2 ]", "{\"a\":1} x", "[1 2", "foo bar", "1.2.3 4"] {
         let (_, _, code) = run_yq_stdin_with_stderr(".", doc, &["-p=json", "-o=json", "-I=0"])?;
         assert_eq!(code, 1, "{doc:?}");
     }

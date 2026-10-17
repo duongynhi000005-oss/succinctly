@@ -1307,7 +1307,8 @@ validate:
   `[1][2]`, `1,2`, `"a": 1` and `true: 1` match yq on stdin and on a file. Two gaps remain: a stream
   whose *later* value is malformed (`1 2 ]`, `{"a":1} x`) fails outright where yq prints the
   values before it and then errors, and `--slurp`/`--eval-all`/`--inplace` read JSON through a
-  different path and do not stream.
+  different path and do not stream. The index addresses the rewritten `v1\n---\nv2` text, so a byte offset,
+  `line` or `column` of a streamed value counts the inserted separators.
 - `?` (the explicit-key indicator), in *both* the block-context and flow-mapping (`{? "a":
   1}`) spellings — a structural rejection of the marker itself, not a key-grammar check, so
   it stays in scope even though mapping-key *text* grammar (#2777) does not.
