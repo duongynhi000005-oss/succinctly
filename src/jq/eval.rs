@@ -48062,11 +48062,47 @@ fn source_moves_register_only_by_binds_in_update(expr: &Expr, null_register: boo
     moves_register_only_by_binds(expr, &mut gate)
 }
 
-/// Whether `e` is a `null` literal or a `$x` marker holding `null` (#4756).
+/// Whether `e` is the `null` register by kind on every output ([`null_leaves_of`]): a `null` literal
+/// or a `$x` marker holding `null` (#4756), and what is made of them (#4774). A bare `.` is not one
+/// (`input_null` is `false`): an untracked entry's `.` is no node of the register, so a head that mixes
+/// it with a `null` is not one either, while `.` after a `null` stage of a pipe (`null | .`) is.
 fn is_null_head(e: &Expr) -> bool {
-    match unwrap_paren(e) {
+    null_leaves_of(e, true, false, &|_| true)
+}
+
+/// Whether `stage` is the `null` register by kind (#4756) on every output (`every`) or on some, where
+/// `.` is that register when `input_null` says so: a `null` literal, a `$x` marker holding `null`
+/// that `marker_ok` accepts, `.` after one, or a comma, a pipe or a handler-less `try`/`?`/`first`/
+/// `limit`/`nth` of those (#4774). A wrapper is read for its leaves alone: it holds no chain to retry
+/// after the consumer's stop. One definition for the spine walk ([`RegisterSpine::null_leaves`]) and
+/// the `foreach` UPDATE gate ([`is_null_head`]), so the two cannot read a head differently.
+fn null_leaves_of(
+    stage: &Expr,
+    every: bool,
+    input_null: bool,
+    marker_ok: &dyn Fn(&Rc<Tracked>) -> bool,
+) -> bool {
+    match unwrap_paren(stage) {
+        Expr::Comma(items) if every => items
+            .iter()
+            .all(|item| null_leaves_of(item, every, input_null, marker_ok)),
+        Expr::Comma(items) => items
+            .iter()
+            .any(|item| null_leaves_of(item, every, input_null, marker_ok)),
+        Expr::Pipe(stages) => stages.iter().fold(input_null, |input, stage| {
+            null_leaves_of(stage, every, input, marker_ok)
+        }),
+        Expr::Identity => input_null,
         Expr::Literal(Literal::Null) => true,
-        Expr::TrackedVar(marker) => matches!(marker.value, OwnedValue::Null),
+        Expr::TrackedVar(marker) => matches!(marker.value, OwnedValue::Null) && marker_ok(marker),
+        wrapper @ (Expr::Optional(_)
+        | Expr::Try { catch: None, .. }
+        | Expr::FirstExpr(_)
+        | Expr::Limit { .. }
+        | Expr::Builtin(Builtin::FirstStream(_) | Builtin::NthStream(..))) => {
+            let inner = peel_register_transparent(wrapper);
+            !core::ptr::eq(inner, wrapper) && null_leaves_of(inner, every, input_null, marker_ok)
+        }
         _ => false,
     }
 }
@@ -52710,19 +52746,15 @@ impl<'e> RegisterSpine<'e> {
     }
 
     /// Whether `stage` is the `null` register by kind ([`Self::null_by_kind`], #4756) on every
-    /// output (`every`) or on some: a `null` literal, a `null` marker the caller certified, or a comma
-    /// of those.
+    /// output (`every`) or on some, where `.` is the `null` register by kind when
+    /// [`null_register`](Self::null_register) says so: a `null` literal, a `null` marker the caller
+    /// certified, `.` after one, or a comma, pipe or `try`/`?`/`first`/`limit`/`nth` wrapper of those
+    /// (#4774). A wrapper is read for its leaves alone: the stage holds no chain to retry after the
+    /// consumer's stop, so [`reach_node`](Self::reach_node)'s `counted` cut does not apply.
     fn null_leaves(&self, stage: &Expr, every: bool) -> bool {
-        match unwrap_paren(stage) {
-            Expr::Comma(items) if every => items.iter().all(|item| self.null_leaves(item, every)),
-            Expr::Comma(items) => items.iter().any(|item| self.null_leaves(item, every)),
-            Expr::Literal(Literal::Null) => true,
-            Expr::TrackedVar(marker) => {
-                matches!(marker.value, OwnedValue::Null)
-                    && self.markers.contains(&Rc::as_ptr(marker))
-            }
-            _ => false,
-        }
+        null_leaves_of(stage, every, self.null_register, &|marker| {
+            self.markers.contains(&Rc::as_ptr(marker))
+        })
     }
 
     /// Whether `$name` is bound on the spine to what may be the register itself.
@@ -53831,6 +53863,19 @@ impl<'e> RegisterSpine<'e> {
                         Reach::HandsOn if self.null_by_kind && self.null_leaves(stage, true) => {
                             self.null_register = true;
                         }
+                        // #4774: and a comma that mixes a `null` with `.` (`(null, .)`, `(., null)`)
+                        // is the register on the `null` outputs only: `.` is no node of the
+                        // register here, so the chain behind it is walked on those.
+                        // Only outside every fold body, as in [`reach_any`](Self::reach_any), which is
+                        // also the only place the arm below can see a `Partial` from.
+                        Reach::HandsOn
+                            if self.null_by_kind
+                                && fold_body::depth() == 0
+                                && self.null_leaves(stage, false) =>
+                        {
+                            reach = Reach::Partial;
+                            self.null_register = true;
+                        }
                         Reach::HandsOn => {}
                         // #4756: a comma with a `null` leaf is the null register on that leaf's output.
                         Reach::Partial if self.null_by_kind && self.null_leaves(stage, false) => {
@@ -54063,13 +54108,15 @@ impl<'e> RegisterSpine<'e> {
                     // #4756: a chain behind `null |` under `first`/`limit`/`nth` retries after the
                     // consumer's stop and emits once more (#4537), which the router cannot yet count
                     // against a `$x.a?` that follows: those stay with the by-value drive.
+                    // #4774: not when the wrapper holds nothing but `null` leaves (`first(null)`): it
+                    // holds no chain to retry, and `null_leaves` reads it as the register by kind.
                     let counted = matches!(
                         unwrap_bind_source(other),
                         Expr::FirstExpr(_)
                             | Expr::Limit { .. }
                             | Expr::NthExpr { .. }
                             | Expr::Builtin(Builtin::FirstStream(_) | Builtin::NthStream(..))
-                    );
+                    ) && !self.null_leaves(other, true);
                     let entry = self.null_by_kind;
                     self.null_by_kind &= !counted;
                     let reach = self.reach(peeled);
