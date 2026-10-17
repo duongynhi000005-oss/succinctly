@@ -96650,7 +96650,7 @@ mod tests {
         );
         yq_query!(
             br#"{"a":1}"#,
-            "first({(1): 2})",
+            "limit(1; {(1): 2})",
             QueryResult::Owned(OwnedValue::Object(map)) => {
                 assert_eq!(map.get("1"), Some(&OwnedValue::Int(2)));
             }
@@ -96707,29 +96707,29 @@ mod tests {
         // The comparison fan-out's inner loop.
         yq_query!(
             br"[1,2]",
-            "first(1 == empty)",
+            "limit(1; 1 == empty)",
             QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
         yq_query!(
             br"[1,2]",
-            "first((1, 2) == empty)",
+            "limit(1; (1, 2) == empty)",
             QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
         // The boolean pair's left half (`empty and ...`)...
         yq_query!(
             br"[1,2]",
-            "first(empty and true)",
+            "limit(1; empty and true)",
             QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
         yq_query!(
             br"[1,2]",
-            "first(empty or (true, false))",
+            "limit(1; empty or (true, false))",
             QueryResult::Owned(OwnedValue::Bool(true)) => {}
         );
         // ...and its right half (`... and empty`).
         yq_query!(
             br"[1,2]",
-            "first((true, false) and empty)",
+            "limit(1; (true, false) and empty)",
             QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
     }
