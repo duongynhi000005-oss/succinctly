@@ -40351,7 +40351,8 @@ struct EmptiedUpdate<'a> {
     /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
     truthy: bool,
     /// Whether a literal stage runs ahead of the `foreach` (`1 | FE`, #4782): it hands the `foreach` a
-    /// value that is not the state, and leaves jq's register where it was.
+    /// value that is not the state, and leaves jq's register where it was. It may emit several values
+    /// (`{a:(1,2)} | FE`, #4797): the `foreach` then runs once per value, each run as empty as the first.
     literal_head: bool,
 }
 

@@ -161067,6 +161067,20 @@ fn test_caught_foreign_marker_destructure_behind_a_multi_output_head_4797() -> R
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; {a:[(1,2)]} | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r"null",
+            r"path(.a as $x | reduce (1,2) as $i (.; {a:[(1,2)]} | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result {\"a\":[1,2]}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
             r"path(.a as $x | reduce (1,2) as $i (.; {a:(1,2)} | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
             "",
             "Invalid path expression with result null",
