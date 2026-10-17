@@ -2831,7 +2831,10 @@ is the revert that established what the other one costs.
    The sweep's first full run lost 3 matches (`first(null | CHAIN)` under `del` on an untracked entry, where the routed source's refused emission is not counted against
    the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` stays with the by-value drive.
    Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with the register (`(null, .) | CHAIN`,
-   `(., null) | CHAIN`) on an untracked entry, and a `null` behind `try`, `first(null)` or `(null | .)` in front of the chain.
+   `(., null) | CHAIN`) on an untracked entry, a `null` behind `try`, `first(null)` or `(null | .)` in front of the chain, and, on an untracked entry, a chain
+   with a computed key (`chain_may_retry_on_a_key`): a key that raises retries onto the bare alternative, which leaves the register at the entry
+   (`{(error("q")):$a} ?// $a` then `| $x | .z` is `["z"]`, pinned by `test_foreach_source_chain_over_rerooted_bound_expression_on_null_4756`), and the route
+   does not model that retry, so a key that cannot raise (`$x as {("b"):$b} ?// $b | .`, `["b"]` in jq) is `[]` here too, as on `main`.
    Still refused where jq answers: a chain beneath `first`/`limit`/`nth` in a `foreach` UPDATE (and a `reduce` UPDATE that is `first(CHAIN)`) and a
    `reduce` or `foreach` UPDATE inside a `reduce` UPDATE. The first kind came back as a wrong answer when read (`foreach (1,2) as $i (.; foreach
    (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)` entered on `{a:{b:1}}`: four paths where jq gives two, the chain's retry after the
