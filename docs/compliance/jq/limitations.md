@@ -2866,8 +2866,8 @@ is the revert that established what the other one costs.
    `false // null`, `empty // null`, `null // null // null`, `null // .` and `. // null` (and `$x // null`, `null // $x` for a `$x` bound to the `null` document) are the register by kind on
    every output, and `null_leaves_of` reads them (`falsy_leaves_of` for the left operand), pinned by `test_foreach_source_alternative_null_head_walks_the_null_register_4784`. A head with a truthy output
    (`null // 1`, `1 // null`, `true // null`), none that is `null` (`false // false`) or no output (`null // empty`) is as it was. On a document that is not `null`, a `$x // null` or `null // $x` head on an
-   untracked entry is still refused where jq answers `[]`, as on `main`.
-   Over the 19 operands added for #4784 (`--stage-only`, 39,547 rows, jq 1.7.1, candidate vs a `main` build): MATCH 33,993 -> 34,214, REFUSE_WRONG 5,296 -> 5,285, DIFF 258 -> 48, ACCEPT_WRONG (0) unchanged, 0 regressions.
+   untracked entry is still refused where jq answers `[]`, as on `main` (the `$x` chain on a non-`null` document of #4756, which this does not touch). A left operand is falsy when it is `null` by kind, `false`, `empty`, a comma of those, a pipe ending in one, or a `try`/`?`/`first`/`limit`/`nth` of one; one that may emit a truthy output (`(null, 1) // null`, which emits only the `1`) is not read, and is pinned.
+   Over the 25 operands added for #4784 (`--stage-only`, 52,027 rows, jq 1.7.1, candidate vs a `main` build): MATCH 44,629 -> 44,941, REFUSE_WRONG 7,030 -> 7,012, DIFF 368 -> 74, ACCEPT_WRONG (0) unchanged, 0 regressions.
    Over the 28 operands added for #4774 (`--stage-only`, 58,267 rows, jq 1.7.1, candidate vs a `main` build): MATCH 50,178 -> 50,276, REFUSE_WRONG 7,896 -> 7,875,
    DIFF 193 -> 116, ACCEPT_WRONG (0) unchanged, 0 regressions.
    Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with `.` or a `1` (`(null, .)`, `(., null)`,

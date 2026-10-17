@@ -48114,12 +48114,34 @@ fn falsy_leaves_of(
     input_null: bool,
     marker_ok: &dyn Fn(&Rc<Tracked>) -> bool,
 ) -> bool {
+    let literal_falsy = |e: &Expr| {
+        matches!(
+            unwrap_paren(e),
+            Expr::Literal(Literal::Bool(false)) | Expr::Builtin(Builtin::Empty)
+        )
+    };
     match unwrap_paren(stage) {
-        Expr::Literal(Literal::Bool(false)) | Expr::Builtin(Builtin::Empty) => true,
+        e if literal_falsy(e) => true,
         Expr::Comma(items) => items
             .iter()
             .all(|item| falsy_leaves_of(item, input_null, marker_ok)),
-        other => null_leaves_of(other, true, input_null, marker_ok),
+        // A pipe is falsy where its last stage that is not `.` is a falsy literal, whatever came before.
+        pipe @ Expr::Pipe(stages) => {
+            let last = stages
+                .iter()
+                .rev()
+                .find(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
+            last.is_some_and(|last| literal_falsy(last))
+                || null_leaves_of(pipe, true, input_null, marker_ok)
+        }
+        wrapper => {
+            let inner = peel_register_transparent(wrapper);
+            if core::ptr::eq(inner, wrapper) {
+                null_leaves_of(wrapper, true, input_null, marker_ok)
+            } else {
+                falsy_leaves_of(inner, input_null, marker_ok)
+            }
+        }
     }
 }
 

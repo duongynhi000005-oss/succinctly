@@ -154808,7 +154808,8 @@ fn test_foreach_source_mixed_or_wrapped_null_head_walks_the_null_register_4774()
 /// them walks it (`["a"]`) where the by-value drive answered the root (`[]`), at the top level, on an
 /// untracked entry, inside another `foreach`'s UPDATE, and through the `=`/`|=`/`del` that write.
 /// The contrasts keep their answer: a head with a truthy output (`null // 1`, `1 // null`, `true // null`),
-/// no `null` one (`false // false`) or none at all (`null // empty`). Rows where `main` already refuses
+/// no `null` one (`false // false`) or none at all (`null // empty`), and a left operand with both truthy and falsy
+/// outputs (`(null, 1) // null` emits only the `1`); a `false` behind a pipe or `first`/`try` is falsy too. Rows where `main` already refuses
 /// a document that is not `null` stay out. Every row captured from jq 1.7.1 with `-c`.
 #[test]
 fn test_foreach_source_alternative_null_head_walks_the_null_register_4784() -> Result<()> {
@@ -154986,6 +154987,33 @@ fn test_foreach_source_alternative_null_head_walks_the_null_register_4784() -> R
         ("[1]", format!("(. as $x | 1 | (foreach ((null // .) | {chain}) as $k (.; .; .)) | $x) = 5"), "5\n", "", 0),
         ("[1]", format!("(. as $x | 1 | (foreach ((null // .) | {chain}) as $k (.; .; .)) | $x) |= 5"), "5\n", "", 0),
         ("[1]", format!("del(. as $x | 1 | (foreach ((null // .) | {chain}) as $k (.; .; .)) | $x.a?)"), "[1]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (((null, 1) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("null", format!("path(foreach (((null, 1) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (((false, null) // null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach (((false, null) // null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (((null, 1, false) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("null", format!("path(foreach (((null, 1, false) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((first(false) // null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach ((first(false) // null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (((false | .) // null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach (((false | .) // null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach ((try false // null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach ((try false // null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(. as $x | 1 | (foreach (((null | false) // null) | {chain}) as $k (.; .; .)) | $x)"), "[\"a\"]\n", "", 0),
+        ("null", format!("path(foreach (((null | false) // null) | {chain}) as $k (.; .; .))"), "[\"a\"]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (((null, 1) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach (((null, 1) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (((false, null) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach (((false, null) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (((null, 1, false) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach (((null, 1, false) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach ((first(false) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (((false | .) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach (((false | .) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach ((try false // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach ((try false // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(. as $x | 1 | (foreach (((null | false) // null) | {chain}) as $k (.; .; .)) | $x)"), "[]\n", "", 0),
+        ("{\"a\":{\"b\":1}}", format!("path(foreach (((null | false) // null) | {chain}) as $k (.; .; .))"), "[]\n", "", 0),
     ];
     for (doc, program, stdout, stderr, code) in rows {
         let program: &'static str = Box::leak(program.into_boxed_str());
