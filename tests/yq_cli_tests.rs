@@ -15545,12 +15545,11 @@ fn test_explicit_key_flow_collection_followed_by_colon_still_permitted_902() -> 
 /// the handling it had before the predicate existed.
 #[test]
 fn test_flow_keyed_mapping_predicate_leaves_other_shapes_alone_1188() -> Result<()> {
-    for input in ["{\"a\":1}: x", "[1,2]: 3"] {
-        let (out, err, code) =
-            run_yq_stdin_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
-        assert_eq!(code, 1, "{input:?}: stdout {out:?}");
-        assert!(err.contains("not a valid JSON value"), "{input:?}: {err:?}");
-    }
+    let input = "{\"a\":1}: x";
+    let (out, err, code) =
+        run_yq_stdin_with_stderr(".", input, &["-p", "json", "-o", "json", "-I", "0"])?;
+    assert_eq!(code, 1, "{input:?}: stdout {out:?}");
+    assert!(err.contains("not a valid JSON value"), "{input:?}: {err:?}");
     for (input, expected) in [
         // A comment ends the line before any `:` can matter.
         ("[a, b] # c: x\n", r#"["a","b"]"#),
@@ -71049,5 +71048,46 @@ fn test_first_f_is_the_first_child_where_f_is_truthy_2377() -> Result<()> {
     // The argument's own error still surfaces, and a field read on a non-mapping child raises.
     let (_, _, code) = run_yq_stdin_with_stderr("first(error(\"x\"))", "[1,2]", &[])?;
     assert_eq!(code, 1);
+    Ok(())
+}
+
+/// #2839: `-p json` reads a stream of top-level values, as real yq's decoder does -- the filter
+/// runs on each. Rows captured from yq v4.53.3 (`-p json -o=json -I=0`).
+#[test]
+fn test_json_input_streams_concatenated_top_level_values_2839() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        ("1 2", ".", "1\n2\n"),
+        ("{\"a\":1}{\"a\":2}", ".a", "1\n2\n"),
+        ("[1][2]", ".", "[1]\n[2]\n"),
+        ("1,2", ".", "1\n2\n"),
+        ("true: 1", ".", "true\n1\n"),
+        // #1188's `[1,2]: 3` is two values too, as in yq.
+        ("[1,2]: 3", ".", "[1,2]\n3\n"),
+        ("\"a\": 1", ".", "\"a\"\n1\n"),
+        ("{\"a\":1}\n{\"a\":2}\n", ".a", "1\n2\n"),
+        // Braces and brackets inside strings do not end a value.
+        (
+            "{\"a\":\"}]\"}\n[1,\"\\\"]\"]\n3",
+            ".",
+            "{\"a\":\"}]\"}\n[1,\"\\\"]\"]\n3\n",
+        ),
+    ];
+    for &(doc, filter, expected) in rows {
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["-p=json", "-o=json", "-I=0"])?;
+        assert_eq!(
+            (code, stdout.as_str()),
+            (0, expected),
+            "`{filter}` on {doc:?}: {stderr:?}"
+        );
+    }
+    // YAML output separates the documents.
+    let (stdout, _, code) = run_yq_stdin_with_stderr(".", "1 2", &["-p=json"])?;
+    assert_eq!((code, stdout.as_str()), (0, "1\n---\n2\n"));
+    // A malformed value in the stream, or a stray byte between values, still fails.
+    for doc in ["1 2 ]", "{\"a\":1} x", "[1 2"] {
+        let (_, _, code) = run_yq_stdin_with_stderr(".", doc, &["-p=json", "-o=json", "-I=0"])?;
+        assert_eq!(code, 1, "{doc:?}");
+    }
     Ok(())
 }
