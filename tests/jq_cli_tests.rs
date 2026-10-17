@@ -161578,3 +161578,62 @@ fn test_caught_foreign_marker_destructure_foreach_update_behind_a_gate_or_fallba
         ),
     ])
 }
+
+/// #4800: a `foreach` whose UPDATE may have moved jq's register off the root (`1 | FOREACH`, whose source
+/// destructures a `$x` that is the register) cannot say where it is for a computed EXTRACT. On a `null`
+/// document `$i` is `null`, which `jv_identical` holds for the register wherever it sits, and the terminal
+/// read it as the root: `path` answered `[]` and `|= 9` wrote the root, where jq's register sits on `["a"]`
+/// (`["a"]`, `{"a":9}`). It is now a refusal (the resolver's guess, so no `?` or `limit` hides it). Not for
+/// the bare `FOREACH` (the register is placed, `["a"]`) or behind a `//`, which backtracks a falsy left side
+/// and leaves the register where it entered (`[]` on `true`).
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refused_4800(
+) -> Result<()> {
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    for head in ["1 | ", "not | ", "{a:1} | ", "[1] | "] {
+        for wrap in [
+            "path(X)",
+            "del(X)",
+            "(X) |= 9",
+            "[path(X)?]",
+            "[limit(1; path(X))]",
+        ] {
+            let inner = format!(r". as $x | foreach . as $i (.; {head}{fe}; $i)");
+            let filter = wrap.replace('X', &inner);
+            let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
+            assert_eq!(code, 5, "{filter}: stdout {stdout:?} stderr {stderr:?}");
+            assert_eq!(stdout, "", "{filter}");
+            assert!(
+                stderr.contains("Invalid path expression with result null"),
+                "{filter}: {stderr:?}"
+            );
+            let (stdout, stderr, code) = run_jq_full(&["-nc", &format!("null | {filter}")], None)?;
+            assert_eq!(code, 5, "-n {filter}: stdout {stdout:?} stderr {stderr:?}");
+            assert_eq!(stdout, "", "-n {filter}");
+        }
+    }
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r". as $x | path(foreach . as $i (.; foreach ($x as {a:$a}|.) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; select(true) | foreach ($x as {a:$a}|.) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach (try ($x as {a:$a}|.)) as $y (.; .; .)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
