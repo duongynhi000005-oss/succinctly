@@ -2866,6 +2866,12 @@ is the revert that established what the other one costs.
    with the `=`/`|=`/`del` that write through them. `null_leaves_of` reads every one of those heads for both the spine walk and the `foreach` UPDATE gate
    (`is_null_head`), which used to read only a bare `null` and a `null` marker. A wrapper is read for its leaves alone (`first(null)` holds no chain to retry after the consumer's
    stop), so it no longer takes the `counted` cut below. (`(. as $x | 1 | (foreach ((., null) | CHAIN) as $k (.; .; .)) | $x) |= 5` on `null` exits 5 as jq does, with a different message: jq's is `Paths must be specified as an array`, the `_modify` VM-stack quirk of #2974.) Pinned by `test_foreach_source_mixed_or_wrapped_null_head_walks_the_null_register_4774`.
+   A `//` head is read the same way ([#4784](https://github.com/rust-works/succinctly/issues/4784)): `A // B` emits `B`'s outputs only when `A` has no truthy one, so `null // null`,
+   `false // null`, `empty // null`, `null // null // null`, `null // .` and `. // null` (and `$x // null`, `null // $x` for a `$x` bound to the `null` document) are the register by kind on
+   every output, and `null_leaves_of` reads them (`falsy_leaves_of` for the left operand), pinned by `test_foreach_source_alternative_null_head_walks_the_null_register_4784`. A head with a truthy output
+   (`null // 1`, `1 // null`, `true // null`), none that is `null` (`false // false`) or no output (`null // empty`) is as it was. On a document that is not `null`, a `$x // null` or `null // $x` head on an
+   untracked entry is still refused where jq answers `[]`, as on `main` (the `$x` chain on a non-`null` document of #4756, which this does not touch). A left operand is falsy when it is `null` by kind, `false`, `empty`, a comma of those, a pipe ending in one, or a `try`/`?`/`first`/`limit`/`nth` of one; one that may emit a truthy output (`(null, 1) // null`, which emits only the `1`) is not read, and is pinned.
+   Over the 25 operands added for #4784 (`--stage-only`, 52,027 rows, jq 1.7.1, candidate vs a `main` build): MATCH 44,629 -> 44,941, REFUSE_WRONG 7,030 -> 7,012, DIFF 368 -> 74, ACCEPT_WRONG (0) unchanged, 0 regressions.
    Over the 28 operands added for #4774 (`--stage-only`, 58,267 rows, jq 1.7.1, candidate vs a `main` build): MATCH 50,178 -> 50,276, REFUSE_WRONG 7,896 -> 7,875,
    DIFF 193 -> 116, ACCEPT_WRONG (0) unchanged, 0 regressions.
    Still the by-value drive's answer on a `null` document (`[]` where jq walks, as on `main`): a head that mixes `null` with `.` or a `1` (`(null, .)`, `(., null)`,
