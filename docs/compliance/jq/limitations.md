@@ -2515,10 +2515,28 @@ is the revert that established what the other one costs.
    raises `result null` from a second source item on), a `foreach` EXTRACT that is the `foreach` (`. | FE`)
    behave as jq does too (`emptied_update`, `sole_update_mark`; pinned by
    `test_caught_foreign_marker_destructure_behind_a_fallback_or_if_in_a_foreach_update_or_extract_4776`,
-   [#4776](https://github.com/rust-works/succinctly/issues/4776)). Still refused where jq emits nothing (or `result null`): a `1 | FE`
-   stage (`result 1`; the fold's marker check compares `$x` with the literal, not the register, so skipping the literal answered a
-   `null` document where jq refuses). Still accepted: a `select`/`if` condition other than `.` (`select(.a) | FE`), and a fallback or `if` head with a stage around it (`(. | FE) // 5 | tostring`, `select(.) | (FE // 5)`: the stage transforms the value, or a falsy state drops it, so the message differs). A condition that is not a pure function
-   of the markers (`select($x.a == .b)`) is still opaque. A
+   [#4776](https://github.com/rust-works/succinctly/issues/4776)). A condition that is not a pure function
+   of the markers (`select($x.a == .b)`) is still opaque.
+
+   A `reduce` UPDATE reads, around that `foreach`, a `select(C)` ahead of it and an `if C then FE else . end` with `C` a pure function of the state
+   (`.a`, `.a != null`, `.a | length > 0`; `is_pure_of_dot`), and the stages after a `// LITERAL` fallback (`(. | FE) // 5 | tostring` is `"5"`;
+   [#4778](https://github.com/rust-works/succinctly/issues/4778), `settle_emptied`, pinned by
+   `test_caught_foreign_marker_destructure_behind_a_pure_condition_or_after_the_fallback_4778`): the condition is evaluated on the state the step is entered
+   with, and on the state it leaves (`null`, or the transformed fallback), which every later step meets. A condition that fails the entering state or raises
+   on the later one, and a `select` that would drop the fallback itself, keep the answer they had: `select(.a) | (FE // 5)` meets `5` on the second step, where jq raises `Cannot index number`,
+   and a falsy fallback behind a `select` (`select(.) | (FE // false)`, jq's state alternates with the step count) is accepted where jq refuses.
+   A literal stage ahead of the `foreach` (`1 | FE`, `"s" | FE`, `null | FE`) is read in a `foreach` UPDATE, a `foreach` EXTRACT or a `reduce` UPDATE
+   ([#4782](https://github.com/rust-works/succinctly/issues/4782), `with_register_ambient`, pinned by
+   `test_caught_foreign_marker_destructure_behind_a_literal_stage_4782`): the markers are compared with the register the frame names, not
+   with the literal, so a `null` `$x` stays the register by kind (comparing with the literal answered where jq refuses on a `null` document, #4780's first attempt). Not read: a literal stage under an
+   `if . then` (the check reads the literal, not the state), under a fallback or `(FE, 7)` in a `foreach` UPDATE, a stage that computes (`1 | tostring | FE`) and a container literal (`{} | FE`).
+
+   In the body of a `reduce` whose source moves the register (`..`, `recurse`, `(.,.a)`) the same `foreach` is read by the position of each step's element
+   ([#4777](https://github.com/rust-works/succinctly/issues/4777), `foreign_register_markers_with`'s `moved_at`, pinned by
+   `test_caught_foreign_marker_destructure_in_a_reduce_whose_source_moved_the_register_4777`): a step whose element is another node than `$x`'s raises and leaves the state `null`
+   (or the fallback), a step whose element is `$x`'s node raises nothing and leaves the state as it found it, so one raising step decides when the `foreach` hands its state on unchanged
+   (`INIT`, `UPDATE` and `EXTRACT` all `.`); a source that yields only `$x`'s node, or nothing, is answered. Not read there: a `foreach` that changes the state (`(.; 7; .)`: the last step decides),
+   a `null`/boolean `$x` (compared by kind with the element, not by position: `.a as $x | reduce .. as $i (.; FE)` on `{"a":null}` is answered where jq refuses) and a binding of the whole document (`. as $x`). A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by

@@ -40350,6 +40350,98 @@ struct EmptiedUpdate<'a> {
     fallback: Option<OwnedValue>,
     /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
     truthy: bool,
+    /// Whether a step of the `foreach` that does emit hands its state on unchanged
+    /// ([`foreach_hands_its_state_on`], #4777).
+    state_kept: bool,
+    /// The conditions the register decides, outermost first (#4778): a `select(C)` ahead of the
+    /// `foreach` or the condition of an `if C then FE else . end` around it, `C` a pure function of `.`
+    /// other than `.` itself (that one is `truthy`).
+    gates: Vec<Gate<'a>>,
+    /// Whether a literal stage runs ahead of the `foreach` (`1 | FE`, #4782): it hands the `foreach` a
+    /// value that is not the state, and leaves jq's register where it was.
+    literal_head: bool,
+    /// The stages that run on the fallback literal ([`EmptiedUpdate::fallback`]) before it is the state
+    /// (#4778): `(. | FE) // 5 | tostring` leaves `"5"`.
+    after: Vec<&'a Expr>,
+}
+
+/// A condition of an UPDATE that the state decides ([`EmptiedUpdate::gates`], #4778).
+struct Gate<'a> {
+    cond: &'a Expr,
+    /// A `select(C)`, which drops a state `C` does not hold for and so leaves `null`; an
+    /// `if C then FE else . end` keeps it.
+    select: bool,
+}
+
+/// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
+/// UPDATE condition or of the tail after a fallback, which the evaluator is run on. Whether one raises
+/// on a given value is left to that run ([`settle_emptied`]).
+fn is_pure_of_dot(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(_)
+        | Expr::TrackedVar(_)
+        | Expr::Identity
+        | Expr::Not
+        | Expr::Field(_)
+        | Expr::Builtin(
+            Builtin::Length | Builtin::Type | Builtin::IsNull | Builtin::ToString | Builtin::ToJson,
+        ) => true,
+        Expr::Builtin(Builtin::Has(key)) => matches!(**key, Expr::Literal(_)),
+        Expr::Paren(inner) => is_pure_of_dot(inner),
+        Expr::Pipe(stages) => stages.iter().all(is_pure_of_dot),
+        Expr::Compare { left, right, .. } => is_pure_of_dot(left) && is_pure_of_dot(right),
+        _ => false,
+    }
+}
+
+/// The single output of `stage` run on `input`, when it emits exactly one and raises nothing.
+fn pure_output<S: EvalSemantics>(stage: &Expr, input: &OwnedValue) -> Option<OwnedValue> {
+    let mut outputs = Vec::new();
+    let flow = eval_each_owned::<S>(stage, input, false, Reentry::REBUILT, &mut |out| {
+        outputs.push(out);
+        Demand::Continue
+    });
+    match (flow, outputs.len()) {
+        (Flow::Exhausted, 1) => outputs.pop(),
+        _ => None,
+    }
+}
+
+/// What an UPDATE marked by [`emptied_update`] leaves once its `foreach` is empty (#4778):
+/// `(fallback, truthy)` as [`fold_body::sole_update_pipe_head`] takes them, or `None` when the state it
+/// leaves is one the steps after it would not repeat.
+///
+/// The step leaves `null` or the transformed fallback `left`, and that is the state every later step
+/// meets, so a condition has to decide on it without raising: a `select(C)` drops `left` where `C` fails
+/// for it and leaves `null` instead. The state the first step is entered with needs no reading: a
+/// condition it fails keeps the `foreach` from being run, and nothing is refused.
+fn settle_emptied<S: EvalSemantics>(
+    emptied: &EmptiedUpdate<'_>,
+) -> Option<(Option<OwnedValue>, bool)> {
+    let mut left = emptied.fallback.clone();
+    if let Some(literal) = &mut left {
+        for stage in &emptied.after {
+            *literal = pure_output::<S>(stage, literal)?;
+        }
+    }
+    let kept = left.clone().unwrap_or(OwnedValue::Null);
+    for gate in &emptied.gates {
+        let holds_later = pure_output::<S>(gate.cond, &kept)?.is_truthy();
+        if gate.select && left.is_some() && !holds_later {
+            return None;
+        }
+    }
+    Some((left, emptied.truthy))
+}
+
+/// Whether a `foreach` whose source emits hands the state it was given on unchanged (#4777): `INIT`,
+/// `UPDATE` and `EXTRACT` are all `.`. In the body of a `reduce` whose source moves the register the
+/// steps differ in whether the foreign `$x` raises, and a step that does not raise must leave the
+/// `null` an earlier one left; any other body would replace it.
+fn foreach_hands_its_state_on(init: &Expr, update: &Expr, extract: Option<&Expr>) -> bool {
+    matches!(unwrap_paren(init), Expr::Identity)
+        && matches!(unwrap_paren(update), Expr::Identity)
+        && matches!(extract.map(unwrap_paren), None | Some(Expr::Identity))
 }
 
 /// Whether `stage` hands its input on untouched, or emits nothing: `.` or `select(.)`.
@@ -40370,10 +40462,20 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 /// it knows the step is empty.
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(expr) {
-        Expr::Foreach { input, .. } => Some(EmptiedUpdate {
+        Expr::Foreach {
+            input,
+            init,
+            update,
+            extract,
+            ..
+        } => Some(EmptiedUpdate {
             source: input,
             fallback: None,
             truthy: false,
+            state_kept: foreach_hands_its_state_on(init, update, extract.as_deref()),
+            gates: Vec::new(),
+            literal_head: false,
+            after: Vec::new(),
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either.
@@ -40391,20 +40493,45 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             body => emptied_update(body),
         },
         Expr::Pipe(stages) => {
-            let skipped = stages
+            // #4778: a `select(C)` with `C` a pure function of the state is a stage like `select(.)`:
+            // the state decides ([`settle_emptied`]), so it is a gate.
+            let mut gates = Vec::new();
+            let mut skipped = 0;
+            let mut literal_head = false;
+            for stage in stages {
+                match unwrap_paren(stage) {
+                    Expr::Builtin(Builtin::Select(cond))
+                        if !literal_head && is_pure_of_dot(cond) =>
+                    {
+                        gates.push(Gate { cond, select: true });
+                    }
+                    other if is_identity_or_select_dot(other) => {}
+                    Expr::Literal(_) => literal_head = true,
+                    _ => break,
+                }
+                skipped += 1;
+            }
+            let mut emptied = emptied_update(stages.get(skipped)?)?;
+            emptied.literal_head |= literal_head;
+            let after = &stages[skipped + 1..];
+            let guarded = stages[..skipped]
                 .iter()
-                .take_while(|stage| is_identity_or_select_dot(stage))
-                .count();
-            let emptied = emptied_update(stages.get(skipped)?)?;
+                .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
             // A fallback or a state-dependent head hands a value on to the stages around it: a
             // later stage transforms it (`// 5 | tostring`), and a `select(.)` ahead of it drops a
             // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
             let plain = emptied.fallback.is_none() && !emptied.truthy;
-            let surrounded = skipped + 1 < stages.len()
-                || stages[..skipped]
-                    .iter()
-                    .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
-            (plain || !surrounded).then_some(emptied)
+            if plain {
+                emptied.gates.splice(0..0, gates);
+                return Some(emptied);
+            }
+            if !emptied.truthy && after.iter().all(is_pure_of_dot) {
+                // #4778: the fallback is the state once the stages around it have run on it.
+                emptied.gates.splice(0..0, gates);
+                emptied.after.extend(after.iter());
+                return Some(emptied);
+            }
+            (after.is_empty() && !guarded).then_some(emptied)
         }
         e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
         Expr::Alternative(left, right) => {
@@ -40422,11 +40549,29 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             cond,
             then_branch,
             else_branch,
-        } if matches!(unwrap_paren(cond), Expr::Identity)
-            && matches!(unwrap_paren(else_branch), Expr::Identity) =>
-        {
+        } if matches!(unwrap_paren(else_branch), Expr::Identity) => {
+            let on_dot = matches!(unwrap_paren(cond), Expr::Identity);
+            // #4778: ...or a pure function of it (`if .a then FE else . end`).
+            if !on_dot && !is_pure_of_dot(cond) {
+                return None;
+            }
             let mut emptied = emptied_update(then_branch)?;
-            emptied.truthy = true;
+            // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
+            // it is not the state of (#4782).
+            if on_dot && emptied.literal_head {
+                return None;
+            }
+            if on_dot {
+                emptied.truthy = true;
+            } else {
+                emptied.gates.insert(
+                    0,
+                    Gate {
+                        cond,
+                        select: false,
+                    },
+                );
+            }
             Some(emptied)
         }
         _ => None,
@@ -40445,18 +40590,40 @@ fn sole_update_mark<S: EvalSemantics>(
         return None;
     }
     match unwrap_paren(body) {
-        Expr::Foreach { input, .. } => {
-            Some(fold_body::sole_update_foreach(input, in_foreach, extract))
-        }
-        e => emptied_update(e).map(|emptied| {
-            fold_body::sole_update_pipe_head(
+        Expr::Foreach {
+            input,
+            init,
+            update,
+            extract: foreach_extract,
+            ..
+        } => Some(fold_body::sole_update_foreach(
+            input,
+            in_foreach,
+            extract,
+            foreach_hands_its_state_on(init, update, foreach_extract.as_deref()),
+        )),
+        e => {
+            let emptied = emptied_update(e)?;
+            // #4778, #4782: what the state decides, the stages after a fallback and a literal stage
+            // ahead are read for a `reduce` UPDATE; a `foreach` reads the plain literal stage only.
+            if in_foreach
+                && (emptied.gates.iter().any(|gate| {
+                    !matches!(unwrap_paren(gate.cond), Expr::Identity) || emptied.fallback.is_some()
+                }) || !emptied.after.is_empty()
+                    || (emptied.literal_head && (emptied.fallback.is_some() || emptied.truthy)))
+            {
+                return None;
+            }
+            let (fallback, truthy) = settle_emptied::<S>(&emptied)?;
+            Some(fold_body::sole_update_pipe_head(
                 emptied.source,
                 in_foreach,
                 extract,
-                emptied.fallback,
-                emptied.truthy,
-            )
-        }),
+                fallback,
+                truthy,
+                emptied.state_kept,
+            ))
+        }
     }
 }
 
@@ -52304,18 +52471,24 @@ fn foreign_register_markers<S: EvalSemantics>(
     ambient: &FoldSourceAmbient<'_>,
     passing: &[Expr],
 ) -> Vec<(*const Tracked, bool)> {
-    foreign_register_markers_with::<S>(source, ambient, false, passing)
+    foreign_register_markers_with::<S>(source, ambient, false, passing, None)
 }
 
 /// [`foreign_register_markers`], where `off_body` says the accumulator is provably not jq's
 /// register ([`foreign_in_off_body`]) and the frame names where the register is. The accumulator
 /// then says nothing about the register's value, so only a marker holding a container (compared by
 /// pointer in jq, never by kind) bound at another position is provably not it.
+///
+/// `moved_at` (#4777) is the position of the element a `reduce` source moved the register onto, in
+/// the body of that `reduce`: the markers read are then those bound at another position, again only a
+/// container (a scalar compares by representation, `null`/booleans by kind). Without it the body of
+/// such a `reduce` reads nothing, the register being on an element the ambient position is not.
 fn foreign_register_markers_with<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
     off_body: bool,
     passing: &[Expr],
+    moved_at: Option<&Rc<PathPrefix>>,
 ) -> Vec<(*const Tracked, bool)> {
     let mut markers = Vec::new();
     // #4621: off the register a `?//` chain of destructuring alternatives raises as a single pattern
@@ -52327,7 +52500,7 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns)
     };
     if S::TAG != EvalTag::Jq
-        || fold_body::source_moved_here()
+        || (fold_body::source_moved_here() && moved_at.is_none())
         || !any_subexpr(
             source,
             &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if pattern_destructures(patterns)),
@@ -52392,13 +52565,18 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             let elsewhere = match &marker.origin {
                 Origin::At { invocation, path } | Origin::SnapshotAt { invocation, path } => {
                     *invocation == ambient.frame.invocation
-                        && ambient.frame.at.is_some()
-                        && !ambient.frame.names(*invocation, path)
+                        && match moved_at {
+                            Some(at) => !same_frame_position(*invocation, at, &path.0),
+                            None => {
+                                ambient.frame.at.is_some()
+                                    && !ambient.frame.names(*invocation, path)
+                            }
+                        }
                 }
                 // A marker with no position (`Snapshot`, `Untracked`, `Unproven`) is not provably elsewhere.
                 _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
             };
-            let provably_other = if off_body {
+            let provably_other = if off_body || moved_at.is_some() {
                 matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
             } else {
                 !marker_identical::<S>(marker, ambient.value, &ambient.frame)
@@ -52412,6 +52590,33 @@ fn foreign_register_markers_with<S: EvalSemantics>(
         false
     });
     markers
+}
+
+/// Runs `check` on `ambient`, or, where a computed stage ahead of the fold left the `.` it sees off the
+/// register (`1 | FE`, #4782), on the register the frame names: the markers are compared with the node
+/// jq's register holds, which that stage did not move, and not with the stage's value. `check` is not
+/// run where the frame does not say where the register is (`None`). In the body of a `reduce` whose
+/// source moved the register the frame says nothing of the element it is on.
+fn with_register_ambient(
+    ambient: &FoldSourceAmbient<'_>,
+    check: impl FnOnce(&FoldSourceAmbient<'_>) -> bool,
+) -> Option<bool> {
+    if ambient.trackable {
+        return Some(check(ambient));
+    }
+    if fold_body::source_moved_here() || ambient.frame.register_loss.is_lost() {
+        return None;
+    }
+    let register = ambient.frame.register()?;
+    Some(check(&FoldSourceAmbient {
+        value: register,
+        trackable: true,
+        snapshot: ambient.snapshot.clone(),
+        frame: ambient.frame.clone(),
+        register_non_null: ambient.register_non_null,
+        register_null: ambient.register_null,
+        register_null_off_root: ambient.register_null_off_root,
+    }))
 }
 
 /// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
@@ -52450,8 +52655,18 @@ fn caught_foreign_destructure<S: EvalSemantics>(
     let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
         return false;
     };
+    // #4777: in the body of a `reduce` whose source moved the register, `$x` is foreign on the steps
+    // whose element is another node, and the state such a step leaves (`null`, or the literal it falls
+    // back to) stays through the steps where `$x` is the register, when the `foreach` hands its state
+    // on unchanged. A step that does not raise only leaves the state as it found it.
+    let moved_at = fold_body::source_moved_at_here();
+    if fold_body::source_moved_here()
+        && !(moved_at.is_some() && fold_body::sole_update_state_kept_here())
+    {
+        return false;
+    }
     (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
-        && foreign_register_markers::<S>(bind, ambient, &[])
+        && foreign_register_markers_with::<S>(bind, ambient, false, &[], moved_at.as_ref())
             .iter()
             .any(|(foreign, _)| *foreign == Rc::as_ptr(marker))
 }
@@ -55417,7 +55632,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     {
         foreign_register_markers::<S>(source, ambient, &passing_selects)
     } else if off_body {
-        foreign_register_markers_with::<S>(source, ambient, true, &passing_selects)
+        foreign_register_markers_with::<S>(source, ambient, true, &passing_selects, None)
     } else {
         Vec::new()
     };
@@ -55576,11 +55791,14 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // source empty, which the enclosing `reduce` UPDATE (this fold, whole) turns into a `null` state
     // that the end of the path refuses.
     let caught_foreign_verdict = sole_update_fold
-        && ambient.trackable
-        && !matches!(ambient.value, OwnedValue::Null)
-        && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
         && fold_body::depth() != 0
-        && caught_foreign_destructure::<S>(source, ambient);
+        && with_register_ambient(ambient, |ambient| {
+            ambient.trackable
+                && !matches!(ambient.value, OwnedValue::Null)
+                && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
+                && caught_foreign_destructure::<S>(source, ambient)
+        })
+        .unwrap_or(false);
     let marker_destructures_unplaced_register =
         equal_verdict || foreign_verdict || caught_foreign_verdict;
     // #4723: ...and of one that is the whole UPDATE of an enclosing `foreach`, no state at all: the
@@ -55592,7 +55810,12 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && foreach_source
         && fold_body::depth() != 0
         && fold_body::sole_update_foreach_in_loop_here(source)
-        && caught_foreign_destructure::<S>(source, ambient)
+        // #4782: against the register the frame names where a computed stage ahead of the fold left
+        // the ambient off it; the ambient itself where the frame does not say.
+        && with_register_ambient(ambient, |ambient| {
+            caught_foreign_destructure::<S>(source, ambient)
+        })
+        .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient))
     {
         return Flow::Exhausted;
     }
@@ -55728,7 +55951,8 @@ fn drive_fold_source_with<S: EvalSemantics>(
     }
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
-        && ambient.trackable
+        // #4782: a verdict read against the register the frame names, off a computed stage's value.
+        && (ambient.trackable || caught_foreign_verdict)
         && !matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0
     {
@@ -60327,6 +60551,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             fold_body::source_moved(
                                 source_is_plain_navigation
                                     .then_some(matches!(elem.value, OwnedValue::Null)),
+                                elem.register_path.clone(),
                             )
                         });
                         // #4651: ...and a nested `reduce` that carries `.` through (its source cannot move
@@ -70308,6 +70533,9 @@ mod fold_body {
         static OFF_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
         static MOVED: Cell<Moved> = const { Cell::new(Moved { depth: 0, onto_null: None }) };
+        /// The body depth [`MOVED`] marks, and the absolute position of the element the register sits on
+        /// when the source names it (#4777).
+        static MOVED_AT: RefCell<Option<(u32, super::Rc<super::PathPrefix>)>> = const { RefCell::new(None) };
         /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none, shifted left two:
         /// bit 0 is the moved bit, bit 1 the stating bit.
         static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -70324,6 +70552,8 @@ mod fold_body {
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
         static SOLE_PIPE_HEAD: RefCell<Option<PipeHead>> = const { RefCell::new(None) };
+        /// Whether the [`SOLE_FOREACH`] one hands its state on unchanged (#4777).
+        static SOLE_KEPT: Cell<bool> = const { Cell::new(false) };
     }
 
     /// The [`sole_update_pipe_head`] mark.
@@ -70365,7 +70595,7 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize, bool, bool), Option<PipeHead>);
+    pub(crate) struct SoleGuard((u32, usize, bool, bool), Option<PipeHead>, bool);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
@@ -70376,8 +70606,10 @@ mod fold_body {
         source: &super::Expr,
         in_foreach: bool,
         extract: bool,
+        state_kept: bool,
     ) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
+        let previous_kept = SOLE_KEPT.with(|a| a.replace(state_kept));
         SOLE_FOREACH.with(|a| {
             a.set((
                 depth() + 1,
@@ -70387,21 +70619,24 @@ mod fold_body {
             ));
         });
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| a.borrow_mut().take());
-        SoleGuard(previous, previous_pipe)
+        SoleGuard(previous, previous_pipe, previous_kept)
     }
 
     /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724), or
     /// any wrapper around one that [`super::emptied_update`] sees through (#4754): its later
     /// stages run once per output, so an empty `foreach` leaves the whole UPDATE empty (or on
     /// `fallback`).
+    #[allow(clippy::fn_params_excessive_bools)] // STYLE-0004: independent mark bits, each named at the three call sites
     pub(crate) fn sole_update_pipe_head(
         source: &super::Expr,
         in_foreach: bool,
         extract: bool,
         fallback: Option<super::OwnedValue>,
         truthy: bool,
+        state_kept: bool,
     ) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
+        let previous_kept = SOLE_KEPT.with(|a| a.replace(state_kept));
         SOLE_FOREACH.with(|a| a.set((0, 0, false, false)));
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| {
             a.borrow_mut().replace(PipeHead {
@@ -70413,13 +70648,14 @@ mod fold_body {
                 truthy,
             })
         });
-        SoleGuard(previous, previous_pipe)
+        SoleGuard(previous, previous_pipe, previous_kept)
     }
 
     impl Drop for SoleGuard {
         fn drop(&mut self) {
             SOLE_FOREACH.with(|a| a.set(self.0));
             SOLE_PIPE_HEAD.with(|a| *a.borrow_mut() = self.1.take());
+            SOLE_KEPT.with(|a| a.set(self.2));
         }
     }
 
@@ -70446,6 +70682,12 @@ mod fold_body {
                 .filter(|head| head.depth == depth() && head.source == *source)
                 .map_or((None, false), |head| (head.fallback.clone(), head.truthy))
         })
+    }
+
+    /// Whether the UPDATE marked for the body being resolved hands its state on unchanged on a step
+    /// where the `foreach` emits (#4777).
+    pub(crate) fn sole_update_state_kept_here() -> bool {
+        SOLE_KEPT.with(Cell::get)
     }
 
     /// [`sole_update_foreach_here`] when the enclosing fold is a `foreach` too (#4723): a source
@@ -70550,30 +70792,39 @@ mod fold_body {
     }
 
     /// Restores the previous [`source_moved`] mark.
-    pub(crate) struct MovedGuard(Moved);
+    pub(crate) struct MovedGuard(Moved, Option<(u32, super::Rc<super::PathPrefix>)>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose enclosing
     /// `reduce` source moved jq's register onto the element (#4484): `.` is the accumulator there,
     /// and a node the register is not at, so a pattern step on it raises in jq. `onto_null` is
     /// whether the node the register sits on is `null` (#4507): a `null` bound by a failed
     /// alternative is then `jv_identical` to the register, so the step does not raise. `None` for
-    /// a source that computes its element, where that node is not the element.
-    pub(crate) fn source_moved(onto_null: Option<bool>) -> MovedGuard {
+    /// a source that computes its element, where that node is not the element. `at` is the element's
+    /// absolute position when the source names it (#4777): a `$x` bound at another position is not
+    /// the register on this step.
+    pub(crate) fn source_moved(
+        onto_null: Option<bool>,
+        at: Option<super::Rc<super::PathPrefix>>,
+    ) -> MovedGuard {
         let previous = MOVED.with(Cell::get);
+        let previous_at = MOVED_AT.with(|a| a.borrow_mut().take());
         MOVED.with(|a| {
             a.set(Moved {
                 depth: depth() + 1,
                 onto_null,
             });
         });
-        MovedGuard(previous)
+        MOVED_AT.with(|a| *a.borrow_mut() = at.map(|at| (depth() + 1, at)));
+        MovedGuard(previous, previous_at)
     }
 
     /// Marks the body about to be entered as moved too when the body being resolved is (#4651): a
     /// nested fold whose source cannot move the register and whose INIT is `.` runs its UPDATE on
-    /// the accumulator the moved body handed it, which the register is still not at.
+    /// the accumulator the moved body handed it, which the register is still not at. The element's
+    /// position is not carried: it names the register for the body that was marked, not this one.
     pub(crate) fn source_moved_inherited() -> MovedGuard {
         let previous = MOVED.with(Cell::get);
+        let previous_at = MOVED_AT.with(|a| a.borrow_mut().take());
         if previous.depth == depth() && depth() > 0 {
             MOVED.with(|a| {
                 a.set(Moved {
@@ -70582,12 +70833,13 @@ mod fold_body {
                 });
             });
         }
-        MovedGuard(previous)
+        MovedGuard(previous, previous_at)
     }
 
     impl Drop for MovedGuard {
         fn drop(&mut self) {
             MOVED.with(|a| a.set(self.0));
+            MOVED_AT.with(|a| *a.borrow_mut() = self.1.take());
         }
     }
 
@@ -70599,6 +70851,17 @@ mod fold_body {
     /// [`source_moved_here`], onto a node known not to be `null` (#4507).
     pub(crate) fn source_moved_onto_non_null_here() -> bool {
         source_moved_here() && MOVED.with(Cell::get).onto_null == Some(false)
+    }
+
+    /// The absolute position of the element the register sits on, for the body that
+    /// [`source_moved`] marked with one (#4777).
+    pub(crate) fn source_moved_at_here() -> Option<super::Rc<super::PathPrefix>> {
+        MOVED_AT.with(|a| {
+            a.borrow()
+                .as_ref()
+                .filter(|(at, _)| depth() > 0 && *at == depth())
+                .map(|(_, path)| super::Rc::clone(path))
+        })
     }
 
     /// Restores the previous [`foreach_body`] mark.
@@ -70752,7 +71015,10 @@ mod fold_body {
 
     pub(crate) struct MovedGuard;
 
-    pub(crate) fn source_moved(_onto_null: Option<bool>) -> MovedGuard {
+    pub(crate) fn source_moved(
+        _onto_null: Option<bool>,
+        _at: Option<super::Rc<super::PathPrefix>>,
+    ) -> MovedGuard {
         MovedGuard
     }
 
@@ -70766,6 +71032,10 @@ mod fold_body {
 
     pub(crate) fn source_moved_onto_non_null_here() -> bool {
         false
+    }
+
+    pub(crate) fn source_moved_at_here() -> Option<super::Rc<super::PathPrefix>> {
+        None
     }
 
     pub(crate) struct LoopGuard;
@@ -70800,6 +71070,7 @@ mod fold_body {
         _source: &super::Expr,
         _in_foreach: bool,
         _extract: bool,
+        _state_kept: bool,
     ) -> SoleGuard {
         SoleGuard
     }
@@ -70810,8 +71081,13 @@ mod fold_body {
         _extract: bool,
         _fallback: Option<super::OwnedValue>,
         _truthy: bool,
+        _state_kept: bool,
     ) -> SoleGuard {
         SoleGuard
+    }
+
+    pub(crate) fn sole_update_state_kept_here() -> bool {
+        false
     }
 
     pub(crate) fn sole_update_residue(_source: &super::Expr) -> (Option<super::OwnedValue>, bool) {
