@@ -40386,6 +40386,63 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
     }
 }
 
+/// The stages that run ahead of a `foreach` that is the whole of a fold UPDATE and changes nothing about what
+/// it emits (#4800): `Some` of the value heads (`not`, a literal, `tostring`, ..., [`is_value_head`]) that hand
+/// it a value that is not the state, empty for the bare `foreach`. The `foreach` may sit behind a `try`/`?`-like
+/// wrapper ([`emptied_wrapper_inner`]) and in a pipe whose other stages are `.` or `select(true)`; anything
+/// else (a fallback, a gate, a comma, a stage that computes) is `None`.
+fn plain_update_heads(expr: &Expr) -> Option<Vec<&Expr>> {
+    fn pass_through(stage: &Expr) -> bool {
+        match unwrap_paren(stage) {
+            Expr::Identity => true,
+            Expr::Builtin(Builtin::Select(cond)) => {
+                matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
+            }
+            _ => false,
+        }
+    }
+    match unwrap_paren(expr) {
+        Expr::Foreach { .. } => Some(Vec::new()),
+        Expr::Pipe(stages) => {
+            let at = stages
+                .iter()
+                .position(|stage| plain_update_heads(stage).is_some())?;
+            let mut heads = Vec::new();
+            for stage in &stages[..at] {
+                if is_value_head(unwrap_paren(stage)) {
+                    heads.push(stage);
+                } else if !pass_through(stage) {
+                    return None;
+                }
+            }
+            if !stages[at + 1..].iter().all(pass_through) {
+                return None;
+            }
+            heads.extend(plain_update_heads(&stages[at])?);
+            Some(heads)
+        }
+        other => emptied_wrapper_inner(other).and_then(plain_update_heads),
+    }
+}
+
+/// The single value the value heads [`plain_update_heads`] found hand the `foreach` when the state is `state`:
+/// `state` itself with no head, `None` where a head does not emit exactly one value.
+fn head_value<S: EvalSemantics>(heads: &[&Expr], state: &OwnedValue) -> Option<OwnedValue> {
+    let mut value = state.clone();
+    for head in heads {
+        let mut outputs = Vec::new();
+        let flow = eval_each_owned::<S>(head, &value, false, Reentry::REBUILT, &mut |out| {
+            outputs.push(out);
+            Demand::Continue
+        });
+        match (flow, outputs.len()) {
+            (Flow::Exhausted, 1) => value = outputs.pop()?,
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on a `null` or a
 /// boolean of the kind `state` is, and there is one (#4800): `$x as {a:$a} | .` with `$x.a` `null` and the
 /// state `null`. jq's register is then a `null`/boolean after the pattern's step, and the state an empty
@@ -61712,17 +61769,18 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // register onto, not the state the last step left.
                         let _register = (_sole_update_foreach.is_some()
                             && elem.register_path.is_some()
-                            && (matches!(unwrap_paren(&bound_update), Expr::Foreach { .. })
-                                || emptied_wrapper_inner(unwrap_paren(&bound_update)).is_some())
-                            && emptied_update(&bound_update).is_some_and(|emptied| {
-                                !emptied.literal_head
-                                    && !emptied.has_fallback
-                                    && !emptied.truthy
-                                    && source_destructures_to_null_or_bool(
-                                        emptied.source,
-                                        &entry_state,
-                                    )
-                            }))
+                            && plain_update_heads(&bound_update)
+                                .and_then(|heads| head_value::<S>(&heads, &entry_state))
+                                .is_some_and(|handed| {
+                                    emptied_update(&bound_update).is_some_and(|emptied| {
+                                        !emptied.has_fallback
+                                            && !emptied.truthy
+                                            && source_destructures_to_null_or_bool(
+                                                emptied.source,
+                                                &handed,
+                                            )
+                                    })
+                                }))
                         .then(|| fold_body::foreach_register(elem.value.clone()));
                         // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
                         // read the register the step left.
