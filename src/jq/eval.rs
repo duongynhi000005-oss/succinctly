@@ -48131,8 +48131,7 @@ fn falsy_leaves_of(
                 .iter()
                 .rev()
                 .find(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
-            last.is_some_and(|last| literal_falsy(last))
-                || null_leaves_of(pipe, true, input_null, marker_ok)
+            last.is_some_and(literal_falsy) || null_leaves_of(pipe, true, input_null, marker_ok)
         }
         wrapper => {
             let inner = peel_register_transparent(wrapper);
