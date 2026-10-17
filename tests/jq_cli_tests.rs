@@ -162019,3 +162019,213 @@ fn test_alt_bind_retry_stays_off_for_nested_bodies_in_a_fold_off_the_register_46
         ),
     ])
 }
+
+/// #4775: a `first`/`limit`/`nth` of a `?//` chain (a bare `$var` last) as the source of a `foreach` that
+/// is another fold's UPDATE, entered on a freshly built container, is no node of jq's register: each
+/// destructuring alternative raises at its first step, `?//` retries onto the bare one, and only that
+/// one emits. The by-value drive of the whole chain emitted the destructured alternative's output
+/// too (and once more after the `first`'s `break` was caught by the chain), so a `null` document
+/// printed `[] [] [] []` where jq prints `[] []`. The chain is now read as its bare last alternative
+/// there (`bare_last_alternative`). Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_source_chain_on_a_fresh_container_emits_once_in_a_fold_update_4775() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)?) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | {} | (reduce (1,2) as $i (.; foreach (limit(2; . as {a:$a} ?// $a | $a)) as $k (.; .; $k))) | .)",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r"true",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (try first(. as {a:$a} ?// [$a] ?// $a | .)) as $k (.; .; $k); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"(. as $x | [1] | (foreach limit(1; . as [$a] ?// $a | .a?) as $k (.; .; .)) | $x) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [1]",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | [1] | (foreach limit(1; . as [$a] ?// $a | .a?) as $k (.; .; .)) | .)",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of [1]",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | [1] | (foreach limit(2; . as {a:$a} ?// [$a] ?// $a | .) as $k (.; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(. as $x | {} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | $a)) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(first(. as {a:$a} ?// $a | $a))) as $k (.; .; .); $i)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | [1] | (foreach limit(1; . as [$a] ?// $a | $a) as $k (.; .; .)) | .)",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | {a:{b:1}} | (foreach limit(2; . as {a:$a} ?// [$a] ?// $a | .) as $k (.; .; .)) )",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | [1] | (foreach first(first(. as [$a] ?// $a | $a)) as $k (.; .; .)) | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | {a:{b:1}} | (foreach limit(1; . as {a:$a} ?// $a | $a) as $k (.; .; .)) | .)",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (limit(1; . as {a:$a} ?// $a | $a)) as $k (.; $k; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (nth(0; . as {a:$a} ?// $a | $a)) as $k (.; .; .); $i)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (try first(. as {a:$a} ?// $a | $a)) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | {a:{b:1}} | (foreach limit(2; . as {a:$a} ?// $a | $a) as $k (.; .; .)) | .)",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"true",
+            r"path(. as $x | {} | (foreach (1,2) as $i (.; foreach (first(first(. as {a:$a} ?// $a | $a))) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | {a:{b:1}} | (foreach nth(0; . as {a:$a} ?// $a | .) as $k (.; .; .)) | .) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (limit(1; . as {a:$a} ?// $a | $a)) as $k (.; .; $k); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(. as $x | [1] | (foreach limit(1; . as [$a] ?// $a | $a) as $k (.; .; .)) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | {a:{b:1}} | (foreach first(first(. as {a:$a} ?// $a | $a)) as $k (.; .; .)) ) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {} | (foreach (1,2) as $i (.; foreach (nth(0; . as {a:$a} ?// $a | $a)) as $k (.; $k; .); .)) | .)",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | [1] | (foreach nth(0; . as [$a] ?// $a | $a) as $k (.; .; .)) | .)",
+            "",
+            "Invalid path expression with result [1]",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"del(. as $x | [1] | (foreach limit(1; . as {a:$a} ?// [$a] ?// $a | .) as $k (.; .; .)) | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r"path(. as $x | [1] | (foreach (1,2) as $i (.; foreach (nth(0; . as [$a] ?// $a | $a)) as $k (.; $k; .); .)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | {} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)?) as $k (.; .; $k); $i)) | $x)",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}

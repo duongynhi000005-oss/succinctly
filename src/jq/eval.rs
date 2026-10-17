@@ -55439,6 +55439,53 @@ fn caught_leading_destructure_emits_nothing(source: &Expr) -> bool {
     }
 }
 
+/// `e` with every `?//` bind of `.` whose alternatives before the last are destructuring patterns
+/// and whose last is a bare `$var` reduced to that last alternative (#4775). On a `.` that is not
+/// jq's register each destructuring alternative raises at its first step (`path_intact`), `?//`
+/// retries onto the next, and the bare one is the only alternative that ever emits: a by-value drive
+/// of the whole chain emits the destructured alternative's output too, and once more after the
+/// `break` of an enclosing `first`/`limit` is caught by the chain, so it counted twice what jq
+/// emits once. Only a chain whose earlier alternatives bind no variable the last does not (their
+/// `null` binding in the retry is then unobservable).
+fn bare_last_alternative(e: &Expr) -> Expr {
+    fn takes_a_step(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(_) => false,
+            Pattern::Object(entries) => !entries.is_empty(),
+            Pattern::Array(items) => !items.is_empty(),
+        }
+    }
+    let mapped = map_subexprs(e, &mut |child| bare_last_alternative(child));
+    match mapped {
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } if patterns.len() > 1
+            && matches!(unwrap_paren(&expr), Expr::Identity)
+            && matches!(patterns.last(), Some(Pattern::Var(_)))
+            && patterns[..patterns.len() - 1].iter().all(takes_a_step)
+            && {
+                let mut last = Vec::new();
+                collect_pattern_var_names(&patterns[patterns.len() - 1], &mut last);
+                let mut earlier = Vec::new();
+                for pattern in &patterns[..patterns.len() - 1] {
+                    collect_pattern_var_names(pattern, &mut earlier);
+                }
+                earlier.iter().all(|name| last.contains(name))
+            } =>
+        {
+            let bare = patterns[patterns.len() - 1].clone();
+            Expr::AsPattern {
+                expr,
+                patterns: vec![bare],
+                body,
+            }
+        }
+        other => other,
+    }
+}
+
 fn drive_fold_source_with<S: EvalSemantics>(
     source: &Expr,
     foreach_source: bool,
@@ -55459,6 +55506,21 @@ fn drive_fold_source_with<S: EvalSemantics>(
         ) {
         marker_ifs_resolved = resolve_marker_ifs(source);
         &marker_ifs_resolved
+    } else {
+        source
+    };
+    // #4775: a `first`/`limit`/`nth` of a `?//` chain on a freshly built container, which is no node of
+    // the register: the destructuring alternatives raise and only the bare one emits.
+    let bare_last_resolved;
+    let source = if S::TAG == EvalTag::Jq
+        && foreach_source
+        && !ambient.trackable
+        && matches!(ambient.snapshot, Snapshot::No)
+        && matches!(ambient.value, OwnedValue::Array(_) | OwnedValue::Object(_))
+        && take_wrapped_bare_chain(source).is_some()
+    {
+        bare_last_resolved = bare_last_alternative(source);
+        &bare_last_resolved
     } else {
         source
     };

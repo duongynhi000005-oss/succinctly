@@ -2914,6 +2914,12 @@ is the revert that established what the other one costs.
    the `$x.a?` after it), so a `null` stage under `first`/`limit`/`nth` that holds a chain (`first(null | CHAIN)`, `limit(2; null | CHAIN)`) stays with the by-value drive
    (`path(. as $x | 1 | (foreach (first(null | CHAIN)) as $k (.; .; .)) | $x)` on `null` is `["a"]` then `[]` in jq and `[]` twice here; on a document that is not `null`
    it prints `[]` twice where jq prints it once, #4669's mechanism).
+   A `first`/`limit`/`nth` of a chain as the source of a `foreach` that is another fold's UPDATE, entered on a freshly built container (a literal head: `{a:{b:1}} | FOREACH`), is read as
+   its bare last alternative ([#4775](https://github.com/rust-works/succinctly/issues/4775), `bare_last_alternative`): the container is no node of the register, so each destructuring
+   alternative raises at its first step and only the bare one emits, where the by-value drive of the whole chain emitted the destructured alternative's output as well
+   (`path(. as $x | {a:{b:1}} | (foreach (1,2) as $i (.; foreach (first(. as {a:$a} ?// $a | .)) as $k (.; .; .); .)) | $x)` on `null` printed `[]` four times, jq twice; pinned by
+   `test_foreach_source_chain_on_a_fresh_container_emits_once_in_a_fold_update_4775`). Only for a chain whose earlier alternatives bind no variable the last does not, and for an
+   `Array`/`Object` input (a number or string could be the register's by representation). On a document that is not `null` the same programs are still refused where jq answers.
    A head that reaches the chain some other way than a bare `null`/`$x` is walked too ([#4774](https://github.com/rust-works/succinctly/issues/4774)): a comma that
    mixes `null` with `.` (`(null, .) | CHAIN` is `["a"]` then `[]` on an untracked entry; `.` after `1 |` is no node of the register), a `null` behind `try`, `?`, `first`,
    `limit` or `nth` (`try null`, `first(null)`, `limit(1; null)`, `nth(0; null)`), and a pipe or comma of those (`(null | .)`, `(null | null)`, `(null | (., null))`),
