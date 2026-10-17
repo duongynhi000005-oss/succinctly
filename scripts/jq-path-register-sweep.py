@@ -791,6 +791,27 @@ OPERANDS = [
     "(foreach (1,2) as $j (.; (foreach ((null, null) | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     "(foreach (1,2) as $j (.; (foreach (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .; .)); .))",
     "(reduce (try null | (.|.) as {a:$a} ?// $a | .) as $k (.; .))",
+    # (#4763) the caught foreign-`$x` destructure `foreach` as the UPDATE of a `reduce`, wrapped by `try ... catch H`,
+    # `first`, or `limit`/`nth`: the `foreach` emits nothing and raises nothing, so the wrapper emits nothing and the
+    # state is `null`. The contrasts are a wrapper around a `foreach` that emits, a count that is not a literal
+    # (`limit(.a; ..)`), and a `foreach` whose source raises.
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch \"c\"))",
+    "(.a as $x | reduce (1,2) as $i (.; first(foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; first(foreach (try ($x as {a:$a} | .)) as $y (.; .; .))?))",
+    "(.a as $x | reduce (1,2) as $i (.; limit(1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; nth(0; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; limit(2; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; try first(foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; first(try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch .)))",
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; try (. | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) // 5) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; first(first(foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))))",
+    "(.a as $x | reduce (1,2) as $i (.; limit(.a; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (1,2) as $q (.; .; .)) catch .))",
+    "(.a as $x | reduce (1,2) as $i (.; first(foreach (1,2) as $q (.; .; .))))",
+    "(.a as $x | reduce (1,2) as $i (.; try (foreach (try error(\"z\")) as $q (.; .; .)) catch .))",
     # (#4757) the chain under a `reduce`, which the `untracked-foreach-update*` and
     # `untracked-reduce-update` contexts put in another fold's body: a `reduce` backtracks its
     # source and UPDATE, so the register it leaves is INIT's. The contrasts navigate in INIT, the
