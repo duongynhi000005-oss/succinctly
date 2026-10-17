@@ -40387,7 +40387,7 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 }
 
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on a `null` or a
-/// boolean of the kind `state` is, and there is one (#4797): `$x as {a:$a} | .` with `$x.a` `null` and the
+/// boolean of the kind `state` is, and there is one (#4800): `$x as {a:$a} | .` with `$x.a` `null` and the
 /// state `null`. jq's register is then a `null`/boolean after the pattern's step, and the state an empty
 /// step left is `jv_identical` to it by kind, which the path resolver models for a pattern walk off the
 /// register ([`PathPatternMode::step`]'s exception); any other node the walk lands on needs a trackable
@@ -51908,7 +51908,7 @@ fn fold_source_register_markers<S: EvalSemantics>(
         && ambient.register_null
         && (fold_body::depth() == 0 || fold_body::foreach_body_stating_here())
         && !chain_may_retry_on_a_key(source);
-    // #4797: in the UPDATE of a `foreach` whose source moved the register onto an element, the register is
+    // #4800: in the UPDATE of a `foreach` whose source moved the register onto an element, the register is
     // that element, whatever state the steps before left: a `$x` is read against it, not against `.`.
     let register_value = fold_body::foreach_register_here();
     if S::TAG != EvalTag::Jq
@@ -55922,7 +55922,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
     }
     // #4320: the `$x` markers of the source that are jq's register at this fold.
     let register_markers = fold_source_register_markers::<S>(source, ambient);
-    // #4797: ...and, outside every fold body, against the register the frame names where a computed stage
+    // #4800: ...and, outside every fold body, against the register the frame names where a computed stage
     // ahead of the fold left the ambient off it (`. as $x | null | foreach ($x as {a:$a} | .) ...`): the
     // state a `foreach` emits from inside its loop is no node of the register, but a `$x` bound to it still is.
     let register_markers = if register_markers.is_empty()
@@ -56172,7 +56172,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         } else {
             (ambient.snapshot.clone(), &ambient.frame)
         };
-    // #4797: in the UPDATE of a `foreach` the frame names the position of the register but carries no value
+    // #4800: in the UPDATE of a `foreach` the frame names the position of the register but carries no value
     // for it, and the resolver certifies a `$x` bound at that position (a marker read above) against the
     // value: the element's own, which the mark carries.
     let element_frame;
@@ -61704,17 +61704,20 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // emits, so an inner source that is empty leaves this one emitting nothing.
                         let _sole_update_foreach =
                             sole_update_mark::<S>(&bound_update, true, false);
-                        // #4797: ...and a caught foreign `$x` is read against the element the source moved the
+                        // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                         // register onto, not the state the last step left.
                         let _register = (_sole_update_foreach.is_some()
                             && elem.register_path.is_some()
                             && (matches!(unwrap_paren(&bound_update), Expr::Foreach { .. })
                                 || emptied_wrapper_inner(unwrap_paren(&bound_update)).is_some())
                             && emptied_update(&bound_update).is_some_and(|emptied| {
-                                source_destructures_to_null_or_bool(emptied.source, &entry_state)
-                                    && !emptied.literal_head
+                                !emptied.literal_head
                                     && !emptied.has_fallback
                                     && !emptied.truthy
+                                    && source_destructures_to_null_or_bool(
+                                        emptied.source,
+                                        &entry_state,
+                                    )
                             }))
                         .then(|| fold_body::foreach_register(elem.value.clone()));
                         // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
@@ -71072,7 +71075,7 @@ mod fold_body {
     pub(crate) struct RegisterGuard(Option<(u32, super::OwnedValue)>);
 
     /// Names the node a `foreach` source moved the register onto (`value`), for the UPDATE about to be
-    /// entered (#4797): jq's register there is that element, not the state the steps before it left.
+    /// entered (#4800): jq's register there is that element, not the state the steps before it left.
     /// Only [`foreach_register_here`] reads it. It is not [`source_moved`], whose
     /// [`source_moved_at_here`] also tells the markers of a pattern step that passes to ask for no
     /// refusal, which a `foreach` loop (it emits inside the step) cannot take.
