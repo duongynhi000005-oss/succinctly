@@ -71092,7 +71092,7 @@ mod fold_body {
 
     pub(crate) struct RegisterFoldsGuard;
 
-    pub(crate) fn register_folds(_folds: Vec<&super::Expr>) -> RegisterFoldsGuard {
+    pub(crate) fn register_folds(_folds: alloc::vec::Vec<&super::Expr>) -> RegisterFoldsGuard {
         RegisterFoldsGuard
     }
 
