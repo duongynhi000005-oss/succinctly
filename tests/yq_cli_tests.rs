@@ -60386,7 +60386,6 @@ fn recurse_through_a_bound_still_resolves_explicit_tags_2693() -> Result<()> {
 
     for filter in [
         "[limit(1; recurse(.[]?))]",
-        "[limit(1; recurse(.[]?))]",
         "[nth(0; recurse(.[]?))]",
         "[limit(1; recurse(.[]?; true))]",
     ] {
