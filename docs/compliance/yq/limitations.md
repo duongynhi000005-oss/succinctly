@@ -1702,6 +1702,19 @@ in a yq filter is far more likely to be a jq habit (`limit(1; f)`, `reduce`, `fo
 empty result, and a loud error is the safer answer to it. The jq-style multi-argument forms that
 `--jq-extensions` enables (`limit`, `range`, `sub`, ...) are unaffected.
 
+### Jq-only names yq's lexer rejects that are still accepted without `--jq-extensions` (#1887, #3560)
+
+A test (`every_parsed_keyword_is_classified_for_the_jq_extensions_gate_1887`, `src/jq/parser.rs`)
+now classifies every keyword the parser matches against the pinned `yq` — gated, yq-native, a
+documented succinctly extension, or a known gap — so a new jq-only name can no longer ship ungated
+unnoticed. The sweep behind it found the gap list below: names yq's lexer rejects
+(`invalid input text`) that `succinctly yq` parses without the flag. Gating them is a behaviour
+change for existing yq scripts and tests (#3560 is the same question for `last`), so they stay
+accepted until it is decided; moving one to the test's `GATED` table is the whole change on the
+parser side.
+
+`arrays`, `booleans`, `break`, `builtins`, `catch`, `def`, `elif`, `else`, `empty`, `end`, `finites`, `fromjsonstream`, `halt`, `halt_error`, `if`, `in`, `isarray`, `isboolean`, `isnull`, `isnumber`, `isobject`, `isstring`, `isvalid`, `iterables`, `keys_unsorted`, `label`, `last`, `ltrim`, `modulemeta`, `normals`, `nulls`, `numbers`, `objects`, `recurse`, `recurse_down`, `repeat`, `rtrim`, `scalars`, `stderr`, `strings`, `then`, `toboolean`, `tojsonstream`, `try`, `until`, `utf8bytelength`, `values`, `while`.
+
 ### 3-argument `sub(re; s; flags)` — resolved, real yq ignores everything past the pattern
 
 [#1122](https://github.com/rust-works/succinctly/issues/1122) resolved what had looked like an

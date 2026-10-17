@@ -13281,4 +13281,335 @@ mod tests {
         assert!(parse_with_mode_and_extensions(".[0] ?", ParserMode::Yq, true).is_ok());
         assert!(parse_with_mode_and_extensions(".a.x ?", ParserMode::Yq, true).is_ok());
     }
+
+    /// #1887: every keyword the parser matches is classified for the `--jq-extensions` gate,
+    /// and the classification is checked against the parser's actual behaviour.
+    ///
+    /// The gate (`reject_unless_jq_extensions`) is called by hand at each parse site, and a
+    /// jq-only name whose call was forgotten shipped ungated four times (#1650, #1714, #1837,
+    /// #1882). This test makes the next one fail CI: a keyword the parser starts matching has to
+    /// be added to one of the tables below (and so be looked up against the pinned `yq`, whose
+    /// lexer rejects the jq-only names with `invalid input text`), and a table entry that no
+    /// longer describes the parser fails too. The classification was captured by running every
+    /// keyword through `yq` v4.52/4.53 and through `succinctly yq` without `--jq-extensions`.
+    #[test]
+    fn every_parsed_keyword_is_classified_for_the_jq_extensions_gate_1887() {
+        const GATE_MESSAGE: &str = "is not part of yq's syntax";
+
+        /// yq's lexer rejects the name; `succinctly yq` refuses it without `--jq-extensions`.
+        const GATED: &[&str] = &[
+            "IN",
+            "INDEX",
+            "JOIN",
+            "abs",
+            "acos",
+            "acosh",
+            "add",
+            "ascii_downcase",
+            "ascii_upcase",
+            "asin",
+            "asinh",
+            "atan",
+            "atan2",
+            "atanh",
+            "bsearch",
+            "ceil",
+            "combinations",
+            "cos",
+            "cosh",
+            "debug",
+            "endswith",
+            "exp",
+            "exp10",
+            "exp2",
+            "fabs",
+            "floor",
+            "foreach",
+            "format",
+            "fromdate",
+            "fromdateiso8601",
+            "fromstream",
+            "getpath",
+            "gmtime",
+            "gsub",
+            "implode",
+            "import",
+            "include",
+            "index",
+            "indices",
+            "infinite",
+            "inside",
+            "isempty",
+            "isfinite",
+            "isinfinite",
+            "isnan",
+            "isnormal",
+            "leaf_paths",
+            "limit",
+            "localtime",
+            "log",
+            "log10",
+            "log2",
+            "ltrimstr",
+            "max_by",
+            "min_by",
+            "mktime",
+            "module",
+            "nan",
+            "nth",
+            "paths",
+            "pow",
+            "range",
+            "reduce",
+            "rindex",
+            "round",
+            "rtrimstr",
+            "scan",
+            "sin",
+            "sinh",
+            "skip",
+            "splits",
+            "sqrt",
+            "startswith",
+            "strflocaltime",
+            "strftime",
+            "strptime",
+            "tan",
+            "tanh",
+            "todate",
+            "todateiso8601",
+            "tostream",
+            "transpose",
+            "trunc",
+            "truncate_stream",
+            "walk",
+        ];
+        /// yq has the name, but not this call form (`all(f)`, `any(f)`, `path(f)`); the form is gated.
+        const GATED_BY_CALL_FORM: &[&str] = &["all", "any", "path"];
+        /// yq accepts the name (a yq builtin, an operator word or core syntax).
+        const YQ_NATIVE: &[&str] = &[
+            "all_c",
+            "anchor",
+            "and",
+            "any_c",
+            "as",
+            "capture",
+            "collect",
+            "column",
+            "contains",
+            "del",
+            "delpaths",
+            "di",
+            "document_index",
+            "downcase",
+            "env",
+            "error",
+            "explode",
+            "false",
+            "fi",
+            "fileIndex",
+            "file_index",
+            "filename",
+            "filter",
+            "first",
+            "flatten",
+            "foot_comment",
+            "from_entries",
+            "from_json",
+            "from_unix",
+            "from_yaml",
+            "fromjson",
+            "group_by",
+            "has",
+            "head_comment",
+            "join",
+            "key",
+            "keys",
+            "kind",
+            "length",
+            "line",
+            "line_comment",
+            "load",
+            "map",
+            "map_values",
+            "match",
+            "max",
+            "min",
+            "not",
+            "now",
+            "null",
+            "omit",
+            "or",
+            "parent",
+            "pick",
+            "pivot",
+            "reverse",
+            "select",
+            "setpath",
+            "shuffle",
+            "sort",
+            "sortKeys",
+            "sort_by",
+            "sort_keys",
+            "split",
+            "split_doc",
+            "strenv",
+            "style",
+            "sub",
+            "tag",
+            "test",
+            "to_entries",
+            "to_number",
+            "to_string",
+            "to_unix",
+            "tojson",
+            "tonumber",
+            "tostring",
+            "trim",
+            "true",
+            "type",
+            "tz",
+            "unique",
+            "unique_by",
+            "upcase",
+            "with",
+            "with_entries",
+        ];
+        /// yq's lexer rejects the name and `succinctly yq` accepts or refuses it on purpose: position navigation is a documented succinctly extension, and the `input` family has its own unconditional refusal (#1507).
+        const BY_DESIGN: &[&str] = &[
+            "at_offset",
+            "at_position",
+            "input",
+            "inputs",
+            "input_line_number",
+        ];
+        /// yq's lexer rejects the name and `succinctly yq` still accepts it without the flag -- a known gap, not a decision (#3560 is the same question for `last`). Gating one means moving it to `GATED` and updating the tests that rely on it.
+        const UNGATED_GAP: &[&str] = &[
+            "arrays",
+            "booleans",
+            "break",
+            "builtins",
+            "catch",
+            "def",
+            "elif",
+            "else",
+            "empty",
+            "end",
+            "finites",
+            "fromjsonstream",
+            "halt",
+            "halt_error",
+            "if",
+            "in",
+            "isarray",
+            "isboolean",
+            "isnull",
+            "isnumber",
+            "isobject",
+            "isstring",
+            "isvalid",
+            "iterables",
+            "keys_unsorted",
+            "label",
+            "last",
+            "ltrim",
+            "modulemeta",
+            "normals",
+            "nulls",
+            "numbers",
+            "objects",
+            "recurse",
+            "recurse_down",
+            "repeat",
+            "rtrim",
+            "scalars",
+            "stderr",
+            "strings",
+            "then",
+            "toboolean",
+            "tojsonstream",
+            "try",
+            "until",
+            "utf8bytelength",
+            "values",
+            "while",
+        ];
+
+        let source = include_str!("parser.rs");
+        let production = &source[..source.rfind("#[cfg(test)]").unwrap()];
+        let mut scanned = std::collections::BTreeSet::new();
+        for call in ["matches_keyword(\"", "consume_keyword(\""] {
+            for part in production.split(call).skip(1) {
+                let name = part.split('"').next().unwrap();
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    scanned.insert(name.to_string());
+                }
+            }
+        }
+        let tables: [(&str, &[&str]); 5] = [
+            ("GATED", GATED),
+            ("GATED_BY_CALL_FORM", GATED_BY_CALL_FORM),
+            ("YQ_NATIVE", YQ_NATIVE),
+            ("BY_DESIGN", BY_DESIGN),
+            ("UNGATED_GAP", UNGATED_GAP),
+        ];
+        let mut classified = std::collections::BTreeMap::new();
+        for (table, names) in tables {
+            for name in names {
+                assert!(
+                    classified.insert(*name, table).is_none(),
+                    "`{name}` is in two tables"
+                );
+            }
+        }
+        for name in &scanned {
+            assert!(
+                classified.contains_key(name.as_str()),
+                "the parser matches the keyword `{name}`, which is in no table: check it against \
+                 the pinned yq (`yq '{name}(.)'` -> `lexer: invalid input text` means jq-only, so \
+                 call `reject_unless_jq_extensions` and add it to GATED) and classify it"
+            );
+        }
+        for name in classified.keys() {
+            assert!(
+                scanned.contains(*name),
+                "`{name}` is in a table but the parser no longer matches it"
+            );
+        }
+
+        // The tables describe the parser: a name is gated when any call form of it is refused.
+        let is_gated = |name: &str| {
+            [
+                name.to_string(),
+                format!("{name}(.)"),
+                format!("{name}(.; .)"),
+                format!("{name}(.; .; .)"),
+                format!("{name} $x"),
+                format!("{name} \"m\"; ."),
+                format!("{name} {{}}; ."),
+                format!("{name} \"m\" as m; ."),
+                format!("{name} \"m\""),
+            ]
+            .iter()
+            .any(|probe| {
+                parse_program_with_mode_and_extensions(probe, ParserMode::Yq, false)
+                    .is_err_and(|e| e.to_string().contains(GATE_MESSAGE))
+            })
+        };
+        for (table, names) in tables {
+            let expect_gated = matches!(table, "GATED" | "GATED_BY_CALL_FORM");
+            for name in names {
+                assert_eq!(
+                    is_gated(name),
+                    expect_gated,
+                    "`{name}` is in {table}, but the parser {} it",
+                    if expect_gated {
+                        "does not gate"
+                    } else {
+                        "gates"
+                    }
+                );
+            }
+        }
+    }
 }
