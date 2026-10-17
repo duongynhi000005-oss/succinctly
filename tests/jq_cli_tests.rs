@@ -155112,7 +155112,7 @@ fn test_caught_foreign_marker_destructure_behind_identity_and_label_in_an_update
 /// state `null`, which the end of the path refuses: the `foreach` emits nothing and raises nothing, so the handler
 /// never runs and the wrapper emits nothing either. It was answered (`[[]]`, and `del`/`|=`/`=` wrote) for every
 /// handler other than `empty` and for `first`/`limit`/`nth`. The same wrappers around a `foreach` that emits, or
-/// under a `foreach` UPDATE, are answered as before. A `foreach` SOURCE's own `try ... catch H` is not this: its
+/// under a `foreach` UPDATE, are answered as before; a count that raises (`nth(-1; ..)`) is not read as one that cannot. A `foreach` SOURCE's own `try ... catch H` is not this: its
 /// handler runs on the raise and emits (#4709's controls). Every row is a live jq 1.7.1 capture.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
@@ -155642,6 +155642,20 @@ fn test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_re
             r"[path(.a as $x | reduce (1,2) as $i (.; limit(1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) | .))]",
             "",
             "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"[path(.a as $x | reduce (1,2) as $i (.; nth(-1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .))))]"#,
+            "",
+            r#"nth doesn't support negative indices"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"[path(.a as $x | reduce (1,2) as $i (.; try nth(-1; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch "c"))]"#,
+            "",
+            r#"Invalid path expression with result "c""#,
             5,
         ),
     ])

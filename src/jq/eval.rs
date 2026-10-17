@@ -40305,24 +40305,40 @@ fn catching_wrapper_inner(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-/// The operand of a wrapper that emits nothing for an operand that emits nothing and raises nothing,
-/// in an UPDATE (#4763): [`catching_wrapper_inner`]'s, a `try ... catch H` for any `H` (the handler
-/// runs only for a raise, and an emptied `foreach` raises none), a `first(..)` and a `limit`/`nth` with a literal count. Not for a `foreach`
-/// source, where `catch H` runs on the raise the `try` is there for and emits.
+/// Whether `n` is a numeric literal that is not negative: a count `limit` and `nth` evaluate without
+/// raising (#4763). `nth(-1; ..)` raises (`nth doesn't support negative indices`), and so do a string
+/// count (`limit("a"; ..)`, `nth("a"; ..)`) and any count that is computed. A negative number is a
+/// `Neg` of a literal, not a literal, but a synthesized `Int`/`Float` can carry the sign.
+fn is_non_negative_number_literal(n: &Expr) -> bool {
+    match unwrap_paren(n) {
+        Expr::Literal(Literal::NumberLiteral(..)) => true,
+        Expr::Literal(Literal::Int(i)) => *i >= 0,
+        Expr::Literal(Literal::Float(f)) => *f >= 0.0,
+        _ => false,
+    }
+}
+
+/// The operand of a wrapper, in a fold UPDATE, that emits nothing for an operand that emits nothing and
+/// raises nothing (#4763): a `try`/`?` with or without `catch H` (the handler runs only for a raise, and
+/// an emptied `foreach` raises none), a `first(..)`, and a `limit`/`nth` whose count cannot raise
+/// ([`is_non_negative_number_literal`]).
+///
+/// Not [`catching_wrapper_inner`], which also reads a `foreach` *source*: there a `catch H` runs on the
+/// raise the `try` is there for and emits, so only `catch empty` hands the emptiness on.
 fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
     match unwrap_paren(expr) {
-        Expr::Try { expr: inner, .. }
+        Expr::Optional(inner)
+        | Expr::Try { expr: inner, .. }
         | Expr::FirstExpr(inner)
         | Expr::Builtin(Builtin::FirstStream(inner)) => Some(inner),
-        // A literal count raises nothing; any other is evaluated and may.
         Expr::Limit { n, expr: inner }
         | Expr::NthExpr { n, expr: inner }
         | Expr::Builtin(Builtin::NthStream(n, inner))
-            if matches!(unwrap_paren(n), Expr::Literal(_)) =>
+            if is_non_negative_number_literal(n) =>
         {
             Some(inner)
         }
-        other => catching_wrapper_inner(other),
+        _ => None,
     }
 }
 

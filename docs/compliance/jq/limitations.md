@@ -2498,10 +2498,10 @@ is the revert that established what the other one costs.
    (`emptied_update`; a source may also nest `try`s and end `// empty`; pinned by
    `test_caught_foreign_marker_destructure_wrapped_in_a_reduce_update_and_catchable_4754`,
    [#4754](https://github.com/rust-works/succinctly/issues/4754)); also under `try ... catch H` for any handler `H`, `first(..)`, and `limit`/`nth` with a
-   literal count ([#4763](https://github.com/rust-works/succinctly/issues/4763): `emptied_wrapper_inner`: the handler runs only for a raise and the emptied `foreach` raises none;
+   non-negative number literal as the count ([#4763](https://github.com/rust-works/succinctly/issues/4763): `emptied_wrapper_inner`: the handler runs only for a raise and the emptied `foreach` raises none;
    a `foreach` *source*'s own `catch H` is not this, its handler runs on the destructure's raise and emits; pinned by
-   `test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_reduce_update_4763`). Not read: a `limit` whose count is not a literal
-   (`limit(.a; FE)` on `{"a":null}` is answered `[[]]` where jq refuses, a count that raises being the reason the count has to be a literal) and what jq does with the
+   `test_caught_foreign_marker_destructure_under_a_handler_first_or_limit_in_a_reduce_update_4763`). Not read: a `limit`/`nth` whose count is not a non-negative number literal
+   (`limit(.a; FE)` on `{"a":null}` is answered `[[]]` where jq refuses; a count can raise: `nth(-1; ..)` and a string count do) and what jq does with the
    `null` state after the `reduce` (`reduce ... FE | try .b` is `[]` in jq and refused here, `... // .a` is `[["a"]]`; `| .b?`, `| .[]?`, `// 3` and `[FE][0]?` raise in both with a different
    message): the refusal is raised at the `reduce`, where jq's `null` state flows on to the next stage as an unplaced value. The wrappers #4763 reads now share that
    residual with the bare `try (FE)`: a later stage that consumes the state as a value (`(REDUCE) // .a`, `try (-(REDUCE))`, a `?`/`try` that gives it a name) is refused where jq answers.
