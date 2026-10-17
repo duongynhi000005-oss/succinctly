@@ -51336,6 +51336,30 @@ fn is_register_navigation(e: &Expr) -> bool {
         // output of either is a node the register is left on.
         Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown) => true,
         Expr::Comma(items) => items.iter().all(is_register_navigation),
+        // #4795: `first(f)`, `limit(n; f)` and `nth(n; f)` hand on some of the navigation's outputs,
+        // each a node the register is left on, and `select(c)` hands its input on or emits nothing
+        // (`c` is a subexpression: it moves nothing). `last(f)` is not: its `reduce` leaves the
+        // register where it entered ([`is_last_of_navigation`]).
+        Expr::FirstExpr(inner)
+        | Expr::Limit { expr: inner, .. }
+        | Expr::NthExpr { expr: inner, .. }
+        | Expr::Builtin(Builtin::FirstStream(inner) | Builtin::NthStream(_, inner)) => {
+            is_register_navigation(inner)
+        }
+        Expr::Builtin(Builtin::Select(_)) => true,
+        _ => false,
+    }
+}
+
+/// Whether `e` is `last(f)` over navigation alone (#4795). jq defines it over a `reduce`, whose
+/// output is the last value but whose register is back where the `reduce` entered (`.c as $x |
+/// reduce last(..) as $i (.; ...)` on `{"a":1,"c":null}` raises with a `null` `$x` although the
+/// last element is `null`): the entry node is the element's ancestor or the element itself.
+fn is_last_of_navigation(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::LastExpr(inner) | Expr::Builtin(Builtin::LastStream(inner)) => {
+            is_register_navigation(inner)
+        }
         _ => false,
     }
 }
@@ -60131,6 +60155,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #4507: the register sits on the element the source yields only where the source is plain
     // navigation; `.[]? | null` or `.[]? | tostring` yield a node the register is not on.
     let source_is_plain_navigation = source_moves_register && is_register_navigation(input);
+    // #4795: `last(f)` over navigation leaves the register at the fold's entry, not on the element.
+    let source_is_last_of_navigation = source_moves_register && is_last_of_navigation(input);
     // INIT resolved first, before SOURCE (#2031, reordered from the
     // original #1467/#1872 shape): confirmed live against jq 1.7.1 (via
     // `debug`-instrumented INIT/SOURCE/UPDATE clauses) that real jq
@@ -60467,8 +60493,14 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // the whole step, where a pattern step on the accumulator raises.
                         let _source_moved = source_moves_register.then(|| {
                             fold_body::source_moved(
-                                source_is_plain_navigation
-                                    .then_some(matches!(elem.value, OwnedValue::Null)),
+                                if source_is_plain_navigation {
+                                    Some(matches!(elem.value, OwnedValue::Null))
+                                } else if source_is_last_of_navigation && trackable {
+                                    // The entry node is the register.
+                                    Some(matches!(value, OwnedValue::Null))
+                                } else {
+                                    None
+                                },
                                 elem.register_path.clone(),
                             )
                         });
