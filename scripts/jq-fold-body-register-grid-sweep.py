@@ -37,6 +37,10 @@ OUTER = [
     ("rd-nav", "reduce .[]? as $i (.; {I})"),
     ("fe-nava", "foreach .a? as $i (.; {I}; .)"),
     ("rd-nava", "reduce .a? as $i (.; {I})"),
+    # (#4790) a source that moves the register without naming the element's position: `..` and a comma of
+    # navigations leave it on the element each output is, so a `null` `$x` is not it unless that element is `null`
+    ("rd-rec", "reduce .. as $i (.; {I})"),
+    ("rd-comma", "reduce (.a?, .) as $i (.; {I})"),
     # (#4627) EXTRACT is the loop element, which a navigating source leaves at jq's register
     ("fe-nav-i", "foreach .[]? as $i (.; {I}; $i)"),
     ("fe-nava-i", "foreach .a? as $i (.; {I}; $i)"),

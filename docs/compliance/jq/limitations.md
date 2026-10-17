@@ -2536,7 +2536,11 @@ is the revert that established what the other one costs.
    `test_caught_foreign_marker_destructure_in_a_reduce_whose_source_moved_the_register_4777`): a step whose element is another node than `$x`'s raises and leaves the state `null`
    (or the fallback), a step whose element is `$x`'s node raises nothing and leaves the state as it found it, so one raising step decides when the `foreach` hands its state on unchanged
    (`INIT`, `UPDATE` and `EXTRACT` all `.`); a source that yields only `$x`'s node, or nothing, is answered. Not read there: a `foreach` that changes the state (`(.; 7; .)`: the last step decides),
-   a `null`/boolean `$x` (compared by kind with the element, not by position: `.a as $x | reduce .. as $i (.; FE)` on `{"a":null}` is answered where jq refuses) and a binding of the whole document (`. as $x`). A
+   and a binding of the whole document (`. as $x`: it refuses with the document where jq prints `null`, [#4791](https://github.com/rust-works/succinctly/issues/4791)). A `null` `$x` is read
+   by the element's kind, not its position ([#4790](https://github.com/rust-works/succinctly/issues/4790), pinned by
+   `test_caught_foreign_null_marker_in_a_reduce_body_whose_source_moved_the_register_4790`): `null` is `jv_identical` to the register by kind, so it is the register on a step whose element is
+   `null` and only there, and on a step whose element is known not to be (`is_register_navigation` now reads `..` and a comma of navigations) its destructure's step raises, the one scalar `try`
+   has no type error to catch for (`.a as $x | reduce .. as $i (.; FE)` on `{"a":null}` was answered where jq refuses). A boolean `$x` raises a type error the `try` catches whatever the position. A
    freshly built value bound to a variable and destructured (`foreach ({a:1} as $n | $n as {b:$b} | .)`) raises in jq
    and is refused here since [#4616](https://github.com/rust-works/succinctly/issues/4616): a `foreach` source asks
    `source_destructures_fresh` as a `reduce` source does (pinned by
