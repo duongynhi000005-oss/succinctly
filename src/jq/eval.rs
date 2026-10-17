@@ -40346,36 +40346,25 @@ fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
 struct EmptiedUpdate<'a> {
     /// The `foreach`'s source.
     source: &'a Expr,
-    /// The literal a trailing `// LITERAL` falls back to: the UPDATE then emits that, not nothing.
-    fallback: Option<OwnedValue>,
+    /// Whether a trailing `// LITERAL` falls back to a literal: the UPDATE then emits that, not nothing.
+    has_fallback: bool,
     /// Whether the UPDATE is empty only while `.` is truthy (`if . then FE else . end`).
     truthy: bool,
-    /// Whether a step of the `foreach` that does emit hands its state on unchanged
-    /// ([`foreach_hands_its_state_on`], #4777).
-    state_kept: bool,
     /// The conditions the register decides, outermost first (#4778): a `select(C)` ahead of the
     /// `foreach` or the condition of an `if C then FE else . end` around it, `C` a pure function of `.`
     /// other than `.` itself (that one is `truthy`).
-    gates: Vec<Gate<'a>>,
+    gates: Vec<&'a Expr>,
     /// Whether a literal stage runs ahead of the `foreach` (`1 | FE`, #4782): it hands the `foreach` a
     /// value that is not the state, and leaves jq's register where it was.
     literal_head: bool,
-    /// The stages that run on the fallback literal ([`EmptiedUpdate::fallback`]) before it is the state
+    /// Whether stages run on the fallback literal ([`EmptiedUpdate::has_fallback`]) before it is the state
     /// (#4778): `(. | FE) // 5 | tostring` leaves `"5"`.
-    after: Vec<&'a Expr>,
-}
-
-/// A condition of an UPDATE that the state decides ([`EmptiedUpdate::gates`], #4778).
-struct Gate<'a> {
-    cond: &'a Expr,
-    /// A `select(C)`, which drops a state `C` does not hold for and so leaves `null`; an
-    /// `if C then FE else . end` keeps it.
-    select: bool,
+    has_after: bool,
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
-/// UPDATE condition or of the tail after a fallback, which the evaluator is run on. Whether one raises
-/// on a given value is left to that run ([`settle_emptied`]).
+/// UPDATE condition or of the tail after a fallback. Whether one raises on a given value is left to the
+/// fold's own run of the UPDATE.
 fn is_pure_of_dot(e: &Expr) -> bool {
     match e {
         Expr::Literal(_)
@@ -40394,62 +40383,46 @@ fn is_pure_of_dot(e: &Expr) -> bool {
     }
 }
 
-/// The single output of `stage` run on `input`, when it emits exactly one and raises nothing.
-fn pure_output<S: EvalSemantics>(stage: &Expr, input: &OwnedValue) -> Option<OwnedValue> {
-    let mut outputs = Vec::new();
-    let flow = eval_each_owned::<S>(stage, input, false, Reentry::REBUILT, &mut |out| {
-        outputs.push(out);
-        Demand::Continue
-    });
-    match (flow, outputs.len()) {
-        (Flow::Exhausted, 1) => outputs.pop(),
-        _ => None,
-    }
-}
-
-/// What an UPDATE marked by [`emptied_update`] leaves once its `foreach` is empty (#4778):
-/// `(fallback, truthy)` as [`fold_body::sole_update_pipe_head`] takes them, or `None` when the state it
-/// leaves is one the steps after it would not repeat.
-///
-/// The step leaves `null` or the transformed fallback `left`, and that is the state every later step
-/// meets, so a condition has to decide on it without raising: a `select(C)` drops `left` where `C` fails
-/// for it and leaves `null` instead. The state the first step is entered with needs no reading: a
-/// condition it fails keeps the `foreach` from being run, and nothing is refused.
-fn settle_emptied<S: EvalSemantics>(
-    emptied: &EmptiedUpdate<'_>,
-) -> Option<(Option<OwnedValue>, bool)> {
-    let mut left = emptied.fallback.clone();
-    if let Some(literal) = &mut left {
-        for stage in &emptied.after {
-            *literal = pure_output::<S>(stage, literal)?;
-        }
-    }
-    let kept = left.clone().unwrap_or(OwnedValue::Null);
-    for gate in &emptied.gates {
-        let holds_later = pure_output::<S>(gate.cond, &kept)?.is_truthy();
-        if gate.select && left.is_some() && !holds_later {
-            return None;
-        }
-    }
-    Some((left, emptied.truthy))
-}
-
-/// Whether a `foreach` whose source emits hands the state it was given on unchanged (#4777): `INIT`,
-/// `UPDATE` and `EXTRACT` are all `.`. In the body of a `reduce` whose source moves the register the
-/// steps differ in whether the foreign `$x` raises, and a step that does not raise must leave the
-/// `null` an earlier one left; any other body would replace it.
-fn foreach_hands_its_state_on(init: &Expr, update: &Expr, extract: Option<&Expr>) -> bool {
-    matches!(unwrap_paren(init), Expr::Identity)
-        && matches!(unwrap_paren(update), Expr::Identity)
-        && matches!(extract.map(unwrap_paren), None | Some(Expr::Identity))
-}
-
 /// Whether `stage` hands its input on untouched, or emits nothing: `.` or `select(.)`.
 fn is_identity_or_select_dot(stage: &Expr) -> bool {
     match unwrap_paren(stage) {
         Expr::Identity => true,
         Expr::Builtin(Builtin::Select(cond)) => matches!(unwrap_paren(cond), Expr::Identity),
         _ => false,
+    }
+}
+
+/// Whether `e` is a stage that emits one value and neither raises on any input nor moves jq's path
+/// register (#4782, #4793): a literal, a container of literals, or a builtin that only reads its input
+/// (`tostring`, `tojson`, `type`, `isnull`, `not`). The next stage is handed a value that is not the
+/// state, as it is after a literal.
+fn is_value_head(e: &Expr) -> bool {
+    /// The items of an array construction: any number of literals (`[1,2]`, `[]`), still one value.
+    fn items(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Comma(parts) => parts.iter().all(items),
+            other => single(other),
+        }
+    }
+    /// Exactly one value: a literal, or a container of such (an object's value that is a comma or
+    /// `empty` emits several values or none, so it is not).
+    fn single(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Literal(_) => true,
+            Expr::Array(inner) => items(inner),
+            Expr::Object(entries) => entries
+                .iter()
+                .all(|entry| matches!(entry.key, ObjectKey::Literal(_)) && single(&entry.value)),
+            _ => false,
+        }
+    }
+    match e {
+        Expr::Not
+        | Expr::Builtin(Builtin::Type | Builtin::IsNull | Builtin::ToString | Builtin::ToJson) => {
+            true
+        }
+        other => single(other),
     }
 }
 
@@ -40462,20 +40435,13 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 /// it knows the step is empty.
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(expr) {
-        Expr::Foreach {
-            input,
-            init,
-            update,
-            extract,
-            ..
-        } => Some(EmptiedUpdate {
+        Expr::Foreach { input, .. } => Some(EmptiedUpdate {
             source: input,
-            fallback: None,
+            has_fallback: false,
             truthy: false,
-            state_kept: foreach_hands_its_state_on(init, update, extract.as_deref()),
             gates: Vec::new(),
             literal_head: false,
-            after: Vec::new(),
+            has_after: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either.
@@ -40494,7 +40460,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
         },
         Expr::Pipe(stages) => {
             // #4778: a `select(C)` with `C` a pure function of the state is a stage like `select(.)`:
-            // the state decides ([`settle_emptied`]), so it is a gate.
+            // the state decides, so it is a gate.
             let mut gates = Vec::new();
             let mut skipped = 0;
             let mut literal_head = false;
@@ -40503,10 +40469,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
                     Expr::Builtin(Builtin::Select(cond))
                         if !literal_head && is_pure_of_dot(cond) =>
                     {
-                        gates.push(Gate { cond, select: true });
+                        gates.push(&**cond);
                     }
                     other if is_identity_or_select_dot(other) => {}
-                    Expr::Literal(_) => literal_head = true,
+                    other if is_value_head(other) => literal_head = true,
                     _ => break,
                 }
                 skipped += 1;
@@ -40520,15 +40486,15 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             // A fallback or a state-dependent head hands a value on to the stages around it: a
             // later stage transforms it (`// 5 | tostring`), and a `select(.)` ahead of it drops a
             // falsy state. Only the plain empty `foreach` is empty whatever surrounds it.
-            let plain = emptied.fallback.is_none() && !emptied.truthy;
+            let plain = !emptied.has_fallback && !emptied.truthy;
             if plain {
                 emptied.gates.splice(0..0, gates);
                 return Some(emptied);
             }
-            if !emptied.truthy && after.iter().all(is_pure_of_dot) {
+            if after.iter().all(is_pure_of_dot) {
                 // #4778: the fallback is the state once the stages around it have run on it.
                 emptied.gates.splice(0..0, gates);
-                emptied.after.extend(after.iter());
+                emptied.has_after |= !after.is_empty();
                 return Some(emptied);
             }
             (after.is_empty() && !guarded).then_some(emptied)
@@ -40538,9 +40504,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
                 Expr::Builtin(Builtin::Empty) => {}
-                Expr::Literal(literal) => {
-                    emptied.fallback = Some(literal_to_owned(literal));
-                }
+                Expr::Literal(_) => emptied.has_fallback = true,
                 _ => return None,
             }
             Some(emptied)
@@ -40557,20 +40521,11 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             }
             let mut emptied = emptied_update(then_branch)?;
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
-            // it is not the state of (#4782).
-            if on_dot && emptied.literal_head {
-                return None;
-            }
-            if on_dot {
+            // it is not the state of (#4782): the condition is then a gate on the state (#4793).
+            if on_dot && !emptied.literal_head {
                 emptied.truthy = true;
             } else {
-                emptied.gates.insert(
-                    0,
-                    Gate {
-                        cond,
-                        select: false,
-                    },
-                );
+                emptied.gates.insert(0, &**cond);
             }
             Some(emptied)
         }
@@ -40590,38 +40545,28 @@ fn sole_update_mark<S: EvalSemantics>(
         return None;
     }
     match unwrap_paren(body) {
-        Expr::Foreach {
-            input,
-            init,
-            update,
-            extract: foreach_extract,
-            ..
-        } => Some(fold_body::sole_update_foreach(
-            input,
-            in_foreach,
-            extract,
-            foreach_hands_its_state_on(init, update, foreach_extract.as_deref()),
-        )),
+        Expr::Foreach { input, .. } => {
+            Some(fold_body::sole_update_foreach(input, in_foreach, extract))
+        }
         e => {
             let emptied = emptied_update(e)?;
             // #4778, #4782: what the state decides, the stages after a fallback and a literal stage
             // ahead are read for a `reduce` UPDATE; a `foreach` reads the plain literal stage only.
             if in_foreach
                 && (emptied.gates.iter().any(|gate| {
-                    !matches!(unwrap_paren(gate.cond), Expr::Identity) || emptied.fallback.is_some()
-                }) || !emptied.after.is_empty()
-                    || (emptied.literal_head && (emptied.fallback.is_some() || emptied.truthy)))
+                    !matches!(unwrap_paren(gate), Expr::Identity)
+                        || emptied.has_fallback
+                        || emptied.literal_head
+                }) || emptied.has_after
+                    || (emptied.literal_head && (emptied.has_fallback || emptied.truthy)))
             {
                 return None;
             }
-            let (fallback, truthy) = settle_emptied::<S>(&emptied)?;
             Some(fold_body::sole_update_pipe_head(
                 emptied.source,
                 in_foreach,
                 extract,
-                fallback,
-                truthy,
-                emptied.state_kept,
+                emptied.truthy,
             ))
         }
     }
@@ -52267,9 +52212,23 @@ fn unplaced_register_markers<S: EvalSemantics>(
     }) {
         return markers;
     }
+    // #4791: in the body of a `reduce` whose source named the element it moved the register onto, a
+    // marker bound at that very node is the register, not a `$x` that may be it: its pattern step
+    // passes, so it asks for no refusal (`. as $x | reduce .. as $i (.; ...)` on the step where `..` is
+    // the root).
+    let moved_at = fold_body::source_moved_at_here();
     any_subexpr(source, &mut |e| {
         if let Expr::TrackedVar(marker) = e {
-            if marker_identical::<S>(marker, ambient.value, &ambient.frame) {
+            let on_the_element = |at: &Rc<PathPrefix>| match &marker.origin {
+                Origin::At { invocation, path } | Origin::SnapshotAt { invocation, path } => {
+                    *invocation == ambient.frame.invocation
+                        && same_frame_position(*invocation, at, &path.0)
+                }
+                _ => false,
+            };
+            if marker_identical::<S>(marker, ambient.value, &ambient.frame)
+                && !moved_at.as_ref().is_some_and(on_the_element)
+            {
                 markers.push(Rc::as_ptr(marker));
             }
         }
@@ -52603,6 +52562,7 @@ fn with_register_ambient(
 fn caught_foreign_destructure<S: EvalSemantics>(
     source: &Expr,
     ambient: &FoldSourceAmbient<'_>,
+    off_body: bool,
 ) -> bool {
     // #4754: through any number of them, and an `// empty` on the outside: each hands an empty
     // operand on as empty.
@@ -52632,17 +52592,12 @@ fn caught_foreign_destructure<S: EvalSemantics>(
         return false;
     };
     // #4777: in the body of a `reduce` whose source moved the register, `$x` is foreign on the steps
-    // whose element is another node, and the state such a step leaves (`null`, or the literal it falls
-    // back to) stays through the steps where `$x` is the register, when the `foreach` hands its state
-    // on unchanged. A step that does not raise only leaves the state as it found it.
+    // whose element is another node. The verdict is read per step, from the position of that step's
+    // element, and the step it holds for emits nothing: the steps where `$x` is the register run the
+    // `foreach` as they do anywhere, whatever it does to the state (#4792).
     let moved_at = fold_body::source_moved_at_here();
-    if fold_body::source_moved_here()
-        && !(moved_at.is_some() && fold_body::sole_update_state_kept_here())
-    {
-        return false;
-    }
     (routes_destructuring(patterns) || patterns_all_destructuring_chain(patterns))
-        && foreign_register_markers_with::<S>(bind, ambient, false, &[], moved_at.as_ref())
+        && foreign_register_markers_with::<S>(bind, ambient, off_body, &[], moved_at.as_ref())
             .iter()
             .any(|(foreign, _)| *foreign == Rc::as_ptr(marker))
 }
@@ -55487,12 +55442,8 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4709: read before `source` is rebound below -- the mark is the address of the fold's own.
     let sole_update_fold =
         S::TAG == EvalTag::Jq && foreach_source && fold_body::sole_update_foreach_here(source);
-    // #4754: ...and what that UPDATE emits instead when the source is empty.
-    let (update_fallback, update_needs_truthy) = if sole_update_fold {
-        fold_body::sole_update_residue(source)
-    } else {
-        (None, false)
-    };
+    // #4754: ...and whether it is empty only while the state is truthy.
+    let update_needs_truthy = sole_update_fold && fold_body::sole_update_needs_truthy(source);
     let marker_ifs_resolved;
     let source = if S::TAG == EvalTag::Jq
         && any_subexpr(
@@ -55764,15 +55715,28 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // that the end of the path refuses.
     let caught_foreign_verdict = sole_update_fold
         && fold_body::depth() != 0
-        && with_register_ambient(ambient, |ambient| {
+        && (with_register_ambient(ambient, |ambient| {
             ambient.trackable
                 && !matches!(ambient.value, OwnedValue::Null)
                 && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
-                && caught_foreign_destructure::<S>(source, ambient)
+                && caught_foreign_destructure::<S>(source, ambient, false)
         })
-        .unwrap_or(false);
-    let marker_destructures_unplaced_register =
-        equal_verdict || foreign_verdict || caught_foreign_verdict;
+        .unwrap_or(false)
+            // #4792: in the body of a `reduce` whose source named the element it moved the register onto,
+            // the verdict is read from that element's position alone. The accumulator a step meets is
+            // whatever the steps before it left (`7`, `null`), which is not the register and says nothing
+            // of `$x`.
+            || (fold_body::source_moved_here()
+                && fold_body::source_moved_at_here().is_some()
+                && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
+                && caught_foreign_destructure::<S>(source, ambient, false))
+            // ...and where the accumulator is provably off the register and the frame names where it is
+            // (the state an earlier empty step left): a marker holding a container bound elsewhere is
+            // foreign whatever the accumulator is.
+            || (off_body
+                && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
+                && caught_foreign_destructure::<S>(source, ambient, true)));
+    let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
     // #4723: ...and of one that is the whole UPDATE of an enclosing `foreach`, no state at all: the
     // loop emits nothing for the step.
     //
@@ -55785,9 +55749,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4782: against the register the frame names where a computed stage ahead of the fold left
         // the ambient off it; the ambient itself where the frame does not say.
         && with_register_ambient(ambient, |ambient| {
-            caught_foreign_destructure::<S>(source, ambient)
+            caught_foreign_destructure::<S>(source, ambient, false)
         })
-        .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient))
+        .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient, false))
     {
         return Flow::Exhausted;
     }
@@ -55921,10 +55885,18 @@ fn drive_fold_source_with<S: EvalSemantics>(
     {
         return Flow::Exhausted;
     }
+    // #4709: a caught destructure of a foreign marker leaves the source empty, and so the `foreach`
+    // that is the whole UPDATE of an enclosing `reduce` emits nothing. The `reduce` carries the `null`
+    // state (or the fallback) into its next step and jq's own end-of-path check refuses what it ends on
+    // (#4730: an outer `?` catches that refusal and a `try` inside the UPDATE does not). Read against
+    // the register the frame names where a computed stage ahead of the fold left the ambient off it
+    // (#4782), and answered whatever the later steps do to the state (#4792).
+    if caught_foreign_verdict {
+        return Flow::Exhausted;
+    }
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
-        // #4782: a verdict read against the register the frame names, off a computed stage's value.
-        && (ambient.trackable || caught_foreign_verdict)
+        && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0
     {
@@ -55937,24 +55909,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // state is refused at the end of the path, outside any `try` around the fold. Anywhere else
         // the register may be where the accumulator is, and the refusal stays the resolver's guess
         // that nothing catches.
-        // #4709: ...and a caught destructure of a foreign marker is the `null` state itself.
-        //
-        // #4730: ...not a guess: the verdict is certain, so the refusal is jq's own end-of-path
-        // `Invalid path expression`, which no `try` inside the `path()` suppresses but one around it
-        // does -- `[path(... reduce ... foreach (try ($x as {a:$a} | .)) ...)?]` is `[]`.
-        let refusal = if caught_foreign_verdict {
-            // jq's own end-of-path refusal of the state the empty `foreach` left (#4730): it comes
-            // after the fold, so an outer `?` catches it and a `try` inside the UPDATE does not.
-            EvalError::invalid_path_expression(
-                update_fallback.as_ref().unwrap_or(&OwnedValue::Null),
-            )
-        } else {
-            match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
-                Some(element) => {
-                    EvalError::invalid_path_expression_near_access(&element, ambient.value)
-                }
-                None => EvalError::invalid_path_expression_guessed(ambient.value),
+        let refusal = match leading_destructure_of_dot_element(source).filter(|_| in_moved_body) {
+            Some(element) => {
+                EvalError::invalid_path_expression_near_access(&element, ambient.value)
             }
+            None => EvalError::invalid_path_expression_guessed(ambient.value),
         };
         return Flow::Escaped(Control::Error(refusal));
     }
@@ -60171,8 +60130,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #4484: an UPDATE that is itself a `foreach` runs its INIT and SOURCE with `.` on the
     // accumulator, which a source and INIT that cannot move jq's register leave on the register at
     // the first step, as for a `try` UPDATE above. Marked per step by `update_at_register`.
-    let foreach_update_on_register =
-        first_step_on_register && matches!(unwrap_paren(update), Expr::Foreach { .. });
+    // #4791: ...or one headed by it through the stages [`emptied_update`] sees through (`select(C) | FE`,
+    // `FE // 5`, `if C then FE else . end`), which hand `.` on to it. Not behind a literal stage, which
+    // hands it a value that is not the accumulator.
+    let foreach_update_on_register = first_step_on_register
+        && (matches!(unwrap_paren(update), Expr::Foreach { .. })
+            || emptied_update(update).is_some_and(|emptied| !emptied.literal_head));
     // #4440: an UPDATE that is a `?//` bind of `.` runs its alternatives with `.` on the accumulator,
     // which is on the register at the first step as for the UPDATEs above.
     let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
@@ -70567,8 +70530,6 @@ mod fold_body {
         /// `foreach`'s source: the pipe's resolver hands the head on copied, so the address above
         /// no longer names it and the source is compared by value.
         static SOLE_PIPE_HEAD: RefCell<Option<PipeHead>> = const { RefCell::new(None) };
-        /// Whether the [`SOLE_FOREACH`] one hands its state on unchanged (#4777).
-        static SOLE_KEPT: Cell<bool> = const { Cell::new(false) };
     }
 
     /// The [`sole_update_pipe_head`] mark.
@@ -70579,8 +70540,6 @@ mod fold_body {
         /// The body is the `foreach`'s EXTRACT, not an UPDATE (#4776): not the UPDATE the enclosing
         /// fold takes its state from, so only the in-loop reading applies.
         extract: bool,
-        /// The literal the UPDATE falls back to when the `foreach` is empty (#4754).
-        fallback: Option<super::OwnedValue>,
         /// Whether the UPDATE is empty only while `.` is truthy (#4754).
         truthy: bool,
     }
@@ -70650,7 +70609,7 @@ mod fold_body {
     }
 
     /// Restores the previous [`sole_update_foreach`] mark.
-    pub(crate) struct SoleGuard((u32, usize, bool, bool), Option<PipeHead>, bool);
+    pub(crate) struct SoleGuard((u32, usize, bool, bool), Option<PipeHead>);
 
     /// Marks the body about to be entered (one level deeper than now) as one whose UPDATE is the
     /// `foreach` whose source is `source` and nothing else (#4709): the enclosing `reduce` then
@@ -70661,10 +70620,8 @@ mod fold_body {
         source: &super::Expr,
         in_foreach: bool,
         extract: bool,
-        state_kept: bool,
     ) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
-        let previous_kept = SOLE_KEPT.with(|a| a.replace(state_kept));
         SOLE_FOREACH.with(|a| {
             a.set((
                 depth() + 1,
@@ -70674,7 +70631,7 @@ mod fold_body {
             ));
         });
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| a.borrow_mut().take());
-        SoleGuard(previous, previous_pipe, previous_kept)
+        SoleGuard(previous, previous_pipe)
     }
 
     /// [`sole_update_foreach`] for an UPDATE that is a pipe headed by the `foreach` (#4724), or
@@ -70686,12 +70643,9 @@ mod fold_body {
         source: &super::Expr,
         in_foreach: bool,
         extract: bool,
-        fallback: Option<super::OwnedValue>,
         truthy: bool,
-        state_kept: bool,
     ) -> SoleGuard {
         let previous = SOLE_FOREACH.with(Cell::get);
-        let previous_kept = SOLE_KEPT.with(|a| a.replace(state_kept));
         SOLE_FOREACH.with(|a| a.set((0, 0, false, false)));
         let previous_pipe = SOLE_PIPE_HEAD.with(|a| {
             a.borrow_mut().replace(PipeHead {
@@ -70699,18 +70653,16 @@ mod fold_body {
                 source: source.clone(),
                 in_foreach,
                 extract,
-                fallback,
                 truthy,
             })
         });
-        SoleGuard(previous, previous_pipe, previous_kept)
+        SoleGuard(previous, previous_pipe)
     }
 
     impl Drop for SoleGuard {
         fn drop(&mut self) {
             SOLE_FOREACH.with(|a| a.set(self.0));
             SOLE_PIPE_HEAD.with(|a| *a.borrow_mut() = self.1.take());
-            SOLE_KEPT.with(|a| a.set(self.2));
         }
     }
 
@@ -70727,22 +70679,15 @@ mod fold_body {
                 }))
     }
 
-    /// What the UPDATE marked by [`sole_update_pipe_head`] for the fold whose source is `source`
-    /// falls back to when that source is empty, and whether it is empty only while `.` is truthy
-    /// (#4754): `(None, false)` for the plain case.
-    pub(crate) fn sole_update_residue(source: &super::Expr) -> (Option<super::OwnedValue>, bool) {
+    /// Whether the UPDATE marked by [`sole_update_pipe_head`] for the fold whose source is `source` is
+    /// empty only while `.` is truthy (#4754).
+    pub(crate) fn sole_update_needs_truthy(source: &super::Expr) -> bool {
         SOLE_PIPE_HEAD.with(|a| {
             a.borrow()
                 .as_ref()
                 .filter(|head| head.depth == depth() && head.source == *source)
-                .map_or((None, false), |head| (head.fallback.clone(), head.truthy))
+                .is_some_and(|head| head.truthy)
         })
-    }
-
-    /// Whether the UPDATE marked for the body being resolved hands its state on unchanged on a step
-    /// where the `foreach` emits (#4777).
-    pub(crate) fn sole_update_state_kept_here() -> bool {
-        SOLE_KEPT.with(Cell::get)
     }
 
     /// [`sole_update_foreach_here`] when the enclosing fold is a `foreach` too (#4723): a source
@@ -71135,7 +71080,6 @@ mod fold_body {
         _source: &super::Expr,
         _in_foreach: bool,
         _extract: bool,
-        _state_kept: bool,
     ) -> SoleGuard {
         SoleGuard
     }
@@ -71144,19 +71088,13 @@ mod fold_body {
         _source: &super::Expr,
         _in_foreach: bool,
         _extract: bool,
-        _fallback: Option<super::OwnedValue>,
         _truthy: bool,
-        _state_kept: bool,
     ) -> SoleGuard {
         SoleGuard
     }
 
-    pub(crate) fn sole_update_state_kept_here() -> bool {
+    pub(crate) fn sole_update_needs_truthy(_source: &super::Expr) -> bool {
         false
-    }
-
-    pub(crate) fn sole_update_residue(_source: &super::Expr) -> (Option<super::OwnedValue>, bool) {
-        (None, false)
     }
 
     pub(crate) fn sole_update_foreach_in_loop_here(_source: &super::Expr) -> bool {

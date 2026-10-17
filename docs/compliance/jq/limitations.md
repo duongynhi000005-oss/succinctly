@@ -2501,7 +2501,9 @@ is the revert that established what the other one costs.
    ([#4604](https://github.com/rust-works/succinctly/issues/4604)). A `try`/`?` (or `try ... catch empty`) that is the whole
    source of a `foreach` which is the whole UPDATE of a `reduce`, around the destructure of such a marker, is refused too: the
    `try` catches the raise, the source is empty, the `foreach` emits nothing and the `reduce` state is `null`, which jq refuses
-   at the end of the path (`Invalid path expression with result null`; `caught_foreign_destructure`, with the UPDATE marked by
+   at the end of the path (`Invalid path expression with result null`; the fold driver answers the source as empty
+   ([#4792](https://github.com/rust-works/succinctly/issues/4792)) and the `reduce` runs its remaining steps on the state that leaves, so a later step's
+   `select`/`if` condition, a raising step, or a `foreach` body that changes the state decides the final state as it does in jq; `caught_foreign_destructure`, with the UPDATE marked by
    `fold_body::sole_update_foreach`; pinned by
    `test_caught_foreign_marker_destructure_as_the_whole_update_foreach_of_a_reduce_4709`,
    [#4709](https://github.com/rust-works/succinctly/issues/4709)). A pipe headed by that `foreach` is the same UPDATE
@@ -2536,23 +2538,26 @@ is the revert that established what the other one costs.
 
    A `reduce` UPDATE reads, around that `foreach`, a `select(C)` ahead of it and an `if C then FE else . end` with `C` a pure function of the state
    (`.a`, `.a != null`, `.a | length > 0`; `is_pure_of_dot`), and the stages after a `// LITERAL` fallback (`(. | FE) // 5 | tostring` is `"5"`;
-   [#4778](https://github.com/rust-works/succinctly/issues/4778), `settle_emptied`, pinned by
-   `test_caught_foreign_marker_destructure_behind_a_pure_condition_or_after_the_fallback_4778`): the condition is evaluated on the state the step is entered
-   with, and on the state it leaves (`null`, or the transformed fallback), which every later step meets. A condition that fails the entering state or raises
-   on the later one, and a `select` that would drop the fallback itself, keep the answer they had: `select(.a) | (FE // 5)` meets `5` on the second step, where jq raises `Cannot index number`,
-   and a falsy fallback behind a `select` (`select(.) | (FE // false)`, jq's state alternates with the step count) is accepted where jq refuses.
+   [#4778](https://github.com/rust-works/succinctly/issues/4778), `emptied_update`, pinned by
+   `test_caught_foreign_marker_destructure_behind_a_pure_condition_or_after_the_fallback_4778`): the empty step leaves `null` or the fallback and the steps after it run on that state as jq's do
+   ([#4792](https://github.com/rust-works/succinctly/issues/4792)): the second step of `select(.a) | (FE // 5)` meets `5` and raises `Cannot index number`, a `select` that drops the fallback leaves `null`,
+   and a falsy fallback behind a `select` (`select(.) | (FE // false)`) ends on `null` (pinned by
+   `test_caught_foreign_marker_destructure_later_steps_run_on_the_state_left_4792`).
    A literal stage ahead of the `foreach` (`1 | FE`, `"s" | FE`, `null | FE`) is read in a `foreach` UPDATE, a `foreach` EXTRACT or a `reduce` UPDATE
    ([#4782](https://github.com/rust-works/succinctly/issues/4782), `with_register_ambient`, pinned by
    `test_caught_foreign_marker_destructure_behind_a_literal_stage_4782`): the markers are compared with the register the frame names, not
-   with the literal, so a `null` `$x` stays the register by kind (comparing with the literal answered where jq refuses on a `null` document, #4780's first attempt). Not read: a literal stage under an
-   `if . then` (the check reads the literal, not the state), under a fallback or `(FE, 7)` in a `foreach` UPDATE, a stage that computes (`1 | tostring | FE`) and a container literal (`{} | FE`).
+   with the literal, so a `null` `$x` stays the register by kind (comparing with the literal answered where jq refuses on a `null` document, #4780's first attempt). A stage that only computes from its input and moves nothing is the same head
+   ([#4793](https://github.com/rust-works/succinctly/issues/4793), `is_value_head`): a container of literals (`[1] | FE`, `{a:1} | FE`) and `tostring`, `tojson`, `type`, `isnull` and `not` (none of them raises on any input), and in a `reduce` UPDATE
+   `if . then (1 | FE) else . end` reads its condition on the state (pinned by `test_caught_foreign_marker_destructure_behind_a_computed_stage_4793`). Not read, in a `foreach` UPDATE or EXTRACT: such a head under an
+   `if . then`, a fallback or `(FE, 7)`. Not read anywhere: a stage that can raise, navigates or does not emit exactly once (`length`, `.a`, `has("a")`, `{a:(1,2)}`).
 
    In the body of a `reduce` whose source moves the register (`..`, `recurse`, `(.,.a)`) the same `foreach` is read by the position of each step's element
    ([#4777](https://github.com/rust-works/succinctly/issues/4777), `foreign_register_markers_with`'s `moved_at`, pinned by
    `test_caught_foreign_marker_destructure_in_a_reduce_whose_source_moved_the_register_4777`): a step whose element is another node than `$x`'s raises and leaves the state `null`
-   (or the fallback), a step whose element is `$x`'s node raises nothing and leaves the state as it found it, so one raising step decides when the `foreach` hands its state on unchanged
-   (`INIT`, `UPDATE` and `EXTRACT` all `.`); a source that yields only `$x`'s node, or nothing, is answered. Not read there: a `foreach` that changes the state (`(.; 7; .)`: the last step decides),
-   and a binding of the whole document (`. as $x`: it refuses with the document where jq prints `null`, [#4791](https://github.com/rust-works/succinctly/issues/4791)). A `null` `$x` is read
+   (or the fallback), a step whose element is `$x`'s node raises nothing and runs the `foreach` as written, whatever it does to the state (`(.; 7; .)`: since #4792 the verdict is read per
+   step from the element's position alone); a source that yields only `$x`'s node, or nothing, is answered. A binding of the whole document (`. as $x`) is the register on the step whose element is the root and
+   on every step where nothing moved it, so the `foreach` emits there ([#4791](https://github.com/rust-works/succinctly/issues/4791), `unplaced_register_markers`; an UPDATE `emptied_update` sees through is
+   on the register at its first step: pinned by `test_caught_foreign_marker_destructure_of_the_whole_document_4791`). A `null` `$x` is read
    by the element's kind, not its position ([#4790](https://github.com/rust-works/succinctly/issues/4790), pinned by
    `test_caught_foreign_null_marker_in_a_reduce_body_whose_source_moved_the_register_4790`): `null` is `jv_identical` to the register by kind, so it is the register on a step whose element is
    `null` and only there, and on a step whose element is known not to be (`is_register_navigation` now reads `..` and a comma of navigations) its destructure's step raises, the one scalar `try`
