@@ -55439,6 +55439,95 @@ fn caught_leading_destructure_emits_nothing(source: &Expr) -> bool {
     }
 }
 
+/// The `first`/`limit`/`nth` of a `?//` chain [`take_wrapped_bare_chain`] reads, with the chain reduced to
+/// its bare last alternative (#4775); `None` when `e` is not that shape. On a `.` that is not jq's
+/// register each destructuring alternative raises at its first step (`path_intact`), `?//` retries
+/// onto the next, and the bare one is the only alternative that ever emits: a by-value drive of the
+/// whole chain emits the destructured alternative's output too, and once more after the `break` of
+/// the enclosing `first`/`limit` is caught by the chain, so it counted twice what jq emits once. Only
+/// the chain the wrappers hold is rewritten, and only one whose earlier alternatives are plain
+/// patterns (literal keys) that bind no variable the last does not (their `null` binding in the retry
+/// is then unobservable).
+fn bare_last_alternative(e: &Expr) -> Option<Expr> {
+    fn plain_step(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(_) => false,
+            Pattern::Object(entries) => {
+                !entries.is_empty()
+                    && entries.iter().all(|entry| {
+                        matches!(entry.key, ObjectKey::Literal(_))
+                            && (matches!(entry.pattern, Pattern::Var(_))
+                                || plain_step(&entry.pattern))
+                    })
+            }
+            Pattern::Array(items) => {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|item| matches!(item, Pattern::Var(_)) || plain_step(item))
+            }
+        }
+    }
+    fn chain(e: &Expr) -> Option<Expr> {
+        let Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } = unwrap_paren(e)
+        else {
+            return None;
+        };
+        let (last, earlier) = patterns.split_last()?;
+        if earlier.is_empty()
+            || !matches!(unwrap_paren(expr), Expr::Identity)
+            || !matches!(last, Pattern::Var(_))
+            || !earlier.iter().all(plain_step)
+        {
+            return None;
+        }
+        let mut last_names = Vec::new();
+        collect_pattern_var_names(last, &mut last_names);
+        let mut earlier_names = Vec::new();
+        for pattern in earlier {
+            collect_pattern_var_names(pattern, &mut earlier_names);
+        }
+        earlier_names
+            .iter()
+            .all(|name| last_names.contains(name))
+            .then(|| Expr::AsPattern {
+                expr: expr.clone(),
+                patterns: vec![last.clone()],
+                body: body.clone(),
+            })
+    }
+    fn through_wrappers(e: &Expr, budget: u8) -> Option<Expr> {
+        let budget = budget.checked_sub(1)?;
+        match unwrap_paren(e) {
+            Expr::Try { expr, catch: None } => Some(Expr::Try {
+                expr: Box::new(through_wrappers(expr, budget)?),
+                catch: None,
+            }),
+            Expr::Optional(inner) => {
+                Some(Expr::Optional(Box::new(through_wrappers(inner, budget)?)))
+            }
+            Expr::FirstExpr(inner) => {
+                Some(Expr::FirstExpr(Box::new(through_wrappers(inner, budget)?)))
+            }
+            Expr::Limit { n, expr } => Some(Expr::Limit {
+                n: n.clone(),
+                expr: Box::new(through_wrappers(expr, budget)?),
+            }),
+            Expr::NthExpr { n, expr } => Some(Expr::NthExpr {
+                n: n.clone(),
+                expr: Box::new(through_wrappers(expr, budget)?),
+            }),
+            other => chain(other),
+        }
+    }
+    take_wrapped_bare_chain(e)?;
+    through_wrappers(e, WRAPPED_CHAIN_DEPTH)
+}
+
 fn drive_fold_source_with<S: EvalSemantics>(
     source: &Expr,
     foreach_source: bool,
@@ -55462,6 +55551,22 @@ fn drive_fold_source_with<S: EvalSemantics>(
     } else {
         source
     };
+    // #4775: a `first`/`limit`/`nth` of a `?//` chain on a container that is provably no node of the
+    // register (it is not the register's value, which the frame holds live): the destructuring
+    // alternatives raise and only the bare one emits.
+    let bare_last_resolved = (S::TAG == EvalTag::Jq
+        && foreach_source
+        && !ambient.trackable
+        && matches!(ambient.snapshot, Snapshot::No)
+        && matches!(ambient.value, OwnedValue::Array(_) | OwnedValue::Object(_))
+        && !ambient.frame.register_loss.is_lost()
+        && ambient
+            .frame
+            .register()
+            .is_some_and(|register| register != ambient.value))
+    .then(|| bare_last_alternative(source))
+    .flatten();
+    let source = bare_last_resolved.as_ref().unwrap_or(source);
     // #4604: a `select(f($x))` whose condition is a pure function of the bound markers decides by their
     // values, as the `if` above does: one that passes hands the register on, as `select($x)` of a truthy
     // marker does ([`collapse_marker_pipes`]).
