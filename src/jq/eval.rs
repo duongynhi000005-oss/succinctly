@@ -57489,11 +57489,19 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             // #4440: except in the one step a fold marked as having `.` on the
                             // register ([`fold_body::acc_is_register_here`]), where the retried
                             // alternative starts from it as outside a fold.
+                            // #4608: and in the one step a fold marked as having its accumulator
+                            // provably off the register ([`fold_body::acc_off_register_here`]): the
+                            // error is the exact kind (a guess is the uncatchable
+                            // `GuessedPathRefusal`, never matched here) raised on a value this
+                            // body computed, which jq refuses whatever the register is, and its `?//`
+                            // retries. The mark holds at that body's depth only, so what a nested
+                            // fold's body raises is not retried here.
                             let retries = path_alternative_retries(&escape, is_last)
                                 || (S::TAG == EvalTag::Jq
                                     && !is_last
                                     && (fold_body::depth() == 0
-                                        || fold_body::acc_is_register_here())
+                                        || fold_body::acc_is_register_here()
+                                        || fold_body::acc_off_register_here())
                                     && matches!(
                                         &escape,
                                         EvalEscape::Error(e) if e.is_untracked_navigation_error()

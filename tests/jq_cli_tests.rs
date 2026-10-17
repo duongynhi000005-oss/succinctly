@@ -161637,3 +161637,385 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
         ),
     ])
 }
+
+/// #4608: a `?//` bind in the body of a fold whose accumulator the walk places off jq's register (a computed
+/// container, not INIT `.`) retries its next alternative when the first one's body raises jq's own path
+/// error (`. as $q ?// $z | (if $q then true else empty end | .a?)`: alternative 1 binds the state, runs
+/// `true | .a?`, and `.a?` does not suppress the path-mode error on a value that is not the register), as it
+/// does outside a fold. The raise was final in a fold body, so `foreach`/`reduce` UPDATE and EXTRACT refused
+/// where jq answers, and a `try` around `isempty(...)` swallowed the stale raise, so `del` deleted the document
+/// where jq refuses at the end of the path. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_alt_bind_body_path_error_retries_in_a_fold_body_off_the_register_4608() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"{}",
+            r"(foreach (1,2) as $k ({}; try isempty(. as $q ?// $z | ($q | .a?)); .)) |= 9",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"(reduce (1,2) as $k (.; [. as $q ?// $z | ($q | select(.) | .a?)]|length)) |= 9",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(reduce .[]? as $k ([]; . as $q ?// [$z] | (if $q then true else empty end | .a?)))",
+            "",
+            "Invalid path expression near attempt to access element 0 of []",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce (1,2) as $k ({}; try (isempty(. as $q ?// $z | .a?) or (.a | .b)?))) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r"0",
+            r"del(foreach . as $k (null; .; try (isempty(. as $q ?// $z | ($q | .a?)) or (.a | .b)?)))",
+            "0\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"del(foreach .. as $k (0; .; first(. as $q ?// $z | (if $q then 7 else 8 end | .a?))))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 8",
+            5,
+        ),
+        (
+            r"[]",
+            r#"path(reduce . as $k ({"a":5}; first(. as $q ?// [$z] | ($q | .a?))))"#,
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(foreach . as $k ({"a":5}; .; isempty(. as $q ?// $z | (if $q then {a:1} else empty end | .a))))"#,
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"null",
+            r"del(reduce (1,2) as $k (.; isempty(. as $q ?// [$z] | (if $q then true else empty end | .a?))))",
+            "",
+            "Invalid path expression near attempt to access element 0 of true",
+            5,
+        ),
+        (
+            r"{}",
+            r#"path(foreach .. as $k ({"a":5}; . as $q ?// [$z] | (if $q then {a:1} else empty end | .a); .))"#,
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":5}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach .. as $k ({}; .; first(. as $q ?// [$z] | (if $q then 1 else empty end | .a?)))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of {}",
+            5,
+        ),
+        (
+            r"null",
+            r"(foreach .a? as $k (0; try (isempty(. as $q ?// $z | ($q | select(.) | .a?)) or (.a | .b)?); .)) |= 9",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"0",
+            r"del(reduce .. as $k ([]; (. as $q ?// $z | (if $q then true else empty end | .a?)) // 3))",
+            "",
+            "Invalid path expression with result 3",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach .[]? as $k ({}; .; . as $q ?// $z | (if $q then true else empty end | .a?)))",
+            "{\"a\":{\"b\":1}}\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"(foreach .. as $k ({}; .; try isempty(. as $q ?// $z | ($q | select(.) | .a?)))) |= 9",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"false",
+            r"(reduce .. as $k ([]; try isempty(. as $q ?// $z | (if $q then 1 else empty end | .a?)))) |= 9",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(reduce (1,2) as $k (.; try (isempty(. as $q ?// $z | (if $q then true else empty end | .a?)) or (.a | .b)?)))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach . as $k (0; isempty(. as $q ?// $z | (if $q then {a:1} else empty end | .a)); .))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"(foreach (1,2) as $k ({"a":5}; .; (. as $q ?// $z | (if $q then {a:1} else empty end | .a)) // 3)) |= 9"#,
+            "",
+            "Invalid path expression with result 3",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(foreach (1,2) as $k ([]; try (. as $q ?// [$z] | .a?); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"true",
+            r#"del(foreach .. as $k ({"a":5}; . as $q ?// [$z] | .a?; .))"#,
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":5}",
+            5,
+        ),
+        (
+            r"null",
+            r"del(foreach .. as $k ([]; [. as $q ?// $z | (if $q then 1 else empty end | .a?)]|length; .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+        (
+            r"false",
+            r"path(foreach . as $k (0; .; . as $q ?// [$z] | ($q | .a?)))",
+            "",
+            "Invalid path expression near attempt to access element 0 of 0",
+            5,
+        ),
+        (
+            r"false",
+            r#"del(reduce .. as $k ({"a":5}; try isempty(. as $q ?// $z | (if $q then true else empty end | .a?))))"#,
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"false",
+            r"del(foreach .. as $k (null; .; try (. as $q ?// [$z] | ($q | .a?))))",
+            "false\n",
+            "",
+            0,
+        ),
+        (
+            r"[]",
+            r"path(foreach (1,2) as $k ([]; .; try (. as $q ?// $z | ($q | .a?))))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce .[]? as $k ({}; first(. as $q ?// $z | ($q | select(.) | .a?)))) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(reduce .. as $k ({}; try (. as $q ?// [$z] | .a?)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (1,2) as $k ({}; .; . as $q ?// $z | (if $q then 7 else 8 end | .a?))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 8",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"(foreach .. as $k ({"a":5}; (. as $q ?// [$z] | (if $q then true else empty end | .a?)) // 3; .)) |= 9"#,
+            "",
+            "Invalid path expression near attempt to access element 0 of {\"a\":5}",
+            5,
+        ),
+    ])
+}
+
+/// #4608: the retry stays off where jq refuses: a nested `limit`/`label`/`getpath`/fold/`def` around the
+/// bind in a fold body marked off the register raises at the end of the path in jq, and a `try`,
+/// `isempty` or `del` around it must not turn that into an answer. Every row captured from
+/// `/usr/bin/jq` 1.7.1 (all refuse), both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_alt_bind_retry_stays_off_for_nested_bodies_in_a_fold_off_the_register_4608() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"[]",
+            r"del(reduce .a? as $k ({}; [(. as [$q] ?// $z | (foreach (1,2) as $j (.; .; .a?)))][0]?))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r"true",
+            r"del(reduce .a? as $k (null; try (limit(1; . as $q ?// $z | (if $q then true else empty end | .a?)))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(reduce .a? as $k (0; try ((. as $q ?// [$z] | (def f: .a?; f)))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(reduce .a? as $k ([]; try isempty((. as $q ?// $z | (reduce (1,2) as $j (.; .a?))))))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r"null",
+            r"path(reduce (1,2) as $k (0; isempty((. as [$q] ?// $z | (. as {a:$w} ?// $v | .b?)))))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 0",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $k (0; isempty((. as [$q] ?// $z | (. as {a:$w} ?// $v | .b?))); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of 0",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach (1,2) as $k ([]; try isempty(label $f | (. as $q ?// $z | (if $q then true else empty end | .a?))); .))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"[[1]]",
+            r"del(reduce (1,2) as $k (null; isempty(limit(1; . as $q ?// $z | (if $q then true else empty end | .a?)))))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach .[]? as $k ([]; [(. as [$q] ?// $z | (. as {a:$w} ?// $v | .b?))][0]?; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of []",
+            5,
+        ),
+        (
+            r"[[1]]",
+            r"(foreach .[]? as $k (null; [(. as $q ?// [$z] | (def f: .a?; f))][0]?; .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of null",
+            5,
+        ),
+        (
+            r"[]",
+            r"path(reduce (1,2) as $k (null; ((. as [$q] ?// $z | (foreach (1,2) as $j (.; .; .a?)))) | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r"[1]",
+            r"del(foreach .[]? as $k (null; isempty(limit(1; . as $q ?// $z | (if $q then true else empty end | .a?))); .))",
+            "",
+            "Invalid path expression with result true",
+            5,
+        ),
+        (
+            r"{}",
+            r#"(reduce .a? as $k ({}; (. as $q ?// $z | getpath(["a"])))) |= 9"#,
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $k ({}; .; [label $f | (. as $q ?// $z | (if $q then true else empty end | .a?))][0]?))",
+            "",
+            "Invalid path expression near attempt to access element 0 of []",
+            5,
+        ),
+        (
+            r"{}",
+            r"del(reduce .[]? as $k ({}; label $f | (. as $q ?// $z | (if $q then true else empty end | .a?))))",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r"[[1]]",
+            r"path(foreach (1,2) as $k ([]; [(. as $q ?// [$z] | (def f: .a?; f))][0]?; .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of []",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach .[]? as $k ([]; .; isempty((. as $q ?// $z | (reduce (1,2) as $j (.; .a?)))))) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            r"{}",
+            r"(foreach (1,2) as $k ([]; [(. as $q ?// $z | (reduce (1,2) as $j (.; .a?)))][0]?; .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of []",
+            5,
+        ),
+        (
+            r"[]",
+            r#"(foreach (1,2) as $k (0; try isempty((. as $q ?// $z | getpath(["a"]))); .)) |= 9"#,
+            "",
+            "Invalid path expression with result false",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(foreach (1,2) as $k (0; isempty((. as [$q] ?// $z | (foreach (1,2) as $j (.; .; .a?)))); .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of 0",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(foreach .[]? as $k (0; .; isempty((. as $q ?// $z | getpath(["a"])))))"#,
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+    ])
+}

@@ -948,10 +948,17 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   **Still divergent** (the same shape, not covered): a `foreach` over INIT `.` and a navigating source whose EXTRACT reads the
   loop variable after a retry (`path(foreach .[]? as $k (.; . as [$q] ?// $z | .; $k))` on `[[1],[1]]` raises where jq prints
   `[0]`, `[1]`), a source that yields `null` elements (`path(reduce .[]? as $k (.; try (. as [$a] ?// $a | $a)))` on
-  `[null,[1]]` raises where jq prints `[]`; the gate is a non-`null` element, as #4507's), and an EXTRACT `try`
-  whose operand wraps the bind in `isempty(...) or ...` (`path(foreach (1,2) as $k ([]; .; try (isempty(. as [$q] ?// $z |
-  if $q then true else empty end) or .b?)))` on `[]` answers where jq raises,
-  [#4608](https://github.com/rust-works/succinctly/issues/4608)).
+  `[null,[1]]` raises where jq prints `[]`; the gate is a non-`null` element, as #4507's), and a `reduce` operand of
+  `and`/`or` over INIT `.` on a `null` document (`path(foreach .a? as $k (.; .; try ((reduce . as [$a] ?// $a ({"a":5}; .a)) and
+  (.a | .b)?)))` answers where jq raises `result false`: a `null` state is on a `null` register by kind,
+  [#4806](https://github.com/rust-works/succinctly/issues/4806)).
+  **Since [#4608](https://github.com/rust-works/succinctly/issues/4608)** the first alternative's own path error retries the next one in a
+  fold body whose accumulator is marked off the register too (`fold_body::acc_off_register_here`, in `resolve_as_pattern`'s escape arm):
+  `. as $q ?// $z | (if $q then true else empty end | .a?)` binds the state, runs `true | .a?`, and `.a?` does not suppress the
+  path-mode error on a value that is not the register, so jq retries onto `$z` where the branch is empty. It was final in a `foreach`/`reduce`
+  UPDATE or EXTRACT, so those refused where jq answers and a `try` around `isempty(...)` swallowed the stale raise (`del` deleted the
+  document where jq refuses at the end of the path). Pinned by
+  `test_alt_bind_body_path_error_retries_in_a_fold_body_off_the_register_4608`.
 
   **Since [#4497](https://github.com/rust-works/succinctly/issues/4497)** a `foreach` source that is a
   `first`/`limit`/`nth` of a `?//` chain with a bare `$var` alternative prints once in `path()` (jq's `first` is a
