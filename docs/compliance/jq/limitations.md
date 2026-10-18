@@ -728,21 +728,29 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed six paths where jq prints
   two): there `.` is the register at the inner source (`acc_is_register_here`), which the outer fold's mark
   now also sets for such a source (`alt_bind_update_on_register`), and the routing requires a tracked ambient
-  (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value. Still by value,
-  where the routed source refuses rows jq answers: the same source in any other fold-body position (a `try`,
-  `if` or comma around the inner `foreach`, the outer EXTRACT, a third nesting level), and under an outer
-  source that `cannot_move_register` reads as not moving it but that navigates (`foreach (last(.[]?)) as $i
-  (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` prints three paths where jq prints one, as it
-  did before). Over the 157 bounded-chain operands (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
+  (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value.
+  Since [#4835](https://github.com/rust-works/succinctly/issues/4835) the same marks reach the other positions
+  a chain source meets `.` on the register in (`body_holds_chain_foreach`): behind a handler-less `try`/`?`,
+  as a comma item, in a branch of an `if` whose condition cannot move the register, in the outer `foreach`'s
+  EXTRACT, in the UPDATE of a middle `foreach` (a third nesting level), and under an outer source `last(f)`
+  over navigation (`is_last_of_navigation`, which jq's `reduce` backtracks: `foreach (last(.[]?)) as $i (.;
+  foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed three paths where jq prints one). Still by
+  value: an `if` whose condition navigates (`if .a then FE else . end` moves jq's register before the branch
+  runs) and an inner INIT that navigates, behind a wrapper (the direct UPDATE of #4818 keeps its
+  tracked-ambient guard), where the routed source refuses rows jq answers. Over the 174 bounded-chain operands
+  (`--stage-only --sample 20000 --seed 4835`, 20,027 rows, against a `main` build) MATCH went 17,360 to 17,401, DIFF 141 to 106 and
+  REFUSE_WRONG 2,509 to 2,503 with ACCEPT_WRONG (17) unchanged and no regression; a 45,360-row nested-fold grid (the #4818 one) moved
+  1,475 rows to MATCH and none away, and a 13,500-row grid over the wrapper positions 660. Over the 157 bounded-chain operands of #4818 (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
   `/usr/bin/jq` 1.7.1, against a `main` build) MATCH went 17,388 to 17,411, DIFF 133 to 114 and ACCEPT_WRONG
   30 to 28, with no regression; a 45,360-row nested-fold grid (36 chain sources x 5 inner INITs x 7 documents
   x `path`/`del`/`first(path)`) moved 878 rows to MATCH and none away. Of the other `label`/`break` consumers
   over such a chain, `any`/`all` match and `isempty` is routed the same way since
   [#4819](https://github.com/rust-works/succinctly/issues/4819) (below). Pinned by
   `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`, for the fold-UPDATE source
-  `test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818` and, for
-  what the routing leaves alone,
-  `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669`;
+  `test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`, for the
+  other positions `test_foreach_source_bounded_alt_chain_behind_stages_in_other_fold_body_positions_counts_every_emission_4835`
+  and, for what the routing leaves alone,
+  `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_and_literal_heads_4669`;
   over the 113 `first`/`limit`/`nth` `?//` operands,
   `--stage-only` (235,067 rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) MATCH went 202,119 to 202,931 and DIFF 2,280 to 1,608 with ACCEPT_WRONG (329) unchanged;
@@ -762,7 +770,7 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   [#4829](https://github.com/rust-works/succinctly/issues/4829) (the `isempty` arm hands back a boolean, so the
   resolver does not read the chain as the register by kind). Pinned by
   `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`,
-  `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819` and
+  `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_excluded_operands_4819` and
   `test_foreach_source_isempty_of_alt_chain_behind_null_folds_and_defs_counts_every_emission_4829`; over the 51
   `isempty` `?//` operands, `--stage-only` (104,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   MATCH went 96,607 to 96,770, DIFF 396 to 235 and ACCEPT_WRONG 4 to 2, no regression. Since

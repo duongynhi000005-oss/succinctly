@@ -164888,12 +164888,11 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_466
 /// leaves alone, and the shapes beside it. Value mode never reached the routed drive; a pipe that starts
 /// at a literal keeps the by-value answer for a `del` through it (the first draft of the routing refused
 /// the `null` ones jq answers); a chain in a non-output position counts as jq does. Every row captured
-/// from jq 1.7.1 with `-c`, except the last six, which are the fold-body positions #4818's routing does
-/// not reach (each has jq's count in its comment: the recorded divergences in `limitations.md`). The plain
-/// nested UPDATE is routed since #4818 (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
+/// from jq 1.7.1 with `-c`. The fold-body positions it used to pin at the by-value count are routed since
+/// #4818 and #4835 (`..._in_a_fold_update_counts_every_emission_4818`, `..._in_other_fold_body_positions_..._4835`).
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
-fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669(
+fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_and_literal_heads_4669(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
@@ -164977,54 +164976,6 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal
             r#"{"a":1}"#,
             r"path(foreach (limit(2; (.,.) | map(1) | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
             "[]\n[]\n",
-            "",
-            0,
-        ),
-        // a `try` around the inner `foreach`: jq prints 2 paths, the by-value count is 6.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n",
-            "",
-            0,
-        ),
-        // an `if` around it: jq prints 2 paths, the by-value count is 6.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; if true then foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .) else . end; .))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n",
-            "",
-            0,
-        ),
-        // a comma beside it in the UPDATE: jq prints 4 paths, the by-value count is 8.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)), .; .))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
-            "",
-            0,
-        ),
-        // the outer EXTRACT: jq prints 2 paths, the by-value count is 6.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; .; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n",
-            "",
-            0,
-        ),
-        // a third nesting level: jq prints 4 paths, the by-value count is 12.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
-            "",
-            0,
-        ),
-        // an outer source `last(.[]?)`, which `cannot_move_register` reads as not moving the register: jq prints 1 paths, the by-value count is 3.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (last(.[]?)) as $i (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
-            "[]\n[]\n[]\n",
             "",
             0,
         ),
@@ -165201,6 +165152,183 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_e
     ])
 }
 
+/// #4835: the #4818 routing in the other fold-body positions a `?//` chain source meets `.` on the register
+/// in: behind a `try` or `?`, a comma item or an `if` branch (condition `true`), the outer `foreach`'s
+/// EXTRACT, a third nesting level, and under an outer source `last(.[]?)` whose navigation jq's `reduce`
+/// backtracks. The last three rows are the controls that stay by value: an `if` whose condition navigates
+/// (`.a`) moves jq's register before the branch runs, and an inner INIT that navigates does too (each has
+/// jq's count in its comment; the `del` row matches jq). Every other row captured from jq 1.7.1 with `-c`.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_bounded_alt_chain_behind_stages_in_other_fold_body_positions_counts_every_emission_4835(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))?; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; if true then foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .) else . end; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)), .; .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; ., (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; .; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; .; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (last(.[]?)) as $i (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (last(.[]?)) as $i (.; . as {a:$a} ?// $a | .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (last(.a, .b)) as $i (.; first(. as {a:$a} ?// $a | .); .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try foreach (first((.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try foreach (isempty((.,.)|. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; .; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .)))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n[]\n[\"a\"]\n[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[[1]]",
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (last(.[]?)) as $i (.; . as {a:$a} ?// $a | .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.a; .; .); .))",
+            "{}\n",
+            "",
+            0,
+        ),
+        // jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; if .a then foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .) else . end; .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // jq prints 2 paths, the by-value count is 3.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.a; .; .); .))",
+            "[\"a\"]\n[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4819: `isempty(..)` over a `?//` chain as a `foreach` source. jq defines `isempty` with a
 /// `label`/`break` the chain's `?//` catches, so the chain's destructuring alternative emits an element
 /// the consumer refuses, `?//` retries the bare alternative and the retry's emission is refused too: the
@@ -165303,13 +165431,13 @@ fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Resu
 /// alone. Value mode never reached the routed drive (jq emits the `false` twice there). The rows after the first
 /// are the operands the routing still excludes -- a fold in the stages after an `isempty` whose chain sits behind a
 /// `?`, and a `def` in those stages -- which keep the by-value count (two paths where jq prints one; #4829 routes the
-/// rest), and the last row, a third nesting level, which keeps it too (see below). Inside another fold's UPDATE the
-/// source is routed since #4818
+/// rest). Inside another fold's UPDATE the source is routed since #4818
 /// (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
 /// Every other row captured from jq 1.7.1 with `-c`.
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
-fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819() -> Result<()> {
+fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_excluded_operands_4819(
+) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":1}"#,
@@ -165337,14 +165465,6 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
             "null",
             r"del(. as [$q] ?// $q | (foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .)))",
             "null\n",
-            "",
-            0,
-        ),
-        // A third nesting level keeps the by-value count: jq prints four paths, this prints eight.
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .); .))",
-            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
             "",
             0,
         ),
