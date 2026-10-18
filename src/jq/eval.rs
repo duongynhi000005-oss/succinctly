@@ -54403,16 +54403,85 @@ fn take_wrapped_bare_chain(e: &Expr) -> Option<&Expr> {
 /// not a chain, the previous answer (a native-stack bound for a pathological nesting).
 const WRAPPED_CHAIN_DEPTH: u8 = 16;
 
+/// Whether `n` is a literal or a comma of literals: a count the resolver's `limit`/`nth` arms take as
+/// their outer loop ([`take_wrapped_bare_chain`]).
+fn is_literal_count(n: &Expr) -> bool {
+    let literal = |n: &Expr| matches!(unwrap_bind_source(n), Expr::Literal(_));
+    match unwrap_bind_source(n) {
+        Expr::Comma(items) => items.iter().all(literal),
+        other => literal(other),
+    }
+}
+
+/// Whether `e` is a `first`/`limit`/`nth` with a literal count, read through a `try`/`?` and a
+/// wrapper under a wrapper, whose operand holds a `?//` chain with a bare `$var` alternative behind
+/// other stages -- `limit(2; (., 1) | . as {a:$a} ?// $a | .)` (#4669). [`take_wrapped_bare_chain`]
+/// reads the chain only as the operand itself (or its leading comma leaf), so a comma stage in front
+/// of it left the source to the by-value drive, which has no register to refuse an emission against:
+/// the chain's destructuring alternative emits an element the consumer refuses (the pattern's step
+/// moved the register off it), `?//` retries the bare alternative, and the retry counts against the
+/// bound again. The by-value drive counted the first emission as delivered (or not at all), so
+/// `path(foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .))` printed three outputs where jq prints one.
+///
+/// The operand is read only if it holds no fold, `def` or call of one (those are not modelled
+/// by the resolver's walk of a bound and keep their by-value answer) and no pipe that starts at a bare
+/// `null`.
+fn bounded_chain_behind_stages(e: &Expr) -> bool {
+    fn holds_bare_chain(operand: &Expr) -> bool {
+        crate::jq::walk::any_subexpr(operand, &mut |e| {
+            matches!(e, Expr::AsPattern { patterns, .. }
+                if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
+        })
+    }
+    fn holds_unmodelled(operand: &Expr) -> bool {
+        crate::jq::walk::any_subexpr(operand, &mut |e| {
+            matches!(
+                e,
+                Expr::Reduce { .. }
+                    | Expr::Foreach { .. }
+                    | Expr::FuncDef { .. }
+                    | Expr::DefCall { .. }
+            )
+        })
+    }
+    // A pipe that starts at a bare `null` is #4756's/#4775's: the chain beneath it is read as the
+    // register by kind there, and the resolver's walk refuses a `del` through it that main answers.
+    fn starts_at_null(operand: &Expr) -> bool {
+        crate::jq::walk::any_subexpr(operand, &mut |e| {
+            matches!(e, Expr::Pipe(stages)
+                if matches!(stages.first().map(unwrap_bind_source), Some(Expr::Literal(Literal::Null))))
+        })
+    }
+    fn operand_ok(operand: &Expr) -> bool {
+        holds_bare_chain(operand) && !holds_unmodelled(operand) && !starts_at_null(operand)
+    }
+    fn go(e: &Expr, budget: u8) -> bool {
+        let Some(budget) = budget.checked_sub(1) else {
+            return false;
+        };
+        match unwrap_bind_source(e) {
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
+            Expr::Limit { n, expr } if is_literal_count(n) => operand_ok(expr),
+            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+                if is_literal_count(n) =>
+            {
+                operand_ok(expr)
+            }
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                operand_ok(inner)
+            }
+            _ => false,
+        }
+    }
+    go(e, WRAPPED_CHAIN_DEPTH)
+}
+
 fn wrapped_bare_chain(e: &Expr, budget: u8) -> Option<&Expr> {
     let budget = budget.checked_sub(1)?;
     if let Expr::Try { expr, catch: None } | Expr::Optional(expr) = unwrap_bind_source(e) {
         return wrapped_bare_chain(expr, budget);
     }
-    let literal = |n: &Expr| matches!(unwrap_bind_source(n), Expr::Literal(_));
-    let literals = |n: &Expr| match unwrap_bind_source(n) {
-        Expr::Comma(items) => items.iter().all(literal),
-        other => literal(other),
-    };
+    let literals = is_literal_count;
     // #4537: `first((CHAIN), 1)` takes the chain's first output, as `first(CHAIN)` does.
     // #4663: so does `limit(n; (CHAIN), X)`.
     fn leading_leaf(inner: &Expr) -> &Expr {
@@ -55934,6 +56003,14 @@ fn drive_fold_source_with<S: EvalSemantics>(
             null_by_kind_at_fold,
         ))
         || destructures_unplaced_register
+        // #4669: a `first`/`limit`/`nth` over a `?//` chain behind other stages (`(., 1) | CHAIN`): the
+        // chain's refused emission counts against the bound and `?//` retries it, which only the
+        // resolver's walk of a bound models. Outside every fold body, as [`take_wrapped_bare_chain`]'s
+        // own routing is: inside one the routed source refuses rows jq answers.
+        || (S::TAG == EvalTag::Jq
+            && foreach_source
+            && fold_body::depth() == 0
+            && bounded_chain_behind_stages(source))
         // #4677/#4682: the part of a bare `//` or `try ... catch` source that always runs.
         || (S::TAG == EvalTag::Jq
             && foreach_source
