@@ -612,6 +612,7 @@ surface (#1512):
 | `IN(s)`, `IN(src; s)`                                | Membership test                               |
 | `ltrimstr(s)`                                        | Strip a leading string prefix                 |
 | `limit(n; f)`                                        | First `n` outputs of `f`                      |
+| `last`, `last(f)`                                    | Last element / last output of `f` (#3560)     |
 | `isempty(f)`                                         | True if `f` produces no output                |
 | `debug`, `debug(msg)`                                | Print to stderr, pass value through           |
 | `infinite`, `isnan`                                  | IEEE 754 infinity literal / NaN test          |
