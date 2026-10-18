@@ -347,7 +347,9 @@ Two routes carry no `CommentTree` at all and so preserve nothing — not anchors
 comments, not style. Both predate #763 and neither is specific to anchors: a filter
 yielding *multiple* results (anything with a comma) loses its cursor to
 `GenericResult::Many` before `evaluate_yaml_cursor` can capture one, and `--eval-all`
-evaluates through the owned-value route (#4380). `--inplace` used to be a third and no
+evaluates through the owned-value route (#4380) -- unless its filter only navigates or
+writes a literal (`m2_gate.rs`'s `eval_all_matches_per_document`), when the run is
+rerouted through the plain route and keeps all three. `--inplace` used to be a third and no
 longer is: since #1349 it keeps comments, style and anchors.
 
 **succinctly never emits YAML it cannot read back — real yq does.** A `*name` is written

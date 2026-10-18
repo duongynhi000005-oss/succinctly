@@ -181,6 +181,59 @@ pub fn can_use_m2_streaming(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `yq --eval-all` answers `expr` the way it would answer each document
+/// on its own (#4380).
+///
+/// Real yq's `ea` is the ordinary evaluator with the context set to *every*
+/// document of every file at once; the plain mode evaluates the same filter
+/// with the context set to one file's documents. Measured against yq v4.53.3,
+/// `[.]` collects `ea`'s whole list but only a document in plain mode, `,` runs
+/// its left operand over every document before its right, and `keys`,
+/// `|= . + 1` and `.a = .b` all see the list. Navigation, and a write whose right
+/// side is a literal, touches each document independently -- and the plain route
+/// is the one that keeps comments, anchors and flow/quote style, which the
+/// owned-value route `--eval-all` takes carries none of.
+///
+/// The set is a deliberate whitelist: anything not named here (a builtin, a
+/// variable, `,`, a collector, an operator, a right side that reads the
+/// document) stays on the `--eval-all` route, where a wrong answer is the
+/// presentation loss this issue already records and not a changed value.
+///
+/// It claims "no worse than the owned-value route", not "byte for byte": `ea`
+/// has quirks neither route reproduces (it doubles every result of `.[0]` over a
+/// stream of arrays, and separates the results of `.[]` across files differently),
+/// and the plain route has its own gaps (see the limitations doc).
+pub fn eval_all_matches_per_document(expr: &Expr) -> bool {
+    match expr {
+        Expr::Builtin(Builtin::Del(path)) => navigates_only(path),
+        Expr::Assign { path, value } | Expr::AlternativeAssign { path, value } => {
+            navigates_only(path) && matches!(**value, Expr::Literal(_))
+        }
+        Expr::Update { path, filter } => {
+            navigates_only(path) && matches!(**filter, Expr::Literal(_))
+        }
+        Expr::CompoundAssign { path, value, .. } => {
+            navigates_only(path) && matches!(**value, Expr::Literal(_))
+        }
+        read => navigates_only(read),
+    }
+}
+
+/// `.`, fields, indexes, slices, `.[]` and `..`, however they are chained.
+fn navigates_only(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::RecursiveDescent => true,
+        Expr::Optional(inner) | Expr::Paren(inner) => navigates_only(inner),
+        Expr::Pipe(stages) => stages.iter().all(navigates_only),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +329,81 @@ mod tests {
         assert!(can_use_m2_streaming(&parse("recurse")));
         assert!(!can_use_m2_streaming(&parse(".. | length")));
         assert!(!can_use_m2_streaming(&parse("[..]")));
+    }
+
+    /// #4380: `--eval-all` takes the per-document route only for a filter real
+    /// yq answers the same way in both modes. Each `false` row is one measured
+    /// against yq v4.53.3 to differ between `ea` and plain evaluation over
+    /// two documents: `[.]` collects the whole list, `,` runs its left operand
+    /// over every document before its right, `.a = .b` and `|= . + 1` read the
+    /// list, and `keys`/`$x`/`select` are builtins or bindings whose list
+    /// handling this gate does not claim.
+    #[test]
+    fn eval_all_per_document_gate_admits_only_navigation_and_literal_writes_4380() {
+        let parse = |f: &str| {
+            succinctly::jq::parse_program_with_mode_and_extensions(
+                f,
+                succinctly::jq::ParserMode::Yq,
+                true,
+            )
+            .expect("parses")
+            .expr
+        };
+        for f in [
+            ".",
+            ".a",
+            ".a.b",
+            ".a?",
+            "(.a)",
+            ".a | .b",
+            ".[]",
+            ".[0]",
+            ".[1:]",
+            "..",
+            ".a[]",
+            ".a[0]",
+            ".a = 9",
+            ".a = \"s\"",
+            ".a = null",
+            ".a.b |= 5",
+            ".a //= 7",
+            ".n += 1",
+            ".n -= 1",
+            ".[] = 1",
+            ".[0] = 5",
+            ".l[1:] = 5",
+            ".. = 1",
+            ".a[].b |= 5",
+            "del(.a)",
+            "del(.a.b)",
+            "del(.[0])",
+        ] {
+            assert!(eval_all_matches_per_document(&parse(f)), "{f}");
+        }
+        for f in [
+            "[.]",
+            ".a, .b",
+            "(.a, .b)",
+            ".a = .b",
+            ".a |= . + 1",
+            ".a |= .b",
+            ".n += .m",
+            ".a //= .b",
+            "keys",
+            "length",
+            ".a | length",
+            "select(.a == 1)",
+            "di",
+            "file_index",
+            ". as $x | $x",
+            "$x",
+            "{a: .a}",
+            ".a + 1",
+            "del(.a, .b)",
+            "del(.a | length)",
+            ".a style = \"flow\"",
+        ] {
+            assert!(!eval_all_matches_per_document(&parse(f)), "{f}");
+        }
     }
 }

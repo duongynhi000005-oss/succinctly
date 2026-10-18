@@ -24641,6 +24641,111 @@ fn test_eval_all_works_from_stdin() -> Result<()> {
     Ok(())
 }
 
+/// #4380: `--eval-all` kept no comment, anchor, alias or flow/quote style even for
+/// `.`, because it evaluates through the owned-value route. A filter real yq
+/// answers the same in both modes now takes the per-document route, which does.
+/// Every expected block below is `yq ea` v4.53.3's own output.
+#[test]
+fn test_eval_all_keeps_presentation_for_per_document_filters_4380() -> Result<()> {
+    let input = "a: &x 1 # c1\nb: *x\nl: [1, 2]\n---\n# head\nc: \"q\" # c2\nd: {p: 1}\n";
+    for (filter, expected) in [
+        (".", input),
+        (
+            ".a = 9",
+            "a: &x 9 # c1\nb: *x\nl: [1, 2]\n---\n# head\nc: \"q\" # c2\nd: {p: 1}\na: 9\n",
+        ),
+        (
+            ".d.p = 5",
+            "a: &x 1 # c1\nb: *x\nl: [1, 2]\nd:\n  p: 5\n---\n# head\nc: \"q\" # c2\nd: {p: 5}\n",
+        ),
+        (
+            "del(.l)",
+            "a: &x 1 # c1\nb: *x\n---\n# head\nc: \"q\" # c2\nd: {p: 1}\n",
+        ),
+        (".l", "[1, 2]\n---\nnull\n"),
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["--eval-all"])?;
+        assert_eq!(code, 0, "{filter}: {stderr}");
+        assert_eq!(out, expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// #4380: the same, across two files, and a write through an alias reaches the
+/// anchor's node in every document (#1351's redirect never ran under `--eval-all`).
+#[test]
+fn test_eval_all_alias_write_reaches_the_anchor_in_every_file_4380() -> Result<()> {
+    let mut f1 = NamedTempFile::new()?;
+    write!(f1, "a: &x {{p: 1}}\nb: *x\n")?;
+    let mut f2 = NamedTempFile::new()?;
+    write!(f2, "a: &x {{p: 3}}\nb: *x\n")?;
+    let (out, stderr, code) = run_yq_files(".b.p = 9", &[f1.path(), f2.path()], &["--eval-all"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "a: &x {p: 9}\nb: *x\n---\na: &x {p: 9}\nb: *x\n");
+    Ok(())
+}
+
+/// #4380: a filter that reads the document *list* stays on the `--eval-all`
+/// route and still sees every document, whatever its presentation loss: `[.]`
+/// collects both, `,` runs its left operand over every document before the right
+/// (`yq ea '.a, .b'` prints every `.a` first), and `.a = .b` reads the list.
+#[test]
+fn test_eval_all_list_reading_filters_keep_the_combined_route_4380() -> Result<()> {
+    let input = "a: 1\nb: 2\n---\na: 3\nb: 4\n";
+    let argv = ["--eval-all", "-o", "json", "-I", "0"];
+    for (filter, expected) in [
+        ("[.]", "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]\n"),
+        (".a, .b", "1\n3\n2\n4\n"),
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &argv)?;
+        assert_eq!(code, 0, "{filter}: {stderr}");
+        assert_eq!(out, expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// #4380: a navigated element keeps its anchor and comment (`yq ea '.l[0]'`), which the
+/// owned-value route drops along with the rest of the presentation.
+#[test]
+fn test_eval_all_navigation_keeps_an_elements_anchor_and_comment_4380() -> Result<()> {
+    let input = "l:\n  - a: &x 1 # c1\n    b: [1, 2]\n  - \"q\" # c2\n  - *x\n";
+    let (out, stderr, code) = run_yq_stdin_with_stderr(".l[0]", input, &["--eval-all"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "a: &x 1 # c1\nb: [1, 2]\n");
+    Ok(())
+}
+
+/// #4380: an error in any document ends an `--eval-all` run with nothing on stdout,
+/// because the whole list is evaluated before anything is written (`yq ea '.a.b'` prints
+/// only the error). The per-document route would print the documents before it, so the
+/// rerouted run evaluates the list first and keeps the combined route's output on failure.
+#[test]
+fn test_eval_all_error_in_a_later_document_prints_nothing_4380() -> Result<()> {
+    let input = "a: {b: 1}\n---\na: [1]\n---\na: {b: 3}\n";
+    for filter in [".a.b", ".a.b = 5", ".a.b |= 7"] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["--eval-all"])?;
+        assert_eq!(code, 1, "{filter}: {stderr}");
+        assert_eq!(out, "", "{filter}");
+        assert!(stderr.contains("Cannot index array"), "{filter}: {stderr}");
+    }
+    Ok(())
+}
+
+/// #4380: the per-document route's double-quoted writer spells a control character the way
+/// go-yaml does (`\a`, `\e`, `\x7F`, `\N`, `\0`), as `--eval-all`'s own writer did; it wrote
+/// `\x07`, `\x1b`, `\x7f`, `\x00`. Both routes, byte for byte with yq v4.53.3.
+#[test]
+fn test_double_quoted_scalar_uses_go_yaml_escapes_on_the_dom_route_4380() -> Result<()> {
+    let input = "a: \"\\a\\b\\e\\x7f\\N\\_ \\0 \\v\\f z\"\nb: \"plain\"\n";
+    let expected = "a: \"\\a\\b\\e\\x7F\\N\u{a0} \\0 \\v\\f z\"\nb: \"plain\"\nc: 1\n";
+    for argv in [&[][..], &["--eval-all"][..]] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(".c = 1", input, argv)?;
+        assert_eq!(code, 0, "{argv:?}: {stderr}");
+        assert_eq!(out, expected, "{argv:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_eval_all_ea_alias() -> Result<()> {
     let (f1, f2) = two_doc_fixtures()?;

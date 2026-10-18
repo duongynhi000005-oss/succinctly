@@ -128,9 +128,21 @@ The redirect runs wherever a write goes through `evaluate_yaml_cursor` — stdou
 `--split-exp`, `--front-matter`, and since
 [#1349](https://github.com/rust-works/succinctly/issues/1349) `--inplace` too (`yq -i
 '.b.p = 9'` writes `a: &x {p: 9, q: 2}` / `b: *x` back to the file). `--eval-all`
-evaluates the collected documents without it, so `yq ea '.b.p = 9'` still writes `b`
-positionally and drops the marks ([#4380](https://github.com/rust-works/succinctly/issues/4380),
-which also covers its loss of every comment and style). A multi-document stream applies the redirect and the
+evaluates the collected documents through the owned-value route, which has no redirect, no
+comments and no style, so a filter that reads the document *list* (`[.]`, `,`, `.a = .b`,
+`|= . + 1`, a builtin, a variable) still writes `b` positionally and drops the marks. A filter
+that only navigates (`.`, `.a.b`, `.[0]`, `.[]`, `..`) or writes a literal (`.b.p = 9`, `.a //= 7`,
+`.n += 1`, `del(.a)`) takes the plain per-document route instead and keeps all of it
+([#4380](https://github.com/rust-works/succinctly/issues/4380); the gate is
+`eval_all_matches_per_document` in `m2_gate.rs`). The rerouted run first evaluates the list
+the old way, so the bridge's refusals (nesting depth, colliding keys, stray commas), a later
+file failing `--validate`, and an erroring document that leaves stdout empty are all unchanged;
+only a run that succeeds is printed by the plain route. JSON-sourced input stays on the old route.
+The gate claims no worse than the owned-value route, not a byte-for-byte match: real `ea`
+doubles every result of `.[0]` over a stream of arrays and separates the results of `.[]`
+across files its own way, neither of which either route reproduces. The plain route also
+keeps a written-into empty `{}`/`[]` in flow style where yq switches to block
+(`{}` | `.a = 5` is `{a: 5}`, yq `a: 5`), so a rerouted `ea` inherits that. A multi-document stream applies the redirect and the
 anchor marks to every document, on stdout and under `--inplace` alike
 ([#2520](https://github.com/rust-works/succinctly/issues/2520): the report that it reached the
 last document only no longer reproduces; pinned by the `yaml_multidoc_alias_*_2520` goldens and
