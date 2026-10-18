@@ -496,8 +496,18 @@ DEFAULT_THRESHOLD = 5.0
 # -11.3%, `wide_length` -9.2% / -8.1%, `mid512_map_length_add` -9.6% / -8.3%.
 # Now in `main`; the entries were removed (#4343) once the rows read ~0% again
 # against a merge-base that already included it.
+#
+# `users_yq_del_select` (#4102, PR #4863) carries one of the same kind: a
+# mapping's `value()` no longer reads every key to look for a `<<` merge key in
+# a document whose text cannot spell one (`YamlIndex::may_have_merge_keys`), and
+# the yq-mode write row builds the value of every `users` record (-8.5% x86_64 /
+# -7.6% ARM64-Linux against the PR's own merge-base, outputs byte-identical). The
+# same change costs `users_yq_keys_unsorted` +3.6% x86_64 (the one-off byte
+# search over a 2 MB document), inside the default threshold. Remove the entry
+# once the row reads ~0% again against a merge-base that already includes it.
 QUERY_THRESHOLDS = {
     "wide_keys_unsorted": 10.0,
+    "users_yq_del_select": 12.0,
 }
 
 # argparse wants a plain string for `epilog`; keeping it as a real constant
