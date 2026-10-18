@@ -68457,6 +68457,11 @@ fn test_with_evaluates_discarded_stages_and_ignores_extra_arguments_4327() -> Re
         assert_eq!(code, 0, "{filter}: {stderr}");
         assert_eq!(out.trim(), expected, "{filter}");
     }
+    // A malformed extra argument is still a parse error.
+    for filter in ["with(.a; . = 1; 2 3)", "with(.a; . = 1;)"] {
+        let (_out, code) = run_yq_stdin(filter, "", args)?;
+        assert_ne!(code, 0, "{filter} must fail");
+    }
     for filter in [
         r#"{"a":{"b":1}} | with(.a; . + 1)"#,
         r#"{"a":{"b":1}} | with(.a; . + 1 | .c = 3)"#,

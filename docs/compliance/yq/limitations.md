@@ -5508,8 +5508,13 @@ value-producing stage is evaluated and its value discarded, as in yq, so its *er
 arithmetic-error difference, not specific to `with`). A third or later argument is accepted and
 ignored, with only the path evaluated, and the input comes back untouched, as yq does
 (`with(.a; . = 1; 2)`). Still different: a stage after a discarded value-producing stage is not
-evaluated (yq runs it on the discarded value), and `(.b = 2) as $x | .c = $x` (a binding whose
-source is an assignment) does not apply the source's change.
+evaluated (yq runs it on the discarded value); `(.b = 2) as $x | .c = $x` (a binding whose
+source is an assignment) does not apply the source's change; a binding whose source yields several
+values applies its body once (yq: once per value, `with(.a; .[] as $v | .[0] = $v)`); `del(.b)` inside the
+update is dropped (yq applies it); and a bare `empty` update is accepted where yq's lexer rejects it
+(#4808's gap). The evaluation costs a `reduce` frame per node `path` selects for a discarded
+stage: `with(.[]; . + 1)` over a million-element array, a no-op in yq too, takes 649 ms where it took
+299 ms; an update with an assignment is unchanged.
 
 `from_yaml` of text the semi-index does not reject still decodes where yq fails: `"--- \n..."` is
 `null` and `"a: !!int x"` is the string `x` (`"a: b: c"` used to be `{"a":"b"}` and is yq's

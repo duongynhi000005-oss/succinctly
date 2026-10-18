@@ -3943,23 +3943,15 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         // yq accepts more arguments and ignores all but the path: `with(.a; . = 7; . = 8)`
         // answers the input untouched, having evaluated `.a` (#4327).
-        if self.peek() == Some(';') && self.mode == ParserMode::Yq {
+        if self.peek() == Some(';') {
             while self.peek() == Some(';') {
                 self.next();
                 self.skip_ws();
                 self.parse_expr()?;
                 self.skip_ws();
             }
-            if self.peek() != Some(')') {
-                return self.wrong_arity_or_expect(start_pos, ')', vec![path, update]);
-            }
-            self.next();
-            return Ok(Expr::Reduce {
-                input: Box::new(path),
-                patterns: vec![Pattern::Var("_".to_string())],
-                init: Box::new(Expr::Identity),
-                update: Box::new(Expr::Identity),
-            });
+            self.expect(')')?;
+            return Ok(with_discarded_stage(&path));
         }
         if self.peek() != Some(')') {
             return self.wrong_arity_or_expect(start_pos, ')', vec![path, update]);
