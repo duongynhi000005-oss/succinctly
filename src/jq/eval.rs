@@ -33708,19 +33708,6 @@ fn assign_one<S: EvalSemantics>(
     Ok(result)
 }
 
-/// The keyword spelling of a [`MetaSlot`], for error messages.
-fn meta_slot_keyword(slot: MetaSlot) -> &'static str {
-    match slot {
-        MetaSlot::LineComment => "line_comment",
-        MetaSlot::Style => "style",
-        MetaSlot::Anchor => "anchor",
-        MetaSlot::Tag => "tag",
-        MetaSlot::HeadComment => "head_comment",
-        MetaSlot::FootComment => "foot_comment",
-        MetaSlot::Comments => "comments",
-    }
-}
-
 /// Evaluate a yq metadata assignment: `PATH <slot> = value` / `PATH <slot>
 /// |= filter` (#798), e.g. `.a line_comment = "hi"`, `.a style = "flow"`,
 /// `.a anchor = "z"`.
@@ -33771,7 +33758,8 @@ fn eval_meta_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         | MetaSlot::Anchor
         | MetaSlot::HeadComment
         | MetaSlot::FootComment
-        | MetaSlot::Comments => {
+        | MetaSlot::Comments
+        | MetaSlot::Tag => {
             let identity = Expr::Identity;
             // `...` (#2796) walks the same value positions `..` does; its key nodes are the
             // metadata pass's concern, not the value tree's.
@@ -33784,13 +33772,6 @@ fn eval_meta_assign<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             };
             eval_update::<W, S>(target, &identity, input, optional, true)
         }
-        MetaSlot::Tag => suppress_or_raise(
-            EvalError::new(format!(
-                "{} = ... is not yet supported",
-                meta_slot_keyword(slot)
-            )),
-            optional,
-        ),
     }
 }
 
@@ -147635,24 +147616,6 @@ mod tests {
         let reshaping = filter.replacen("def f0: .a = 1;", "def f0: map(.);", 1);
         let expr = parse(&reshaping).expect("filter should parse");
         assert!(!is_alias_sensitive_assign(&expr));
-    }
-
-    /// `meta_slot_keyword`'s only call site (`eval_meta_assign`'s "not yet
-    /// supported" error) only ever passes `Tag`/`HeadComment`/`FootComment`/
-    /// `Comments` -- `LineComment`/`Style`/`Anchor` never reach it through
-    /// any CLI-observable path, since those three slots already have a
-    /// working write and never take the error branch. Exercised directly
-    /// here since the mapping itself (every `MetaSlot` to its yq source
-    /// keyword) is real, checked logic, not dead code.
-    #[test]
-    fn test_meta_slot_keyword_covers_every_slot_798() {
-        assert_eq!(meta_slot_keyword(MetaSlot::LineComment), "line_comment");
-        assert_eq!(meta_slot_keyword(MetaSlot::Style), "style");
-        assert_eq!(meta_slot_keyword(MetaSlot::Anchor), "anchor");
-        assert_eq!(meta_slot_keyword(MetaSlot::Tag), "tag");
-        assert_eq!(meta_slot_keyword(MetaSlot::HeadComment), "head_comment");
-        assert_eq!(meta_slot_keyword(MetaSlot::FootComment), "foot_comment");
-        assert_eq!(meta_slot_keyword(MetaSlot::Comments), "comments");
     }
 
     /// #2549: `wrap_fresh`'s `unreachable!` catch-all is closed by

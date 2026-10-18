@@ -36,9 +36,9 @@ use succinctly::json::JsonIndex;
 use succinctly::yaml::{
     deeper_yaml_indent, format_float_yq_yaml, format_float_yq_yaml_nested, go_yaml_block_scalar,
     go_yaml_dom_scalar, go_yaml_double_quoted_scalar, go_yaml_explicit_key_scalar,
-    go_yaml_forces_double_quotes, go_yaml_multiline_scalar, go_yaml_tagged_str_scalar,
-    resolve_plain_sourced, stream_json_sequence, stream_yaml_sequence, ResolvedScalar, YamlCursor,
-    YamlIndex, YamlValue,
+    go_yaml_forces_double_quotes, go_yaml_multiline_scalar, go_yaml_resolved_tag,
+    go_yaml_tagged_str_scalar, resolve_plain_sourced, stream_json_sequence, stream_yaml_sequence,
+    ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
 };
 
 use super::m2_gate::{can_use_m2_streaming, eval_all_matches_per_document};
@@ -3753,6 +3753,10 @@ enum MetaEffect {
     /// on `a: 1 # x` => `a: 1`).
     LineComment(Option<String>),
     Style(&'static str),
+    /// `tag = "!!str"` (#2796): the text the right-hand side gave, applied as go-yaml's encoder
+    /// does ([`apply_tag`]): written unless it is the tag the scalar resolves to anyway, and
+    /// `!!str` quotes a scalar that would read back as another type. An empty text clears the tag.
+    Tag(String),
     /// `None` clears the anchor (live-verified: `.a anchor = ""` on
     /// `a: &z 1` => `a: 1`).
     Anchor(Option<String>),
@@ -3810,6 +3814,8 @@ enum WritableSlot {
     LineComment,
     Style,
     Anchor,
+    /// `tag = "!!str"` (#2796): see [`MetaEffect::Tag`].
+    Tag,
     HeadComment,
     FootComment,
     Comments,
@@ -3827,7 +3833,7 @@ impl WritableSlot {
             MetaSlot::HeadComment => Some(Self::HeadComment),
             MetaSlot::FootComment => Some(Self::FootComment),
             MetaSlot::Comments => Some(Self::Comments),
-            MetaSlot::Tag => None,
+            MetaSlot::Tag => Some(Self::Tag),
         }
     }
 }
@@ -4136,6 +4142,21 @@ fn is_value_identity_stage(stage: &Expr) -> bool {
         stage,
         Expr::Identity | Expr::Builtin(Builtin::Debug | Builtin::DebugMsg(_))
     )
+}
+
+/// Whether `expr` contains a `tag` metadata write anywhere (#2796): the one slot that changes
+/// a value a `-o json` output prints (`tag = "!!str"` makes `1` the string `"1"`), so it needs
+/// the metadata pass that output otherwise skips.
+fn writes_tag(expr: &Expr) -> bool {
+    jq::walk::any_subexpr(expr, &mut |e| {
+        matches!(
+            e,
+            Expr::MetaAssign {
+                slot: MetaSlot::Tag,
+                ..
+            }
+        )
+    })
 }
 
 /// Whether `expr` contains a `head_comment`, `foot_comment` or `comments` metadata write
@@ -4448,9 +4469,12 @@ fn resolve_one_meta_assign(
     // `(PATH | key)` addresses the key node of the member `PATH` names (#2796).
     let key_prefix = target.key_node_prefix();
     if (with_keys || key_prefix.is_some())
-        && matches!(slot, WritableSlot::Style | WritableSlot::Anchor)
+        && matches!(
+            slot,
+            WritableSlot::Style | WritableSlot::Anchor | WritableSlot::Tag
+        )
     {
-        // Their key-node counterparts (a quoted key, an `&anchor` on a key) are not modelled for
+        // Their key-node counterparts (a quoted key, an `&anchor` on a key, a tag on a key) are not modelled for
         // a write, and applying them to the value node would be wrong rather than missing.
         sink.report(
             DiagStyle::Yq,
@@ -4705,6 +4729,7 @@ fn resolve_one_meta_assign(
                 }
             },
             WritableSlot::LineComment => MetaEffect::LineComment(meta_comment_text(&s)),
+            WritableSlot::Tag => MetaEffect::Tag(s.clone()),
             WritableSlot::Anchor => match meta_anchor_name(&s) {
                 Ok(name) => MetaEffect::Anchor(name),
                 Err(e) => {
@@ -4905,6 +4930,7 @@ fn apply_meta_assign_writes(
             MetaEffect::Anchor(name) => {
                 node.meta_mut().anchor = name.clone().map(AnchorMark::Declares);
             }
+            MetaEffect::Tag(tag) => apply_tag(tag, node_value, node),
             // Handled above, before the node is borrowed.
             MetaEffect::Clear { .. }
             | MetaEffect::SetRoot { .. }
@@ -4913,6 +4939,89 @@ fn apply_meta_assign_writes(
         }
     }
     Ok(())
+}
+
+/// `NODE tag = TAG` (#2796), the way go-yaml's encoder treats a node whose tag was assigned:
+/// the tag is written only if it differs from the one the node would get anyway, and `!!str`
+/// on a scalar that would read back as another type quotes it (and types it a string, for the
+/// rest of the pipe and for `-o json`).
+///
+/// For a scalar, the tag it resolves to is that of its text ([`go_yaml_resolved_tag`], whatever
+/// its quoting: `'1'` with `!!int` stays `'1'`, untagged, as yq prints it); a node already
+/// quoted needs no `!!str`. A tag that does not start with `!` is written in the verbatim form
+/// `!<tag>`. An empty text clears the tag. Every row is captured from yq v4.53.3.
+fn apply_tag(tag: &str, value: &mut OwnedValue, node: &mut CommentTree) {
+    let current = node.meta().clone();
+    // A tag written in the source keeps go-yaml's tagged style when the tag is replaced, so the
+    // new one is written even where it is the scalar's own (`a: !!str 1` with `!!int` is
+    // `a: !!int 1`); an empty text clears it, and the scalar reads as what its text says again.
+    let source_tagged = current.tag().is_some();
+    let explicit_text = |tag: &str| {
+        if tag.starts_with('!') {
+            tag.to_string()
+        } else {
+            format!("!<{tag}>")
+        }
+    };
+    if tag.is_empty() {
+        if source_tagged {
+            if let OwnedValue::String(text) = &*value {
+                *value = match resolve_plain_sourced(text, false) {
+                    ResolvedScalar::Null => OwnedValue::Null,
+                    ResolvedScalar::Bool(b) => OwnedValue::Bool(b),
+                    ResolvedScalar::Int(n) => OwnedValue::Int(n),
+                    ResolvedScalar::Float(f) => OwnedValue::Float(f),
+                    ResolvedScalar::Str => return *node.meta_mut() = current.with_tag(None),
+                };
+            }
+        }
+        *node.meta_mut() = current.with_tag(None);
+        return;
+    }
+    let natural = match &*value {
+        OwnedValue::Object(_) => "!!map",
+        OwnedValue::Array(_) => "!!seq",
+        scalar => {
+            let spelled = current
+                .spelling()
+                .filter(|spelling| spelling_names_value(spelling, scalar))
+                .map(str::to_string);
+            let text = match scalar {
+                OwnedValue::String(s) => Some(s.to_string()),
+                other => spelled.or_else(|| plain_scalar_text(other)),
+            };
+            let quoted = matches!(current.style, "double" | "single" | "literal" | "folded");
+            let resolved = text.as_deref().map_or("!!str", go_yaml_resolved_tag);
+            if tag == "!!str" {
+                if let Some(text) = text {
+                    let needs_quotes = !quoted && resolved != "!!str" && !source_tagged;
+                    if needs_quotes {
+                        // forceQuoting: the text reads back as another type, so it is quoted.
+                        node.meta_mut().style = "double";
+                    }
+                    *value = OwnedValue::String(text.into());
+                }
+                *node.meta_mut() = node.meta().with_tag(source_tagged.then(|| tag.to_string()));
+                return;
+            }
+            // Any other tag leaves the text alone; a string typed by a source `!!str` is the
+            // type its tag now says.
+            if let OwnedValue::String(text) = scalar {
+                if source_tagged {
+                    *value = match resolve_plain_sourced(text, false) {
+                        ResolvedScalar::Null => OwnedValue::Null,
+                        ResolvedScalar::Bool(b) => OwnedValue::Bool(b),
+                        ResolvedScalar::Int(n) => OwnedValue::Int(n),
+                        ResolvedScalar::Float(f) => OwnedValue::Float(f),
+                        ResolvedScalar::Str => value.clone(),
+                    };
+                }
+            }
+            resolved
+        }
+    };
+    let explicit = (source_tagged || tag != natural).then(|| explicit_text(tag));
+    *node.meta_mut() = current.with_tag(explicit);
 }
 
 /// Whether `path` addresses a scalar that is a value of a mapping or an item of a sequence in
@@ -5463,8 +5572,9 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // and only when the caller can use the result at all (`need_comments`).
     // `no_comments` below reconciles this against each result document once
     // evaluation finishes.
-    let presentation_sync_ctx = match (need_comments && is_alias_sensitive_assign(expr))
-        .then(|| to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor)))
+    let presentation_sync_ctx = match ((need_comments || writes_tag(expr))
+        && is_alias_sensitive_assign(expr))
+    .then(|| to_owned_with_comments::<_, YqSemantics>(&cursor.value(), Some(&cursor)))
     {
         Some(snapshot) => {
             let Some(snapshot) = sink.materialize(DiagStyle::Yq, snapshot, &no_location()) else {
