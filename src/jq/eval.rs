@@ -50706,7 +50706,7 @@ impl FoldRegister {
                             &branch.register,
                             self.trackable
                                 .then_some(&self.value)
-                                .or(live_register.filter(|_| alternate)),
+                                .or_else(|| live_register.filter(|_| alternate)),
                         )
                 };
             let relocated = self.relocate_one::<S>(branch.into_owned_value(), identical_eligible);
