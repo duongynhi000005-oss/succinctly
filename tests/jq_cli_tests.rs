@@ -164096,3 +164096,347 @@ fn test_chain_rewrite_covers_unread_variables_bare_chains_and_scalar_inputs_4813
         ),
     ])
 }
+
+/// #4669: `first`/`limit`/`nth` over a `?//` chain *behind other stages* (`(., 1) | CHAIN`) as a
+/// `foreach` source. The chain's destructuring alternative emits an element the consumer refuses (its
+/// step moved the register), `?//` retries the bare alternative, and jq's `limit` -- a `label`/`break`
+/// the chain's `?//` catches -- counts every one of those emissions against the bound. Which element
+/// (`.` or a literal) reaches the chain decides the count, so the by-value drive, which counted the
+/// first emission as delivered, printed one path more than jq (`limit(2; (., 1) | CHAIN)` printed two
+/// where jq prints one). The source is routed to the resolver's walk of a bound, as `limit(n; CHAIN)`
+/// is. Every row captured from jq 1.7.1 with `-c`.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(3; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(4; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(3; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1; (1,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (1,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(3; (1,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1; (.,1)|(.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(3; (.,1)|(.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(4; (.,1)|(.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (1,.)|(.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(3; (1,.)|(.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (first((.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (first((.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (nth(1;(1,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (nth(0,1;(.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(1,2;(.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,null)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,.)|try (. as {a:$a} ?// $a | .))) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;((.,.)|. as {a:$a} ?// $a | .)?)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (try limit(2;(.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (first(first((.,.)|. as {a:$a} ?// $a | .))) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,.)|select(.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,.)|. as {a:$a} ?// $a | .|.)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,{a:2})|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2;(.,.)|. as [$a] ?// {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (limit(3; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach (limit(2; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[[1]]",
+            r"path(foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4669: what `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`'s routing
+/// leaves alone, and the shapes beside it. Value mode never reached the routed drive; a pipe that starts
+/// at a literal keeps the by-value answer for a `del` through it (the first draft of the routing refused
+/// the `null` ones jq answers); a chain in a non-output position counts as jq does. Every row captured
+/// from jq 1.7.1 with `-c`, except the last, which is the by-value count the routing does not reach
+/// inside another fold's body (jq prints two paths: a recorded divergence in `limitations.md`).
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"[foreach (limit(1; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .)]",
+            "[{\"a\":1},{\"a\":1}]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[foreach (limit(2; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .)]",
+            "[{\"a\":1},{\"a\":1}]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[foreach (limit(3; (.,1)|. as {a:$a} ?// $a | .)) as $k (.; .; .)]",
+            "[{\"a\":1},{\"a\":1}]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | 1 | (foreach (first(null | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(. as $x | {a:{b:1}} | (foreach (limit(2; null | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | 1 | (foreach (first(true | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(. as $x | {a:{b:1}} | (foreach (limit(2; true | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | 1 | (foreach (first(1 | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(. as $x | {a:{b:1}} | (foreach (limit(2; 1 | . as {a:$a} ?// $a | .)) as $k (.; .; .)) | $x.a?)",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (.,.) | (. as {a:$a} ?// $a | $a) as $x | .)) as $k (.; .; .))",
+            "[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (.,.) | select((. as {a:$a} ?// $a | .) | true))) as $k (.; .; .))",
+            "[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (limit(2; (.,.) | map(1) | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (limit(2; (.,.) | . as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
