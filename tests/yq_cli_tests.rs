@@ -1253,7 +1253,7 @@ fn test_yq_field_name_keeps_tab_cr_nbsp_3377() -> Result<()> {
 /// gap #3377's own test above deliberately routed around (see its doc
 /// comment). Inputs here use an actual Rust `\r`/`\n` escape, producing the
 /// literal control byte in the JSON text itself (unlike `#3377`'s
-/// `r#"...\r..."#` fixtures, whose `\r` is JSON's own two-character escape
+/// `r"...\r..."` fixtures, whose `\r` is JSON's own two-character escape
 /// sequence, decoded by the parser rather than appearing as a raw byte).
 /// Covers both a raw byte as an object key (`keys`) and as an ordinary
 /// string value, plus the deeper bug: the same raw byte was folded in the
@@ -71285,29 +71285,26 @@ fn test_scalar_item_dash_comment_is_its_head_comment_4268() -> Result<()> {
 fn test_yq_yaml_sourced_number_length_on_the_owned_route_is_its_spelling_3604() -> Result<()> {
     let yaml = "a: 2.0\nb: 1e5\nc: 1.50\nd: -0.5\n";
     for (filter, expected) in [
-        (r#".a | length"#, "3\n"),
-        (r#"to_entries | map(.value | length)"#, "[3,3,4,4]\n"),
+        (r".a | length", "3\n"),
+        (r"to_entries | map(.value | length)", "[3,3,4,4]\n"),
+        (r"map_values(length)", "{\"a\":3,\"b\":3,\"c\":4,\"d\":4}\n"),
         (
-            r#"map_values(length)"#,
-            "{\"a\":3,\"b\":3,\"c\":4,\"d\":4}\n",
-        ),
-        (
-            r#"with_entries(.value |= length)"#,
+            r"with_entries(.value |= length)",
             "{\"a\":3,\"b\":3,\"c\":4,\"d\":4}\n",
         ),
         (
             r#". * {"z":1} | map_values(length)"#,
             "{\"a\":3,\"b\":3,\"c\":4,\"d\":4,\"z\":1}\n",
         ),
-        (r#"[.[] | length]"#, "[3,3,4,4]\n"),
-        (r#"[.a] | .[0] | length"#, "3\n"),
+        (r"[.[] | length]", "[3,3,4,4]\n"),
+        (r"[.a] | .[0] | length", "3\n"),
         (
             r#"map_values({"v":.} | .v | length)"#,
             "{\"a\":3,\"b\":3,\"c\":4,\"d\":4}\n",
         ),
-        (r#"map(length)"#, "[3,3,4,4]\n"),
+        (r"map(length)", "[3,3,4,4]\n"),
         (
-            r#"to_entries | map(.value) | map(. * 1) | map(length)"#,
+            r"to_entries | map(.value) | map(. * 1) | map(length)",
             "[1,6,3,4]\n",
         ),
     ] {
@@ -71325,16 +71322,16 @@ fn test_yq_yaml_sourced_number_length_on_the_owned_route_is_its_spelling_3604() 
 fn test_yq_json_sourced_number_length_on_the_owned_route_is_unchanged_3604() -> Result<()> {
     let json = r#"{"p":2.0,"q":1e5,"r":1.50,"t":123456789012345678901,"x":-123456789012345678901}"#;
     for (filter, expected) in [
-        (r#"to_entries | map(.value | length)"#, "[1,6,3,22,23]\n"),
+        (r"to_entries | map(.value | length)", "[1,6,3,22,23]\n"),
         (
-            r#"map_values(length)"#,
+            r"map_values(length)",
             "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23}\n",
         ),
         (
-            r#"with_entries(.value |= length)"#,
+            r"with_entries(.value |= length)",
             "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23}\n",
         ),
-        (r#"[.[]] | map(length)"#, "[1,6,3,22,23]\n"),
+        (r"[.[]] | map(length)", "[1,6,3,22,23]\n"),
     ] {
         let (stdout, code) =
             run_yq_stdin(filter, json, &["--input-format", "json", "-o=json", "-I=0"])?;
