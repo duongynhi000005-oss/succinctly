@@ -40213,6 +40213,25 @@ fn is_non_negative_number_literal(n: &Expr) -> bool {
     }
 }
 
+/// Whether `expr` has a comma that makes it emit several branches (`(FE), 7`, `(1,2) | FE`), looking through the
+/// wrappers, pipe stages and `if` branches an UPDATE is made of but not into a `foreach` or a constructor
+/// (`[1,2] | FE`, a source `(.a,.)`), whose commas are not branches of the UPDATE itself (#4800).
+fn has_branching_comma(expr: &Expr) -> bool {
+    match expr {
+        Expr::Comma(_) => true,
+        Expr::Paren(inner) | Expr::Optional(inner) | Expr::Try { expr: inner, .. } => {
+            has_branching_comma(inner)
+        }
+        Expr::Pipe(stages) => stages.iter().any(has_branching_comma),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => has_branching_comma(then_branch) || has_branching_comma(else_branch),
+        _ => false,
+    }
+}
+
 /// The operand of a wrapper, in a fold UPDATE, that emits nothing for an operand that emits nothing and
 /// raises nothing (#4763): a `try`/`?` with or without `catch H` (the handler runs only for a raise, and
 /// an emptied `foreach` raises none), a `first(..)`, and a `limit`/`nth` whose count cannot raise
@@ -61594,10 +61613,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && !any_subexpr(&bound_update, &mut |e| {
                                         matches!(e, Expr::Alternative(..))
                                     });
-                                let update_has_comma = register_lost_at_the_root
-                                    && any_subexpr(&bound_update, &mut |e| {
-                                        matches!(e, Expr::Comma(..))
-                                    });
+                                let update_has_comma =
+                                    register_lost_at_the_root && has_branching_comma(&bound_update);
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
                                     if extract_moved
                                         && !branch.trackable
@@ -61619,10 +61636,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         // (`1 | FOREACH` whose source destructures a `$x` that is
                                         // it), which the root path of a computed emission cannot
                                         // say, so the terminal's `null` carve-out must not read
-                                        // it as the register's.
-                                        // A comma beside the `foreach` (`(FE), 7`) restores the register for
-                                        // its later branches, which only the run can tell: that statement
-                                        // stays the terminal's own, and does not outlive a stage.
+                                        // it as the register's, nor after the stages that follow
+                                        // ([`RegisterLoss::LostOffRoot`]). A comma beside the
+                                        // `foreach` (`(FE), 7`) restores the register for its later
+                                        // branches, which only the run can tell: that statement
+                                        // stays the terminal's own and does not outlive a stage.
                                         emit(branch.with_register(if update_has_comma {
                                             BranchRegister::LostSomewhere
                                         } else {

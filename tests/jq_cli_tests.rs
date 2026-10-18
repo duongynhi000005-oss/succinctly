@@ -161643,14 +161643,14 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
 /// outlive a stage, so the last stage's untracked `.` was read as the root by the terminal's `null`
 /// carve-out, `path` answered `[]` and `|= 9` wrote `9` where jq's register sits on `["a"]` (`{"a":9}`).
 /// Controls that must not move: a comma beside the `foreach` (`(FE), 7`) and a `//` fallback restore
-/// the register for some branches, which only the run can tell, so they keep the answers they had
+/// the register for some branches (a comma inside a constructor, `[1,2] | FE`, is no such branch), which only the run can tell, so they keep the answers they had
 /// (`["a"]` then `[]`, and `[]`), as does the bare `FOREACH` UPDATE (`["a"]`).
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_4800() -> Result<()>
 {
     let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
-    for head in ["1 | ", "not | "] {
+    for head in ["1 | ", "not | ", "[1,2] | "] {
         for stage in [
             " | .",
             " | select(true)",
@@ -161658,7 +161658,15 @@ fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_
             " | if true then . else . end",
             " | select(true) | .",
         ] {
-            for wrap in ["path(X)", "(X) |= 9", "[path(X)?]", "[limit(1; path(X))]"] {
+            for wrap in [
+                "path(X)",
+                "del(X)",
+                "(X) |= 9",
+                "[path(X)?]",
+                "[limit(1; path(X))]",
+                "path(first(X))",
+                "path(try (X))",
+            ] {
                 let inner = format!(r". as $x | foreach . as $i (.; {head}{fe}; $i){stage}");
                 let filter = wrap.replace('X', &inner);
                 let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
