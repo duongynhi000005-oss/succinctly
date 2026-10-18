@@ -22943,9 +22943,6 @@ fn test_nested_double_float_keeps_the_comment_yq_drops_1079_float() -> Result<()
 ///   yq answers `.[1] | head_comment` directly; here the comment attaches
 ///   to the first key / inner item instead, the same attribution #798's
 ///   standalone-line capture already has for `- 1\n# h\n- b: 1\n` (#2811);
-/// - a tag with no value on the item's next line (`- # c\n  !!str`) --
-///   real yq keeps the tag and floats the comment (`- !!str\n# c\n- 2`);
-///   here the tag is dropped (a pre-existing gap) and the comment with it;
 /// - several floated comments in a sequence that closes to an outer item
 ///   or to end of input: real yq keeps only the last (`- k:\n  - # c\n
 ///   - # d\n- 2\n` has `d` on `.[0].k`'s foot and `c` nowhere); here the
@@ -22957,11 +22954,6 @@ fn test_absent_item_comment_residuals_1079_float() -> Result<()> {
     assert_yq_getter("- # c\n- - 1\n", ".[1] | head_comment", "\n")?;
     assert_yq_getter("- # c\n- - 1\n", ".[1][0] | head_comment", "c\n")?;
 
-    assert_yq_getter("- # c\n  !!str\n- 2\n", ".[1] | head_comment", "\n")?;
-    let (out, code) = run_yq_stdin(".", "- # c\n  !!str\n- 2\n", &[])?;
-    assert_eq!(code, 0);
-    assert_eq!(out, "-\n- 2\n");
-
     let input = "- k:\n  - # c\n  - # d\n- 2\n";
     assert_yq_getter(input, ".[0].k | key | foot_comment", "d\n")?;
     assert_yq_getter(input, ".[1] | head_comment", "c\n")?;
@@ -22970,6 +22962,91 @@ fn test_absent_item_comment_residuals_1079_float() -> Result<()> {
     let input = "-\n  - # c3\n- # c5\n- 6\n";
     assert_yq_getter(input, ".[2] | head_comment", "c3\nc5\n")?;
     assert_yq_getter(input, ".[1] | foot_comment", "\n")
+}
+
+/// Node properties on a line of their own under a bare `-` or `key:`, with nothing after them,
+/// name an empty node (#2835). They were dropped (`-\n  !!str\n- 2` printed a bare `-`), and under
+/// a mapping key the next key was read as the value (`a:\n  !!str\nb: 1` lost `b`). Every row is
+/// real yq's answer, captured against v4.53.3.
+#[test]
+fn test_own_line_properties_name_an_empty_node_2835() -> Result<()> {
+    for (input, expected) in [
+        ("-\n  !!str\n- 2\n", "- !!str\n- 2\n"),
+        ("-\n  &x\n- 2\n", "- &x\n- 2\n"),
+        ("-\n  &x\n- *x\n", "- &x\n- *x\n"),
+        ("-\n  !!str\n", "- !!str\n"),
+        ("- 1\n-\n  !!int\n", "- 1\n- !!int\n"),
+        ("-\n  !!str\n-\n  &y\n", "- !!str\n- &y\n"),
+        ("-\n  !!str &y\n- 2\n", "- &y !!str\n- 2\n"),
+        ("a:\n  !!str\nb: 1\n", "a: !!str\nb: 1\n"),
+        ("a:\n  &x\nb: 1\n", "a: &x\nb: 1\n"),
+        (
+            "k:\n  -\n    !!str\n  - 2\nz: 1\n",
+            "k:\n  - !!str\n  - 2\nz: 1\n",
+        ),
+        (
+            "a:\n  b:\n    !!str\n  c: 1\nd: 2\n",
+            "a:\n  b: !!str\n  c: 1\nd: 2\n",
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(".", input, &[])?;
+        assert_eq!(code, 0, "{input:?}");
+        assert_eq!(out, expected, "{input:?}");
+    }
+    assert_yq_getter("-\n  !!str\n- 2\n", ".[0] | tag", "!!str\n")?;
+    assert_yq_getter("-\n  &x\n- 2\n", ".[0] | anchor", "x\n")?;
+    assert_yq_getter("a:\n  !!str\nb: 1\n", ".b", "1\n")?;
+    assert_yq_getter("a:\n  !!str\nb: 1\n", "keys | length", "2\n")?;
+    // The properties are followed by the value, not by nothing: unchanged.
+    assert_yq_getter("-\n  !!str\n  x\n- 2\n", ".[0] | tag", "!!str\n")?;
+    assert_yq_getter("-\n  !!str\n  x\n- 2\n", ".[0]", "x\n")
+}
+
+/// The comment on a bare `-` whose value is own-line properties alone (#2835): the item is an
+/// empty tagged or anchored node, so the comment goes forward as the next node's head instead
+/// of being dropped with the properties. Unlike an absent item's, it does not settle on the
+/// owner key's foot when the sequence closes (`k:` / `  - # c` / `    !!str` / `z: 1` heads `z`).
+#[test]
+fn test_comment_on_a_bare_dash_before_own_line_properties_goes_forward_2835() -> Result<()> {
+    for (input, expected) in [
+        ("- # c\n  !!str\n- 2\n", "- !!str\n# c\n- 2\n"),
+        ("- # c\n  &x\n- 2\n", "- &x\n# c\n- 2\n"),
+        ("- # c\n  !!str\n", "- !!str\n# c\n"),
+        (
+            "k:\n  - # c\n    !!str\n  - 2\nz: 1\n",
+            "k:\n  - !!str\n  # c\n  - 2\nz: 1\n",
+        ),
+        (
+            "k:\n  - # c\n    !!str\nz: 1\n",
+            "k:\n  - !!str\n# c\nz: 1\n",
+        ),
+        (
+            "k:\n  - # c\n    !!str\n# d\nz: 1\n",
+            "k:\n  - !!str\n# c\n# d\nz: 1\n",
+        ),
+        (
+            "- # a\n  !!str\n- # b\n  &y\n- 3\n",
+            "- !!str\n- &y\n# a\n# b\n- 3\n",
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(".", input, &[])?;
+        assert_eq!(code, 0, "{input:?}");
+        assert_eq!(out, expected, "{input:?}");
+    }
+    assert_yq_getter("- # c\n  !!str\n- 2\n", ".[1] | head_comment", "c\n")?;
+    assert_yq_getter("- # c\n  !!str\n- 2\n", ".[0] | line_comment", "\n")?;
+    assert_yq_getter(
+        "k:\n  - # c\n    !!str\nz: 1\n",
+        ".z | key | head_comment",
+        "c\n",
+    )?;
+    assert_yq_getter(
+        "k:\n  - # c\n    !!str\nz: 1\n",
+        ".k | key | foot_comment",
+        "\n",
+    )?;
+    // Content after the properties keeps the comment as that node's head, as before.
+    assert_yq_getter("- # c\n  !!str\n  x\n- 2\n", ".[0] | head_comment", "c\n")
 }
 
 /// A standalone block above a bare `-` whose value is deferred to the next

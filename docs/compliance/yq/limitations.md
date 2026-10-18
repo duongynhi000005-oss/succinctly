@@ -5256,10 +5256,8 @@ divergence, not a gap: real yq *drops* every floated comment but the last when a
 sequence holding several closes to an outer item or to end of input inside a mapping
 (`- k:\n  - # c\n  - # d\n- 2\n` keeps only `d`), which ADR-0018 rule 4 forbids
 matching — the rest go forward as the next node's head instead of being discarded to
-match. Two more are separate, pre-existing gaps, not divergences licensed by that
-rule: a tag with no value on the item's next line (`- # c\n  !!str\n- 2\n`) drops both
-tag and comment here where yq keeps the tag and floats the comment; and — unlike the
-now-fixed *ordinary* (non-floated) case above — a comment *floated* off an absent bare
+match. One more is a separate, pre-existing gap, not a divergence licensed by that
+rule: unlike the now-fixed *ordinary* (non-floated) case above, a comment *floated* off an absent bare
 item still attaches to its next sibling's first key/inner item rather than the sibling
 itself when that sibling is a compact mapping or a nested sequence (`- # c\n- b: 1\n` is
 `.[1] | head_comment` in real yq, `.[1].b | key | head_comment` here). This residual is

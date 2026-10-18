@@ -1618,6 +1618,23 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         });
     }
 
+    /// [`Self::float_absent_item_comment`] for a bare `- # c` item whose value is node
+    /// properties alone (`  !!str` on the next line, #2835). The item is an empty tagged or
+    /// anchored node rather than an absent one, so real yq does not remember the comment as
+    /// floated off an item of this sequence: it goes forward with the pending block and heads
+    /// whatever opens next, even past the end of the sequence (`k:` / `  - # c` / `    !!str` /
+    /// `z: 1` heads `z`, where an absent item makes it the foot of `k`).
+    fn float_comment_past_empty_property_item(&mut self, range: (u32, u32)) {
+        if let Some(previous) = self.floated_item_comment.take() {
+            self.settle_float_if_sequence_closed(previous, None);
+        }
+        let idx = self
+            .pending_head_lines
+            .partition_point(|&(start, _)| start < range.0);
+        self.pending_head_lines.insert(idx, range);
+        self.block_passed_absent_item = true;
+    }
+
     /// Settle a pending block whose forward attachment is already disproven
     /// (a blank line follows it) onto `PREV`'s foot -- or, with no `PREV` in
     /// the *current* document yet, onto the document that just closed
@@ -4223,10 +4240,15 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 let value_is_null = self
                     .next_line_settles_value_is_null(indent)
                     .unwrap_or_else(|| self.following_value_is_null(indent));
-                if value_is_null {
-                    match trailing {
-                        Some(range) => self.float_absent_item_comment(range),
-                        None => self.end_float(),
+                // Properties on a line of their own name an empty node, so the item is not
+                // absent, but its comment still goes forward off the dash line (#2835).
+                let empty_property_item =
+                    !value_is_null && self.next_line_is_properties_of_a_null_value(indent);
+                if value_is_null || empty_property_item {
+                    match (trailing, empty_property_item) {
+                        (Some(range), false) => self.float_absent_item_comment(range),
+                        (Some(range), true) => self.float_comment_past_empty_property_item(range),
+                        (None, _) => self.end_float(),
                     }
                     // A null item is still content: a block after it at end
                     // of document is the root's foot, not a comment-only
@@ -4447,6 +4469,84 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             None if spaces == 0 => Some(true),
             _ => None,
         }
+    }
+
+    /// Whether the node properties that open the cursor's line, under a bare `-` or `key:` on the
+    /// line above, are followed by no value (#2835): the next content line stands no deeper than
+    /// the owner, and is not a zero-indented sequence a key takes as its value (`seq:` / ` &x` /
+    /// `- a`, YAML test suite SKE5). The value of a dash or key can stand left of its own
+    /// properties as long as it is deeper than the owner (`folded:` / `   !foo` / `  >1`, M5C3), so
+    /// the properties' own column says nothing. Called with `self.pos` on the line's break or its
+    /// trailing comment; restores it.
+    fn own_line_properties_have_no_value(&mut self, indent: usize) -> bool {
+        let Some((lead, rest)) = self.previous_content_line() else {
+            return false;
+        };
+        let bare_dash = rest[0] == b'-' && line_is_bare_dash_before_comment(rest);
+        if !bare_dash && !line_ends_with_colon_before_comment(rest) {
+            return false;
+        }
+        // A dash owns the value that is deeper than it; a key's column is the line's indent
+        // plus the `- ` markers it opens with.
+        let mut marker_len = 0;
+        if !bare_dash {
+            while rest.get(marker_len) == Some(&b'-')
+                && Self::is_ws_break_or_eoi(rest.get(marker_len + 1).copied())
+            {
+                marker_len += 1;
+                while matches!(rest.get(marker_len), Some(b' ' | b'\t')) {
+                    marker_len += 1;
+                }
+            }
+        }
+        let owner = lead + marker_len;
+        if indent <= owner {
+            return false;
+        }
+        if bare_dash {
+            self.following_value_is_null(owner)
+        } else {
+            self.following_value_is_null_unless_sequence_at(owner)
+        }
+    }
+
+    /// Whether the next line holds nothing but node properties (`!!str`, `&x`) and the content
+    /// line after it stands no deeper than the item at `indent`, so the properties name an empty
+    /// value (#2835). A bare `-` item whose value is that empty node is still absent for the
+    /// comment on its dash line: real yq floats it onto the next node as it does for `-` alone.
+    /// Called with `self.pos` on the current line's break or its trailing comment; restores it.
+    fn next_line_is_properties_of_a_null_value(&mut self, indent: usize) -> bool {
+        let mut p = self.pos;
+        while self.input.get(p).is_some_and(|&b| !Self::is_break(b)) {
+            p += 1;
+        }
+        match self.input.get(p) {
+            Some(b'\n') => p += 1,
+            Some(b'\r') => {
+                p += 1;
+                if self.input.get(p) == Some(&b'\n') {
+                    p += 1;
+                }
+            }
+            _ => return false,
+        }
+        let spaces = super::simd::count_leading_spaces(self.input, p);
+        let line_start = p + spaces;
+        if spaces <= indent || !matches!(self.input.get(line_start), Some(b'&' | b'!')) {
+            return false;
+        }
+        let line_end = self.input[line_start..]
+            .iter()
+            .position(|&b| Self::is_break(b))
+            .map_or(self.input.len(), |at| line_start + at);
+        if !only_node_properties(&self.input[line_start..line_end]) {
+            return false;
+        }
+        let saved_pos = self.pos;
+        self.pos = line_end;
+        let is_null = self.following_value_is_null(indent);
+        self.pos = saved_pos;
+        is_null
     }
 
     /// Parse a compact mapping entry within a sequence item.
@@ -8283,7 +8383,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Check what follows
                     match self.peek() {
                         Some(b'\n' | b'\r') | None => {
-                            // Property with value on next line - will be parsed in next iteration
+                            // Property with value on next line - will be parsed in next iteration,
+                            // unless there is none (#2835): the properties open a line of their
+                            // own under a bare `-` or `key:`, and the next content line stands
+                            // left of them (or the input ends). That value is an empty node, and
+                            // the properties need one to name -- a tag is looked up at the next
+                            // BP position and an anchor records it, so without it they land on a
+                            // sibling's open, or on nothing, and a following mapping key is read
+                            // as the value (`a:` / `  !!str` / `b: 1` lost `b`).
+                            if self.type_stack.len() > 1
+                                && self.line_opens_with_properties_only(properties_start)
+                                && self.own_line_properties_have_no_value(indent)
+                            {
+                                self.set_ib();
+                                self.write_bp_open();
+                                self.write_bp_close();
+                            }
                         }
                         // #4271: the properties open a line of their own and the block scalar
                         // header follows them (`&x |`, `!!str >`), under a `-` or `key:` that

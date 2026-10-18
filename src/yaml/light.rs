@@ -2491,23 +2491,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                                 // #1079: real yq attaches a bare item's own
                                 // comment to the scalar node it defers to
                                 // (case C). The parser only parks a comment
-                                // on the wrapper when a child node follows,
-                                // but that child can still render as
-                                // absent -- a tag with no value (`- # c\n
-                                // !!str`), where real yq floats the comment
-                                // forward instead; leave that shape alone
-                                // rather than write a comment line above
-                                // an empty item. Gated on
-                                // `wrapper_comment.is_some()` (rare), so
-                                // this second `.value()` resolve -- on top
-                                // of the one `write_deferred_value` below
-                                // does internally -- only costs anything on
-                                // items that already carry this comment.
-                                if !is_deferred_value_absent_at(&cursor.value()) {
-                                    out.write_str(comment)?;
-                                    out.write_char('\n')?;
-                                    out.write_str(indent)?;
-                                }
+                                // on the wrapper when a child node follows
+                                // that is not empty; an item whose value is
+                                // a tag or anchor with nothing after it
+                                // (`- # c\n  !!str`) floats it instead
+                                // (#2835).
+                                out.write_str(comment)?;
+                                out.write_char('\n')?;
+                                out.write_str(indent)?;
                             }
                             out.write_char('-')?;
                             let child_indent = compact_yaml_indent(indent);
@@ -2525,24 +2516,10 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // since neither opens a separate child node.
                             // The parser floats such a comment onto another
                             // node's head/foot rather than parking it here
-                            // (#1079), with one gap: a deeper line that
-                            // writes no node (`- # c\n  !!str`, a tag with
-                            // no value, dropped along with its tag today)
-                            // reads as a present value at capture time, so
-                            // the wrapper still holds `c`. Real yq floats
-                            // that one too, so suppress it rather than
-                            // render it inline. A compact scalar's own
-                            // genuine comment (`is_deferred_value_absent_at`
-                            // false there) is unaffected.
+                            // (#1079), and does the same for one whose only
+                            // value is a tag or anchor on the next line
+                            // (#2835).
                             let own_comment = cursor.line_comment_raw();
-                            let own_comment = if own_comment.is_some()
-                                && raw.bp_position() == cursor.bp_position()
-                                && is_deferred_value_absent_at(&cursor.value())
-                            {
-                                None
-                            } else {
-                                own_comment
-                            };
                             write_line_comment(out, own_comment)?;
                             prev_had_foot = self.write_item_foot_comments_at(
                                 out,
@@ -9095,25 +9072,32 @@ fn write_extra_line_comments<'t, Out: core::fmt::Write>(
     Ok(())
 }
 
-/// Whether a wholly blank line lies in `text[from..to)` -- two or more line
-/// breaks, `\r\n` counting once (#2795). The cursor-side twin of the
-/// parser's `blank_line_between`, used to *derive* the blank line real yq
-/// keeps between two lines of one standalone comment block
-/// (`a:\n  # h1\n\n  # h2\n  b: 1` round-trips with the blank intact): the
-/// parser records only the `#` lines, so the blank is read back off the
-/// text between them rather than stored.
+/// Whether a wholly blank line lies in `text[from..to)` -- a line break directly after another,
+/// only blanks between, `\r\n` counting once (#2795). The cursor-side twin of the parser's
+/// `blank_line_between`, used to *derive* the blank line real yq keeps between two lines of one
+/// standalone comment block (`a:\n  # h1\n\n  # h2\n  b: 1` round-trips with the blank
+/// intact): the parser records only the `#` lines, so the blank is read back off the text
+/// between them rather than stored.
+///
+/// A line of content between the two comments is not a blank line (#2835): a bare `- # c`
+/// item's comment and the block under the next item sit either side of the `  !!str` line the
+/// item's properties are on, and real yq joins them with no blank.
 fn blank_line_between(text: &[u8], from: usize, to: usize) -> bool {
-    let mut breaks = 0usize;
+    let mut seen_content = true;
     let mut p = from;
     let end = to.min(text.len());
     while p < end {
-        if is_line_break(text[p]) {
-            breaks += 1;
-            if breaks >= 2 {
+        let byte = text[p];
+        if is_line_break(byte) {
+            if !seen_content {
                 return true;
             }
+            seen_content = false;
             p += line_break_len(text, p);
         } else {
+            if !matches!(byte, b' ' | b'\t') {
+                seen_content = true;
+            }
             p += 1;
         }
     }
@@ -17518,6 +17502,17 @@ plain: hello
             assert!(blank_line_between(b"# a\r\n\r\n# b\r\n", 3, 7));
             assert!(blank_line_between(b"# a\n\n# b\n", 3, 5));
             assert!(!blank_line_between(b"# a\n# b\n", 3, 4));
+        }
+
+        #[test]
+        fn blank_line_between_needs_a_blank_line_not_a_line_of_content_2835() {
+            // A property-only line between two comments (`- # a` / `  !!str` / `# b`) is two
+            // breaks but no blank line; a blank line (or a whitespace-only one) still is.
+            assert!(!blank_line_between(b"# a\n  !!str\n# b\n", 3, 13));
+            assert!(!blank_line_between(b"# a\r\n  !!str\r\n# b\r\n", 3, 15));
+            assert!(blank_line_between(b"# a\n  !!str\n\n# b\n", 3, 14));
+            assert!(blank_line_between(b"# a\n  \n# b\n", 3, 8));
+            assert!(blank_line_between(b"# a\n \t\n# b\n", 3, 8));
         }
 
         #[test]
