@@ -15642,6 +15642,7 @@ fn builtin_operand_is_input(builtin: &Builtin) -> bool {
             | Builtin::ToJson
             | Builtin::FromJson
             | Builtin::FromYaml
+            | Builtin::Envsubst(_)
             | Builtin::Explode
             | Builtin::Implode
             | Builtin::Test(_)
@@ -15963,6 +15964,7 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         Builtin::ToJson => builtin_tojson::<W, S>(value, optional),
         Builtin::FromJson => builtin_fromjson::<W, S>(value, optional),
         Builtin::FromYaml => builtin_from_yaml::<W, S>(value, optional),
+        Builtin::Envsubst(flags) => builtin_envsubst::<W>(value, *flags, optional),
 
         // Phase 6: Additional String Functions
         Builtin::Explode => builtin_explode::<W>(value, optional),
@@ -22559,6 +22561,51 @@ fn builtin_tojson<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // documented anywhere for this sibling either.
     let owned = to_owned_or_suppress!(&value, optional);
     QueryResult::Owned(OwnedValue::String(owned_value_to_json::<S>(&owned).into()))
+}
+
+/// Builtin: yq's `envsubst` (#4872) -- the environment substituted into a string; anything else
+/// is yq's own error.
+#[cfg(feature = "std")]
+fn builtin_envsubst<W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'_, W>,
+    flags: super::envsubst::EnvsubstFlags,
+    optional: bool,
+) -> QueryResult<'_, W> {
+    let text = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(e) => return QueryResult::Error(EvalError::decode_failure(e.message())), // patchcov: coverage tolerate-line reason="unreachable: a string that does not decode fails where the cursor materializes it, before this builtin sees a value (#4872)"
+        },
+        other => {
+            let tag = yaml_type_tag(other);
+            return suppress_or_raise(
+                EvalError::new(format!(
+                    "cannot substitute with {tag}, can only substitute strings. Hint: Most often \
+                     you'll want to use '|=' over '=' for this operation"
+                )),
+                optional,
+            );
+        }
+    };
+    match super::envsubst::envsubst(&text, flags, &|name| {
+        std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+    }) {
+        Ok(out) => QueryResult::Owned(OwnedValue::String(out.into())),
+        Err(message) => suppress_or_raise(EvalError::new(message), optional),
+    }
+}
+
+/// `envsubst` reads the environment, which a `no_std` build does not have.
+#[cfg(not(feature = "std"))]
+fn builtin_envsubst<W: Clone + AsRef<[u64]>>(
+    _value: StandardJson<'_, W>,
+    _flags: super::envsubst::EnvsubstFlags,
+    optional: bool,
+) -> QueryResult<'_, W> {
+    suppress_or_raise(
+        EvalError::new("envsubst requires the std feature"),
+        optional,
+    )
 }
 
 /// Builtin: `from_json` / `from_yaml` (yq, #4206): decode the string as YAML and answer its first
@@ -32883,6 +32930,7 @@ fn builtin_yields_at_most_one_value(builtin: &Builtin) -> bool {
         | Builtin::FromEntries
         | Builtin::FromJson
         | Builtin::FromYaml
+        | Builtin::Envsubst(_)
         | Builtin::FromJsonStream
         | Builtin::FromStream(_)
         | Builtin::FromUnix
@@ -49272,6 +49320,7 @@ fn cannot_move_register(expr: &Expr) -> bool {
             | Builtin::ToJson
             | Builtin::FromJson
             | Builtin::FromYaml
+            | Builtin::Envsubst(_)
             // #2764: produces nothing, so it navigates nothing --
             // `path(. as $x | [empty] | $x)` is `[]` in jq 1.7.1.
             | Builtin::Empty

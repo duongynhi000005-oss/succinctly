@@ -25557,6 +25557,433 @@ fn test_tag_assignment_refuses_a_key_node_2796() -> Result<()> {
     Ok(())
 }
 
+/// #4872: yq's `envsubst` on 29 strings (`$X`, `${X}`, the `-`/`:-`/`=`/`:=`/`+`/`:+` operators,
+/// `$$`, unknown operators, a lone `$`) under the flags `nu`, `ne` and `ff`. Every row is
+/// yq v4.53.3's own answer (the JSON text, or the error message with `Error: ` stripped; a
+/// failure is judged on its first line, since yq's `ff` stops at one and without it lists
+/// them all) with `SUCCINCTLY_T1=bar`, `SUCCINCTLY_T2=` (set, empty), `SUCCINCTLY_T3=a b` and
+/// `SUCCINCTLY_T0` unset standing for `FOO`, `EMPTY`, `SP` and `MISSING`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // the rows are `${X:-d}` text, not format strings
+fn test_envsubst_follows_a8m_envsubst_4872() -> Result<()> {
+    let rows: &[(&str, &str, bool, &str)] = &[
+        ("$SUCCINCTLY_T1", "", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1", "(nu)", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1", "(ne)", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1", "(nu,ne)", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1", "(ff)", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1", "(nu,ne,ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "(nu)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "(ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "(nu,ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "(ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1}", "(nu,ne,ff)", true, "\"bar\"\n"),
+        ("$SUCCINCTLY_T1$SUCCINCTLY_T1", "", true, "\"barbar\"\n"),
+        ("$SUCCINCTLY_T1$SUCCINCTLY_T1", "(nu)", true, "\"barbar\"\n"),
+        ("$SUCCINCTLY_T1$SUCCINCTLY_T1", "(ne)", true, "\"barbar\"\n"),
+        (
+            "$SUCCINCTLY_T1$SUCCINCTLY_T1",
+            "(nu,ne)",
+            true,
+            "\"barbar\"\n",
+        ),
+        ("$SUCCINCTLY_T1$SUCCINCTLY_T1", "(ff)", true, "\"barbar\"\n"),
+        (
+            "$SUCCINCTLY_T1$SUCCINCTLY_T1",
+            "(nu,ne,ff)",
+            true,
+            "\"barbar\"\n",
+        ),
+        ("${SUCCINCTLY_T1}x", "", true, "\"barx\"\n"),
+        ("${SUCCINCTLY_T1}x", "(nu)", true, "\"barx\"\n"),
+        ("${SUCCINCTLY_T1}x", "(ne)", true, "\"barx\"\n"),
+        ("${SUCCINCTLY_T1}x", "(nu,ne)", true, "\"barx\"\n"),
+        ("${SUCCINCTLY_T1}x", "(ff)", true, "\"barx\"\n"),
+        ("${SUCCINCTLY_T1}x", "(nu,ne,ff)", true, "\"barx\"\n"),
+        ("$SUCCINCTLY_T1x", "", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T1x",
+            "(nu)",
+            false,
+            "variable ${SUCCINCTLY_T1x} not set",
+        ),
+        ("$SUCCINCTLY_T1x", "(ne)", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T1x",
+            "(nu,ne)",
+            false,
+            "variable ${SUCCINCTLY_T1x} not set",
+        ),
+        ("$SUCCINCTLY_T1x", "(ff)", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T1x",
+            "(nu,ne,ff)",
+            false,
+            "variable ${SUCCINCTLY_T1x} not set",
+        ),
+        ("x$SUCCINCTLY_T1", "", true, "\"xbar\"\n"),
+        ("x$SUCCINCTLY_T1", "(nu)", true, "\"xbar\"\n"),
+        ("x$SUCCINCTLY_T1", "(ne)", true, "\"xbar\"\n"),
+        ("x$SUCCINCTLY_T1", "(nu,ne)", true, "\"xbar\"\n"),
+        ("x$SUCCINCTLY_T1", "(ff)", true, "\"xbar\"\n"),
+        ("x$SUCCINCTLY_T1", "(nu,ne,ff)", true, "\"xbar\"\n"),
+        ("${SUCCINCTLY_T0}", "", true, "\"\"\n"),
+        (
+            "${SUCCINCTLY_T0}",
+            "(nu)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("${SUCCINCTLY_T0}", "(ne)", true, "\"\"\n"),
+        (
+            "${SUCCINCTLY_T0}",
+            "(nu,ne)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("${SUCCINCTLY_T0}", "(ff)", true, "\"\"\n"),
+        (
+            "${SUCCINCTLY_T0}",
+            "(nu,ne,ff)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("$SUCCINCTLY_T0", "", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T0",
+            "(nu)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("$SUCCINCTLY_T0", "(ne)", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T0",
+            "(nu,ne)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("$SUCCINCTLY_T0", "(ff)", true, "\"\"\n"),
+        (
+            "$SUCCINCTLY_T0",
+            "(nu,ne,ff)",
+            false,
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        ("${SUCCINCTLY_T0:-def}", "", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:-def}", "(nu)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:-def}", "(ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:-def}", "(nu,ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:-def}", "(ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:-def}", "(nu,ne,ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "(nu)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "(ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "(nu,ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "(ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0-def}", "(nu,ne,ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "(nu)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "(ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "(nu,ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "(ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2:-def}", "(nu,ne,ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T2-def}", "", true, "\"\"\n"),
+        ("${SUCCINCTLY_T2-def}", "(nu)", true, "\"\"\n"),
+        (
+            "${SUCCINCTLY_T2-def}",
+            "(ne)",
+            false,
+            "variable ${SUCCINCTLY_T2} set but empty",
+        ),
+        (
+            "${SUCCINCTLY_T2-def}",
+            "(nu,ne)",
+            false,
+            "variable ${SUCCINCTLY_T2} set but empty",
+        ),
+        ("${SUCCINCTLY_T2-def}", "(ff)", true, "\"\"\n"),
+        (
+            "${SUCCINCTLY_T2-def}",
+            "(nu,ne,ff)",
+            false,
+            "variable ${SUCCINCTLY_T2} set but empty",
+        ),
+        ("${SUCCINCTLY_T0:=def}", "", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:=def}", "(nu)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:=def}", "(ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:=def}", "(nu,ne)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:=def}", "(ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:=def}", "(nu,ne,ff)", true, "\"def\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "", true, "\"\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "(nu)", true, "\"\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "(ne)", true, "\"\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "(nu,ne)", true, "\"\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "(ff)", true, "\"\"\n"),
+        ("${SUCCINCTLY_T0:+alt}", "(nu,ne,ff)", true, "\"\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "(nu)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "(ne)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "(nu,ne)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "(ff)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T1:+alt}", "(nu,ne,ff)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "(nu)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "(ne)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "(nu,ne)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "(ff)", true, "\"alt\"\n"),
+        ("${SUCCINCTLY_T2:+alt}", "(nu,ne,ff)", true, "\"alt\"\n"),
+        ("$$SUCCINCTLY_T1", "", true, "\"$SUCCINCTLY_T1\"\n"),
+        ("$$SUCCINCTLY_T1", "(nu)", true, "\"$SUCCINCTLY_T1\"\n"),
+        ("$$SUCCINCTLY_T1", "(ne)", true, "\"$SUCCINCTLY_T1\"\n"),
+        ("$$SUCCINCTLY_T1", "(nu,ne)", true, "\"$SUCCINCTLY_T1\"\n"),
+        ("$$SUCCINCTLY_T1", "(ff)", true, "\"$SUCCINCTLY_T1\"\n"),
+        (
+            "$$SUCCINCTLY_T1",
+            "(nu,ne,ff)",
+            true,
+            "\"$SUCCINCTLY_T1\"\n",
+        ),
+        ("$$", "", true, "\"$\"\n"),
+        ("$$", "(nu)", true, "\"$\"\n"),
+        ("$$", "(ne)", true, "\"$\"\n"),
+        ("$$", "(nu,ne)", true, "\"$\"\n"),
+        ("$$", "(ff)", true, "\"$\"\n"),
+        ("$$", "(nu,ne,ff)", true, "\"$\"\n"),
+        ("$SUCCINCTLY_T1.bar", "", true, "\"bar.bar\"\n"),
+        ("$SUCCINCTLY_T1.bar", "(nu)", true, "\"bar.bar\"\n"),
+        ("$SUCCINCTLY_T1.bar", "(ne)", true, "\"bar.bar\"\n"),
+        ("$SUCCINCTLY_T1.bar", "(nu,ne)", true, "\"bar.bar\"\n"),
+        ("$SUCCINCTLY_T1.bar", "(ff)", true, "\"bar.bar\"\n"),
+        ("$SUCCINCTLY_T1.bar", "(nu,ne,ff)", true, "\"bar.bar\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "", true, "\"bary\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "(nu)", true, "\"bary\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "(ne)", true, "\"bary\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "(nu,ne)", true, "\"bary\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "(ff)", true, "\"bary\"\n"),
+        ("${SUCCINCTLY_T1-x}y", "(nu,ne,ff)", true, "\"bary\"\n"),
+        ("$ SUCCINCTLY_T1", "", true, "\"$ SUCCINCTLY_T1\"\n"),
+        ("$ SUCCINCTLY_T1", "(nu)", true, "\"$ SUCCINCTLY_T1\"\n"),
+        ("$ SUCCINCTLY_T1", "(ne)", true, "\"$ SUCCINCTLY_T1\"\n"),
+        ("$ SUCCINCTLY_T1", "(nu,ne)", true, "\"$ SUCCINCTLY_T1\"\n"),
+        ("$ SUCCINCTLY_T1", "(ff)", true, "\"$ SUCCINCTLY_T1\"\n"),
+        (
+            "$ SUCCINCTLY_T1",
+            "(nu,ne,ff)",
+            true,
+            "\"$ SUCCINCTLY_T1\"\n",
+        ),
+        ("$", "", true, "\"$\"\n"),
+        ("$", "(nu)", true, "\"$\"\n"),
+        ("$", "(ne)", true, "\"$\"\n"),
+        ("$", "(nu,ne)", true, "\"$\"\n"),
+        ("$", "(ff)", true, "\"$\"\n"),
+        ("$", "(nu,ne,ff)", true, "\"$\"\n"),
+        ("a$", "", true, "\"a$\"\n"),
+        ("a$", "(nu)", true, "\"a$\"\n"),
+        ("a$", "(ne)", true, "\"a$\"\n"),
+        ("a$", "(nu,ne)", true, "\"a$\"\n"),
+        ("a$", "(ff)", true, "\"a$\"\n"),
+        ("a$", "(nu,ne,ff)", true, "\"a$\"\n"),
+        ("${SUCCINCTLY_T1^^}", "", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1^^}", "(nu)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1^^}", "(ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1^^}", "(nu,ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1^^}", "(ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1^^}", "(nu,ne,ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "(nu)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "(ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "(nu,ne)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "(ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T1:1}", "(nu,ne,ff)", true, "\"bar\"\n"),
+        ("${SUCCINCTLY_T3}", "", true, "\"a b\"\n"),
+        ("${SUCCINCTLY_T3}", "(nu)", true, "\"a b\"\n"),
+        ("${SUCCINCTLY_T3}", "(ne)", true, "\"a b\"\n"),
+        ("${SUCCINCTLY_T3}", "(nu,ne)", true, "\"a b\"\n"),
+        ("${SUCCINCTLY_T3}", "(ff)", true, "\"a b\"\n"),
+        ("${SUCCINCTLY_T3}", "(nu,ne,ff)", true, "\"a b\"\n"),
+        ("plain", "", true, "\"plain\"\n"),
+        ("plain", "(nu)", true, "\"plain\"\n"),
+        ("plain", "(ne)", true, "\"plain\"\n"),
+        ("plain", "(nu,ne)", true, "\"plain\"\n"),
+        ("plain", "(ff)", true, "\"plain\"\n"),
+        ("plain", "(nu,ne,ff)", true, "\"plain\"\n"),
+        ("", "", true, "\"\"\n"),
+        ("", "(nu)", true, "\"\"\n"),
+        ("", "(ne)", true, "\"\"\n"),
+        ("", "(nu,ne)", true, "\"\"\n"),
+        ("", "(ff)", true, "\"\"\n"),
+        ("", "(nu,ne,ff)", true, "\"\"\n"),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "(nu)",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "(ne)",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "(nu,ne)",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "(ff)",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+        (
+            "cost $$5 for ${SUCCINCTLY_T1:-x}",
+            "(nu,ne,ff)",
+            true,
+            "\"cost $5 for bar\"\n",
+        ),
+    ];
+    for (input, flags, ok, expected) in rows {
+        let filter = format!(". | envsubst{flags}");
+        let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+            .args(["yq", "-p", "json", "-o", "json", "-I0", &filter])
+            .env("SUCCINCTLY_T1", "bar")
+            .env("SUCCINCTLY_T2", "")
+            .env("SUCCINCTLY_T3", "a b")
+            .env_remove("SUCCINCTLY_T0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                let body = format!("{input:?}");
+                child.stdin.take().unwrap().write_all(body.as_bytes())?;
+                child.wait_with_output()
+            })?;
+        let stdout = String::from_utf8(output.stdout)?;
+        let stderr = String::from_utf8(output.stderr)?;
+        if *ok {
+            assert_eq!(output.status.code(), Some(0), "{input:?} {flags}: {stderr}");
+            assert_eq!(&stdout, expected, "{input:?} {flags}");
+        } else {
+            assert_eq!(output.status.code(), Some(1), "{input:?} {flags}: {stdout}");
+            let first = |s: &str| {
+                s.trim()
+                    .replace("Error: ", "")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            assert_eq!(first(&stderr), first(expected), "{input:?} {flags}");
+        }
+    }
+    Ok(())
+}
+
+/// #4872: `ff` stops at the first of several errors (yq lists them all without it), and a
+/// syntax error comes first, ahead of the variables found before it.
+#[test]
+fn test_envsubst_fail_fast_and_syntax_errors_4872() -> Result<()> {
+    for (text, flags, expected) in [
+        (
+            "$SUCCINCTLY_T0$SUCCINCTLY_T2",
+            "(nu,ne)",
+            "variable ${SUCCINCTLY_T0} not set\nvariable ${SUCCINCTLY_T2} set but empty",
+        ),
+        (
+            "$SUCCINCTLY_T0$SUCCINCTLY_T2",
+            "(nu,ne,ff)",
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        (
+            "$SUCCINCTLY_T2$SUCCINCTLY_T0",
+            "(nu,ne,ff)",
+            "variable ${SUCCINCTLY_T2} set but empty",
+        ),
+        (
+            "$SUCCINCTLY_T0 ${SUCCINCTLY_T1",
+            "(nu)",
+            "closing brace expected\nvariable ${SUCCINCTLY_T0} not set",
+        ),
+        (
+            "$SUCCINCTLY_T0 ${SUCCINCTLY_T1",
+            "(nu,ff)",
+            "closing brace expected",
+        ),
+    ] {
+        let filter = format!(". | envsubst{flags}");
+        let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+            .args(["yq", "-p", "json", "-o", "json", "-I0", &filter])
+            .env("SUCCINCTLY_T1", "bar")
+            .env("SUCCINCTLY_T2", "")
+            .env_remove("SUCCINCTLY_T0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(format!("{text:?}").as_bytes())?;
+                child.wait_with_output()
+            })?;
+        assert_eq!(output.status.code(), Some(1), "{text} {flags}");
+        let stderr = String::from_utf8(output.stderr)?;
+        assert_eq!(
+            stderr.trim().trim_start_matches("Error: "),
+            expected,
+            "{text} {flags}"
+        );
+    }
+    Ok(())
+}
+
+/// #4872: a non-string is yq's error (the tag it names), and `|=` is the way to use it.
+#[test]
+fn test_envsubst_of_a_non_string_names_its_tag_4872() -> Result<()> {
+    for (json, tag) in [
+        ("null", "!!null"),
+        ("5", "!!int"),
+        ("1.5", "!!float"),
+        ("true", "!!bool"),
+        ("[1]", "!!seq"),
+        ("{\"a\":1}", "!!map"),
+    ] {
+        let (out, stderr, code) =
+            run_yq_stdin_with_stderr(". | envsubst", json, &["-p", "json", "-o", "json"])?;
+        assert_eq!(code, 1, "{json}");
+        assert_eq!(out, "");
+        assert!(
+            stderr.contains(&format!(
+                "cannot substitute with {tag}, can only substitute strings. Hint: Most often you'll want to use '|=' over '=' for this operation"
+            )),
+            "{json}: {stderr}"
+        );
+    }
+    let (out, stderr, code) = run_yq_stdin_with_stderr(
+        "(.. | select(tag == \"!!str\")) |= envsubst",
+        "{\"a\":\"x$$y\",\"b\":[\"$$\",1]}",
+        &["-p", "json", "-o", "json", "-I0"],
+    )?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "{\"a\":\"x$y\",\"b\":[\"$\",1]}\n");
+    Ok(())
+}
+
 #[test]
 fn test_eval_all_ea_alias() -> Result<()> {
     let (f1, f2) = two_doc_fixtures()?;

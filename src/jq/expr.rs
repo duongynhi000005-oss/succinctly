@@ -2425,6 +2425,9 @@ pub enum Builtin {
     /// yq's `from_json` and `from_yaml` (#4206): the string's first YAML document, as a value.
     /// A non-string passes through unchanged. Yq mode only.
     FromYaml,
+    /// yq's `envsubst` and `envsubst(nu, ne, ff)` (#4872): `$VAR`, `${VAR}` and `${VAR:-d}` in a
+    /// string replaced by the environment. Yq mode only.
+    Envsubst(super::envsubst::EnvsubstFlags),
 
     // Phase 6: Additional String Functions
     /// `explode` - string to array of codepoints

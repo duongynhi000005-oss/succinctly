@@ -74,6 +74,9 @@ mod array_index;
 mod collect_object;
 mod deferred_bind;
 pub mod document;
+// Only the `std` build reads the environment; a `no_std` build parses the builtin and refuses it.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
+mod envsubst;
 mod error;
 pub mod escape;
 mod eval;

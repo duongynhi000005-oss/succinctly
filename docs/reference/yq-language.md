@@ -94,6 +94,21 @@ node `path` names and discards the value of anything else; a missing path is cre
 does. `from_json` and `from_yaml` both decode YAML and answer the first document of a string
 (a non-string passes through). `to_json` and `to_yaml` are not implemented yet (#4206).
 
+### `envsubst` (#4872)
+
+```bash
+FOO=bar succinctly yq -n '"hi $FOO ${FOO} ${MISSING:-def} $$5" | envsubst'   # hi bar bar def $5
+succinctly yq '.[] |= envsubst(nu, ne)' values.yaml    # an unset or empty variable is an error
+```
+
+`$VAR`, `${VAR}`, `${VAR:-d}`, `${VAR-d}`, `${VAR:=d}`, `${VAR:+a}` and `$$` (a literal `$`) are
+replaced from the environment, as yq's `a8m/envsubst` does. The flags are `nu` (an unset variable is
+an error), `ne` (a variable that is set but empty is an error) and `ff` (stop at the first error
+instead of listing all); `envsubst(nu, ne)` combines them. A non-string is an error
+(`cannot substitute with !!map, ...`): use `|=` on the strings. A `${` that is not followed by a
+variable name (`${-}`, a `${` nested in a braced name) is only approximated; see the
+[limitations entry](../compliance/yq/limitations.md#envsubst-4872).
+
 ### Operator precedence differs on `|`, `,` and `and`/`or`
 
 The [jq operator-precedence table](jq-language.md#operator-precedence) applies in
