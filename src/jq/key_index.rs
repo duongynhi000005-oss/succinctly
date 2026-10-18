@@ -127,6 +127,9 @@ impl KeyIndex {
             if members > max_members {
                 return None;
             }
+            if !key.key_is_indexable() {
+                return None;
+            }
             // A hash exists only for a key that decoded, so asking for it first
             // decodes each key once; the malformed test is for a key without one.
             if let Some(hash) = key_hash_of(&key) {
@@ -920,31 +923,116 @@ mod tests {
             }
         }
 
-        #[test]
-        fn a_yaml_mapping_is_never_registered_3913() {
+        /// The first document's mapping of `yaml`, run through `check` inside a memo scope.
+        fn with_yaml_mapping<R>(
+            yaml: &str,
+            check: impl FnOnce(&crate::yaml::YamlFields<'_, Vec<u64>>) -> R,
+        ) -> R {
             use crate::yaml::{YamlIndex, YamlValue};
 
-            let yaml: String = (0..WIDE_MEMBERS * 2)
-                .map(|i| format!("k{i}: {i}\n"))
-                .collect();
             let index = YamlIndex::build(yaml.as_bytes()).unwrap();
             let root = index.root(yaml.as_bytes());
             let YamlValue::Sequence(docs) = root.value() else {
                 panic!("a YAML root is a sequence of documents"); // patchcov: coverage tolerate-line reason="unreachable: YamlIndex::build always wraps parsed documents in a virtual root Sequence (#798)"
             };
             let Some(YamlValue::Mapping(fields)) = docs.into_iter().next() else {
-                panic!("expected a mapping document"); // patchcov: coverage tolerate-line reason="unreachable: the document built above is a block mapping (#3913)"
+                panic!("expected a mapping document"); // patchcov: coverage tolerate-line reason="unreachable: the documents built by these tests are block mappings (#4003)"
             };
-            assert!(fields.head_key_cursor().is_none());
             let _scope = memo::enter(root.document_token());
-            let before = memo::work();
-            // A format without the key index is told "not wide" by its own
-            // walk; asking the memo to remember it anyway is a no-op.
-            memo::note_wide(&fields);
-            for _ in 0..4 {
-                assert!(matches!(find_cursor_memoized(&fields, "k9"), Ok(Some(_))));
+            check(&fields)
+        }
+
+        fn yaml_mapping(members: usize, extra: &str) -> String {
+            let mut yaml: String = (0..members).map(|i| format!("k{i}: {i}\n")).collect();
+            yaml.push_str(extra);
+            yaml
+        }
+
+        /// What the walk answers, as the position of the value's key's text, for comparing with
+        /// the memo's answer.
+        fn shown_yaml(
+            found: Result<Option<crate::yaml::YamlCursor<'_, Vec<u64>>>, EvalError>,
+        ) -> String {
+            match found {
+                Ok(Some(cursor)) => format!("{:?}", cursor.text_position()),
+                Ok(None) => "none".to_string(),
+                Err(e) => format!("error: {e}"),
             }
-            assert_eq!(memo::work(), before);
+        }
+
+        /// #4003: a YAML mapping of plain string keys is indexed on its second wide lookup, and
+        /// every answer is the walk's, duplicates included (the last wins).
+        #[test]
+        fn a_wide_yaml_mapping_is_indexed_and_answers_as_the_walk_does_4003() {
+            let yaml = yaml_mapping(
+                WIDE_MEMBERS * 2,
+                "k3: again\n\"k5\": quoted\n'': empty\n7: seven\n~: tilde\n",
+            );
+            with_yaml_mapping(&yaml, |fields| {
+                assert!(fields.head_key_cursor().is_some());
+                let before = memo::work();
+                for name in ["k0", "k3", "k5", "k127", "", "7", "~", "nope", "k3", "k5"] {
+                    let walked = shown_yaml(DocumentFields::find_cursor(fields, name));
+                    for round in 0..4 {
+                        assert_eq!(
+                            shown_yaml(find_cursor_memoized(fields, name)),
+                            walked,
+                            "{name:?} round {round}"
+                        );
+                    }
+                }
+                let (builds, hits) = memo::work();
+                assert_eq!(builds, before.0 + 1, "built once");
+                assert!(hits > before.1, "and answered from the index");
+            });
+        }
+
+        /// #4003: a key the walk does not match by its text keeps the walk: an alias, a collection
+        /// (which the walk matches to `""` only).
+        #[test]
+        fn a_yaml_mapping_with_a_key_the_walk_matches_differently_is_not_indexed_4003() {
+            for extra in [
+                "&a anchored: 1\n*a : via alias\n",
+                "? [a, b]\n: collection\n",
+                "? {x: 1}\n: map key\n",
+            ] {
+                let yaml = yaml_mapping(WIDE_MEMBERS * 2, extra);
+                with_yaml_mapping(&yaml, |fields| {
+                    let before = memo::work();
+                    for name in ["k0", "anchored", "", "nope"] {
+                        let walked = shown_yaml(DocumentFields::find_cursor(fields, name));
+                        for round in 0..4 {
+                            assert_eq!(
+                                shown_yaml(find_cursor_memoized(fields, name)),
+                                walked,
+                                "{extra:?} {name:?} round {round}"
+                            );
+                        }
+                    }
+                    assert_eq!(memo::work(), before, "{extra:?}: neither a build nor a hit");
+                });
+            }
+        }
+
+        /// #4003: a mapping with a merge key holds entries no member spells; it has no head and
+        /// is never indexed.
+        #[test]
+        fn a_merge_resolved_yaml_mapping_is_not_indexed_4003() {
+            let yaml = format!(
+                "base: &b {{m1: 1}}\n{}<<: *b\n",
+                (0..WIDE_MEMBERS * 2)
+                    .map(|i| format!("k{i}: {i}\n"))
+                    .collect::<String>()
+            );
+            with_yaml_mapping(&yaml, |fields| {
+                assert!(fields.head_key_cursor().is_none());
+                let before = memo::work();
+                for _ in 0..4 {
+                    assert!(matches!(find_cursor_memoized(fields, "m1"), Ok(Some(_))));
+                    assert!(matches!(find_cursor_memoized(fields, "k9"), Ok(Some(_))));
+                }
+                assert_eq!(memo::work(), before);
+            });
         }
 
         #[test]

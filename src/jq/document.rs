@@ -1432,6 +1432,17 @@ pub trait DocumentValue: Sized + Clone {
         false
     }
 
+    /// Whether the per-object key index may hold this key (#4003).
+    ///
+    /// The index finds a member by the hash of its decoded key, which is the lookup a
+    /// format's own walk performs only when the walk matches every key by its decoded text.
+    /// A format whose walk skips some keys (YAML does not match an alias key by
+    /// name, and matches a collection key only to `""`) answers `false` for those, and an
+    /// object holding one keeps the walk. `true` by default.
+    fn key_is_indexable(&self) -> bool {
+        true
+    }
+
     /// This value's raw source bytes when it is a string key whose span
     /// needs no decoding -- byte-identical to what
     /// [`key_string`](Self::key_string) would return.

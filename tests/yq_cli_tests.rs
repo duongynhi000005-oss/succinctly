@@ -68341,6 +68341,30 @@ fn test_kind_names_an_alias_and_a_null_tagged_collection_4866() -> Result<()> {
     Ok(())
 }
 
+/// #4003: a wide mapping read by key more than once is indexed (the index JSON documents get), and
+/// the index answers as the walk does: the last duplicate wins, a quoted key matches by its text, a
+/// numeric or hex key by its spelling, an alias key and a collection key (`""` only) never by name.
+/// Rows captured from yq v4.53.3 (`-o=json -I=0`).
+#[test]
+fn test_wide_yaml_mapping_lookups_answer_as_the_walk_does_4003() -> Result<()> {
+    let filter =
+        r#"[.k1, .k3, .k3, .["7"], .[""], .["0x10"], .["1.5"], .kx, .k99, .nope, .k3, .k3]"#;
+    let keys: String = (0..100).map(|i| format!("k{i}: {i}\n")).collect();
+    for (head, tail, expected) in [
+        ("", "\"k3\": quoted3\nk3: again3\n7: seven\n'': empty\n0x10: hex\n1.5: f\n", "[1,\"again3\",\"again3\",\"seven\",\"empty\",\"hex\",\"f\",null,99,null,\"again3\",\"again3\"]\n"),
+        ("base: &a kx\n", "kx: direct\n*a : viaalias\n", "[1,3,3,null,null,null,null,\"direct\",99,null,3,3]\n"),
+        ("", "? [a, b]\n: complexval\n'': empty\n", "[1,3,3,null,\"empty\",null,null,null,99,null,3,3]\n"),
+    ] {
+        let doc = format!("{head}{keys}{tail}");
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, &doc, &["-o=json", "-I=0"])?,
+            (expected.to_string(), String::new(), 0),
+            "{tail:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.
