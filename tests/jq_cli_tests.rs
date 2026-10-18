@@ -63502,6 +63502,256 @@ fn test_destructure_of_a_marker_that_is_not_the_register_in_a_fold_body_4588() -
     Ok(())
 }
 
+/// #4832: the same `$x` bound to a node that is not jq's register (`.a as $x`, `null` included),
+/// destructured by a fold *source* outside every fold body, at any position of the source (alone,
+/// behind a comma, with a computed key or a bind in front, after a `1 |` or `(1,2) |` stage, before a
+/// `select(false)`, inside a `first` or a `label`). The pattern's tracked `INDEX` step raises whether or not
+/// a `reduce` backtracks its source; the by-value drive answered, and `del` deleted the document through
+/// the answer (`.a as $x | reduce ($x as {a:$a} | .) as $y (.; .)` printed `null` where jq raises) and `|=`
+/// replaced it. A `foreach` source with a stage ahead of the destructure (`1 |`, `(1,2) |`, `select(.) |`)
+/// was driven by value the same way. The resolver decides what the stages around the destructure skip, so
+/// the controls keep answering: a destructure behind `select(false)`, `empty` or `limit(0; ..)`, one behind a
+/// bind whose source emits nothing, `$x` that is the register (`. as $x`), a `try` around it, a bare `$x`,
+/// and the `foreach` form. Every row captured from jq 1.7.1 with `-c`.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_fold_source_destructure_of_a_marker_that_is_not_the_register_outside_a_fold_body_4832(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce ($x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(.a as $x | reduce ($x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1, ($x as {a:$a} | .)) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (($x as {a:$a} | .), 5) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (5, ($x as {a:$a} | .)) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1, 5, ($x as {a:$a} | .)) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":[1,2]}"#,
+            r"path(.a as $x | reduce (1, $x as [$a] | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1,2]",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(.a as $x | reduce (1, $x as {("a"):$a} | .) as $y (.; .))"#,
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1, $x as $q | $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1, $x as {a:$a} | $a) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1, $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(.a as $x | reduce (1, $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce ($x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | reduce (1, $x as {a:$a} | .) as $y (.; .)) |= 1",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce ($x as {a:$a} | select(false)) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (first(empty, ($x as {a:$a} | .))) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1 | $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce ((1,2) | $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (label $f | $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (1 | $x as {a:$a} | .) as $y (.; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1 | $x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach ((1,2) | $x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (select(.) | $x as {a:$a} | .) as $y (.; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (select(false) | $x as {a:$a} | .) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (empty | $x as {a:$a} | .) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (limit(0; $x as {a:$a} | .)) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce ((.a | select(.zz)) as $q | $x as {a:$a} | .) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | reduce (select(false) | $x as {a:$a} | .) as $y (.; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce ($x as {a:$a} | .) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (try ($x as {a:$a} | .)) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1, $x) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1, ($x as {a:$a} | .)) as $y (.; .; .))",
+            "[]\n",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | reduce (1, $x as {a:$a} | .) as $y (.; .))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4603: a `null`/boolean literal bound by a destructure in a fold source (`null as {b:$b} | .`)
 /// is not jq's register unless the register holds the same one (`jv_identical` compares those by
 /// kind), so the pattern's tracked `INDEX` step raises on it when the register is a document of

@@ -2556,7 +2556,12 @@ is the revert that established what the other one costs.
    A `$x` that is *not* the register -- bound to a node elsewhere (`.a as $x`, `null` included), not equal to it by kind
    -- raises at the pattern's first step whatever the source is, a `reduce` that backtracks included
    ([#4588](https://github.com/rust-works/succinctly/issues/4588): `foreign_register_markers`, for a trackable non-`null`
-   accumulator in any fold body, not under a `try`/`?`, not in a source with an `if`, `and`/`or` or `//` (one branch may
+   accumulator in any fold body and, since [#4832](https://github.com/rust-works/succinctly/issues/4832), for a fold source outside every
+   fold body, where the resolver decides what the stages around the destructure skip (`top_foreign_destructure`; `.a as $x | reduce ($x as {a:$a} | .)
+   as $y (.; .)` printed `[]`, `del` of it `null` and `|= 1` replaced the document, where jq raises, and so did the same
+   destructure behind a comma, a `1 |` stage, a `select(false)`, a `first` or a `label`, and a `foreach` source with a stage ahead of
+   it; still by value there: a destructure of `.` ahead of the `$x` one (`reduce (. as {a:$z} | $x as {a:$a} | .)`, the first bind moves
+   the register) and a source with an `if`, `and`/`or`, `//` or `try` around it), not under a `try`/`?`, not in a source with an `if`, `and`/`or` or `//` (one branch may
    not run: `if $x then . else $x as {b:$b} | . end` is answered), and a `null`/`false` one not behind a `select`; the body of a
    `reduce` whose source moved the register is left alone, where the register is on an element a marker may be). A `select($x)` in front of a destructure of `.` passes the register on by `$x`'s own truthiness whatever node it is bound to
    (since [#4604](https://github.com/rust-works/succinctly/issues/4604) any truthy marker is read, not only one equal to the
@@ -2571,7 +2576,7 @@ is the revert that established what the other one costs.
    `test_select_on_a_foreign_marker_then_destructure_raises_for_a_reduce_source_4604`,
    `test_alternative_chain_over_a_foreign_marker_in_a_fold_body_raises_4604` and
    `test_select_on_a_pure_marker_condition_decides_by_the_markers_value_4604`
-   ([#4604](https://github.com/rust-works/succinctly/issues/4604)). A `try`/`?` (or `try ... catch empty`) that is the whole
+   ([#4604](https://github.com/rust-works/succinctly/issues/4604)). Still the wrong message ([#4832](https://github.com/rust-works/succinctly/issues/4832); stdout and exit code agree): a `$x` bound elsewhere and navigated or destructured directly in a `reduce` UPDATE after a source that moved the register (`. as $x | reduce .a as $i (.; $x | .a)` ends on the final emission with `with result 1`, where jq raises `near attempt to access element "a" of {"a":1}` at the step), and in a `foreach` UPDATE or EXTRACT behind a bind or a comma, because `reduce` carries no per-step accumulator path and the certification of the marker is against the register the fold entered on. A `try`/`?` (or `try ... catch empty`) that is the whole
    source of a `foreach` which is the whole UPDATE of a `reduce`, around the destructure of such a marker, is refused too: the
    `try` catches the raise, the source is empty, the `foreach` emits nothing and the `reduce` state is `null`, which jq refuses
    at the end of the path (`Invalid path expression with result null`; the fold driver answers the source as empty
