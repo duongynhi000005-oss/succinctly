@@ -164729,3 +164729,150 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal
         ),
     ])
 }
+
+/// #4819: `isempty(..)` over a `?//` chain as a `foreach` source. jq defines `isempty` with a
+/// `label`/`break` the chain's `?//` catches, so the chain's destructuring alternative emits an element
+/// the consumer refuses, `?//` retries the bare alternative and the retry's emission is refused too: the
+/// by-value drive counted both, printing one path more than jq (`#4669`'s `first`/`limit`/`nth`
+/// sibling). The source is routed to the resolver's `isempty` arm, with or without a comma stage in
+/// front of the chain, a `try`/`?` around the `isempty`, or stages after it. Every row captured from
+/// jq 1.7.1 with `-c`.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((.,.)|. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((.,1)|. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((1,.)|. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(isempty(. as {a:$a} ?// $a | .)) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(limit(2;(.,.)|. as {a:$a} ?// $a | .)) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (try isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .)? | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((. as {a:$a} ?// $a | .),1) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach ((isempty(. as {a:$a} ?// $a | .)|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[[1]]",
+            r"path(foreach (isempty((.,.)|. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4819: what `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`'s routing leaves
+/// alone. Value mode never reached the routed drive (jq emits the `false` twice there), and inside
+/// another fold's body the by-value count is kept, as for #4669 (the last row: jq prints two paths, the
+/// by-value count is four, a recorded divergence in `limitations.md`). The last three rows are the
+/// operands the routing excludes -- a fold or `def` in the stages after the `isempty`, a pipe that starts at
+/// a bare `null` inside it -- which keep the by-value count (two paths where jq prints one). Every other
+/// row captured from jq 1.7.1 with `-c`.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"[foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .)]",
+            "[{\"a\":1},{\"a\":1}]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}

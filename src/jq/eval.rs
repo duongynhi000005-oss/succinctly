@@ -54477,7 +54477,8 @@ fn is_literal_count(n: &Expr) -> bool {
     }
 }
 
-/// Whether `e` is a `first`/`limit`/`nth` with a literal count, read through a `try`/`?` and a
+/// Whether `e` is a `first`/`limit`/`nth` with a literal count (or, since #4819, an `isempty(..)`, alone
+/// or as the head of a pipe, read through a `try`/`?`), read through a `try`/`?` and a
 /// wrapper under a wrapper, whose operand holds a `?//` chain with a bare `$var` alternative, as
 /// [`wrapped_bare_chain`] reads the wrapper -- but anywhere in the operand, which is what lets the
 /// chain sit behind other stages: `limit(2; (., 1) | . as {a:$a} ?// $a | .)` (#4669). [`take_wrapped_bare_chain`]
@@ -54494,38 +54495,51 @@ fn is_literal_count(n: &Expr) -> bool {
 /// routed too: the sweep rows and `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`
 /// pin that the resolver counts those as jq does.
 fn bounded_chain_behind_stages(e: &Expr) -> bool {
-    // One walk of the operand: it holds a `?//` chain with a bare `$var` alternative, and holds
-    // neither a construct the resolver's walk of a bound does not model nor a pipe that starts at a
-    // bare `null` (#4756's and #4775's: the chain beneath is read as the register by kind there, and
-    // the resolver's walk refuses a `del` through it that the by-value drive answers).
+    // A construct the resolver's walk of a bound does not model (a fold, a `def` or a call of one), or
+    // a pipe that starts at a bare `null` (#4756's and #4775's: the chain beneath is read as the
+    // register by kind there, and the resolver's walk refuses a `del` through it that the by-value
+    // drive answers).
+    fn unrouted(e: &Expr) -> bool {
+        match e {
+            Expr::Reduce { .. }
+            | Expr::Foreach { .. }
+            | Expr::FuncDef { .. }
+            | Expr::DefCall { .. } => true,
+            Expr::Pipe(stages) => matches!(
+                stages.first().map(unwrap_bind_source),
+                Some(Expr::Literal(Literal::Null))
+            ),
+            _ => false,
+        }
+    }
+    // One walk of the operand: it holds a `?//` chain with a bare `$var` alternative and no
+    // [`unrouted`] construct.
     fn operand_ok(operand: &Expr) -> bool {
         let mut chain = false;
-        let mut unrouted = false;
+        let mut has_unrouted = false;
         crate::jq::walk::any_subexpr(operand, &mut |e| {
-            match e {
-                Expr::AsPattern { patterns, .. }
-                    if patterns.len() > 1
-                        && patterns.iter().any(|p| matches!(p, Pattern::Var(_))) =>
-                {
-                    chain = true;
-                }
-                Expr::Reduce { .. }
-                | Expr::Foreach { .. }
-                | Expr::FuncDef { .. }
-                | Expr::DefCall { .. } => unrouted = true,
-                Expr::Pipe(stages)
-                    if matches!(
-                        stages.first().map(unwrap_bind_source),
-                        Some(Expr::Literal(Literal::Null))
-                    ) =>
-                {
-                    unrouted = true;
-                }
-                _ => {}
+            if unrouted(e) {
+                has_unrouted = true;
+            } else if matches!(e, Expr::AsPattern { patterns, .. }
+                if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
+            {
+                chain = true;
             }
-            unrouted
+            has_unrouted
         });
-        chain && !unrouted
+        chain && !has_unrouted
+    }
+    // `isempty(..)`, read through a `try`/`?` that hands its answer on unchanged (#4819), under the
+    // same wrapper budget as [`go`].
+    fn is_isempty_head(e: &Expr, budget: u8) -> bool {
+        let Some(budget) = budget.checked_sub(1) else {
+            return false;
+        };
+        match unwrap_bind_source(e) {
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => is_isempty_head(expr, budget),
+            Expr::Builtin(Builtin::IsEmpty(_)) => true,
+            _ => false,
+        }
     }
     fn go(e: &Expr, budget: u8) -> bool {
         let Some(budget) = budget.checked_sub(1) else {
@@ -54539,8 +54553,22 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
             {
                 operand_ok(expr)
             }
-            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            Expr::FirstExpr(inner)
+            | Expr::Builtin(Builtin::FirstStream(inner) | Builtin::IsEmpty(inner)) => {
                 operand_ok(inner)
+            }
+            // #4819: the `isempty` of a chain feeding further stages (`isempty(CHAIN) | select(.|not)`):
+            // the resolver walks the stages after it as it walks the rest of a pipe. Only an `isempty`
+            // head, and no [`unrouted`] construct in the tail.
+            Expr::Pipe(stages)
+                if stages
+                    .first()
+                    .is_some_and(|head| is_isempty_head(head, budget))
+                    && stages[1..]
+                        .iter()
+                        .all(|stage| !crate::jq::walk::any_subexpr(stage, &mut unrouted)) =>
+            {
+                go(&stages[0], budget)
             }
             _ => false,
         }

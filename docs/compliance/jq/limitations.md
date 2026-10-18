@@ -726,14 +726,25 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Still by value: the same
   source inside another fold's body (`foreach (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k
   (.; .; .); .)` prints six paths where jq prints two; the routed source refuses rows jq answers there),
-  and the other `label`/`break` consumers over such a chain (`isempty(.. | CHAIN)` as a `foreach` source
-  counts one more than jq; `any`/`all` match). Pinned by
+  and the other `label`/`break` consumers over such a chain (`any`/`all` match; `isempty` is routed the
+  same way since [#4819](https://github.com/rust-works/succinctly/issues/4819), below). Pinned by
   `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669` and, for what the routing
   leaves alone, `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669`; over the 113
   `first`/`limit`/`nth` `?//` operands, `--stage-only` (235,067 rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) MATCH went 202,119 to 202,931 and DIFF 2,280 to 1,608 with ACCEPT_WRONG (329) unchanged;
   its only regressions were nine safe-direction `del` rows over `first`/`limit`/`nth(null | CHAIN)`,
   which the `null` exclusion removes (the 25 operands naming `null`, re-run: 0 regressions). Since
+  [#4819](https://github.com/rust-works/succinctly/issues/4819) an `isempty(..)` over such a chain is
+  routed the same way (`bounded_chain_behind_stages`, also through a `try`/`?` and when stages follow it):
+  jq defines `isempty` with a `label`/`break` the chain's `?//` catches and retries, so `path(foreach
+  (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))` on `{"a":1}` printed `[]` twice
+  where jq prints it once. The same source inside another fold's body keeps the by-value count (`foreach
+  (1,2) as $i (.; foreach (isempty(CHAIN) | select(.|not)) as $k (.; .; .); .)` prints four paths where jq
+  prints two), as do an `isempty` whose tail holds a fold or `def` or whose chain sits behind a bare
+  `null |`. Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
+  `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819`; over the 51
+  `isempty` `?//` operands, `--stage-only` (104,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
+  MATCH went 96,607 to 96,770, DIFF 396 to 235 and ACCEPT_WRONG 4 to 2, no regression. Since
   [#4615](https://github.com/rust-works/succinctly/issues/4615) the gate also reads through a call to a
   `def` with arguments (`def f(g): g; foreach f(CHAIN) ...`, a `def` written in the source too), through the
   argument it shares into the body, and through a nested `foreach` whose INIT, UPDATE and EXTRACT cannot
