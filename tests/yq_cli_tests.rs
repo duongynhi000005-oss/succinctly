@@ -13960,6 +13960,16 @@ fn test_yq_streaming_double_quoted_scalar_escapes_like_go_yaml_4850() -> Result<
             "c: \"plain \\\" q \\\\ s \\t\\n\\r\"\n",
         ),
         ("d: \"plain\"\n", "d: \"plain\"\n"),
+        // A leading U+FEFF escapes every character after it, and `\P` is U+2029.
+        (
+            "a: \"\\uFEFFx y \\u2029\"\n",
+            "a: \"\\uFEFF\\x78\\x20\\x79\\x20\\P\"\n",
+        ),
+        // A key and a flow sequence take the same writer.
+        (
+            "\"k\\a\": 1\nf: [\"\\a\", \"\\x7f\"]\n",
+            "\"k\\a\": 1\nf: [\"\\a\", \"\\x7F\"]\n",
+        ),
     ] {
         let (streamed, code) = run_yq_stdin(".", yaml, &[])?;
         assert_eq!(code, 0, "{yaml:?}");
@@ -13969,6 +13979,15 @@ fn test_yq_streaming_double_quoted_scalar_escapes_like_go_yaml_4850() -> Result<
         assert_eq!(code, 0, "{yaml:?}");
         assert_eq!(dom, format!("{expected}z: 1\n"), "DOM route for {yaml:?}");
     }
+    // A JSON-sourced string with a line break keeps the escaped double-quoted form, and its
+    // control characters are go-yaml's too (yq v4.53.3 `-p json -o yaml`).
+    let (out, code) = run_yq_stdin(
+        ".",
+        "{\"a\":\"x\\ny\\u0007\",\"c\":\"\\ufeffx\"}",
+        &["-p", "json", "-o", "yaml"],
+    )?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "a: \"x\\ny\\a\"\nc: \"\\uFEFF\\x78\"\n");
     Ok(())
 }
 

@@ -1103,7 +1103,7 @@ pub fn stream_yaml_string_in<W: core::fmt::Write>(
 ) -> core::fmt::Result {
     match write_go_yaml_string(out, s, flow) {
         Some(written) => written,
-        None => stream_yaml_double_quoted(out, s),
+        None => write_go_yaml_double_quoted(out, s),
     }
 }
 
@@ -1207,12 +1207,6 @@ pub fn stream_lazy_keys_yaml<W: core::fmt::Write, F: DocumentFields>(
         }
         Ok(())
     }
-}
-
-/// Stream a double-quoted YAML string the way go-yaml's emitter writes one (#4850), as
-/// `crate::yaml`'s source-scalar writer does.
-fn stream_yaml_double_quoted<W: core::fmt::Write>(out: &mut W, s: &str) -> core::fmt::Result {
-    write_go_yaml_double_quoted(out, s)
 }
 
 #[cfg(test)]

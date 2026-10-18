@@ -9685,7 +9685,7 @@ fn stream_yaml_nonstring_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
 ) -> core::fmt::Result {
     let s = key.key_string();
     if needs_yaml_quoting(&s) {
-        stream_yaml_double_quoted(out, &s)
+        write_go_yaml_double_quoted(out, &s)
     } else {
         out.write_str(&s)
     }
@@ -9795,7 +9795,7 @@ fn stream_yaml_block_scalar_quoted<Out: core::fmt::Write>(
     decoded: &str,
 ) -> core::fmt::Result {
     if needs_yaml_quoting(decoded) {
-        stream_yaml_double_quoted(out, decoded)
+        write_go_yaml_double_quoted(out, decoded)
     } else {
         out.write_str(decoded)
     }
@@ -9985,10 +9985,10 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
         YamlString::DoubleQuoted { .. } if canonicalize => {
             match write_go_yaml_string(out, &str_val, false) {
                 Some(written) => Ok(written?),
-                None => Ok(stream_yaml_double_quoted(out, &str_val)?),
+                None => Ok(write_go_yaml_double_quoted(out, &str_val)?),
             }
         }
-        YamlString::DoubleQuoted { .. } => Ok(stream_yaml_double_quoted(out, &str_val)?),
+        YamlString::DoubleQuoted { .. } => Ok(write_go_yaml_double_quoted(out, &str_val)?),
         YamlString::SingleQuoted { .. } => Ok(stream_yaml_single_quoted(out, &str_val)?),
         YamlString::Unquoted { .. } => {
             // #996: checked before the verbatim-echo fallback below,
@@ -10015,7 +10015,7 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
                 || str_val.bytes().any(|b| b < 0x20)
                 || starts_seq_entry(str_val.as_bytes(), 0)
             {
-                Ok(stream_yaml_double_quoted(out, &str_val)?)
+                Ok(write_go_yaml_double_quoted(out, &str_val)?)
             } else {
                 Ok(out.write_str(&str_val)?)
             }
@@ -10135,21 +10135,6 @@ fn looks_like_yaml_number(s: &str) -> bool {
     }
 
     true
-}
-
-/// Stream a double-quoted YAML string the way go-yaml's emitter writes one (#4850): the escape
-/// letters (`\a \b \e \v \f \0`, `\N`, `\L`, `\P`), `\xNN` in upper case, `\u`/`\U` for what
-/// it will not write raw. A string of printable ASCII with no `"` or `\` is the common case and
-/// is written whole.
-fn stream_yaml_double_quoted<Out: core::fmt::Write>(out: &mut Out, s: &str) -> core::fmt::Result {
-    if s.bytes()
-        .all(|b| (0x20..0x7F).contains(&b) && b != b'"' && b != b'\\')
-    {
-        out.write_char('"')?;
-        out.write_str(s)?;
-        return out.write_char('"');
-    }
-    write_go_yaml_double_quoted(out, s)
 }
 
 /// Stream a single-quoted YAML string with proper escaping.
