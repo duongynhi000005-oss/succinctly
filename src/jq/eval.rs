@@ -1168,50 +1168,105 @@ pub mod alias_identity {
         });
     }
 
-    /// Drop every path of a recursive descent that lies strictly *below* an alias position that
-    /// is still its anchor's untouched copy (#4223): yq's `..` visits an alias node and does not
-    /// go into it, so `(.. | select(tag == "!!int")) |= . + 1` over `base: &b {p: 1}` /
-    /// `copy: *b` adds one to `p`. The paths here are the expanded copy's, which
-    /// [`redirect_paths`] would send to the anchor's node once each: the same node written twice.
-    /// The alias position itself stays (`.. |= f` still reaches the alias node).
+    /// The paths among `paths` of a recursive descent that lie strictly *below* an alias position
+    /// that is still its anchor's untouched copy (#4223): yq's `..` visits an alias node and does
+    /// not go into it, so `(.. | select(tag == "!!int")) |= . + 1` over `base: &b {p: 1}` /
+    /// `copy: *b` adds one to `p`. The paths a descent resolves here are the expanded copy's,
+    /// which [`redirect_paths`] would send to the anchor's node once each: the same node written
+    /// twice. The alias position itself is not among them (`.. |= f` still reaches the alias
+    /// node).
     ///
     /// Not [`redirect_paths`]: an explicit path through an alias (`.copy.p`, `.[] .p`) is yq's
-    /// rule 6 and accumulates; only the paths a `..` produced are the descent's to drop.
-    pub(crate) fn drop_below_alias(paths: &mut Vec<Expr>, doc: &OwnedValue) {
+    /// rule 6 and accumulates; only the paths a `..` produced are the descent's to drop, so the
+    /// caller hands in exactly those.
+    pub(crate) fn below_alias(paths: &[Expr], doc: &OwnedValue) -> Vec<Expr> {
         with_table(|table| {
-            paths.retain(|path| {
-                let mut components = Vec::new();
-                push_path_components(&mut components, path);
-                let mut prefix: Vec<OwnedValue> = Vec::new();
-                for (i, component) in components.iter().enumerate() {
-                    match unwrap_path_component(component).0 {
-                        Expr::Field(name) => prefix.push(OwnedValue::String(name.clone().into())),
-                        Expr::Index { idx, .. } => {
-                            let Some(OwnedValue::Array(arr)) = get_value_at_path(doc, &prefix)
-                            else {
-                                return true;
-                            };
-                            let len = arr.len() as i64;
-                            let norm = if *idx < 0 { *idx + len } else { *idx };
-                            if norm < 0 || norm >= len {
-                                return true;
-                            }
-                            prefix.push(OwnedValue::Int(norm));
-                        }
-                        _ => return true,
+            // Alias positions as byte keys, so each path is walked once instead of compared
+            // against every alias at every step.
+            let anchors: std::collections::HashMap<Vec<u8>, &[OwnedValue]> = table
+                .groups
+                .iter()
+                .flat_map(|(def, aliases)| {
+                    aliases
+                        .iter()
+                        .filter_map(move |alias| Some((position_key(alias)?, def.as_slice())))
+                })
+                .collect();
+            paths
+                .iter()
+                .filter(|path| is_below_alias(path, doc, &anchors))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// `position`'s steps as one key: a tag byte and the step, so a `String` and an `Int` never
+    /// collide. `None` for a step `collect_alias_groups` never produces.
+    fn position_key(position: &[OwnedValue]) -> Option<Vec<u8>> {
+        let mut key = Vec::new();
+        for step in position {
+            push_step_key(&mut key, step)?;
+        }
+        Some(key)
+    }
+
+    fn push_step_key(key: &mut Vec<u8>, step: &OwnedValue) -> Option<()> {
+        match step {
+            OwnedValue::String(name) => {
+                key.push(b'k');
+                key.extend_from_slice(name.as_bytes());
+                key.push(0);
+            }
+            OwnedValue::Int(idx) => {
+                key.push(b'i');
+                key.extend_from_slice(&idx.to_le_bytes());
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn is_below_alias(
+        path: &Expr,
+        doc: &OwnedValue,
+        anchors: &std::collections::HashMap<Vec<u8>, &[OwnedValue]>,
+    ) -> bool {
+        let mut components = Vec::new();
+        push_path_components(&mut components, path);
+        let mut prefix: Vec<OwnedValue> = Vec::new();
+        let mut key: Vec<u8> = Vec::new();
+        for (i, component) in components.iter().enumerate() {
+            let step = match unwrap_path_component(component).0 {
+                Expr::Field(name) => OwnedValue::String(name.clone().into()),
+                Expr::Index { idx, .. } if *idx >= 0 => OwnedValue::Int(*idx),
+                Expr::Index { idx, .. } => {
+                    // A negative index names the slot counted from the end of the array it indexes now.
+                    let Some(OwnedValue::Array(arr)) = get_value_at_path(doc, &prefix) else {
+                        return false;
+                    };
+                    let norm = *idx + arr.len() as i64;
+                    if norm < 0 {
+                        return false;
                     }
-                    let is_proper_prefix = i + 1 < components.len();
-                    if is_proper_prefix {
-                        if let Some(def) = table.anchor_for(&prefix) {
-                            if same_node(doc, &prefix, def) {
-                                return false;
-                            }
-                        }
+                    OwnedValue::Int(norm)
+                }
+                _ => return false,
+            };
+            if push_step_key(&mut key, &step).is_none() {
+                return false;
+            }
+            prefix.push(step);
+            let is_proper_prefix = i + 1 < components.len();
+            if is_proper_prefix {
+                if let Some(def) = anchors.get(&key) {
+                    if same_node(doc, &prefix, def) {
+                        return true;
                     }
                 }
-                true
-            });
-        });
+            }
+        }
+        false
     }
 
     /// Per-entry-point options for [`redirect_paths`].
@@ -1411,7 +1466,9 @@ pub mod alias_identity {
 
     pub(crate) fn redirect_paths(_paths: &mut Vec<Expr>, _doc: &OwnedValue, _opts: Redirect) {}
 
-    pub(crate) fn drop_below_alias(_paths: &mut Vec<Expr>, _doc: &OwnedValue) {}
+    pub(crate) fn below_alias(_paths: &[Expr], _doc: &OwnedValue) -> Vec<Expr> {
+        Vec::new()
+    }
 
     pub(crate) fn redirect_concrete_path(_path: &mut Vec<OwnedValue>, _doc: &OwnedValue) {}
 
@@ -68402,20 +68459,53 @@ fn resolve_dynamic_indexes<S: EvalSemantics>(
     // #4223: yq's `..` does not go into an alias node, so what it resolves below one is not a
     // target. Checked only when a write installed an alias table, and then only for a target
     // that holds a recursive descent.
-    if S::TAG == EvalTag::Yq
-        && alias_identity::active()
-        && crate::jq::walk::any_subexpr(expr, &mut |e| {
-            matches!(
-                e,
-                Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown)
-            )
-        })
-    {
-        match &mut resolved {
-            Ok(paths) | Err((paths, _)) => alias_identity::drop_below_alias(paths, input),
+    if S::TAG == EvalTag::Yq && alias_identity::active() && holds_recursive_descent(expr) {
+        let dropped = descent_paths_below_alias::<S>(expr, input, defer_trailing_iterate);
+        if !dropped.is_empty() {
+            let (Ok(paths) | Err((paths, _))) = &mut resolved;
+            for gone in &dropped {
+                if let Some(at) = paths.iter().position(|p| p == gone) {
+                    paths.remove(at);
+                }
+            }
         }
     }
     resolved
+}
+
+/// Whether `expr` holds a recursive descent that yq's alias rule applies to: `..`, bare
+/// `recurse`, and the `recurse(.[]?)` spelling of the same walk (#3719).
+fn holds_recursive_descent(expr: &Expr) -> bool {
+    crate::jq::walk::any_subexpr(expr, &mut |e| match e {
+        Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown) => true,
+        Expr::Builtin(Builtin::RecurseF(f)) => is_structural_descent(f, None),
+        _ => false,
+    })
+}
+
+/// The paths a recursive descent in `expr` resolves below an alias position (#4223), one entry
+/// per path, so that the caller removes exactly those from the combined list. A comma is taken
+/// member by member: an explicit path beside a `..` (`(.copy.p, ..) |= f`) is not the descent's.
+fn descent_paths_below_alias<S: EvalSemantics>(
+    expr: &Expr,
+    input: &OwnedValue,
+    defer_trailing_iterate: bool,
+) -> Vec<Expr> {
+    if let Expr::Comma(members) = unwrap_paren(expr) {
+        return members
+            .iter()
+            .flat_map(|member| {
+                descent_paths_below_alias::<S>(member, input, defer_trailing_iterate)
+            })
+            .collect();
+    }
+    if !holds_recursive_descent(expr) {
+        return Vec::new();
+    }
+    match resolve_dynamic_indexes_all::<S>(expr, input, defer_trailing_iterate) {
+        Ok(paths) => alias_identity::below_alias(&paths, input),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn resolve_dynamic_indexes_all<S: EvalSemantics>(

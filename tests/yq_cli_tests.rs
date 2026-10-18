@@ -191,10 +191,33 @@ fn test_write_through_recursive_descent_reaches_an_anchored_node_once_4223() -> 
             "(.anchors.copy.p) |= . + 1",
             r#"{"anchors":{"base":{"p":2,"q":2},"copy":{"p":2,"q":2}}}"#,
         ),
+        // An explicit path through the alias beside a descent is not the descent's: it is
+        // written, and the descent's own paths below the alias are not (in either order).
+        (
+            r#"(.anchors.copy.p, (.. | select(tag == "!!int" and . == 2))) |= . + 1"#,
+            both,
+        ),
+        (
+            r#"((.. | select(tag == "!!int" and . == 2)), .anchors.copy.p) |= . + 1"#,
+            both,
+        ),
+        (
+            r#"((.. | select(tag == "!!int" and . == 2)), (.anchors.copy.q, .anchors.base.p)) += 10"#,
+            r#"{"anchors":{"base":{"p":11,"q":22},"copy":{"p":11,"q":22}}}"#,
+        ),
+        ("(.anchors.copy.p, .anchors.base.q) |= . + 1", both),
     ] {
         let (out, code) = run_yq_stdin(filter, doc, args)?;
         assert_eq!((out.trim(), code), (expected, 0), "{filter}");
     }
+    // `recurse(.[]?)` is the same walk as `..` (#3719) and takes the same rule; yq has no
+    // `recurse`, so this row follows `..` rather than a reference.
+    let (out, code) = run_yq_stdin(
+        r#"(recurse(.[]?) | select(tag == "!!int")) |= . + 1"#,
+        doc,
+        &["-o=json", "-I=0", "--jq-extensions"],
+    )?;
+    assert_eq!((out.trim(), code), (both, 0));
     // Scalars and sequences behind aliases, and an alias of a scalar.
     let doc = "a: &x [1, 2]\nb: *x\nc: &y {n: 5}\nd:\n  - *y\n  - *x\n";
     let (out, code) = run_yq_stdin(r#"(.. | select(tag == "!!int")) |= . + 1"#, doc, args)?;
