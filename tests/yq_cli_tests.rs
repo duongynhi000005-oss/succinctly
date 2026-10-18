@@ -68362,6 +68362,32 @@ fn test_wide_yaml_mapping_lookups_answer_as_the_walk_does_4003() -> Result<()> {
             "{tail:?}"
         );
     }
+    // `has` reads the same index (a mapping read by `has` twice and walked 64 members).
+    let has_filter = r#"[has("k1"), has("k3"), has("k3"), has("7"), has(""), has("0x10"), has("1.5"), has("kx"), has("k99"), has("nope"), has("k100"), has("k3")]"#;
+    for (head, tail, expected) in [
+        (
+            "",
+            "\"k3\": quoted3\nk3: again3\n7: seven\n'': empty\n0x10: hex\n1.5: f\n",
+            "[true,true,true,true,true,true,true,false,true,false,false,true]\n",
+        ),
+        (
+            "base: &a kx\n",
+            "kx: direct\n*a : viaalias\n",
+            "[true,true,true,false,false,false,false,true,true,false,false,true]\n",
+        ),
+        (
+            "",
+            "? [a, b]\n: complexval\n'': empty\n",
+            "[true,true,true,false,true,false,false,false,true,false,false,true]\n",
+        ),
+    ] {
+        let doc = format!("{head}{keys}{tail}");
+        assert_eq!(
+            run_yq_stdin_with_stderr(has_filter, &doc, &["-o=json", "-I=0"])?,
+            (expected.to_string(), String::new(), 0),
+            "has: {tail:?}"
+        );
+    }
     Ok(())
 }
 
