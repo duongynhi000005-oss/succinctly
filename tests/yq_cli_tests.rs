@@ -13994,7 +13994,7 @@ fn test_yq_streaming_double_quoted_scalar_escapes_like_go_yaml_4850() -> Result<
 /// #4849: a write that gives an empty flow `{}` / `[]` its first child leaves it block-styled, as
 /// go-yaml's emitter does (an empty container has the one spelling, so flow is kept only until it has
 /// a child); the comment beside the flow spelling goes with it, and a container that was already
-/// non-empty keeps its flow style. Expected text captured from yq v4.53.3.
+/// non-empty, or that a copied node filled, keeps its flow style. Expected text captured from yq v4.53.3.
 #[test]
 fn test_yq_write_into_an_empty_flow_container_is_block_4849() -> Result<()> {
     for (yaml, filter, expected) in [
@@ -14011,6 +14011,15 @@ fn test_yq_write_into_an_empty_flow_container_is_block_4849() -> Result<()> {
             "- {}\n- []\n",
             ".[0].a = 1 | .[1][0] = 2",
             "- a: 1\n- - 2\n",
+        ),
+        // A node copied onto the container brings its own presentation (the source is flow here).
+        ("x: {}\ny: {b: 1}\n", ".x = .y", "x: {b: 1}\ny: {b: 1}\n"),
+        ("x: []\ny: [1]\n", ".x = .y", "x: [1]\ny: [1]\n"),
+        ("x: []\ny: [1]\n", ".x = (.y | map(.))", "x: [1]\ny: [1]\n"),
+        (
+            "x: {}\ny: {b: 1}\n",
+            ".x = .y | .x.c = 2",
+            "x: {b: 1, c: 2}\ny: {b: 1}\n",
         ),
         // Not grown, or already non-empty: the flow spelling and its comment stay.
         ("x: {} # c\n", ".y = 1", "x: {} # c\ny: 1\n"),

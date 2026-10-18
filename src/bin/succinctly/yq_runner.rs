@@ -2959,8 +2959,7 @@ fn reconcile_presentation_at_depth(
         (OwnedValue::Object(p_fields), OwnedValue::Object(r_fields)) => {
             let own_meta = grown_container_meta(
                 pristine_tree.meta(),
-                p_fields.is_empty(),
-                r_fields.is_empty(),
+                p_fields.is_empty() && !r_fields.is_empty() && !has_copy_here(targets),
             );
             let mut fields = IndexMap::new();
             let mut key_comments = IndexMap::new();
@@ -3024,8 +3023,10 @@ fn reconcile_presentation_at_depth(
             CommentTree::Object(own_meta, fields, key_comments)
         }
         (OwnedValue::Array(p_items), OwnedValue::Array(r_items)) => {
-            let own_meta =
-                grown_container_meta(pristine_tree.meta(), p_items.is_empty(), r_items.is_empty());
+            let own_meta = grown_container_meta(
+                pristine_tree.meta(),
+                p_items.is_empty() && !r_items.is_empty() && !has_copy_here(targets),
+            );
             // #870: which pristine slot each result slot really came from —
             // identity unless a write at this node moved things.
             let sources = array_sources(p_items, r_items, targets);
@@ -3101,13 +3102,14 @@ fn reconcile_presentation_at_depth(
 }
 
 /// The meta a container keeps across a write: its own, except that an empty flow `{}` / `[]` that a
-/// write gave its first child is block-styled (#4849). go-yaml's emitter writes a flow container
-/// in flow only while it is empty -- the one spelling an empty container has -- and a non-empty
-/// one keeps its flow style, so a source `{b: 1}` stays flow when written into. Out of line for
-/// the reason [`kind_changed_leaf`] is.
+/// write gave its first child (`grown`) is block-styled (#4849). go-yaml's emitter writes a flow
+/// container in flow only while it is empty -- the one spelling an empty container has -- and a
+/// non-empty one keeps its flow style, so a source `{b: 1}` stays flow when written into. A write
+/// that copies another node onto the container brings that node's presentation instead, so the
+/// caller does not call it grown. Out of line for the reason [`kind_changed_leaf`] is.
 #[inline(never)]
-fn grown_container_meta(meta: &NodeMeta, pristine_empty: bool, result_empty: bool) -> NodeMeta {
-    if pristine_empty && !result_empty && meta.style == "flow" {
+fn grown_container_meta(meta: &NodeMeta, grown: bool) -> NodeMeta {
+    if grown && meta.style == "flow" {
         // The comment beside `{}` / `[]` goes with the flow spelling (yq drops it).
         let mut grown = meta.with_style("");
         grown.comment = None;
