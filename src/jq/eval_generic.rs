@@ -2725,6 +2725,18 @@ impl CommentTree {
         }
     }
 
+    /// Set the comment trailing object field `key`'s own *key* line (#4377), keeping the key's
+    /// quoting, anchor and tag, and creating the entry when the key had none. The value is a
+    /// container written on the lines below, so the comment is not an absent-value one. A no-op
+    /// for a node that is not an `Object`.
+    pub fn set_key_comment(&mut self, key: &str, comment: String) {
+        if let Self::Object(_, _, keys) = self {
+            let meta = keys.entry(key.to_string()).or_default();
+            meta.comment = Some(comment);
+            meta.value_absent = false;
+        }
+    }
+
     /// How object field `key`'s *key* was quoted in the source (`"single"`,
     /// `"double"`, [`KEY_STYLE_STRING`] after `-P`), or `""` for a plain key,
     /// one this isn't an `Object` for, or one with no entry (#3601). Distinct

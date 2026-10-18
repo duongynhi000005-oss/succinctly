@@ -5935,6 +5935,25 @@ container's below it, as in yq. An alias item (`- # own` / `  *x`) prints its ta
 prints `*x` (the pre-existing root-alias expansion, #1350). Separately, `.a` on a sequence whose dash-comment item
 carries an `&anchor` drops that anchor (`- &x` is printed as `-`), which predates this change.
 
+### `-P` and the trailing comment of a flow collection ([#4377](https://github.com/rust-works/succinctly/issues/4377))
+
+`-P` rewrites a flow collection as block, and the comment after its closing bracket (`a: [1, 2] # ec`) then has
+no line of its own. yq's encoder holds it and writes it at the end of the next line that carries no comment: the
+next sibling's key line when that is a collection (`b: # ec`), its value line otherwise (`b: 1 # ec`), the dash
+line of a collection item (`- # ec` / `  x: 1`); and it is lost when nothing follows in the document, so
+`yq -P '.a'` on `a: [1, 2] # ec` prints no comment. A scalar that has a comment of its own keeps its line and the
+held comment waits for the next one, a comment on a collection's key overwrites it, an alias is skipped, and an
+empty `[]`/`{}` stays flow with its comment. This build follows that for the DOM route that `-P`, a write and
+`--arg` take, on JSON-shaped and YAML input alike (`defer_flow_line_comments`). Swept against yq v4.53.3 over 14
+documents x 8 filters. Still different:
+
+- **A comment written inside a flow collection** (`[1, # note` / `  2]`) is not kept by the parser, where yq
+  prints it after the element (`- 1 # note`), and so is not held either.
+- **An empty `{}`/`[]` value that follows a held comment**: yq writes `b: # ec` and the `{}` on the next line;
+  this build writes `b: {} # ec`.
+- **A collection built by an expression** (`[.]`, `{"k": .a}`, `to_entries`) carries no comment tree at all
+  (#1361), so no comment is held or printed there.
+
 ## `@yaml` of a flow-sourced container, a multi-line string, a root computed float or a non-finite float ([#1183](https://github.com/rust-works/succinctly/issues/1183))
 
 `@yaml` runs the same owned-value YAML streamer as the CLI's own output, so it inherits that
