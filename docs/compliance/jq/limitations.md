@@ -740,7 +740,7 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   `try ... catch` handler, a pipe into a stage that may move the register (`FE | select(.)`) and an inner INIT
   that navigates, behind a wrapper, in an EXTRACT or below the outermost fold (the direct UPDATE of #4818
   keeps its tracked-ambient guard). Over the 174 bounded-chain operands (`--stage-only --sample 20000 --seed
-  4835`, 20,027 rows, against a `main` build) MATCH went 17,360 to 17,401, DIFF 141 to 106 and REFUSE_WRONG
+  4835`, 20,027 rows, against a `main` build) MATCH went 17,360 to 17,403, DIFF 141 to 104 and REFUSE_WRONG
   2,509 to 2,503 with ACCEPT_WRONG (17) unchanged and no regression; the 45,360-row nested-fold grid of #4818
   moved 1,475 rows to MATCH and none away, a 20,250-row grid over the wrapper positions 960, and a 6,160-row
   `last(f)`-source grid 801. For #4818 itself, over the 157 bounded-chain operands (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
