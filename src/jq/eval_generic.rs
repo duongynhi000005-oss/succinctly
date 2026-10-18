@@ -23689,7 +23689,7 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
 /// key last; the `[path, leaf]` events before it name every one.
 fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
     value: &V,
-    cursor: Option<&V::Cursor>,
+    cursor: &V::Cursor,
     current_path: &mut Vec<OwnedValue>,
     events: &mut Vec<OwnedValue>,
 ) -> Result<(), EvalError> {
@@ -23703,7 +23703,7 @@ fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
     if let Some(fields) = value.as_object() {
         let checked = effective_fields_checked(&fields, false)?;
         if checked.is_empty() {
-            empty_fields_tail_gap_ok(&fields, cursor)?;
+            empty_fields_tail_gap_ok(&fields, Some(cursor))?;
             events.push(leaf(
                 current_path,
                 OwnedValue::Object(indexmap::IndexMap::new().into()),
@@ -23722,7 +23722,7 @@ fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
             });
             collect_tostream_generic::<S, _>(
                 &field.value,
-                Some(&field.value_cursor),
+                &field.value_cursor,
                 current_path,
                 events,
             )?;
@@ -23734,7 +23734,7 @@ fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
     } else if let Some(elements) = value.as_array() {
         let cursors = elements.collect_cursors_checked()?;
         if cursors.is_empty() {
-            empty_elements_tail_gap_ok(&elements, cursor)?;
+            empty_elements_tail_gap_ok(&elements, Some(cursor))?;
             events.push(leaf(current_path, OwnedValue::Array(Vec::new().into())));
             return Ok(());
         }
@@ -23742,20 +23742,14 @@ fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
         for (i, elem_cursor) in cursors.into_iter().enumerate() {
             current_path.push(OwnedValue::Int(i as i64));
             let elem = elem_cursor.value();
-            collect_tostream_generic::<S, _>(&elem, Some(&elem_cursor), current_path, events)?;
+            collect_tostream_generic::<S, _>(&elem, &elem_cursor, current_path, events)?;
             if i == last {
                 events.push(closing(current_path));
             }
             current_path.pop();
         }
     } else {
-        // `cursor` is `Some` for every node a caller hands in; `None` falls
-        // back to the bare value, which has lost its explicit tag.
-        let owned = match cursor {
-            Some(cursor) => to_owned_cursor::<S, _>(cursor)?,
-            None => to_owned::<S, _>(value)?,
-        };
-        events.push(leaf(current_path, owned));
+        events.push(leaf(current_path, to_owned_cursor::<S, _>(cursor)?));
     }
     Ok(())
 }
@@ -32611,11 +32605,11 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
         // `Paths` is above -- the fallback's `to_owned_with_cursor` merges a
         // repeated mapping key before `collect_tostream_events` sees it. jq
         // mode (collapsing) keeps the fallback.
-        Builtin::ToStream if !S::COLLAPSE_DUPLICATE_KEYS => {
+        Builtin::ToStream if !S::COLLAPSE_DUPLICATE_KEYS && cursor.is_some() => {
             let mut events = Vec::new();
             match collect_tostream_generic::<S, _>(
                 &value,
-                cursor.as_ref(),
+                cursor.as_ref().expect("guarded"),
                 &mut Vec::new(),
                 &mut events,
             ) {

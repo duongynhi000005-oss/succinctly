@@ -946,10 +946,15 @@ jq mode, which collapses them anyway, keeps the owned producer):
   fallback still routes through `parse_input`/`OwnedValue` for *both* formats (a pre-existing,
   format-symmetric bug, not a new one #1398 introduced).
 - [#1344](https://github.com/rust-works/succinctly/issues/1344) — `del`/`with_entries`/
-  `map_values`/`tostream`/`walk`/`recurse` fall through `eval_generic.rs`'s wildcard bridge
-  (`eval_on_owned`), which still materializes via an `IndexMap` and collapses duplicates for
-  both formats today. #1687 closed the same class for the sort family and `reduce`/`foreach`
-  above; this list is the remaining membership.
+  `map_values`/`walk` (and `recurse(f)`/`recurse(f; cond)` with a general `f`) fall through
+  `eval_generic.rs`'s wildcard bridge (`eval_on_owned`), which still materializes via an
+  `IndexMap` and collapses duplicates for both formats today. #1687 closed the same class for
+  the sort family and `reduce`/`foreach` above; this list is the remaining membership.
+  `tostream` (under `--jq-extensions`) and `..`/bare `recurse` now keep the repeated key, with
+  one limit: `..` only prints the node intact where its result streams as a cursor (`..`, or
+  `..` piped into `select`/`key`/`path`/another navigation stage). Anywhere else the node is
+  materialized and collapses -- `[..]`, `.., 1`, `.. as $x | $x`, `.. // 1` -- where yq keeps
+  both entries (`[..]` is `[{"a":1,"a":2,"b":3},2,3]` in yq).
 - [#1102](https://github.com/rust-works/succinctly/issues/1102) — object slicing (`.[S:E]` on
   an object) must materialize into an `OwnedValue::Object` to build yq's AST-child-list view
   before slicing it, with no cursor-preserving alternative available (the operation inherently

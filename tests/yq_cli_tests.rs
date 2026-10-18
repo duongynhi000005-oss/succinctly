@@ -59219,6 +59219,36 @@ mod recursive_descent_duplicate_keys_1344 {
         )
     }
 
+    /// The shapes where `..` still collapses a repeated key because the node is
+    /// materialized, pinned at today's answer (yq keeps both entries in every
+    /// one of them; see `docs/compliance/yq/limitations.md`, #1344).
+    #[test]
+    fn descent_still_collapses_a_materialized_node_1344() -> Result<()> {
+        check_on(
+            "a: 1\na: 2\nb: 3\n",
+            &[],
+            &[
+                ("[..]", r#"[{"a":2,"b":3},2,3]"#),
+                (".., 1", r#"{"a":2,"b":3} 2 3 1"#),
+                (".. as $x | $x", r#"{"a":2,"b":3} 2 3"#),
+            ],
+        )
+    }
+
+    /// `tostream` names a mapping's keys the way `paths` does, so a key that
+    /// reads as an int is an int path component in both.
+    #[test]
+    fn tostream_names_keys_like_paths_1344() -> Result<()> {
+        check_on(
+            "1: a\n2: b\n",
+            &["--jq-extensions"],
+            &[
+                ("[tostream]", r#"[[[1],"a"],[[2],"b"],[[2]]]"#),
+                ("[paths]", "[[1],[2]]"),
+            ],
+        )
+    }
+
     /// No oracle: yq's lexer rejects `tostream`, so this is pinned to be
     /// consistent with `paths` on the same document (both list `a` twice).
     #[test]
