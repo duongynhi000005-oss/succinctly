@@ -407,7 +407,29 @@ fn with_update_effect(update: &Expr) -> Expr {
         Expr::Paren(inner) => with_update_effect(inner),
         Expr::Comma(items) => Expr::pipe(items.iter().map(with_update_effect).collect()),
         Expr::Pipe(stages) => with_update_pipe_effect(stages),
-        _ => Expr::Identity,
+        // `SRC as $v | rest`: the binding is kept, and `rest` contributes its changes (`.b as $v |
+        // .z = $v` writes `z`); SRC itself is evaluated, so its errors still count.
+        Expr::As { expr, var, body } => Expr::As {
+            expr: expr.clone(),
+            var: var.clone(),
+            body: Box::new(with_update_effect(body)),
+        },
+        discarded => with_discarded_stage(discarded),
+    }
+}
+
+/// A stage of a `with` update whose value yq discards, kept for the one thing yq still does
+/// with it: evaluate it, so an error it raises (`. + 1` on a map, `error(\"x\")`) fails the
+/// `with` (#4327). `reduce STAGE as $_ (.; .)` answers the node unchanged.
+fn with_discarded_stage(stage: &Expr) -> Expr {
+    match stage {
+        Expr::Identity => Expr::Identity,
+        stage => Expr::Reduce {
+            input: Box::new(stage.clone()),
+            patterns: vec![Pattern::Var("_".to_string())],
+            init: Box::new(Expr::Identity),
+            update: Box::new(Expr::Identity),
+        },
     }
 }
 
@@ -438,7 +460,9 @@ fn with_update_pipe_effect(stages: &[Expr]) -> Expr {
             path: Box::new(head.clone()),
             filter: Box::new(with_update_pipe_effect(rest)),
         },
-        _ => Expr::Identity,
+        // A value-producing head: yq discards its value and still evaluates it; the stages
+        // after it run on its (discarded) output, so they are not evaluated here.
+        head => with_discarded_stage(head),
     }
 }
 
@@ -3917,6 +3941,26 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         let update = self.parse_expr()?;
         self.skip_ws();
+        // yq accepts more arguments and ignores all but the path: `with(.a; . = 7; . = 8)`
+        // answers the input untouched, having evaluated `.a` (#4327).
+        if self.peek() == Some(';') && self.mode == ParserMode::Yq {
+            while self.peek() == Some(';') {
+                self.next();
+                self.skip_ws();
+                self.parse_expr()?;
+                self.skip_ws();
+            }
+            if self.peek() != Some(')') {
+                return self.wrong_arity_or_expect(start_pos, ')', vec![path, update]);
+            }
+            self.next();
+            return Ok(Expr::Reduce {
+                input: Box::new(path),
+                patterns: vec![Pattern::Var("_".to_string())],
+                init: Box::new(Expr::Identity),
+                update: Box::new(Expr::Identity),
+            });
+        }
         if self.peek() != Some(')') {
             return self.wrong_arity_or_expect(start_pos, ')', vec![path, update]);
         }
