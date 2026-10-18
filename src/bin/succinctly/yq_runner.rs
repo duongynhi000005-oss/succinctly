@@ -4941,6 +4941,18 @@ fn apply_meta_assign_writes(
     Ok(())
 }
 
+/// The scalar a string typed by a source `!!str` reads as once that tag is gone: what its text
+/// resolves to (`"1"` is the integer `1`), or `None` for a string that stays one.
+fn retype_from_text(text: &str) -> Option<OwnedValue> {
+    match resolve_plain_sourced(text, false) {
+        ResolvedScalar::Null => Some(OwnedValue::Null),
+        ResolvedScalar::Bool(b) => Some(OwnedValue::Bool(b)),
+        ResolvedScalar::Int(n) => Some(OwnedValue::Int(n)),
+        ResolvedScalar::Float(f) => Some(OwnedValue::Float(f)),
+        ResolvedScalar::Str => None,
+    }
+}
+
 /// `NODE tag = TAG` (#2796), the way go-yaml's encoder treats a node whose tag was assigned:
 /// the tag is written only if it differs from the one the node would get anyway, and `!!str`
 /// on a scalar that would read back as another type quotes it (and types it a string, for the
@@ -4965,14 +4977,11 @@ fn apply_tag(tag: &str, value: &mut OwnedValue, node: &mut CommentTree) {
     };
     if tag.is_empty() {
         if source_tagged {
-            if let OwnedValue::String(text) = &*value {
-                *value = match resolve_plain_sourced(text, false) {
-                    ResolvedScalar::Null => OwnedValue::Null,
-                    ResolvedScalar::Bool(b) => OwnedValue::Bool(b),
-                    ResolvedScalar::Int(n) => OwnedValue::Int(n),
-                    ResolvedScalar::Float(f) => OwnedValue::Float(f),
-                    ResolvedScalar::Str => return *node.meta_mut() = current.with_tag(None),
-                };
+            if let Some(typed) = match &*value {
+                OwnedValue::String(text) => retype_from_text(text),
+                _ => None,
+            } {
+                *value = typed;
             }
         }
         *node.meta_mut() = current.with_tag(None);
@@ -5006,15 +5015,9 @@ fn apply_tag(tag: &str, value: &mut OwnedValue, node: &mut CommentTree) {
             }
             // Any other tag leaves the text alone; a string typed by a source `!!str` is the
             // type its tag now says.
-            if let OwnedValue::String(text) = scalar {
-                if source_tagged {
-                    *value = match resolve_plain_sourced(text, false) {
-                        ResolvedScalar::Null => OwnedValue::Null,
-                        ResolvedScalar::Bool(b) => OwnedValue::Bool(b),
-                        ResolvedScalar::Int(n) => OwnedValue::Int(n),
-                        ResolvedScalar::Float(f) => OwnedValue::Float(f),
-                        ResolvedScalar::Str => value.clone(),
-                    };
+            if let (true, OwnedValue::String(text)) = (source_tagged, scalar) {
+                if let Some(typed) = retype_from_text(text) {
+                    *value = typed;
                 }
             }
             resolved
@@ -5628,6 +5631,19 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
                     "metadata assignment (line_comment/style/anchor = ...) is not supported \
                      behind a navigation stage (`.a | .b line_comment = ...`) or a stage that \
                      calls a `def` (#2679)",
+                ),
+                &no_location(),
+            );
+            return Ok(Vec::new());
+        }
+        // `tag =` has a value effect even under `-o json`, so a route that places no metadata
+        // write (a comma, a construction, a bind) refuses it too (#2796).
+        None if writes_tag(expr) => {
+            sink.report(
+                DiagStyle::Yq,
+                &EvalError::new(
+                    "tag = ... is only supported as a top-level pipe stage of a plain write \
+                     (#2796)",
                 ),
                 &no_location(),
             );
@@ -8734,6 +8750,11 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // Left on that branch regardless: JSON-sourced input (no comment or anchor to
     // keep, and the plain route spells `1e19` where `--eval-all` gives `1e+19`,
     // #2902).
+    // `--eval-all` evaluates through the owned-value route, which runs no metadata pass: a
+    // `tag =` there would be dropped without a word (#2796).
+    if args.eval_all && writes_tag(&program.expr) {
+        anyhow::bail!("tag = ... is not supported with --eval-all (#2796)");
+    }
     let mut eval_all_pregathered: Option<(Vec<GatheredSource>, Option<i32>)> = None;
     let mut eval_all_results: Option<Vec<OwnedValue>> = None;
     let mut eval_all_per_document = false;

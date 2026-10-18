@@ -4576,7 +4576,11 @@ ruled out), even though real yq supports every one of them:
   `tag = ""` of a source-tagged `!!float`/`!!int` scalar keeps its tag/quoting where yq prints the
   plain text, a tag on a key node (`(.a | key) tag = ...`) and on `...` is refused, a tag written through an alias
   position reaches the alias copy (yq leaves the alias and changes the anchor's node), and the
-  write is not visible to a later stage of the same pipe (`.a tag = "!!str" | .a | type`).
+  write is not visible to a later stage of the same pipe (`.a tag = "!!str" | .a | type`), and two
+  `tag =` writes to one node in a pipe (`.a tag = "!!float" | .a tag = "!!str"`) are not composed the
+  way yq composes them. A `tag =` on a route that places no metadata write (behind a comma, an array
+  construction, a bind) or under `--eval-all` is an error (`tag = ... is only supported as a top-level
+  pipe stage of a plain write`), never a silent no-op.
 - **The document root takes a text** ([#2796](https://github.com/rust-works/succinctly/issues/2796),
   part 2): `. head_comment = "x"`, `. foot_comment = "x"` and `. comments = "x"` (and `|=`)
   replace the root's own standalone lines, a multi-line text becoming one `# ` line each, and

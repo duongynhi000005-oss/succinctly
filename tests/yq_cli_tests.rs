@@ -25525,6 +25525,24 @@ fn test_tag_assignment_follows_go_yamls_encoder_2796() -> Result<()> {
     Ok(())
 }
 
+/// #2796: a `tag =` a route cannot place is an error, never a silent no-op: behind a comma, in a
+/// construction, and under `--eval-all`.
+#[test]
+fn test_tag_assignment_on_an_unplaceable_route_is_an_error_2796() -> Result<()> {
+    for (filter, extra) in [
+        (".a tag = \"!!str\", .b", &[][..]),
+        (".a tag = \"!!str\", .b", &["-o=json", "-I0"][..]),
+        ("[.a] | .[0] tag = \"!!str\"", &[][..]),
+        (".a tag = \"!!str\"", &["--eval-all"][..]),
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", extra)?;
+        assert_eq!(code, 1, "{filter} {extra:?}: {stderr}");
+        assert_eq!(out, "", "{filter} {extra:?}");
+        assert!(stderr.contains("tag = ..."), "{filter} {extra:?}: {stderr}");
+    }
+    Ok(())
+}
+
 /// #2796: the refusals `tag =` keeps. A tag on a key node names a different node than the
 /// value (yq prefixes the key), so it is an error here rather than a silent no-op.
 #[test]
