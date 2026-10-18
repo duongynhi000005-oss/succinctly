@@ -27763,6 +27763,143 @@ fn test_yq_comma_multiple_overflow_fields_all_fixed_1168() -> Result<()> {
     Ok(())
 }
 
+/// #1361: a query that is itself a `,` keeps what its document branches carry. `.x, .y` lost the
+/// comments, the style and the `&anchor` marks that each half kept on its own, because the
+/// branches were made into owned trees one by one. The reference output is the same two nodes
+/// reached through `.[]` (`--arg` forces the DOM printer), so each row compares against it, and
+/// the first rows also pin the text so the comparison cannot pass on two equal losses.
+#[test]
+fn test_yaml_comma_keeps_anchor_marks_1361() -> Result<()> {
+    let input = "x: &a {p: 1}\ny:\n  q: *a\n";
+    let (via_iterate, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
+    assert_eq!(code, 0);
+    // The second result stands alone, so a `*a` whose `&a` is in the first result's document is
+    // written out, as it is for `.[]` (the existing per-result soundness rule).
+    assert_eq!(via_iterate, "&a {p: 1}\nq:\n  p: 1\n");
+    for filter in [".x, .y", "(.x, .y)", ".x // .z, .y"] {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(out, via_iterate, "{filter}");
+    }
+    let (out, code) = run_yq_stdin(".x, .y", input, &["-P"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "&a\np: 1\nq:\n  p: 1\n");
+    Ok(())
+}
+
+#[test]
+fn test_yaml_comma_keeps_comments_and_style_1361() -> Result<()> {
+    let input = "x:\n  p: 1 # note\ny:\n  q: \"str\"\nl:\n  - a # one\n  - b\n";
+    let (via_iterate, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
+    assert_eq!(code, 0);
+    assert_eq!(via_iterate, "p: 1 # note\nq: \"str\"\n- a # one\n- b\n");
+    let (out, code) = run_yq_stdin(".x, .y, .l", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, via_iterate);
+    // Repeated, reordered, a `select` and the document itself among the branches.
+    let (out, code) = run_yq_stdin(".y, .x, .y", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "q: \"str\"\np: 1 # note\nq: \"str\"\n");
+    let (out, code) = run_yq_stdin("select(.x), .l", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "x:\n  p: 1 # note\ny:\n  q: \"str\"\nl:\n  - a # one\n  - b\n- a # one\n- b\n"
+    );
+    // Flow style survives a node reached twice.
+    let (out, code) = run_yq_stdin(".l, .l", "l: [1, 2]\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "[1, 2]\n[1, 2]\n");
+    Ok(())
+}
+
+/// Scalars, absent keys, a branch that answers nothing and a result from a nested `,` all take the
+/// node route too; the answers are the ones they had when every branch was copied.
+#[test]
+fn test_yaml_comma_scalar_and_empty_branches_match_iterate_1361() -> Result<()> {
+    let input = "a: &x 1\nb: *x\nc: ~\n";
+    let (via_iterate, code) = run_yq_stdin(".a, .b", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(via_iterate, "1\n1\n");
+    let (out, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
+    assert_eq!(code, 0);
+    // The printer that handles node results spells a `~` as `null` (yq keeps `~`) and writes an
+    // alias scalar's value for its `*x`, here and for `.[]` alike: not this issue's.
+    assert_eq!(out, "1\n1\nnull\n");
+    for (filter, expected) in [
+        (".a, .zz", "1\nnull\n"),
+        (".zz, .a", "null\n1\n"),
+        (".a, .c", "1\nnull\n"),
+        (".a, select(false)", "1\n"),
+        ("select(false), .a", "1\n"),
+        ("select(false), select(false)", ""),
+        (".a", "1\n"),
+        ("(.a, .b), .c", "1\n1\nnull\n"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(out, expected, "{filter}");
+    }
+    Ok(())
+}
+
+/// The first branch that is not a node of the document turns the nodes before it into copies, and
+/// the comma runs as it always did: the comments on those nodes are gone (yq keeps them), pinned
+/// so a change is deliberate. A raise in a later branch loses the earlier outputs as before.
+#[test]
+fn test_yaml_comma_mixed_branch_falls_back_to_owned_1361() -> Result<()> {
+    let input = "x:\n  p: 1 # note\ny:\n  q: \"str\"\n";
+    for (filter, expected) in [
+        (".x, (.y | length)", "p: 1\n1\n"),
+        (".x, 1", "p: 1\n1\n"),
+        ("1, .x", "1\np: 1\n"),
+        (".x, .y | length", "p: 1\n1\n"),
+        ("(.x, .y) | length", "1\n1\n"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(out, expected, "{filter}");
+    }
+    let (out, code) = run_yq_stdin(".x, error(\"boom\")", input, &[])?;
+    assert_eq!(code, 1);
+    assert_eq!(out, "");
+    Ok(())
+}
+
+/// A float keeps the spelling the document gave it through the node route, and `-o json` is
+/// unchanged by it.
+#[test]
+fn test_yaml_comma_float_spelling_unchanged_1361() -> Result<()> {
+    let input = "f: 1.0\ng: 1.50\nn: 99999999999999999999\n";
+    let (out, code) = run_yq_stdin(".f, .g", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "1.0\n1.50\n");
+    let (out, code) = run_yq_stdin(".f, .g, .n", input, &["-o", "json"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "1.0\n1.50\n100000000000000000000.0\n");
+    let (out, code) = run_yq_stdin(
+        ".x, .y",
+        "x:\n  p: 1 # n\ny: [1, 2]\n",
+        &["-o", "json", "-I=0"],
+    )?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "{\"p\":1}\n[1,2]\n");
+    Ok(())
+}
+
+/// The node route is yq's alone: `jq` over the same kind of query answers what it did.
+#[test]
+fn test_jq_comma_over_json_unchanged_1361() -> Result<()> {
+    let input = "{\"x\":{\"p\":1},\"y\":[1,2],\"f\":1.0}";
+    let (out, code) = run_jq_stdin(".x, .y, .f", input, &["-c"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "{\"p\":1}\n[1,2]\n1.0\n");
+    let (out, code) = run_jq_stdin(".x, 1, .y", input, &["-c"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "{\"p\":1}\n1\n[1,2]\n");
+    Ok(())
+}
+
 /// #2438 closes what #1168 pinned here as a known gap: a bare *computed*
 /// float wrapped directly in `[...]`/`,` used to get its decimal point
 /// forced by `yq_float_fidelity_fixup`'s round trip, where real yq keeps
