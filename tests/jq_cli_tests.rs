@@ -161584,8 +161584,9 @@ fn test_caught_foreign_marker_destructure_foreach_update_behind_a_gate_or_fallba
 /// document `$i` is `null`, which `jv_identical` holds for the register wherever it sits, and the terminal
 /// read it as the root: `path` answered `[]` and `|= 9` wrote the root, where jq's register sits on `["a"]`
 /// (`["a"]`, `{"a":9}`). It is now a refusal (the resolver's guess, so no `?` or `limit` hides it). Not for
-/// the bare `FOREACH` (the register is placed, `["a"]`) or behind a `//`, which backtracks a falsy left side
-/// and leaves the register where it entered (`[]` on `true`).
+/// the bare `FOREACH` (the register is placed, `["a"]`) or for the alternate of a `//`, which jq runs after it
+/// backtracked a falsy left side (`[]` on `true`); the left side's own output is refused, see
+/// `test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800`.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refused_4800(
@@ -161697,6 +161698,117 @@ fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_
         (
             "null",
             r"path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a}|.)) as $y (.; .; .)) // 5; $i) | .)",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: a `//` in a `foreach` UPDATE is read per output. jq keeps the register moved when the left operand
+/// emitted a truthy value (`(1 | FE) // 5` on `null` is `["a"]`, and `|= 9` writes `.a`) and runs the alternate
+/// from the register it entered with when it emitted nothing truthy. The alternate (and a left operand that
+/// navigates nothing) states the entry register, the left operand that moved it does not, so on a `null`
+/// document, whose `$i` is `jv_identical` to the register wherever it sits, `path` answered `[]` and `|= 9`
+/// wrote the root: it is now a refusal (`Invalid path expression with result null`), where it used to be
+/// exempted wholesale. The alternate that jq reaches is read as the register it entered with: `(select(false)
+/// | 1 | FE) // 5` is `[]` on every document (it was refused on `true`/`false` once the exemption went, and
+/// before it on `{"a":1}` for `(not | FE) // 5`), as are `5 // (1 | FE)` and a left operand that is falsy
+/// (`FE | false`, `FE | select(false)`).
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() -> Result<()> {
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    for head in ["1 | ", "not | ", "{a:1} | "] {
+        for alt in [
+            "(L) // 5",
+            "(L) // empty",
+            "((L) // 5) // 6",
+            "((L), 3) // 5",
+            "(L) // (L)",
+            "false // (L)",
+        ] {
+            for wrap in ["path(X)", "del(X)", "(X) |= 9", "[path(X)?]", "path(X | .)"] {
+                let update = alt.replace('L', &format!("{head}{fe}"));
+                let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+                let filter = wrap.replace('X', &inner);
+                let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
+                assert_eq!(code, 5, "{filter}: stdout {stdout:?} stderr {stderr:?}");
+                assert_eq!(stdout, "", "{filter}");
+                assert!(
+                    stderr.contains("Invalid path expression with result null"),
+                    "{filter}: {stderr:?}"
+                );
+            }
+        }
+    }
+    assert_path_rows_both_routes_3749(&[
+        (
+            "true",
+            r"path(. as $x | foreach . as $i (.; (select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "false",
+            r"path(. as $x | foreach . as $i (.; 5 // (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; 5 // (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .) | false) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .) | select(false)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":1}",
+            r"path(. as $x | foreach . as $i (.; (not | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "{\"a\":null}",
+            r"path(. as $x | foreach . as $i (.; (not | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            r"path(. as $x | foreach . as $i (.; ((1 | try (foreach ($x as {a:$a}|.) as $y (.; .; .))) // 5), 7; $i))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; if . then (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5 else 4 end; $i))",
             "[]\n",
             "",
             0,
