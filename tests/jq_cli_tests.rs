@@ -165153,11 +165153,13 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_e
 }
 
 /// #4835: the #4818 routing in the other fold-body positions a `?//` chain source meets `.` on the register
-/// in: behind a `try` or `?`, a comma item or an `if` branch (condition `true`), the outer `foreach`'s
-/// EXTRACT, a third nesting level, and under an outer source `last(.[]?)` whose navigation jq's `reduce`
-/// backtracks. The last three rows are the controls that stay by value: an `if` whose condition navigates
-/// (`.a`) moves jq's register before the branch runs, and an inner INIT that navigates does too (each has
-/// jq's count in its comment; the `del` row matches jq). Every other row captured from jq 1.7.1 with `-c`.
+/// in: behind a `try` or `?`, a comma item, a pipe whose later stages cannot move it, an `if` branch
+/// (condition `true`/`.`-free), the outer `foreach`'s EXTRACT, a third nesting level (through the middle
+/// fold's UPDATE or EXTRACT) and under an outer source `last(.[]?)` whose navigation jq's `reduce`
+/// backtracks. The rows with a count in a comment are the controls that stay by value: a pipe into
+/// `select(.)`, a `try ... catch` handler, an `if` whose condition navigates (`.a` moves jq's register
+/// before the branch runs) and an inner INIT that navigates behind a wrapper (the `del` and the
+/// middle-fold-INIT rows match jq). Every other row captured from jq 1.7.1 with `-c`.
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
 fn test_foreach_source_bounded_alt_chain_behind_stages_in_other_fold_body_positions_counts_every_emission_4835(
@@ -165305,8 +165307,66 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_in_other_fold_body_positi
         ),
         (
             r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; .; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; .; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)); .))",
+            "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach .[]? as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)) | .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; if false then . else foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .) end; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.a; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "[\"a\"]\n[\"a\"]\n[\"a\"]\n[\"a\"]\n",
+            "Invalid path expression near attempt to access element \"a\" of 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
             r"del(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.a; .; .); .))",
             "{}\n",
+            "",
+            0,
+        ),
+        // jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)) | select(.); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)) catch .; .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
             "",
             0,
         ),

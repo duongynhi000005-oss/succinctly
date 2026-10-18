@@ -731,16 +731,19 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value.
   Since [#4835](https://github.com/rust-works/succinctly/issues/4835) the same marks reach the other positions
   a chain source meets `.` on the register in (`body_holds_chain_foreach`): behind a handler-less `try`/`?`,
-  as a comma item, in a branch of an `if` whose condition cannot move the register, in the outer `foreach`'s
-  EXTRACT, in the UPDATE of a middle `foreach` (a third nesting level), and under an outer source `last(f)`
-  over navigation (`is_last_of_navigation`, which jq's `reduce` backtracks: `foreach (last(.[]?)) as $i (.;
-  foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed three paths where jq prints one). Still by
-  value: an `if` whose condition navigates (`if .a then FE else . end` moves jq's register before the branch
-  runs) and an inner INIT that navigates, behind a wrapper (the direct UPDATE of #4818 keeps its
-  tracked-ambient guard), where the routed source refuses rows jq answers. Over the 174 bounded-chain operands
-  (`--stage-only --sample 20000 --seed 4835`, 20,027 rows, against a `main` build) MATCH went 17,360 to 17,401, DIFF 141 to 106 and
-  REFUSE_WRONG 2,509 to 2,503 with ACCEPT_WRONG (17) unchanged and no regression; a 45,360-row nested-fold grid (the #4818 one) moved
-  1,475 rows to MATCH and none away, and a 13,500-row grid over the wrapper positions 660. Over the 157 bounded-chain operands of #4818 (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
+  as a comma item, in a pipe whose later stages cannot move the register, in a branch of an `if` whose
+  condition cannot, in the outer `foreach`'s EXTRACT, in the UPDATE or EXTRACT of a middle `foreach` (a third
+  nesting level), and under an outer source `last(f)` over navigation (`is_last_of_navigation`, which jq's
+  `reduce` backtracks: `foreach (last(.[]?)) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)`
+  printed three paths where jq prints one). Still by value, where the routed source refuses rows jq answers:
+  an `if` whose condition navigates (`if .a then FE else . end` moves jq's register before the branch runs), a
+  `try ... catch` handler, a pipe into a stage that may move the register (`FE | select(.)`) and an inner INIT
+  that navigates, behind a wrapper, in an EXTRACT or below the outermost fold (the direct UPDATE of #4818
+  keeps its tracked-ambient guard). Over the 174 bounded-chain operands (`--stage-only --sample 20000 --seed
+  4835`, 20,027 rows, against a `main` build) MATCH went 17,360 to 17,401, DIFF 141 to 106 and REFUSE_WRONG
+  2,509 to 2,503 with ACCEPT_WRONG (17) unchanged and no regression; the 45,360-row nested-fold grid of #4818
+  moved 1,475 rows to MATCH and none away, a 20,250-row grid over the wrapper positions 960, and a 6,160-row
+  `last(f)`-source grid 801. For #4818 itself, over the 157 bounded-chain operands (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
   `/usr/bin/jq` 1.7.1, against a `main` build) MATCH went 17,388 to 17,411, DIFF 133 to 114 and ACCEPT_WRONG
   30 to 28, with no regression; a 45,360-row nested-fold grid (36 chain sources x 5 inner INITs x 7 documents
   x `path`/`del`/`first(path)`) moved 878 rows to MATCH and none away. Of the other `label`/`break` consumers

@@ -37022,21 +37022,22 @@ fn update_is_alt_bind(update: &Expr) -> bool {
         || take_wrapped_bare_chain(update).is_some()
 }
 
-/// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain behind other stages
-/// ([`bounded_chain_behind_stages`], #4669) that meets `.` where the enclosing fold left it: the body
-/// is that `foreach`, or reaches it through a handler-less `try`/`?`, a comma item, a branch of an `if`
-/// whose condition cannot move the register, or the UPDATE or EXTRACT of another `foreach` (a third
-/// nesting level, whose middle fold is marked in turn). The bare `foreach` is #4818; the wrappers are
-/// #4835. A bare `first(CHAIN)` source ([`take_wrapped_bare_chain`]) is not a reason of its own: its direct
-/// UPDATE is marked by [`update_is_alt_bind`]'s arm, and behind a wrapper it keeps its previous answer,
-/// which a marked body changes for an INIT that navigates.
+/// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
+/// enclosing fold left it: a chain behind other stages ([`bounded_chain_behind_stages`], #4669), or a
+/// bare `first(CHAIN)` ([`take_wrapped_bare_chain`], #4537) as the body itself. The body is that
+/// `foreach`, or reaches it through a handler-less `try`/`?`, a comma item, a pipe whose later stages
+/// cannot move the register, a branch of an `if` whose condition cannot, or the UPDATE or EXTRACT of
+/// another `foreach` (a third nesting level, whose middle fold is marked in turn). The bare `foreach`
+/// is #4818; the wrappers are #4835.
 ///
-/// `direct_moving_init` says whether the body's own `foreach` may have an INIT that moves the register
-/// (`.a`): the direct UPDATE of #4818 does, since the routing then declines an untracked ambient
-/// ([`drive_fold_source_with`]'s `chain_source_on_register`); behind a wrapper or in EXTRACT it does not.
-fn body_holds_chain_foreach(body: &Expr, direct_moving_init: bool) -> bool {
-    // `direct` is whether `e` is the body itself, not read through a wrapper or an enclosing `foreach`.
-    fn go(e: &Expr, budget: u8, direct: bool) -> bool {
+/// `may_move_init` says whether the body's own `foreach` may have an INIT that moves the register
+/// (`.a`): the direct UPDATE of an outermost fold does, since the routing then declines an untracked
+/// ambient ([`drive_fold_source_with`]'s `chain_source_on_register`) and a bare `first(CHAIN)` answers
+/// it as before; behind a wrapper, in an EXTRACT or below the outermost fold it must not, because the
+/// marked body changes the answer for the sources #4537 routes.
+fn body_holds_chain_foreach(body: &Expr, may_move_init: bool) -> bool {
+    // `top` is whether `e` is the body itself, not read through a wrapper or an enclosing `foreach`.
+    fn go(e: &Expr, budget: u8, top: bool, may_move_init: bool) -> bool {
         let Some(budget) = budget.checked_sub(1) else {
             return false;
         };
@@ -37049,27 +37050,37 @@ fn body_holds_chain_foreach(body: &Expr, direct_moving_init: bool) -> bool {
                 ..
             } => {
                 // An INIT that moves the register (`.a`) takes it off `.` before the source runs.
-                (direct || cannot_move_register(init))
+                (top && may_move_init || cannot_move_register(init))
                     && (bounded_chain_behind_stages(input)
-                        || go(update, budget, false)
+                        || top && take_wrapped_bare_chain(input).is_some()
+                        || go(update, budget, false, false)
                         || extract
                             .as_deref()
-                            .is_some_and(|extract| go(extract, budget, false)))
+                            .is_some_and(|extract| go(extract, budget, false, false)))
             }
-            Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget, false),
-            Expr::Comma(items) => items.iter().any(|item| go(item, budget, false)),
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+                go(expr, budget, false, false)
+            }
+            Expr::Comma(items) => items.iter().any(|item| go(item, budget, false, false)),
+            Expr::Pipe(stages) => match stages.split_first() {
+                Some((head, tail)) => {
+                    tail.iter().all(cannot_move_register) && go(head, budget, false, false)
+                }
+                None => false,
+            },
             Expr::If {
                 cond,
                 then_branch,
                 else_branch,
             } => {
                 cannot_move_register(cond)
-                    && (go(then_branch, budget, false) || go(else_branch, budget, false))
+                    && (go(then_branch, budget, false, false)
+                        || go(else_branch, budget, false, false))
             }
             _ => false,
         }
     }
-    go(body, WRAPPED_CHAIN_DEPTH, direct_moving_init)
+    go(body, WRAPPED_CHAIN_DEPTH, true, may_move_init)
 }
 
 /// Whether a `reduce` UPDATE is a `?//` chain over `.` whose body hands `.` back, under a `first` or
@@ -61388,15 +61399,18 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
     let step_cannot_move =
         cannot_move_register(update) && extract.map_or(true, cannot_move_register);
+    // #4835: the INIT of the outermost fold's direct UPDATE may move the register; below it, or behind a
+    // wrapper, it must not ([`body_holds_chain_foreach`]).
+    let chain_foreach_may_move_init = fold_body::depth() == 0 && cannot_move_register(input);
     // #4440: `resolve_reduce`'s `alt_bind_update_on_register`, for a `foreach`: a `?//` bind UPDATE
     // runs with `.` on the register at a step whose accumulator is still on it.
     let first_step_on_register = S::TAG == EvalTag::Jq
         && (fold_body::depth() == 0
-            // #4835: ...and one inside a body whose accumulator is the register, for a `foreach` UPDATE
-            // that holds a chain `foreach`: its own INIT and source meet `.` where the enclosing fold
-            // left it.
+            // #4835: ...and one inside a body whose accumulator is the register, for a `foreach` that
+            // holds a chain `foreach`: its own INIT and source meet `.` where the enclosing fold left it.
             || fold_body::acc_is_register_here()
-                && body_holds_chain_foreach(update, cannot_move_register(input)))
+                && (body_holds_chain_foreach(update, false)
+                    || extract.is_some_and(|extract| body_holds_chain_foreach(extract, false))))
         && patterns_all_bare(patterns)
         // #4835: `last(f)` over navigation leaves jq's register at the fold's entry, as it backtracks
         // `f` (#4795), so the first step meets `.` on it as for a source that never moves it.
@@ -61407,11 +61421,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
             // over a bounded chain behind other stages (`limit(2; (., .) | CHAIN)`), which the routing in
             // `drive_fold_source_with` then sends to the resolver's walk of a bound (#4669). #4835: also
-            // behind a `try`, a comma or an `if`.
-            || matches!(unwrap_paren(update), Expr::Foreach { input: inner, init: inner_init, .. }
-                if take_wrapped_bare_chain(inner).is_some()
-                    && (cannot_move_register(input) || cannot_move_register(inner_init)))
-            || body_holds_chain_foreach(update, cannot_move_register(input)));
+            // behind a `try`, a comma, a pipe or an `if`.
+            || body_holds_chain_foreach(update, chain_foreach_may_move_init));
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register = first_step_on_register
         && extract.is_some_and(|extract| {
