@@ -162737,6 +162737,43 @@ fn test_foreach_update_single_pattern_bind_behind_wrappers_4800() -> Result<()> 
             "",
             0,
         ),
+        // Controls that must not move: a `select` that is not `select(true)` (or is shadowed), a `break`
+        // beside the bind, a bind that is no hand-on.
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1) as $i (.; label $l | (. as {a:$q} | ., break $l); null))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"def select(f): empty; path(foreach (1) as $i (.; select(true) | (. as {a:$q} | .); null))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; select(false) | (. as {a:$q} | .); null))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; select(null) | (. as {a:$q} | .); null))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; select(true) | (.a as {a:$q} | .); null))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
     ])
 }
 
