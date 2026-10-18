@@ -56080,21 +56080,28 @@ fn drive_fold_source_with<S: EvalSemantics>(
         Vec::new()
     };
     let foreign_markers: Vec<*const Tracked> = foreign_pairs.iter().map(|(m, _)| *m).collect();
-    // #4832: ...read outside every fold body too, for the routing alone (never the loud refusal).
-    let top_foreign_destructure = S::TAG == EvalTag::Jq
-        && fold_body::depth() == 0
-        && ambient.trackable
-        && !matches!(ambient.value, OwnedValue::Null)
-        && try_free()
-        && !foreign_register_markers_with::<S>(
-            source,
-            ambient,
-            false,
-            &passing_selects,
-            None,
-            false,
-        )
-        .is_empty();
+    // #4832: ...read outside every fold body too, for the routing alone (never the loud refusal), and
+    // lazily: the source is scanned only if no earlier disjunct of the routing has decided it. Only on a
+    // tracked, non-`null` ambient: where a stage or an INIT moved the register the frame names where the
+    // fold entered, not where the register is (`.a as $x | reduce ($x as {b:$b} | .) as $y (.a; .)` has
+    // `$x` on it), so a marker cannot be told from the register there.
+    let top_foreign_destructure = || {
+        S::TAG == EvalTag::Jq
+            && fold_body::depth() == 0
+            && ambient.trackable
+            && !matches!(ambient.value, OwnedValue::Null)
+            && try_free()
+            && !foreign_register_markers_with::<S>(
+                source,
+                ambient,
+                false,
+                &passing_selects,
+                None,
+                // `require_reach`: the resolver decides what the stages around the destructure skip.
+                false,
+            )
+            .is_empty()
+    };
     // What a `select` on a marker passes on: the accumulator's own for one equal to it, and a
     // foreign marker's own value when that is truthy.
     let mut truthy_markers: Vec<*const Tracked> = unplaced_markers
@@ -56393,7 +56400,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // wherever in the source it stands, and the by-value drive has no register to check it against.
         // The resolver decides what the stages around the destructure skip, so
         // [`source_always_reaches_destructure`] is not asked here.
-        || top_foreign_destructure
+        || top_foreign_destructure()
         // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
         // result, a fresh value beside the register in a comma): the pattern's step raises on it
         // whatever the register is. Not gated on `ambient.trackable` (#4522): a path-expression
