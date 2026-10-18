@@ -37867,6 +37867,12 @@ enum RegisterLoss {
     /// Lost by a route that handed back no register value at all (a
     /// `reduce` stage): anywhere.
     LostSomewhere,
+    /// [`LostSomewhere`](Self::LostSomewhere) that a `foreach` EXTRACT stated for a computed
+    /// emission at the root path (#4800): its UPDATE may have moved jq's register off the root,
+    /// which the emission's root path cannot say. It rides the frame past the stages after the
+    /// `foreach` so the last of them can state it again ([`BranchRegister::LostOffRoot`]) and the
+    /// terminal's `null` carve-out does not read the emission as the register's.
+    LostOffRoot,
 }
 
 impl RegisterLoss {
@@ -39656,6 +39662,10 @@ enum BranchRegister<'a> {
     LostAt(Rc<OwnedValue>),
     /// A live register entered and nothing is known about where it went.
     LostSomewhere,
+    /// [`LostSomewhere`](Self::LostSomewhere) for a computed emission at the root path of a
+    /// `foreach` whose UPDATE may have moved the register off the root (#4800); the frame keeps
+    /// it as [`RegisterLoss::LostOffRoot`] across the stages after.
+    LostOffRoot,
     /// This output is one jq emits with its path register exactly where the
     /// stage that is consuming it entered (#3580): a recursion's own seed (the
     /// `.` of `def r: ., (f | r)`, emitted before anything indexes) and an
@@ -39682,7 +39692,11 @@ impl<'a> BranchRegister<'a> {
     fn into_unmoved(self) -> Option<Cow<'a, OwnedValue>> {
         match self {
             Self::Unmoved(register) => Some(register),
-            Self::None | Self::LostAt(_) | Self::LostSomewhere | Self::AtEntry => None,
+            Self::None
+            | Self::LostAt(_)
+            | Self::LostSomewhere
+            | Self::LostOffRoot
+            | Self::AtEntry => None,
         }
     }
 
@@ -39690,7 +39704,11 @@ impl<'a> BranchRegister<'a> {
     fn unmoved_value(&self) -> Option<&OwnedValue> {
         match self {
             Self::Unmoved(register) => Some(register),
-            Self::None | Self::LostAt(_) | Self::LostSomewhere | Self::AtEntry => None,
+            Self::None
+            | Self::LostAt(_)
+            | Self::LostSomewhere
+            | Self::LostOffRoot
+            | Self::AtEntry => None,
         }
     }
 
@@ -39705,6 +39723,7 @@ impl<'a> BranchRegister<'a> {
             Self::Unmoved(register) => RegisterLoss::LostAt(Rc::new(OwnedValue::clone(register))),
             Self::LostAt(register) => RegisterLoss::LostAt(Rc::clone(register)),
             Self::None | Self::LostSomewhere | Self::AtEntry => RegisterLoss::LostSomewhere,
+            Self::LostOffRoot => RegisterLoss::LostOffRoot,
         }
     }
 
@@ -39714,7 +39733,7 @@ impl<'a> BranchRegister<'a> {
     fn keep_unmoved(self) -> Self {
         match self {
             Self::Unmoved(_) | Self::None => self,
-            Self::LostAt(_) | Self::LostSomewhere | Self::AtEntry => Self::None,
+            Self::LostAt(_) | Self::LostSomewhere | Self::LostOffRoot | Self::AtEntry => Self::None,
         }
     }
 
@@ -39726,6 +39745,7 @@ impl<'a> BranchRegister<'a> {
             Self::Unmoved(register) => BranchRegister::Unmoved(Cow::Owned(register.into_owned())),
             Self::LostAt(register) => BranchRegister::LostAt(register),
             Self::LostSomewhere => BranchRegister::LostSomewhere,
+            Self::LostOffRoot => BranchRegister::LostOffRoot,
             Self::AtEntry => BranchRegister::AtEntry,
         }
     }
@@ -59164,7 +59184,7 @@ fn could_be_lost_register(register_loss: &RegisterLoss, frozen: bool, value: &Ow
     let candidate = frozen || matches!(value, OwnedValue::Null);
     match register_loss {
         RegisterLoss::Kept => false,
-        RegisterLoss::LostSomewhere => candidate,
+        RegisterLoss::LostSomewhere | RegisterLoss::LostOffRoot => candidate,
         RegisterLoss::LostAt(register) => candidate && holds_node_equal_to(register, value),
     }
 }
@@ -61574,6 +61594,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && !any_subexpr(&bound_update, &mut |e| {
                                         matches!(e, Expr::Alternative(..))
                                     });
+                                let update_has_comma = register_lost_at_the_root
+                                    && any_subexpr(&bound_update, &mut |e| {
+                                        matches!(e, Expr::Comma(..))
+                                    });
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
                                     if extract_moved
                                         && !branch.trackable
@@ -61596,7 +61620,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         // it), which the root path of a computed emission cannot
                                         // say, so the terminal's `null` carve-out must not read
                                         // it as the register's.
-                                        emit(branch.with_register(BranchRegister::LostSomewhere))
+                                        // A comma beside the `foreach` (`(FE), 7`) restores the register for
+                                        // its later branches, which only the run can tell: that statement
+                                        // stays the terminal's own, and does not outlive a stage.
+                                        emit(branch.with_register(if update_has_comma {
+                                            BranchRegister::LostSomewhere
+                                        } else {
+                                            BranchRegister::LostOffRoot
+                                        }))
                                     } else {
                                         emit(branch)
                                     }
@@ -66375,10 +66406,23 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
             && !branch.trackable)
             .then(|| (branch.snapshot.clone(), branch.value.clone()));
         let flow = match apply_static_tail_one::<S>(branch, &flat[last_dynamic + 1..]) {
-            Ok(Some(b)) => match sink(b) {
-                Demand::Continue => ResolveFlow::Exhausted,
-                Demand::Stop => ResolveFlow::Stopped,
-            },
+            Ok(Some(mut b)) => {
+                // #4800: the stages before this pipe's end dropped the statement a `foreach`
+                // EXTRACT made (a lost state does not outlive a stage, D2); a tail that
+                // navigates nothing hands the emission on as it was, so state it again.
+                if flat.len() == last_dynamic + 1
+                    && matches!(frame.register_loss, RegisterLoss::LostOffRoot)
+                    && !b.trackable
+                    && b.path.depth() == 0
+                    && matches!(b.register, BranchRegister::None)
+                {
+                    b.register = BranchRegister::LostOffRoot;
+                }
+                match sink(b) {
+                    Demand::Continue => ResolveFlow::Exhausted,
+                    Demand::Stop => ResolveFlow::Stopped,
+                }
+            }
             Ok(None) => ResolveFlow::Exhausted,
             Err(e) => ResolveFlow::Escaped(e),
         };
@@ -66663,7 +66707,9 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
             && !facts.navigated
             && !matches!(
                 step_register,
-                BranchRegister::LostAt(_) | BranchRegister::LostSomewhere
+                BranchRegister::LostAt(_)
+                    | BranchRegister::LostSomewhere
+                    | BranchRegister::LostOffRoot
             );
         let register_entering = if !(stage_preserves_register || seed || states_register) {
             None
@@ -67171,7 +67217,10 @@ fn resolve_terminal_sink<'a, S: EvalSemantics>(
                 let identical = S::TAG == EvalTag::Jq && null_bool_identical(&branch.value, input);
                 // #4800: ...and not for a branch that states the register lost, which a computed
                 // emission of a fold whose UPDATE may have moved it off the root does.
-                let register_lost = matches!(branch.register, BranchRegister::LostSomewhere);
+                let register_lost = matches!(
+                    branch.register,
+                    BranchRegister::LostSomewhere | BranchRegister::LostOffRoot
+                );
                 if identical && !register_lost && (near_iterate || branch.path.depth() == 0) {
                     // emission: mirror the navigation family's identical
                     // seed (#2691) -- the identical literal carried through

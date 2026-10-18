@@ -161638,6 +161638,64 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
     ])
 }
 
+/// #4800: the refusal above holds when stages follow the `foreach` (`FOREACH | .`, `| select(true)`,
+/// `| first(.)`, `| if true then . else . end`, several of them): the statement the EXTRACT made does not
+/// outlive a stage, so the last stage's untracked `.` was read as the root by the terminal's `null`
+/// carve-out, `path` answered `[]` and `|= 9` wrote `9` where jq's register sits on `["a"]` (`{"a":9}`).
+/// Controls that must not move: a comma beside the `foreach` (`(FE), 7`) and a `//` fallback restore
+/// the register for some branches, which only the run can tell, so they keep the answers they had
+/// (`["a"]` then `[]`, and `[]`), as does the bare `FOREACH` UPDATE (`["a"]`).
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_4800() -> Result<()>
+{
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    for head in ["1 | ", "not | "] {
+        for stage in [
+            " | .",
+            " | select(true)",
+            " | first(.)",
+            " | if true then . else . end",
+            " | select(true) | .",
+        ] {
+            for wrap in ["path(X)", "(X) |= 9", "[path(X)?]", "[limit(1; path(X))]"] {
+                let inner = format!(r". as $x | foreach . as $i (.; {head}{fe}; $i){stage}");
+                let filter = wrap.replace('X', &inner);
+                let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
+                assert_eq!(code, 5, "{filter}: stdout {stdout:?} stderr {stderr:?}");
+                assert_eq!(stdout, "", "{filter}");
+                assert!(
+                    stderr.contains("Invalid path expression with result null"),
+                    "{filter}: {stderr:?}"
+                );
+            }
+        }
+    }
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a}|.)) as $y (.; .; .)), 7; $i) | .)",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a}|.)) as $y (.; .; .)) // 5; $i) | .)",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's
