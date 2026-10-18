@@ -545,47 +545,45 @@ fn is_printable(c: char) -> bool {
 /// Whether yaml.v3's `resolve("", s)` gives `s` a tag other than `!!str`, which
 /// is when the encoder quotes it.
 fn resolves_to_non_str(s: &str) -> bool {
+    go_yaml_resolved_tag(s) != "!!str"
+}
+
+/// The tag yaml.v3's `resolve("", s)` gives a plain scalar spelled `s` (#2796).
+///
+/// What go-yaml's encoder compares an assigned tag against: a tag equal to this one is
+/// implicit and not written. `-0` is a float (captured from yq: `tag = "!!float"` leaves
+/// `-0` bare and `tag = "!!int"` writes `!!int -0`).
+#[must_use]
+pub fn go_yaml_resolved_tag(s: &str) -> &'static str {
     // `resolveMap`: the keywords, including the empty string (null) and `<<`.
-    if matches!(
-        s,
-        "" | "~"
-            | "null"
-            | "Null"
-            | "NULL"
-            | "true"
-            | "True"
-            | "TRUE"
-            | "false"
-            | "False"
-            | "FALSE"
-            | ".nan"
-            | ".NaN"
-            | ".NAN"
-            | ".inf"
-            | ".Inf"
-            | ".INF"
-            | "+.inf"
-            | "+.Inf"
-            | "+.INF"
-            | "-.inf"
-            | "-.Inf"
-            | "-.INF"
-            | "<<"
-    ) {
-        return true;
+    match s {
+        "" | "~" | "null" | "Null" | "NULL" => return "!!null",
+        "true" | "True" | "TRUE" | "false" | "False" | "FALSE" => return "!!bool",
+        ".nan" | ".NaN" | ".NAN" | ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF"
+        | "-.inf" | "-.Inf" | "-.INF" => return "!!float",
+        "<<" => return "!!merge",
+        _ => {}
     }
     match s.as_bytes()[0] {
-        b'.' => is_go_float(s),
+        b'.' if is_go_float(s) => "!!float",
         b'0'..=b'9' | b'+' | b'-' => {
             if is_timestamp(s) {
-                return true;
+                return "!!timestamp";
             }
             // yaml.v3 strips every underscore before it tries an integer or a
             // float, so `1_000` and `0x1_f` are numbers.
             let plain = without_underscores(s);
-            is_go_int(&plain) || (matches_yaml_float(&plain) && is_finite_float(&plain))
+            if plain == "-0" {
+                "!!float"
+            } else if is_go_int(&plain) {
+                "!!int"
+            } else if matches_yaml_float(&plain) && is_finite_float(&plain) {
+                "!!float"
+            } else {
+                "!!str"
+            }
         }
-        _ => false,
+        _ => "!!str",
     }
 }
 
@@ -1511,5 +1509,39 @@ mod tests {
             key(&format!("a\t{}", "k".repeat(129))).as_deref(),
             Some(&*format!("\"a\\t{}\"", "k".repeat(129)))
         );
+    }
+
+    /// #2796: the tag yaml.v3's `resolve` gives a plain scalar, which is what an assigned tag
+    /// is compared with. Every row is captured from yq v4.53.3 (`tag = "<tag>"` printing
+    /// nothing exactly when `<tag>` is the row's).
+    #[test]
+    fn plain_scalars_resolve_to_the_tag_go_yaml_compares_2796() {
+        for (text, tag) in [
+            ("", "!!null"),
+            ("~", "!!null"),
+            ("null", "!!null"),
+            ("true", "!!bool"),
+            ("False", "!!bool"),
+            ("yes", "!!str"),
+            ("1", "!!int"),
+            ("0x1F", "!!int"),
+            ("0o17", "!!int"),
+            ("1_000", "!!int"),
+            ("-5", "!!int"),
+            ("1.5", "!!float"),
+            ("1e3", "!!float"),
+            (".5", "!!float"),
+            (".inf", "!!float"),
+            ("-.INF", "!!float"),
+            (".nan", "!!float"),
+            ("-0", "!!float"),
+            ("2001-12-14", "!!timestamp"),
+            ("<<", "!!merge"),
+            ("x", "!!str"),
+            ("1.2.3", "!!str"),
+            ("0x", "!!str"),
+        ] {
+            assert_eq!(go_yaml_resolved_tag(text), tag, "{text:?}");
+        }
     }
 }

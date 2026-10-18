@@ -4554,18 +4554,33 @@ pads `b` with `null`s and writes `# null`.
 What is refused explicitly (an error, never a silent no-op — the outcome #798's triage
 ruled out), even though real yq supports every one of them:
 
-- **`tag =`, and `head_comment =`/`foot_comment =`/`comments =` with a non-empty text on
+- **`head_comment =`/`foot_comment =`/`comments =` with a non-empty text on
   anything but the document root, a scalar mapping value / sequence item in a block
   collection, or a mapping key (`(.a | key) head_comment = "x"`)** raise `<slot> = ... is
-  not yet supported`. Real yq's `.a tag = "!!str"` coerces the
-  value's type, `.a head_comment = "hi"`/`.a foot_comment = "bye"` insert standalone comment
-  lines, and `.a comments = "x"` sets head, line and foot together. Setting a text has no
-  write mechanism here yet: `NodeMeta` (`src/jq/eval_generic.rs`) keeps a node's tag only as
-  the verbatim source spelling (#4078), and where yq *prints* a comment set on a node follows
+  not yet supported`. Real yq's `.a head_comment = "hi"`/`.a foot_comment = "bye"` insert standalone comment
+  lines, and `.a comments = "x"` sets head, line and foot together. Where yq *prints* a comment set on a node follows
   go-yaml's emitter state rather than the node (a scalar mapping value's head lands after
   its line, before the next key's own head, which then replaces it; a container's foot lands
   after the next entry's first line), which the emitters here do not model. See the
   identity-round-trip entry below.
+- **`tag =` is written on a value node** ([#2796](https://github.com/rust-works/succinctly/issues/2796)),
+  applied as go-yaml's encoder treats an assigned tag: written unless it is the tag the scalar's
+  text resolves to anyway (`go_yaml_resolved_tag`: `!!int` on `1` and `!!timestamp` on `2001-12-14`
+  print nothing, `-0` is a float), `!!str` on a scalar that reads back as another type quotes it and
+  makes it a string (`a: 1` is `a: "1"`, and `"1"` under `-o json`), a tag that does not start with
+  `!` is `!<tag>`, a node that already has a source tag prints the new one even where it is its own
+  (`!!str 1` with `!!int` is `!!int 1`), and `""` clears it. 180 text/tag pairs over 15 scalar spellings
+  and 120 more over source-tagged scalars, containers, sequence items, several targets, `-o json` and
+  `|=` match yq v4.53.3 byte for byte. Still different: `-o json` does not type a value by a
+  non-`!!str` tag (`!!float` on `1` is `1.0` in yq, and `!!int` on `x` is an error there), the
+  `tag = ""` of a source-tagged `!!float`/`!!int` scalar keeps its tag/quoting where yq prints the
+  plain text, a tag on a key node (`(.a | key) tag = ...`) and on `...` is refused, a tag written through an alias
+  position reaches the alias copy (yq leaves the alias and changes the anchor's node), and the
+  write is not visible to a later stage of the same pipe (`.a tag = "!!str" | .a | type`), and two
+  `tag =` writes to one node in a pipe (`.a tag = "!!float" | .a tag = "!!str"`) are not composed the
+  way yq composes them. A `tag =` on a route that places no metadata write (behind a comma, an array
+  construction, a bind) or under `--eval-all` is an error (`tag = ... is only supported as a top-level
+  pipe stage of a plain write`), never a silent no-op.
 - **The document root takes a text** ([#2796](https://github.com/rust-works/succinctly/issues/2796),
   part 2): `. head_comment = "x"`, `. foot_comment = "x"` and `. comments = "x"` (and `|=`)
   replace the root's own standalone lines, a multi-line text becoming one `# ` line each, and

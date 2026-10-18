@@ -20696,14 +20696,14 @@ mod meta_assign_798 {
         assert!(err.contains("parse error"), "stderr: {err}");
     }
 
-    /// `tag =` and a non-empty `head_comment =`/`foot_comment =`/`comments =` parse (the
-    /// shared grammar is complete) but raise an explicit "not yet supported" error rather than
+    /// A non-empty `head_comment =`/`foot_comment =`/`comments =` on a node it is not modelled
+    /// for parses (the shared grammar is complete) but raises an explicit "not yet supported"
+    /// error rather than
     /// silently no-oping -- real yq itself fully supports them; succinctly writes only the
     /// clearing form `= ""` of the comment slots so far (#2796), and `...` only with those.
     #[test]
     fn stub_slots_parse_but_raise_not_yet_supported() {
         for (filter, slot) in [
-            (".a tag = \"!!str\"", "tag"),
             (".. head_comment = \"x\"", "head_comment"),
             ("... comments = \"x\"", "comments"),
             ("... line_comment = \"x\"", "line_comment"),
@@ -25070,6 +25070,490 @@ fn test_source_block_scalar_of_a_lone_newline_keeps_its_chomping_3587() -> Resul
     let (json, stderr, code) = run_yq_stdin_with_stderr(".", &out, &["-o", "json", "-I0"])?;
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(json, "{\"a\":\"\\n\",\"b\":1}\n");
+    Ok(())
+}
+
+/// #2796: `PATH tag = "TAG"` is written the way go-yaml's encoder treats an assigned tag --
+/// printed unless it is the tag the scalar's text resolves to, `!!str` quoting what would read
+/// back as another type, `""` clearing, a source tag always replaced by the new one. Every row
+/// is yq v4.53.3's own output: 15 scalar spellings by the tags, source-tagged scalars,
+/// containers, sequence items, several targets, `|=`, a computed text and `-o json`.
+#[test]
+fn test_tag_assignment_follows_go_yamls_encoder_2796() -> Result<()> {
+    let rows: &[(&str, &str, &[&str], &str)] = &[
+        ("a: 1\n", ".a tag = \"!!str\"", &[], "a: \"1\"\n"),
+        ("a: 1\n", ".a tag = \"!!int\"", &[], "a: 1\n"),
+        ("a: 1\n", ".a tag = \"!!float\"", &[], "a: !!float 1\n"),
+        ("a: 1\n", ".a tag = \"!!bool\"", &[], "a: !!bool 1\n"),
+        ("a: 1\n", ".a tag = \"!!null\"", &[], "a: !!null 1\n"),
+        ("a: 1\n", ".a tag = \"!foo\"", &[], "a: !foo 1\n"),
+        ("a: 1\n", ".a tag = \"str\"", &[], "a: !<str> 1\n"),
+        ("a: 1\n", ".a tag = \"!!seq\"", &[], "a: !!seq 1\n"),
+        ("a: 1\n", ".a tag = \"\"", &[], "a: 1\n"),
+        (
+            "a: 1\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp 1\n",
+        ),
+        ("a: 1.5\n", ".a tag = \"!!str\"", &[], "a: \"1.5\"\n"),
+        ("a: 1.5\n", ".a tag = \"!!int\"", &[], "a: !!int 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"!!float\"", &[], "a: 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"!!bool\"", &[], "a: !!bool 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"!!null\"", &[], "a: !!null 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"!foo\"", &[], "a: !foo 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"str\"", &[], "a: !<str> 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"!!seq\"", &[], "a: !!seq 1.5\n"),
+        ("a: 1.5\n", ".a tag = \"\"", &[], "a: 1.5\n"),
+        (
+            "a: 1.5\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp 1.5\n",
+        ),
+        ("a: 0x1F\n", ".a tag = \"!!str\"", &[], "a: \"0x1F\"\n"),
+        ("a: 0x1F\n", ".a tag = \"!!int\"", &[], "a: 0x1F\n"),
+        (
+            "a: 0x1F\n",
+            ".a tag = \"!!float\"",
+            &[],
+            "a: !!float 0x1F\n",
+        ),
+        ("a: 0x1F\n", ".a tag = \"!!bool\"", &[], "a: !!bool 0x1F\n"),
+        ("a: 0x1F\n", ".a tag = \"!!null\"", &[], "a: !!null 0x1F\n"),
+        ("a: 0x1F\n", ".a tag = \"!foo\"", &[], "a: !foo 0x1F\n"),
+        ("a: 0x1F\n", ".a tag = \"str\"", &[], "a: !<str> 0x1F\n"),
+        ("a: 0x1F\n", ".a tag = \"!!seq\"", &[], "a: !!seq 0x1F\n"),
+        ("a: 0x1F\n", ".a tag = \"\"", &[], "a: 0x1F\n"),
+        (
+            "a: 0x1F\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp 0x1F\n",
+        ),
+        ("a: true\n", ".a tag = \"!!str\"", &[], "a: \"true\"\n"),
+        ("a: true\n", ".a tag = \"!!int\"", &[], "a: !!int true\n"),
+        (
+            "a: true\n",
+            ".a tag = \"!!float\"",
+            &[],
+            "a: !!float true\n",
+        ),
+        ("a: true\n", ".a tag = \"!!bool\"", &[], "a: true\n"),
+        ("a: true\n", ".a tag = \"!!null\"", &[], "a: !!null true\n"),
+        ("a: true\n", ".a tag = \"!foo\"", &[], "a: !foo true\n"),
+        ("a: true\n", ".a tag = \"str\"", &[], "a: !<str> true\n"),
+        ("a: true\n", ".a tag = \"!!seq\"", &[], "a: !!seq true\n"),
+        ("a: true\n", ".a tag = \"\"", &[], "a: true\n"),
+        (
+            "a: true\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp true\n",
+        ),
+        ("a: yes\n", ".a tag = \"!!str\"", &[], "a: yes\n"),
+        ("a: yes\n", ".a tag = \"!!int\"", &[], "a: !!int yes\n"),
+        ("a: yes\n", ".a tag = \"!!float\"", &[], "a: !!float yes\n"),
+        ("a: yes\n", ".a tag = \"!!bool\"", &[], "a: !!bool yes\n"),
+        ("a: yes\n", ".a tag = \"!!null\"", &[], "a: !!null yes\n"),
+        ("a: yes\n", ".a tag = \"!foo\"", &[], "a: !foo yes\n"),
+        ("a: yes\n", ".a tag = \"str\"", &[], "a: !<str> yes\n"),
+        ("a: yes\n", ".a tag = \"!!seq\"", &[], "a: !!seq yes\n"),
+        ("a: yes\n", ".a tag = \"\"", &[], "a: yes\n"),
+        (
+            "a: yes\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp yes\n",
+        ),
+        ("a: null\n", ".a tag = \"!!str\"", &[], "a: \"null\"\n"),
+        ("a: null\n", ".a tag = \"!!int\"", &[], "a: !!int null\n"),
+        (
+            "a: null\n",
+            ".a tag = \"!!float\"",
+            &[],
+            "a: !!float null\n",
+        ),
+        ("a: null\n", ".a tag = \"!!bool\"", &[], "a: !!bool null\n"),
+        ("a: null\n", ".a tag = \"!!null\"", &[], "a: null\n"),
+        ("a: null\n", ".a tag = \"!foo\"", &[], "a: !foo null\n"),
+        ("a: null\n", ".a tag = \"str\"", &[], "a: !<str> null\n"),
+        ("a: null\n", ".a tag = \"!!seq\"", &[], "a: !!seq null\n"),
+        ("a: null\n", ".a tag = \"\"", &[], "a: null\n"),
+        (
+            "a: null\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp null\n",
+        ),
+        ("a: ~\n", ".a tag = \"!!str\"", &[], "a: \"~\"\n"),
+        ("a: ~\n", ".a tag = \"!!int\"", &[], "a: !!int ~\n"),
+        ("a: ~\n", ".a tag = \"!!float\"", &[], "a: !!float ~\n"),
+        ("a: ~\n", ".a tag = \"!!bool\"", &[], "a: !!bool ~\n"),
+        ("a: ~\n", ".a tag = \"!!null\"", &[], "a: ~\n"),
+        ("a: ~\n", ".a tag = \"!foo\"", &[], "a: !foo ~\n"),
+        ("a: ~\n", ".a tag = \"str\"", &[], "a: !<str> ~\n"),
+        ("a: ~\n", ".a tag = \"!!seq\"", &[], "a: !!seq ~\n"),
+        ("a: ~\n", ".a tag = \"\"", &[], "a: ~\n"),
+        (
+            "a: ~\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp ~\n",
+        ),
+        ("a: x\n", ".a tag = \"!!str\"", &[], "a: x\n"),
+        ("a: x\n", ".a tag = \"!!int\"", &[], "a: !!int x\n"),
+        ("a: x\n", ".a tag = \"!!float\"", &[], "a: !!float x\n"),
+        ("a: x\n", ".a tag = \"!!bool\"", &[], "a: !!bool x\n"),
+        ("a: x\n", ".a tag = \"!!null\"", &[], "a: !!null x\n"),
+        ("a: x\n", ".a tag = \"!foo\"", &[], "a: !foo x\n"),
+        ("a: x\n", ".a tag = \"str\"", &[], "a: !<str> x\n"),
+        ("a: x\n", ".a tag = \"!!seq\"", &[], "a: !!seq x\n"),
+        ("a: x\n", ".a tag = \"\"", &[], "a: x\n"),
+        (
+            "a: x\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp x\n",
+        ),
+        ("a: '1'\n", ".a tag = \"!!str\"", &[], "a: '1'\n"),
+        ("a: '1'\n", ".a tag = \"!!int\"", &[], "a: '1'\n"),
+        ("a: '1'\n", ".a tag = \"!!float\"", &[], "a: !!float '1'\n"),
+        ("a: '1'\n", ".a tag = \"!!bool\"", &[], "a: !!bool '1'\n"),
+        ("a: '1'\n", ".a tag = \"!!null\"", &[], "a: !!null '1'\n"),
+        ("a: '1'\n", ".a tag = \"!foo\"", &[], "a: !foo '1'\n"),
+        ("a: '1'\n", ".a tag = \"str\"", &[], "a: !<str> '1'\n"),
+        ("a: '1'\n", ".a tag = \"!!seq\"", &[], "a: !!seq '1'\n"),
+        ("a: '1'\n", ".a tag = \"\"", &[], "a: '1'\n"),
+        (
+            "a: '1'\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp '1'\n",
+        ),
+        ("a: \"1\"\n", ".a tag = \"!!str\"", &[], "a: \"1\"\n"),
+        ("a: \"1\"\n", ".a tag = \"!!int\"", &[], "a: \"1\"\n"),
+        (
+            "a: \"1\"\n",
+            ".a tag = \"!!float\"",
+            &[],
+            "a: !!float \"1\"\n",
+        ),
+        (
+            "a: \"1\"\n",
+            ".a tag = \"!!bool\"",
+            &[],
+            "a: !!bool \"1\"\n",
+        ),
+        (
+            "a: \"1\"\n",
+            ".a tag = \"!!null\"",
+            &[],
+            "a: !!null \"1\"\n",
+        ),
+        ("a: \"1\"\n", ".a tag = \"!foo\"", &[], "a: !foo \"1\"\n"),
+        ("a: \"1\"\n", ".a tag = \"str\"", &[], "a: !<str> \"1\"\n"),
+        ("a: \"1\"\n", ".a tag = \"!!seq\"", &[], "a: !!seq \"1\"\n"),
+        ("a: \"1\"\n", ".a tag = \"\"", &[], "a: \"1\"\n"),
+        (
+            "a: \"1\"\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp \"1\"\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!str\"",
+            &[],
+            "a: \"2001-12-14\"\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!int\"",
+            &[],
+            "a: !!int 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!float\"",
+            &[],
+            "a: !!float 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!bool\"",
+            &[],
+            "a: !!bool 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!null\"",
+            &[],
+            "a: !!null 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!foo\"",
+            &[],
+            "a: !foo 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"str\"",
+            &[],
+            "a: !<str> 2001-12-14\n",
+        ),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!seq\"",
+            &[],
+            "a: !!seq 2001-12-14\n",
+        ),
+        ("a: 2001-12-14\n", ".a tag = \"\"", &[], "a: 2001-12-14\n"),
+        (
+            "a: 2001-12-14\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: 2001-12-14\n",
+        ),
+        ("a: 1e3\n", ".a tag = \"!!str\"", &[], "a: \"1e3\"\n"),
+        ("a: 1e3\n", ".a tag = \"!!int\"", &[], "a: !!int 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"!!float\"", &[], "a: 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"!!bool\"", &[], "a: !!bool 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"!!null\"", &[], "a: !!null 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"!foo\"", &[], "a: !foo 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"str\"", &[], "a: !<str> 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"!!seq\"", &[], "a: !!seq 1e3\n"),
+        ("a: 1e3\n", ".a tag = \"\"", &[], "a: 1e3\n"),
+        (
+            "a: 1e3\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp 1e3\n",
+        ),
+        ("a: .inf\n", ".a tag = \"!!str\"", &[], "a: \".inf\"\n"),
+        ("a: .inf\n", ".a tag = \"!!int\"", &[], "a: !!int .inf\n"),
+        ("a: .inf\n", ".a tag = \"!!float\"", &[], "a: .inf\n"),
+        ("a: .inf\n", ".a tag = \"!!bool\"", &[], "a: !!bool .inf\n"),
+        ("a: .inf\n", ".a tag = \"!!null\"", &[], "a: !!null .inf\n"),
+        ("a: .inf\n", ".a tag = \"!foo\"", &[], "a: !foo .inf\n"),
+        ("a: .inf\n", ".a tag = \"str\"", &[], "a: !<str> .inf\n"),
+        ("a: .inf\n", ".a tag = \"!!seq\"", &[], "a: !!seq .inf\n"),
+        ("a: .inf\n", ".a tag = \"\"", &[], "a: .inf\n"),
+        (
+            "a: .inf\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp .inf\n",
+        ),
+        ("a: -0\n", ".a tag = \"!!str\"", &[], "a: \"-0\"\n"),
+        ("a: -0\n", ".a tag = \"!!int\"", &[], "a: !!int -0\n"),
+        ("a: -0\n", ".a tag = \"!!float\"", &[], "a: -0\n"),
+        ("a: -0\n", ".a tag = \"!!bool\"", &[], "a: !!bool -0\n"),
+        ("a: -0\n", ".a tag = \"!!null\"", &[], "a: !!null -0\n"),
+        ("a: -0\n", ".a tag = \"!foo\"", &[], "a: !foo -0\n"),
+        ("a: -0\n", ".a tag = \"str\"", &[], "a: !<str> -0\n"),
+        ("a: -0\n", ".a tag = \"!!seq\"", &[], "a: !!seq -0\n"),
+        ("a: -0\n", ".a tag = \"\"", &[], "a: -0\n"),
+        (
+            "a: -0\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp -0\n",
+        ),
+        ("a: ''\n", ".a tag = \"!!str\"", &[], "a: ''\n"),
+        ("a: ''\n", ".a tag = \"!!int\"", &[], "a: !!int ''\n"),
+        ("a: ''\n", ".a tag = \"!!float\"", &[], "a: !!float ''\n"),
+        ("a: ''\n", ".a tag = \"!!bool\"", &[], "a: !!bool ''\n"),
+        ("a: ''\n", ".a tag = \"!!null\"", &[], "a: ''\n"),
+        ("a: ''\n", ".a tag = \"!foo\"", &[], "a: !foo ''\n"),
+        ("a: ''\n", ".a tag = \"str\"", &[], "a: !<str> ''\n"),
+        ("a: ''\n", ".a tag = \"!!seq\"", &[], "a: !!seq ''\n"),
+        ("a: ''\n", ".a tag = \"\"", &[], "a: ''\n"),
+        (
+            "a: ''\n",
+            ".a tag = \"!!timestamp\"",
+            &[],
+            "a: !!timestamp ''\n",
+        ),
+        ("a: !!str 1\n", ".a tag = \"!!str\"", &[], "a: !!str 1\n"),
+        ("a: !!str 1\n", ".a tag = \"!!int\"", &[], "a: !!int 1\n"),
+        ("a: !!str 1\n", ".a tag = \"!foo\"", &[], "a: !foo 1\n"),
+        ("a: !!int 1\n", ".a tag = \"!!str\"", &[], "a: !!str 1\n"),
+        ("a: !!int 1\n", ".a tag = \"!!int\"", &[], "a: !!int 1\n"),
+        ("a: !!int 1\n", ".a tag = \"!foo\"", &[], "a: !foo 1\n"),
+        ("a: !foo 1\n", ".a tag = \"!!str\"", &[], "a: !!str 1\n"),
+        ("a: !foo 1\n", ".a tag = \"!!int\"", &[], "a: !!int 1\n"),
+        ("a: !foo 1\n", ".a tag = \"!foo\"", &[], "a: !foo 1\n"),
+        (
+            "a: !!str \"q\"\n",
+            ".a tag = \"!!str\"",
+            &[],
+            "a: !!str \"q\"\n",
+        ),
+        (
+            "a: !!str \"q\"\n",
+            ".a tag = \"!!int\"",
+            &[],
+            "a: !!int \"q\"\n",
+        ),
+        (
+            "a: !!str \"q\"\n",
+            ".a tag = \"!foo\"",
+            &[],
+            "a: !foo \"q\"\n",
+        ),
+        ("a: [1]\n", ".a tag = \"!foo\"", &[], "a: !foo [1]\n"),
+        ("a: [1]\n", ".a tag = \"!!seq\"", &[], "a: [1]\n"),
+        ("a: {b: 1}\n", ".a tag = \"!foo\"", &[], "a: !foo {b: 1}\n"),
+        ("a: {b: 1}\n", ".a tag = \"!!map\"", &[], "a: {b: 1}\n"),
+        (
+            "a:\n  - 1\n  - 2\n",
+            ".a tag = \"!foo\"",
+            &[],
+            "a: !foo\n  - 1\n  - 2\n",
+        ),
+        (
+            "a: 1\nb: 2\n",
+            ".[] tag = \"!!str\"",
+            &[],
+            "a: \"1\"\nb: \"2\"\n",
+        ),
+        (
+            "a: 1\nb: 2\n",
+            ".a tag = \"!!str\" | .b tag = \"!foo\"",
+            &[],
+            "a: \"1\"\nb: !foo 2\n",
+        ),
+        ("- 1\n- 2\n", ".[0] tag = \"!!str\"", &[], "- \"1\"\n- 2\n"),
+        (
+            "- 1\n- 2\n",
+            ".[] tag = \"!foo\"",
+            &[],
+            "- !foo 1\n- !foo 2\n",
+        ),
+        (
+            "a: 1 # c\nb: 2\n",
+            ".a tag = \"!!str\"",
+            &[],
+            "a: \"1\" # c\nb: 2\n",
+        ),
+        ("# h\na: 1\n", ".a tag = \"!foo\"", &[], "# h\na: !foo 1\n"),
+        ("a:\nb: 1\n", ".a tag = \"!!str\"", &[], "a: \"\"\nb: 1\n"),
+        ("1\n", ". tag = \"!!str\"", &[], "1\n"),
+        ("1\n", ". tag = \"!foo\"", &[], "1\n"),
+        ("a: 1\n", ".a tag |= \"!!str\"", &[], "a: \"1\"\n"),
+        ("a: 1\n", ".a tag = (\"!!\" + \"str\")", &[], "a: \"1\"\n"),
+        (
+            "a: 1\nb: x\n",
+            "(.a, .b) tag = \"!!str\"",
+            &[],
+            "a: \"1\"\nb: x\n",
+        ),
+        (
+            "a: [1, 2]\n",
+            ".a[] tag = \"!!str\"",
+            &[],
+            "a: [\"1\", \"2\"]\n",
+        ),
+        (
+            "a: |\n  x\n  y\n",
+            ".a tag = \"!!str\"",
+            &[],
+            "a: |\n  x\n  y\n",
+        ),
+        (
+            "a: |\n  x\n  y\n",
+            ".a tag = \"!foo\"",
+            &[],
+            "a: !foo |\n  x\n  y\n",
+        ),
+        (
+            "a: 1\n",
+            ".a tag = \"!!str\"",
+            &["-o=json", "-I0"],
+            "{\"a\":\"1\"}\n",
+        ),
+        (
+            "a: 1\n",
+            ".a tag = \"!foo\"",
+            &["-o=json", "-I0"],
+            "{\"a\":1}\n",
+        ),
+        (
+            "a: true\n",
+            ".a tag = \"!!str\"",
+            &["-o=json", "-I0"],
+            "{\"a\":\"true\"}\n",
+        ),
+        (
+            "a: true\n",
+            ".a tag = \"!foo\"",
+            &["-o=json", "-I0"],
+            "{\"a\":true}\n",
+        ),
+        (
+            "a: null\n",
+            ".a tag = \"!!str\"",
+            &["-o=json", "-I0"],
+            "{\"a\":\"null\"}\n",
+        ),
+        (
+            "a: null\n",
+            ".a tag = \"!foo\"",
+            &["-o=json", "-I0"],
+            "{\"a\":null}\n",
+        ),
+        (
+            "a: x\n",
+            ".a tag = \"!!str\"",
+            &["-o=json", "-I0"],
+            "{\"a\":\"x\"}\n",
+        ),
+        (
+            "a: x\n",
+            ".a tag = \"!foo\"",
+            &["-o=json", "-I0"],
+            "{\"a\":\"x\"}\n",
+        ),
+    ];
+    for (input, filter, extra, expected) in rows {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, extra)?;
+        assert_eq!(code, 0, "{input:?} {filter} {extra:?}: {stderr}");
+        assert_eq!(&out, expected, "{input:?} {filter} {extra:?}");
+    }
+    Ok(())
+}
+
+/// #2796: a `tag =` a route cannot place is an error, never a silent no-op: behind a comma, in a
+/// construction, and under `--eval-all`.
+#[test]
+fn test_tag_assignment_on_an_unplaceable_route_is_an_error_2796() -> Result<()> {
+    for (filter, extra) in [
+        (".a tag = \"!!str\", .b", &[][..]),
+        (".a tag = \"!!str\", .b", &["-o=json", "-I0"][..]),
+        ("[.a] | .[0] tag = \"!!str\"", &[][..]),
+        (".a tag = \"!!str\"", &["--eval-all"][..]),
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", extra)?;
+        assert_eq!(code, 1, "{filter} {extra:?}: {stderr}");
+        assert_eq!(out, "", "{filter} {extra:?}");
+        assert!(stderr.contains("tag = ..."), "{filter} {extra:?}: {stderr}");
+    }
+    Ok(())
+}
+
+/// #2796: the refusals `tag =` keeps. A tag on a key node names a different node than the
+/// value (yq prefixes the key), so it is an error here rather than a silent no-op.
+#[test]
+fn test_tag_assignment_refuses_a_key_node_2796() -> Result<()> {
+    let (out, stderr, code) = run_yq_stdin_with_stderr("(.a | key) tag = \"!foo\"", "a: 1\n", &[])?;
+    assert_eq!(code, 1);
+    assert_eq!(out, "");
+    assert!(
+        stderr.contains("only supported with the comment slots"),
+        "{stderr}"
+    );
     Ok(())
 }
 
