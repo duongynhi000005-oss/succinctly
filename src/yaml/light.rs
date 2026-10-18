@@ -5123,6 +5123,16 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
     /// Create a new YamlFields from a mapping cursor.
     pub fn from_mapping_cursor(mapping_cursor: YamlCursor<'a, W>) -> Self {
         let key_cursor = mapping_cursor.first_child();
+        // No `<<` anywhere in the text means no merge key to find, and finding that out
+        // otherwise reads every key of the mapping (#4102).
+        if !mapping_cursor
+            .index
+            .may_have_merge_keys(mapping_cursor.text)
+        {
+            return Self {
+                inner: FieldsInner::Direct(key_cursor),
+            };
+        }
         match resolve_merge_keys(key_cursor) {
             Some(entries) => Self {
                 inner: FieldsInner::Merged {
