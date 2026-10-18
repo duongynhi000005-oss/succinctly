@@ -56057,6 +56057,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                     false,
                     &passing_selects,
                     Some(&at),
+                    true,
                 )
             })
             .unwrap_or_default()
