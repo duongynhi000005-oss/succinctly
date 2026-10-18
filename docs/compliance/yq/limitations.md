@@ -5901,10 +5901,17 @@ yq's recursive descent yields an alias node and does not descend into it, so on
 aliased mapping, as in yq. `recurse` and `recurse(.[]?)` are `..` (#3719) and stop with it; yq has
 no `recurse`, so under `--jq-extensions` they follow the `..` rule rather than a reference.
 
-Still diverging: a write through `..` (`(.. | select(tag=="!!int")) |= . + 1` is `p: 2, q: 3` in
-yq and `p: 3, q: 4` here, the shared node incremented twice), `..` over an owned value
-(`to_entries | .[] | ..` expands the alias), a merge key (`<<: *b`, which yq also treats as the
-stop, listing `m.<<` where this lists the merged `m.p`/`m.q`), and `recurse(f; cond)`.
+A write through `..` reaches an anchored node once too (#4223): `(.. | select(tag=="!!int")) |= . + 1`
+is `p: 2, q: 3` in yq and was `p: 3, q: 4` here, the shared node incremented twice. The paths a `..`
+resolves below an alias position that is still its anchor's copy are not targets
+(`alias_identity::drop_below_alias`); explicit paths through an alias are, as before (yq's rule 6).
+
+Still diverging: a `..` write behind a navigation stage
+(`.y | (.. | select(tag == "!!int")) |= . + 5`) still goes into an alias node inside the navigated
+subtree, since the alias table names positions from the document root; `..` over an owned value
+(`to_entries | .[] | ..` expands the alias); a merge key (`<<: *b`, which yq also treats as the
+stop, listing `m.<<` where this lists the merged `m.p`/`m.q`, and which it writes through to the
+anchor: `.m.p |= . + 1` also changes `base.p` there); and `recurse(f; cond)`.
 
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
