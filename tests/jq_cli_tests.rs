@@ -163345,13 +163345,6 @@ fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_va
             5,
         ),
         (
-            r#"{"a":{"a":null}}"#,
-            r"path(. as $x | foreach .a as $i (.; null | foreach (($x|.a) as {a:$a} | .) as $y (.; .; .); .))",
-            "[\"a\",\"a\"]\n",
-            "",
-            0,
-        ),
-        (
             r#"{"a":{"b":1},"c":{"b":1}}"#,
             r"path(. as $x | foreach .a as $i (.; null | foreach (($x.c) as {a:$a} | .) as $y (.; .; .); .))",
             "",
@@ -163384,6 +163377,20 @@ fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_va
             r"path(. as $x | foreach .a as $i (.; null | foreach (($x) as {a:$a} | .) as $y (.; .; .); .))",
             "",
             "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | reduce (($x.a) as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | reduce (($x.a) as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression with result",
             5,
         ),
     ])

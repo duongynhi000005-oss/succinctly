@@ -57482,9 +57482,14 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // #4827: jq mode only (a yq variable holds a node with its own path, ADR-0018): the head reads a `$x`
     // marker and navigates from it, so the node it yields is a child of the marker's value and shares its
     // storage with the register exactly where jq's pointer comparison holds.
-    let marker_navigation_head = S::TAG == EvalTag::Jq
-        && any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_)))
-        && head_spine_navigates(head);
+    // A single pattern only, as the `wrapped_marker` rule above: a `?//` chain's retry rules keep a head
+    // unproven. Walked only for a `bound` that shares the register's storage.
+    let marker_navigation_head = || {
+        S::TAG == EvalTag::Jq
+            && patterns.len() == 1
+            && any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_)))
+            && head_spine_navigates(head)
+    };
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
     // last alternative never retries, so a single pattern skips the walk.
@@ -57543,7 +57548,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                     // #4827: a navigation of a `$x` marker (`$x.a`, `$x | .a`) hands on the child
                     // `jv` of the node `$x` holds, which is the register's own when the register
                     // stands there: jq's `path_intact` compares the pointers, and the step passes.
-                    || (marker_navigation_head && register.is_some_and(|reg| bound.shares_storage_with(reg)))
+                    || (register.is_some_and(|reg| bound.shares_storage_with(reg)) && marker_navigation_head())
             }
         };
         // Whether a first-step refusal is jq's own verdict rather than this
