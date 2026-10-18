@@ -67843,10 +67843,7 @@ fn strip_neutral_stages(head: &Expr) -> Option<Expr> {
         .collect();
     // Only a pure navigation (a variable, a name, a literal index) is evaluated a second time: a computed key
     // that debugs, reads input or writes to stderr would run twice.
-    let pure = |e: &Expr| match e {
-        Expr::TrackedVar(_) | Expr::Field(_) | Expr::Index { .. } => true,
-        _ => false,
-    };
+    let pure = |e: &Expr| matches!(e, Expr::TrackedVar(_) | Expr::Field(_) | Expr::Index { .. });
     (changed && !kept.is_empty() && kept.iter().all(pure)).then(|| Expr::pipe(kept))
 }
 
