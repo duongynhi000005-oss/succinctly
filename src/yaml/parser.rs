@@ -33,7 +33,7 @@ use alloc::{
 use std::collections::BTreeMap;
 
 use super::error::YamlError;
-use super::line_break::{is_line_break, line_break_len};
+use super::line_break::{blank_line_between, is_line_break, line_break_len};
 use super::simd;
 use crate::text;
 
@@ -1922,53 +1922,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         self.flush_pending_head_lines(next);
     }
 
-    /// Whether a wholly blank line (empty or inline whitespace only) lies in
-    /// `[from, to)`.
-    ///
-    /// Every caller passes `from` at the end of a comment line's text, so
-    /// the first break scanned is that line's own; `to` is always mid-line
-    /// (a key, a value, or just past a `---`), so a trailing partial line is
-    /// never counted. Lines with content in between are not blank: an
-    /// empty `-` item or a bare `-` whose value is deferred sits between a
-    /// comment block and the node it heads without attaching anything
-    /// itself, and counting its line break as a blank line sent the block
-    /// backwards onto `PREV`'s foot (`- 1\n# h\n-\n- 3\n` is `.[2]`'s head
-    /// in real yq, #1079).
-    ///
-    /// Deliberately not the same algorithm as `light.rs`'s cursor-side twin
-    /// of the same name (#2811 review): that one only needs a total break
-    /// *count* because its caller already guarantees nothing but
-    /// whitespace in the range, while this one must tell "two adjacent
-    /// breaks" apart from "a break, real (non-blank) content, another
-    /// break" -- exactly the `- 1\n# h\n-\n- 3\n` case above, which a
-    /// count-only check cannot distinguish from a genuine blank line.
+    /// Whether a wholly blank line (empty or inline whitespace only) lies in `[from, to)`:
+    /// [`blank_line_between`] over the input, shared with the cursor side in `light.rs`.
     fn blank_line_between(&self, from: usize, to: usize) -> bool {
-        let mut seen_content = true;
-        let mut p = from;
-        let end = to.min(self.input.len());
-        while p < end {
-            let byte = self.input[p];
-            if is_line_break(byte) {
-                if !seen_content {
-                    return true;
-                }
-                seen_content = false;
-                // CRLF is one break -- via the shared `line_break_len` rule
-                // (`crate::text::line_break`'s module doc: "there is still
-                // exactly one definition") rather than a second hand-rolled
-                // copy of the same check (#2811 review). The `p + 1 < end`
-                // guard is still needed on top: `line_break_len` reads
-                // `self.input` unbounded by `end`, and `end` can fall
-                // between a CRLF pair's two bytes.
-                if line_break_len(self.input, p) == 2 && p + 1 < end {
-                    p += 1;
-                }
-            } else if !Self::is_inline_whitespace(byte) {
-                seen_content = true;
-            }
-            p += 1;
-        }
-        false
+        blank_line_between(self.input, from, to)
     }
 
     /// The column of `pos` if everything between it and the start of its
@@ -4472,66 +4429,82 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     }
 
     /// Whether the node properties that open the cursor's line, under a bare `-` or `key:` on the
-    /// line above, are followed by no value (#2835): the next content line stands no deeper than
-    /// the owner, and is not a zero-indented sequence a key takes as its value (`seq:` / ` &x` /
-    /// `- a`, YAML test suite SKE5). The value of a dash or key can stand left of its own
-    /// properties as long as it is deeper than the owner (`folded:` / `   !foo` / `  >1`, M5C3), so
-    /// the properties' own column says nothing. Called with `self.pos` on the line's break or its
-    /// trailing comment; restores it.
+    /// line above (either may carry properties of its own: `- &x`, `k: !!map`), are followed by
+    /// no value (#2835). The properties name an empty node then, and real yq reads the next key
+    /// or item as a sibling, not as their value. Called with `self.pos` on the line's break or
+    /// its trailing comment; restores it.
     fn own_line_properties_have_no_value(&mut self, indent: usize) -> bool {
         let Some((lead, rest)) = self.previous_content_line() else {
             return false;
         };
-        let bare_dash = rest[0] == b'-' && line_is_bare_dash_before_comment(rest);
-        if !bare_dash && !line_ends_with_colon_before_comment(rest) {
+        let Some((owner, is_dash)) = Self::deferred_value_owner(lead, rest) else {
             return false;
-        }
-        // A dash owns the value that is deeper than it; a key's column is the line's indent
-        // plus the `- ` markers it opens with.
+        };
+        indent > owner && self.value_after_own_line_properties_is_null(owner, is_dash)
+    }
+
+    /// The column of the dash or key whose value the line `rest` (standing `lead` columns in)
+    /// leaves for the lines below it, and whether it is a dash: a bare `-`, a chain of them
+    /// (`- -`), a dash with only properties (`- &x`), or a key written up to its colon, with
+    /// properties after it or not (`k:`, `- k: !!map`). A key's column is the line's indent plus
+    /// the `- ` markers it opens with.
+    fn deferred_value_owner(lead: usize, rest: &[u8]) -> Option<(usize, bool)> {
         let mut marker_len = 0;
-        if !bare_dash {
-            while rest.get(marker_len) == Some(&b'-')
-                && Self::is_ws_break_or_eoi(rest.get(marker_len + 1).copied())
-            {
+        let mut last_dash = None;
+        while rest.get(marker_len) == Some(&b'-')
+            && Self::is_ws_break_or_eoi(rest.get(marker_len + 1).copied())
+        {
+            last_dash = Some(lead + marker_len);
+            marker_len += 1;
+            while matches!(rest.get(marker_len), Some(b' ' | b'\t')) {
                 marker_len += 1;
-                while matches!(rest.get(marker_len), Some(b' ' | b'\t')) {
-                    marker_len += 1;
-                }
             }
         }
-        let owner = lead + marker_len;
-        if indent <= owner {
-            return false;
+        let tail = &rest[marker_len..];
+        match last_dash {
+            Some(column) if only_node_properties(tail) => Some((column, true)),
+            _ => line_ends_with_colon_after_properties(tail).then_some((lead + marker_len, false)),
         }
-        if bare_dash {
+    }
+
+    /// Whether the value that the dash or key at column `owner` leaves for the lines below it is
+    /// absent once the cursor's line (its own-line properties) is past: the next content line
+    /// stands no deeper than the owner, and is not a zero-indented sequence a key takes as its
+    /// value (`seq:` / ` &x` / `- a`, YAML test suite SKE5). A value can stand left of its own
+    /// properties as long as it is deeper than the owner (`folded:` / `   !foo` / `  >1`, M5C3),
+    /// so the properties' own column says nothing. The one definition behind both the empty node
+    /// the properties name and the comment that floats off the item that holds it.
+    fn value_after_own_line_properties_is_null(&mut self, owner: usize, is_dash: bool) -> bool {
+        if is_dash {
             self.following_value_is_null(owner)
         } else {
             self.following_value_is_null_unless_sequence_at(owner)
         }
     }
 
-    /// Whether the next line holds nothing but node properties (`!!str`, `&x`) and the content
-    /// line after it stands no deeper than the item at `indent`, so the properties name an empty
+    /// Whether the next content line holds nothing but node properties (`!!str`, `&x`) and the
+    /// one after it stands no deeper than the item at `indent`, so the properties name an empty
     /// value (#2835). A bare `-` item whose value is that empty node is still absent for the
     /// comment on its dash line: real yq floats it onto the next node as it does for `-` alone.
     /// Called with `self.pos` on the current line's break or its trailing comment; restores it.
     fn next_line_is_properties_of_a_null_value(&mut self, indent: usize) -> bool {
         let mut p = self.pos;
-        while self.input.get(p).is_some_and(|&b| !Self::is_break(b)) {
-            p += 1;
-        }
-        match self.input.get(p) {
-            Some(b'\n') => p += 1,
-            Some(b'\r') => {
+        // The first line below that is neither blank nor a comment.
+        let (line_start, spaces) = loop {
+            while self.input.get(p).is_some_and(|&b| !Self::is_break(b)) {
                 p += 1;
-                if self.input.get(p) == Some(&b'\n') {
-                    p += 1;
-                }
             }
-            _ => return false,
-        }
-        let spaces = super::simd::count_leading_spaces(self.input, p);
-        let line_start = p + spaces;
+            if self.input.get(p).is_none() {
+                return false;
+            }
+            p += line_break_len(self.input, p);
+            let spaces = super::simd::count_leading_spaces(self.input, p);
+            match self.input.get(p + spaces) {
+                Some(b'#') => p += spaces,
+                Some(&b) if Self::is_break(b) => p += spaces,
+                _ => break (p + spaces, spaces),
+            }
+        };
         if spaces <= indent || !matches!(self.input.get(line_start), Some(b'&' | b'!')) {
             return false;
         }
@@ -4544,7 +4517,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
         let saved_pos = self.pos;
         self.pos = line_end;
-        let is_null = self.following_value_is_null(indent);
+        let is_null = self.value_after_own_line_properties_is_null(indent, true);
         self.pos = saved_pos;
         is_null
     }

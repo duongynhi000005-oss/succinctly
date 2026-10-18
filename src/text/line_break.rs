@@ -52,6 +52,39 @@ pub fn line_break_len(text: &[u8], pos: usize) -> usize {
     }
 }
 
+/// Whether a wholly blank line (empty or inline whitespace only) lies in `text[from..to)`.
+///
+/// Callers pass `from` at the end of a comment line's text, so the first break scanned is that
+/// line's own; `to` is mid-line (a key, a value, just past a `---`, or the start of the next
+/// comment), so a trailing partial line is never counted. A line with content in between is not
+/// blank: an empty `-` item, a bare `-` whose value is deferred, or the line holding a node's
+/// properties (`  !!str`) sits between two comments without being a gap in them, and counting
+/// its line break as a blank line sent a block backwards onto `PREV`'s foot (`- 1\n# h\n-\n- 3\n`
+/// is `.[2]`'s head in real yq, #1079) or put a stray blank between two joined comment lines
+/// (`- # c\n  !!str\n# f\n- 2\n`, #2835). A count of breaks cannot tell those from a real blank
+/// line, so the scan tracks whether the line it just finished held content. `\r\n` counts once.
+pub(crate) fn blank_line_between(text: &[u8], from: usize, to: usize) -> bool {
+    let mut seen_content = true;
+    let mut p = from;
+    let end = to.min(text.len());
+    while p < end {
+        let byte = text[p];
+        if is_line_break(byte) {
+            if !seen_content {
+                return true;
+            }
+            seen_content = false;
+            p += line_break_len(text, p);
+        } else {
+            if !matches!(byte, b' ' | b'\t') {
+                seen_content = true;
+            }
+            p += 1;
+        }
+    }
+    false
+}
+
 /// Width in bytes of the line break ending immediately *before* `pos`: 2 for
 /// `\r\n`, 1 for a lone `\r` or `\n`, 0 if `pos` is not preceded by one.
 ///
@@ -134,6 +167,26 @@ mod tests {
         assert_eq!(line_break_len_before(b"", 0), 0);
         // A bare LF at index 0 is a one-byte break with no CR in front of it.
         assert_eq!(line_break_len_before(b"\nx", 1), 1);
+    }
+
+    #[test]
+    fn blank_line_between_needs_a_blank_line_not_a_line_of_content() {
+        // Adjacent comments, and one with a CRLF break between.
+        assert!(!blank_line_between(b"# a\n# b\n", 3, 4));
+        assert!(!blank_line_between(b"# a\r\n# b\r\n", 3, 5));
+        // A blank line, blank-with-spaces, and a CRLF blank line.
+        assert!(blank_line_between(b"# a\n\n# b\n", 3, 5));
+        assert!(blank_line_between(b"# a\n  \n# b\n", 3, 8));
+        assert!(blank_line_between(b"# a\r\n\r\n# b\r\n", 3, 7));
+        // A line holding only node properties between two comments is content, not a gap
+        // (#2835), and so is a bare `-`.
+        assert!(!blank_line_between(b"# a\n  !!str\n# b\n", 3, 12));
+        assert!(!blank_line_between(b"# a\r\n  !!str\r\n# b\r\n", 3, 14));
+        assert!(!blank_line_between(b"# a\n-\n# b\n", 3, 6));
+        assert!(blank_line_between(b"# a\n  !!str\n\n# b\n", 3, 13));
+        // `to` falling inside a CRLF pair, and past the end of the text.
+        assert!(!blank_line_between(b"# a\r\n# b", 3, 4));
+        assert!(blank_line_between(b"# a\n\n", 3, 99));
     }
 
     /// The three helpers are one rule seen from three angles, and must not

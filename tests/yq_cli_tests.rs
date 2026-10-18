@@ -22978,6 +22978,18 @@ fn test_own_line_properties_name_an_empty_node_2835() -> Result<()> {
         ("- 1\n-\n  !!int\n", "- 1\n- !!int\n"),
         ("-\n  !!str\n-\n  &y\n", "- !!str\n- &y\n"),
         ("-\n  !!str &y\n- 2\n", "- &y !!str\n- 2\n"),
+        // The owner may carry properties of its own, or be a chain of dashes.
+        ("- &x\n  !!str\n- 2\n", "- &x !!str\n- 2\n"),
+        ("- !!str\n  &x\n- 2\n", "- &x !!str\n- 2\n"),
+        ("a: &x\n  !!str\nb: 1\n", "a: &x !!str\nb: 1\n"),
+        ("a: !!map\n  &x\nb: 1\n", "a: &x !!map\nb: 1\n"),
+        ("- -\n    !!str\n  - 2\n", "- - !!str\n  - 2\n"),
+        ("- -\n    &x\n  - 2\n", "- - &x\n  - 2\n"),
+        ("- k: &x\n    !!str\n  j: 1\n", "- k: &x !!str\n  j: 1\n"),
+        // A key on the properties' line, or a value deeper than the owner, is not "no value".
+        ("-\n  !!str k: 1\n- 2\n", "- !!str k: 1\n- 2\n"),
+        ("- # c\n  !!str k: 1\n- 2\n", "- # c\n  !!str k: 1\n- 2\n"),
+        ("-\n   !foo\n  >1\n value\n", "- !foo >\n  value\n\n"),
         ("a:\n  !!str\nb: 1\n", "a: !!str\nb: 1\n"),
         ("a:\n  &x\nb: 1\n", "a: &x\nb: 1\n"),
         (
@@ -23012,6 +23024,10 @@ fn test_comment_on_a_bare_dash_before_own_line_properties_goes_forward_2835() ->
         ("- # c\n  !!str\n- 2\n", "- !!str\n# c\n- 2\n"),
         ("- # c\n  &x\n- 2\n", "- &x\n# c\n- 2\n"),
         ("- # c\n  !!str\n", "- !!str\n# c\n"),
+        ("- # c\r\n  !!str\r\n- 2\r\n", "- !!str\n# c\n- 2\n"),
+        ("- # c\n\n  !!str\n- 2\n", "- !!str\n# c\n- 2\n"),
+        ("- # c\n  # x\n  !!str\n- 2\n", "- !!str\n# c\n# x\n- 2\n"),
+        ("- - # c\n    !!str\n  - 2\n", "- - !!str\n  # c\n  - 2\n"),
         (
             "k:\n  - # c\n    !!str\n  - 2\nz: 1\n",
             "k:\n  - !!str\n  # c\n  - 2\nz: 1\n",
@@ -23047,6 +23063,31 @@ fn test_comment_on_a_bare_dash_before_own_line_properties_goes_forward_2835() ->
     )?;
     // Content after the properties keeps the comment as that node's head, as before.
     assert_yq_getter("- # c\n  !!str\n  x\n- 2\n", ".[0] | head_comment", "c\n")
+}
+
+/// Residuals next to #2835, pinned with real yq's answer in the comment so a change is
+/// deliberate: a comment after own-line properties (`!!str # d`) stays on the item here, where yq
+/// moves it onto whatever follows (`b: 1 # d`); and two own-line property lines in a row are
+/// accepted (the second names the node), where yq rejects them with `did not find expected key`.
+#[test]
+fn test_own_line_properties_residuals_2835() -> Result<()> {
+    let (out, code) = run_yq_stdin(".", "a:\n  !!str # d\nb: 1\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "a: !!str # d\nb: 1\n");
+    let (out, code) = run_yq_stdin(".", "- # c\n  !!str # d\n- 2\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "- !!str # d\n# c\n- 2\n");
+    let (out, code) = run_yq_stdin(".", "a:\n  !!str\n  !!int\nb: 1\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "a: !!int\nb: 1\n");
+    // The foot of a sequence closing past a tagged item: the getters agree with yq, the printed
+    // block gets a blank line yq leaves out.
+    let input = "k:\n  - # c\n    # x\n    !!str\nz: 1\n";
+    assert_yq_getter(input, ".k | key | foot_comment", "c\nx\n")?;
+    let (out, code) = run_yq_stdin(".", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "k:\n  - !!str\n# c\n# x\n\nz: 1\n");
+    Ok(())
 }
 
 /// A standalone block above a bare `-` whose value is deferred to the next

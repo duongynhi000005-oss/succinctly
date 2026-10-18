@@ -24,7 +24,7 @@ use std::string::ToString;
 
 use super::encode_style::write_go_yaml_string;
 use super::index::YamlIndex;
-use super::line_break::{is_line_break, line_break_len, line_break_len_before};
+use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
 use super::scalar::{
     could_be_null_or_bool, is_preservable_float_literal, preservable_float_literal_text,
     resolve_plain, resolve_plain_sourced, resolve_tagged, whole_float_as_int, ResolvedScalar,
@@ -9072,38 +9072,6 @@ fn write_extra_line_comments<'t, Out: core::fmt::Write>(
     Ok(())
 }
 
-/// Whether a wholly blank line lies in `text[from..to)` -- a line break directly after another,
-/// only blanks between, `\r\n` counting once (#2795). The cursor-side twin of the parser's
-/// `blank_line_between`, used to *derive* the blank line real yq keeps between two lines of one
-/// standalone comment block (`a:\n  # h1\n\n  # h2\n  b: 1` round-trips with the blank
-/// intact): the parser records only the `#` lines, so the blank is read back off the text
-/// between them rather than stored.
-///
-/// A line of content between the two comments is not a blank line (#2835): a bare `- # c`
-/// item's comment and the block under the next item sit either side of the `  !!str` line the
-/// item's properties are on, and real yq joins them with no blank.
-fn blank_line_between(text: &[u8], from: usize, to: usize) -> bool {
-    let mut seen_content = true;
-    let mut p = from;
-    let end = to.min(text.len());
-    while p < end {
-        let byte = text[p];
-        if is_line_break(byte) {
-            if !seen_content {
-                return true;
-            }
-            seen_content = false;
-            p += line_break_len(text, p);
-        } else {
-            if !matches!(byte, b' ' | b'\t') {
-                seen_content = true;
-            }
-            p += 1;
-        }
-    }
-    false
-}
-
 /// How many wholly blank lines lie in `text[from..to)` (#4093): the line breaks there,
 /// less the one that ends the line `from` is on.
 fn blank_lines_between(text: &[u8], from: usize, to: usize) -> usize {
@@ -17502,17 +17470,6 @@ plain: hello
             assert!(blank_line_between(b"# a\r\n\r\n# b\r\n", 3, 7));
             assert!(blank_line_between(b"# a\n\n# b\n", 3, 5));
             assert!(!blank_line_between(b"# a\n# b\n", 3, 4));
-        }
-
-        #[test]
-        fn blank_line_between_needs_a_blank_line_not_a_line_of_content_2835() {
-            // A property-only line between two comments (`- # a` / `  !!str` / `# b`) is two
-            // breaks but no blank line; a blank line (or a whitespace-only one) still is.
-            assert!(!blank_line_between(b"# a\n  !!str\n# b\n", 3, 13));
-            assert!(!blank_line_between(b"# a\r\n  !!str\r\n# b\r\n", 3, 15));
-            assert!(blank_line_between(b"# a\n  !!str\n\n# b\n", 3, 14));
-            assert!(blank_line_between(b"# a\n  \n# b\n", 3, 8));
-            assert!(blank_line_between(b"# a\n \t\n# b\n", 3, 8));
         }
 
         #[test]
