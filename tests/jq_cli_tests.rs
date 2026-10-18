@@ -163249,6 +163249,153 @@ fn test_uncaught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind
     ])
 }
 
+/// #4827: a nested `foreach` whose source destructures a *navigation of* the root-bound `$x` (`$x.a`, `$x | .a`) behind a
+/// value head in a `foreach` UPDATE. The node `$x.a` hands on is the child `jv` of the root, which is the register's own when
+/// the outer source stepped onto `.a`: jq's `path_intact` compares the pointers and the pattern's step passes
+/// (`["a","a"]`), where the resolver took the step for a copy's and refused. A `1` head leaves the register on the
+/// element, so jq raises `with result`. The controls: `$x.c`, equal in value to the register but another node, and the root
+/// `$x` itself raise at the step, and `$x.a` over a document whose `.a` carries no key the pattern names. Every row captured
+/// from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_value_head_4827(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; 1 | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; 1 | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; 1 | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; 1 | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; 1 | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; 1 | foreach (($x | .a) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.c) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x.c) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x.a) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{\"b\":1},\"c\":{\"b\":1}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | reduce (($x.a) as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | reduce (($x.a) as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+    ])
+}
+
 /// #4608: a `?//` bind in the body of a fold whose accumulator the walk places off jq's register (a computed
 /// container, not INIT `.`) retries its next alternative when the first one's body raises jq's own path
 /// error (`. as $q ?// $z | (if $q then true else empty end | .a?)`: alternative 1 binds the state, runs
