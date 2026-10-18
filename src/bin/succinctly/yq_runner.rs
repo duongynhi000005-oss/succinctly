@@ -39,7 +39,7 @@ use succinctly::yaml::{
     stream_json_sequence, stream_yaml_sequence, ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
 };
 
-use super::m2_gate::can_use_m2_streaming;
+use super::m2_gate::{can_use_m2_streaming, eval_all_matches_per_document};
 use super::{FrontMatterMode, InputFormat, OutputFormat, YqCommand};
 use crate::front_matter;
 use crate::output::{
@@ -7066,23 +7066,10 @@ fn yaml_quote_string(s: &str) -> String {
 /// can also reach it directly to *force* double-quote style regardless of
 /// whether the heuristic alone would have required it (#739).
 fn yaml_double_quote_escaped(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 2);
-    result.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c.is_ascii_control() => {
-                result.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            _ => result.push(c),
-        }
-    }
-    result.push('"');
-    result
+    // go-yaml's own escape letters (`\0`, `\a`, `\e`, `\x7F`, `\N`, ...), not a
+    // `\xNN` for every control character: the form `--eval-all`'s owned-value writer
+    // already used, so the two routes agree on a NUL (#4380).
+    go_yaml_double_quoted_scalar(s)
 }
 
 /// Single-quote `s`, doubling embedded single quotes per YAML's escaping
@@ -8442,6 +8429,27 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // Check if expression contains split_doc - if so, each result is a separate document
     let has_split_doc = contains_split_doc(&program.expr);
 
+    // #4380: `--eval-all` evaluates through the owned-value route, which
+    // carries no `CommentTree`, so it drops every comment, anchor and style
+    // even for `.`. For a filter real yq answers the same either way
+    // (`eval_all_matches_per_document`), evaluate per document instead: that
+    // route keeps all three.
+    //
+    // The M2 streamers validate less than `--eval-all`'s bridge does (nesting
+    // depth, a colliding complex key, a stray comma, a later file failing
+    // `--validate`), so the rerouted run stays off them: the DOM route is the one
+    // that shares the bridge's checks.
+    //
+    // JSON-sourced input is left on `--eval-all`'s route: it has no comment, anchor
+    // or style to keep, and the plain route spells a JSON float (`1e19`) its own way
+    // where `--eval-all` canonicalizes it (`1e+19`, #2902).
+    let eval_all_per_document = args.eval_all
+        && resolve_run_input_format(args.input_format, &input_files) == InputFormat::Yaml
+        && eval_all_matches_per_document(&program.expr);
+    if eval_all_per_document {
+        args.eval_all = false;
+    }
+
     // M2/M2.5 streaming fast path: navigation queries stream results
     // directly from the document cursor, skipping the OwnedValue DOM (and
     // its IndexMap, which cannot represent duplicate mapping keys — #442).
@@ -8635,6 +8643,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         && args.front_matter.is_none()
         && split_expr.is_none()
         && !args.eval_all
+        && !eval_all_per_document
         && context.named.is_empty();
     // #2606: unlike the JSON gate above, this one never OR's in
     // `output_config.compact` -- `-I0` no longer means "compact" for YAML
@@ -8656,6 +8665,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         && args.front_matter.is_none()
         && split_expr.is_none()
         && !args.eval_all
+        && !eval_all_per_document
         && context.named.is_empty();
     let can_fast_path = can_json_fast_path || can_yaml_fast_path;
 
@@ -10570,6 +10580,20 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             args.validate,
             args.output_format,
         )?;
+        // #4380: a run rerouted here from `--eval-all` keeps `--eval-all`'s
+        // all-or-nothing contract instead of the per-file one below: a source
+        // failing `--validate` ends the run before anything is written (#1564),
+        // and every source passes through the same owned-value bridge
+        // (`parse_input`) first, whose nesting-depth, colliding-key and stray-comma
+        // refusals the cursor route does not make.
+        if eval_all_per_document {
+            if let Some(code) = validate_exit_code {
+                return Ok(code);
+            }
+            for (bytes, format, _) in &input_sources {
+                parse_input(bytes, *format)?;
+            }
+        }
         // #1564: each file's results are collected/emitted independently
         // of the others (the two loops below) -- process whatever passed
         // and report the failure once done, instead of losing every

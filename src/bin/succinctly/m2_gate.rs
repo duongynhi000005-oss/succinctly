@@ -181,6 +181,48 @@ pub fn can_use_m2_streaming(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `yq --eval-all` answers `expr` exactly as it would answer each
+/// document on its own (#4380).
+///
+/// Real yq's `ea` is the ordinary evaluator with the context set to *every*
+/// document of every file at once; the plain mode evaluates the same filter
+/// with the context set to one file's documents (measured against yq v4.53.3:
+/// `[.]` collects `ea`'s whole list but only a document in plain mode, `,`
+/// runs the left operand over every document before the right, `keys`, `|= . + 1`
+/// and `.a = .b` all see the list). A navigation step, or a write whose right
+/// side is a literal, touches each document independently, so the two modes
+/// print the same bytes -- and the plain route is the one that keeps comments,
+/// anchors and flow/quote style, which the owned-value route `--eval-all` takes
+/// carries none of.
+///
+/// The set is a deliberate whitelist: anything not named here (a builtin, a
+/// variable, `,`, a collector, an operator, a right side that reads the
+/// document) stays on the `--eval-all` route, where a wrong answer is the
+/// presentation loss this issue already records and not a changed value.
+pub fn eval_all_matches_per_document(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::RecursiveDescent => true,
+        Expr::Optional(inner) | Expr::Paren(inner) => eval_all_matches_per_document(inner),
+        Expr::Pipe(stages) => stages.iter().all(eval_all_matches_per_document),
+        Expr::Assign { path, value } | Expr::AlternativeAssign { path, value } => {
+            eval_all_matches_per_document(path) && matches!(**value, Expr::Literal(_))
+        }
+        Expr::Update { path, filter } => {
+            eval_all_matches_per_document(path) && matches!(**filter, Expr::Literal(_))
+        }
+        Expr::CompoundAssign { path, value, .. } => {
+            eval_all_matches_per_document(path) && matches!(**value, Expr::Literal(_))
+        }
+        Expr::Builtin(Builtin::Del(path)) => eval_all_matches_per_document(path),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +318,75 @@ mod tests {
         assert!(can_use_m2_streaming(&parse("recurse")));
         assert!(!can_use_m2_streaming(&parse(".. | length")));
         assert!(!can_use_m2_streaming(&parse("[..]")));
+    }
+
+    /// #4380: `--eval-all` takes the per-document route only for a filter real
+    /// yq answers the same way in both modes. Each `false` row is one measured
+    /// against yq v4.53.3 to differ between `ea` and plain evaluation over
+    /// two documents: `[.]` collects the whole list, `,` runs its left operand
+    /// over every document before its right, `.a = .b` and `|= . + 1` read the
+    /// list, and `keys`/`$x`/`select` are builtins or bindings whose list
+    /// handling this gate does not claim.
+    #[test]
+    fn eval_all_per_document_gate_admits_only_navigation_and_literal_writes_4380() {
+        let parse = |f: &str| {
+            succinctly::jq::parse_program_with_mode_and_extensions(
+                f,
+                succinctly::jq::ParserMode::Yq,
+                true,
+            )
+            .expect("parses")
+            .expr
+        };
+        for f in [
+            ".",
+            ".a",
+            ".a.b",
+            ".a?",
+            "(.a)",
+            ".[]",
+            ".[0]",
+            ".[1:]",
+            "..",
+            ".a | .b",
+            ".a[]",
+            ".a = 9",
+            ".a = \"s\"",
+            ".a = null",
+            ".a.b |= 5",
+            ".a //= 7",
+            ".n += 1",
+            ".n -= 1",
+            ".[] = 1",
+            "del(.a)",
+            "del(.a.b)",
+        ] {
+            assert!(eval_all_matches_per_document(&parse(f)), "{f}");
+        }
+        for f in [
+            "[.]",
+            ".a, .b",
+            "(.a, .b)",
+            ".a = .b",
+            ".a |= . + 1",
+            ".a |= .b",
+            ".n += .m",
+            ".a //= .b",
+            "keys",
+            "length",
+            ".a | length",
+            "select(.a == 1)",
+            "di",
+            "file_index",
+            ". as $x | $x",
+            "$x",
+            "{a: .a}",
+            ".a + 1",
+            "del(.a, .b)",
+            "del(.a | length)",
+            ".a style = \"flow\"",
+        ] {
+            assert!(!eval_all_matches_per_document(&parse(f)), "{f}");
+        }
     }
 }
