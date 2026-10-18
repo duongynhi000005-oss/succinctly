@@ -67228,6 +67228,101 @@ fn test_yq_refuses_a_fractional_array_index_4749() -> Result<()> {
     Ok(())
 }
 
+/// #4377: `-P` turns a flow collection into block style, and yq's encoder then has no line for
+/// the comment after its closing bracket. It holds the comment and writes it at the end of the next
+/// line that has none of its own -- the next sibling's key line when that is a collection, its value
+/// line otherwise -- and loses it when nothing follows. A scalar that carries a comment keeps its
+/// line and the held comment waits for the next one; a key comment on a collection overwrites it; an
+/// alias is skipped; an empty `[]`/`{}` stays flow and keeps its comment. Rows captured from yq
+/// v4.53.3 with `-P`.
+#[test]
+fn test_p_moves_a_flow_collections_trailing_comment_to_the_next_line_4377() -> Result<()> {
+    for (input, filter, expected) in [
+        (
+            "a:\n  e: [1, 2] # ec\n",
+            ".",
+            "a:\n  e:\n    - 1\n    - 2\n",
+        ),
+        ("a:\n  e: [1, 2] # ec\n", ".a.e", "- 1\n- 2\n"),
+        (
+            "a: [1, 2] # ec\nb: 1\n",
+            ".",
+            "a:\n  - 1\n  - 2\nb: 1 # ec\n",
+        ),
+        ("a: [1, 2] # ec\nb: 1\n", ".a", "- 1\n- 2\n"),
+        (
+            "a: [1, 2] # ec\nb: [3] # fc\nc: 4 # gc\n",
+            ".z = 1",
+            "a:\n  - 1\n  - 2\nb: # ec\n  - 3\nc: 4 # gc\nz: 1 # fc\n",
+        ),
+        (
+            "a: [1] # x\nb: # kc\n  - 1\nc: 3\n",
+            ".",
+            "a:\n  - 1\nb: # kc\n  - 1\nc: 3\n",
+        ),
+        (
+            "a: &y 5\nz: [1] # x\nb: *y\nc: 3\n",
+            ".",
+            "a: &y 5\nz:\n  - 1\nb: *y\nc: 3 # x\n",
+        ),
+        (
+            "a:\n  - [1, 2] # ec\n  - {x: 1} # fc\n",
+            ".z = 1",
+            "a:\n  - - 1\n    - 2\n  - # ec\n    x: 1\nz: 1 # fc\n",
+        ),
+        (
+            "a: {b: 1} # c\n---\na: {b: 2} # d\n",
+            ".a",
+            "b: 1\n---\nb: 2\n",
+        ),
+        (
+            "a: {b: 1} # c\n---\na: {b: 2} # d\n",
+            ".z = 1",
+            "a:\n  b: 1\nz: 1 # c\n---\na:\n  b: 2\nz: 1 # d\n",
+        ),
+        ("a: [] # ec\nb: {} # fc\n", ".a", "[] # ec\n"),
+        ("a: [] # ec\nb: {} # fc\n", ".", "a: [] # ec\nb: {} # fc\n"),
+        (
+            "a: [1] # x\nb: 2 # own\nc: 3\n",
+            ".",
+            "a:\n  - 1\nb: 2 # own\nc: 3 # x\n",
+        ),
+        (
+            "a: [1] # x\n# head\nb: 2\n",
+            ".",
+            "a:\n  - 1\n# head\nb: 2 # x\n",
+        ),
+        (
+            "a: [1] # x\nb: \"q\"\nc: 3\n",
+            ".",
+            "a:\n  - 1\nb: q # x\nc: 3\n",
+        ),
+        (
+            "a:\n  e: [1, 2] # ec\n  f: {g: 1} # fc\n",
+            ".",
+            "a:\n  e:\n    - 1\n    - 2\n  f: # ec\n    g: 1\n",
+        ),
+        (
+            "a: [1, 2] # ec\nb: [3] # fc\nc: 4\nd: 5\n",
+            ".",
+            "a:\n  - 1\n  - 2\nb: # ec\n  - 3\nc: 4 # fc\nd: 5\n",
+        ),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, input, &["-P"])?,
+            (expected.to_string(), String::new(), 0),
+            "-P {filter} on {input:?}"
+        );
+    }
+    // Without `-P` the flow collection and its comment stay where they were written.
+    let input = "a: [1, 2] # ec\nb: [3] # fc\nc: 4\n";
+    assert_eq!(
+        run_yq_stdin_with_stderr(".", input, &[])?,
+        (input.to_string(), String::new(), 0)
+    );
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.

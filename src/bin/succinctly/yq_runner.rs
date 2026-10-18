@@ -5834,6 +5834,9 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     if strip_style {
         if let Ok(docs) = &mut docs {
             for (value, comments) in docs.iter_mut() {
+                // Before the style is gone: only a node still written in flow style carries the
+                // comment that moves (#4377).
+                defer_flow_line_comments(value, comments);
                 *comments = strip_presentation_style(value, comments);
             }
         }
@@ -5860,6 +5863,172 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     }
 
     docs
+}
+
+/// Where yq's `-P` writes the trailing comment of a flow collection it turns into block style
+/// (#4377). The comment sits after the closing `]`/`}`, where a block collection has no line, so
+/// yq's encoder holds it and writes it at the end of the next line it emits that has no comment
+/// of its own, and loses it when nothing follows in the document:
+///
+/// ```text
+/// a: [1, 2] # ec           a:
+/// b: [3]    # fc    -P ->     - 1
+/// c: 4      # gc              - 2
+///                           b: # ec
+///                             - 3
+///                           c: 4 # gc
+/// ```
+///
+/// A scalar that carries its own comment keeps the line and the held comment waits for the next
+/// one (`z: 1 # fc` after `c: 4 # gc` above, if a `z` follows). A collection that was flow takes
+/// the held comment on its own opening line, since its own comment is no longer written there. An
+/// empty `[]`/`{}` stays flow and keeps its comment, and an alias is one line. The walk follows
+/// the value's order, which is the order the document is written in.
+fn defer_flow_line_comments(value: &OwnedValue, tree: &mut CommentTree) {
+    let mut held = std::collections::VecDeque::new();
+    defer_flow_line_comments_at(value, tree, false, false, &mut held, 0);
+}
+
+/// Whether `value` is a collection with members, the only kind `-P` rewrites from flow to block.
+fn is_non_empty_collection(value: &OwnedValue) -> bool {
+    match value {
+        OwnedValue::Object(members) => !members.is_empty(),
+        OwnedValue::Array(items) => !items.is_empty(),
+        _ => false,
+    }
+}
+
+/// `key_commented`: the line already ends in a comment that belongs to the key (`k: # note`), so
+/// yq's encoder overwrites the held comment there instead of waiting. `in_flow`: `tree`'s parent
+/// stays flow-written, where a nested collection's trailing comment is lost rather than held.
+fn defer_flow_line_comments_at(
+    value: &OwnedValue,
+    tree: &mut CommentTree,
+    key_commented: bool,
+    in_flow: bool,
+    held: &mut std::collections::VecDeque<String>,
+    depth: usize,
+) {
+    assert_value_tree_depth(depth);
+    // An alias is written as `*name` and never takes the held comment; the next line does.
+    if tree.alias_name().is_some() {
+        return;
+    }
+    let converted_flow = is_non_empty_collection(value) && tree.style() == "flow";
+    let own = if converted_flow {
+        tree.meta_mut().comment.take()
+    } else {
+        None
+    };
+    if key_commented {
+        held.pop_front();
+    } else if tree.own().is_none() {
+        if let Some(comment) = held.pop_front() {
+            tree.meta_mut().comment = Some(comment);
+        }
+    }
+    let children_in_flow = tree.style() == "flow";
+    match (value, &mut *tree) {
+        (OwnedValue::Object(members), CommentTree::Object(..)) => {
+            for (key, child) in members.iter() {
+                let key_commented = tree.key_comment(key).is_some();
+                let CommentTree::Object(_, fields, _) = &mut *tree else {
+                    break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Object and nothing in the loop changes its variant"
+                };
+                // A member the tree never saw (a computed key) can only take a held comment.
+                if !fields.contains_key(key.as_str()) {
+                    if held.is_empty() {
+                        continue;
+                    }
+                    fields.insert(key.clone(), CommentTree::empty());
+                }
+                // A collection is written on the lines below its key, so the held comment ends
+                // the key's line; any other value ends the line itself.
+                let on_key = !key_commented
+                    && !held.is_empty()
+                    && is_non_empty_collection(child)
+                    && fields
+                        .get(key.as_str())
+                        .is_some_and(|slot| slot.alias_name().is_none());
+                if on_key {
+                    if let Some(comment) = held.pop_front() {
+                        tree.set_key_comment(key, comment);
+                    }
+                }
+                let CommentTree::Object(_, fields, _) = &mut *tree else {
+                    break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Object and nothing in the loop changes its variant"
+                };
+                if let Some(slot) = fields.get_mut(key.as_str()) {
+                    defer_flow_line_comments_at(
+                        child,
+                        slot,
+                        key_commented || on_key,
+                        children_in_flow,
+                        held,
+                        depth + 1,
+                    );
+                }
+            }
+        }
+        (OwnedValue::Array(items), CommentTree::Array(..)) => {
+            for (i, child) in items.iter().enumerate() {
+                let CommentTree::Array(_, slots) = &mut *tree else {
+                    break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Array and nothing in the loop changes its variant"
+                };
+                if i >= slots.len() {
+                    if held.is_empty() {
+                        continue;
+                    }
+                    slots.resize_with(i + 1, CommentTree::empty);
+                }
+                // A collection item opens on its dash, and the writer puts a comment there as the
+                // head comment of the item's first member (#4231).
+                let on_dash = !held.is_empty()
+                    && slots[i].alias_name().is_none()
+                    && is_non_empty_collection(child);
+                if on_dash {
+                    if let Some(comment) = held.pop_front() {
+                        head_comment_first_member(&mut slots[i], child, comment);
+                    }
+                }
+                defer_flow_line_comments_at(
+                    child,
+                    &mut slots[i],
+                    on_dash,
+                    children_in_flow,
+                    held,
+                    depth + 1,
+                );
+            }
+        }
+        _ => {}
+    }
+    if let Some(comment) = own {
+        if !in_flow {
+            held.push_back(comment);
+        }
+    }
+}
+
+/// Prepend `comment` to the head comment of the first member of the non-empty collection `value`
+/// (`tree` is its tree), where the writer renders the comment on a collection item's dash line.
+fn head_comment_first_member(tree: &mut CommentTree, value: &OwnedValue, comment: String) {
+    let first = match (tree, value) {
+        (CommentTree::Array(_, items), OwnedValue::Array(_)) => items.first_mut(),
+        (CommentTree::Object(_, fields, _), OwnedValue::Object(members)) => members
+            .keys()
+            .next()
+            .and_then(|key| fields.get_mut(key.as_str())),
+        _ => None,
+    };
+    if let Some(first) = first {
+        let mut head = vec![comment];
+        head.extend(first.meta().head_comment().iter().cloned());
+        let meta = first
+            .meta()
+            .with_head_foot(head, first.meta().foot_comment().to_vec());
+        *first.meta_mut() = meta;
+    }
 }
 
 /// Recursively clear every node's style (issue #705's `-P` gate) while
@@ -5944,8 +6113,15 @@ fn strip_presentation_style_at_depth(
                 OwnedValue::Array(elements) => Some(elements),
                 _ => None,
             };
+            // An empty collection has only one spelling, `[]`, so `-P` leaves its flow style (and
+            // with it the comment beside it) alone (#4377).
+            let style = if elements.is_some_and(|e| e.is_empty()) && meta.style == "flow" {
+                "flow"
+            } else {
+                ""
+            };
             CommentTree::Array(
-                strip_core_tag(meta.with_style(""), Some("!!seq")),
+                strip_core_tag(meta.with_style(style), Some("!!seq")),
                 items
                     .iter()
                     .enumerate()
@@ -5961,8 +6137,13 @@ fn strip_presentation_style_at_depth(
                 OwnedValue::Object(members) => Some(members),
                 _ => None,
             };
+            let style = if members.is_some_and(|m| m.is_empty()) && meta.style == "flow" {
+                "flow"
+            } else {
+                ""
+            };
             CommentTree::Object(
-                strip_core_tag(meta.with_style(""), Some("!!map")),
+                strip_core_tag(meta.with_style(style), Some("!!map")),
                 fields
                     .iter()
                     .map(|(k, v)| {
