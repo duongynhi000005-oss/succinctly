@@ -5500,13 +5500,21 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
 ### `with`, `from_json` and `from_yaml` residuals (#4206)
 
 `with(path; update)` is `path |= <what update changes>` (`with_update_effect`): assignments,
-commas, `select(f) | ...`, and a navigation in front of an assignment. An `update` that binds
-a variable first (`(.b = 2) as $x | .c = $x`) is not followed: the binding contributes nothing,
-so the assignment after it is dropped where yq applies both. A value-producing stage ahead of
-an assignment is dropped too, and so is its *error*: `{"a":{"b":1}} | with(.a; . + 1)` fails in
-yq (`!!int () cannot be added to a !!map (a)`) and is a no-op here, because `update` is never
-evaluated for a value. A third argument (`with(.a; . = 1; 2)`) is a parse error here; yq accepts
-it and returns its input untouched.
+commas, `select(f) | ...`, a navigation in front of an assignment, and a binding
+(`.b as $v | .z = $v`, whose source is evaluated and whose body contributes its changes). A
+value-producing stage is evaluated and its value discarded, as in yq, so its *error* counts
+(`#4327`): `{"a":{"b":1}} | with(.a; . + 1)` fails in yq (`!!int () cannot be added to a !!map
+(a)`) and here (`object ({"b":1}) and number (1) cannot be added`; the wording is the general
+arithmetic-error difference, not specific to `with`). A third or later argument is accepted and
+ignored, with only the path evaluated, and the input comes back untouched, as yq does
+(`with(.a; . = 1; 2)`). Still different: a stage after a discarded value-producing stage is not
+evaluated (yq runs it on the discarded value); `(.b = 2) as $x | .c = $x` (a binding whose
+source is an assignment) does not apply the source's change; a binding whose source yields several
+values applies its body once (yq: once per value, `with(.a; .[] as $v | .[0] = $v)`); `del(.b)` inside the
+update is dropped (yq applies it); and a bare `empty` update is accepted where yq's lexer rejects it
+(#4808's gap). The evaluation costs a `reduce` frame per node `path` selects for a discarded
+stage: `with(.[]; . + 1)` over a million-element array, a no-op in yq too, takes 649 ms where it took
+299 ms; an update with an assignment is unchanged.
 
 `from_yaml` of text the semi-index does not reject still decodes where yq fails: `"--- \n..."` is
 `null` and `"a: !!int x"` is the string `x` (`"a: b: c"` used to be `{"a":"b"}` and is yq's

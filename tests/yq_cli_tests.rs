@@ -68455,6 +68455,53 @@ fn test_to_number_from_json_from_yaml_4206() -> Result<()> {
     Ok(())
 }
 
+/// #4327: a discarded value-producing stage of a `with` update is still evaluated, so its error
+/// fails the `with` (yq: `!!int () cannot be added to a !!map (a)`); a third argument is accepted
+/// and ignored, the input coming back untouched with only the path evaluated; a binding applies
+/// its body. Every row is yq v4.53.3's outcome (failures compared by exit status).
+#[test]
+fn test_with_evaluates_discarded_stages_and_ignores_extra_arguments_4327() -> Result<()> {
+    let args = &["-n", "-o=json", "-I=0"];
+    for (filter, expected) in [
+        (r#"{"a":1} | with(.a; . = 7; . = 8)"#, r#"{"a":1}"#),
+        (r#"{"a":1} | with(.a; . = 7; . = 8; . = 9)"#, r#"{"a":1}"#),
+        (r#"{"a":1} | with(.a; error("x"); . = 8)"#, r#"{"a":1}"#),
+        (
+            r#"{"a":{"b":1}} | with(.a; .b as $v | .z = $v)"#,
+            r#"{"a":{"b":1,"z":1}}"#,
+        ),
+        (
+            r#"{"a":{"b":1}} | with(.a; .zz as $v | .z = $v)"#,
+            r#"{"a":{"b":1,"z":null}}"#,
+        ),
+        // A stage that succeeds is discarded as before.
+        (r#"{"a":"x"} | with(.a; . + "y")"#, r#"{"a":"x"}"#),
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, "", args)?;
+        assert_eq!(code, 0, "{filter}: {stderr}");
+        assert_eq!(out.trim(), expected, "{filter}");
+    }
+    // A malformed extra argument is still a parse error.
+    for filter in ["with(.a; . = 1; 2 3)", "with(.a; . = 1;)"] {
+        let (_out, code) = run_yq_stdin(filter, "", args)?;
+        assert_ne!(code, 0, "{filter} must fail");
+    }
+    for filter in [
+        r#"{"a":{"b":1}} | with(.a; . + 1)"#,
+        r#"{"a":{"b":1}} | with(.a; . + 1 | .c = 3)"#,
+        r#"{"a":1} | with(.a; error("x"))"#,
+        r#"{"a":1} | with(.a; . = 7 | error("x"))"#,
+        r#"{"a":{"b":1}} | with(.a; .b as $v | error("q"))"#,
+        r#"{"a":1} | with(error("p"); . = 7; . = 8)"#,
+    ] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, "", args)?;
+        assert_eq!(code, 1, "{filter}: {out:?}");
+        assert_eq!(out, "", "{filter}");
+        assert!(!stderr.is_empty(), "{filter}");
+    }
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `with(path; update)` runs `update` for the assignments in it and discards
 /// the value of anything else (#4206). Every row was captured from the pinned binary,
 /// `-n -o=json -I=0`.
@@ -68601,8 +68648,8 @@ fn test_with_applies_only_the_assignments_of_its_update_4206() -> Result<()> {
         stderr.contains("with must be given a block (;), got UNION instead"),
         "{stderr}"
     );
-    // A wrong arity is a parse error in yq mode.
-    for filter in ["with", "with(.a)", "with(.a; . = 1; 2)"] {
+    // A wrong arity is a parse error in yq mode (three or more arguments are not: #4327).
+    for filter in ["with", "with(.a)"] {
         let (_out, code) = run_yq_stdin(filter, "", args)?;
         assert_ne!(code, 0, "{filter} must fail");
     }
