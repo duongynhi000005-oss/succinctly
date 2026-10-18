@@ -19,18 +19,26 @@
 //!
 //! # What this does not cover
 //!
-//! A string with a line break (`\n`, `\r`, U+0085, U+2028, U+2029) is
-//! [`None`]. yq writes a literal block for it as a value, `? ` explicit-key
-//! syntax as a key, and folds a quoted one across lines, none of which a
-//! single-line writer can produce. The same goes for a key longer than 128
-//! bytes, which go-yaml also writes with `? `.
+//! [`go_yaml_string_style`] is [`None`] for a string with a line break (`\n`, `\r`,
+//! U+0085, U+2028, U+2029): the single-line choice has nothing to say about it.
+//! [`go_yaml_multiline_scalar`] writes those (#3587): a literal block, double quotes,
+//! or single quotes across lines, and [`go_yaml_explicit_key_scalar`] the `? ` explicit-key
+//! syntax for a key with a break or over 128 bytes.
 
 use super::scalar::{resolve_plain, ResolvedScalar};
 
 #[cfg(not(test))]
-use alloc::{borrow::Cow, string::String};
+use alloc::{
+    borrow::Cow,
+    format,
+    string::{String, ToString},
+};
 #[cfg(test)]
-use std::{borrow::Cow, string::String};
+use std::{
+    borrow::Cow,
+    format,
+    string::{String, ToString},
+};
 
 /// The style go-yaml's encoder gives a single-line string scalar in block
 /// context.
@@ -131,6 +139,218 @@ fn go_yaml_string_style_typed(s: &str, flow: bool, typed: bool) -> Option<Encode
     } else {
         Some(EncodedStringStyle::Plain)
     }
+}
+
+/// A character go-yaml's emitter treats as a line break, other than `\r`, which it
+/// will not write raw.
+fn is_yaml_line_break(c: char) -> bool {
+    matches!(c, '\n' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Whether go-yaml writes a string with a line break double-quoted.
+///
+/// Whatever the requested style: a character its emitter will not write raw (a control,
+/// `\r`, a character outside the BMP) or a space before a line break (libyaml's
+/// `special_characters` and `space_break`).
+pub fn go_yaml_forces_double_quotes(s: &str) -> bool {
+    let printable = |c: char| {
+        matches!(
+            c,
+            '\n' | '\t' | '\u{20}'..='\u{7E}' | '\u{A0}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}'
+        ) && c != '\u{FEFF}'
+    };
+    let mut previous = '\0';
+    for c in s.chars() {
+        if !printable(c) || (previous == ' ' && is_yaml_line_break(c)) {
+            return true;
+        }
+        previous = c;
+    }
+    false
+}
+
+/// The block scalar (`|` literal or `>` folded) go-yaml writes for `s`.
+///
+/// Header line included and without the final line break (the entry separator
+/// supplies it), or `None` when go-yaml would not write one (#2707, #3587).
+///
+/// `indent` is the indent of the content lines and `step` the width of one
+/// indent unit, which is the indentation indicator go-yaml writes when the first
+/// line starts with a space (`|2-`). Ported from libyaml's
+/// `yaml_emitter_analyze_scalar` (what disqualifies a block) and
+/// `yaml_emitter_write_{literal,folded}_scalar` (how it is written), then
+/// checked against yq v4.53.3 on random strings:
+///
+/// - the chomping indicator comes from the trailing breaks: none is `-`, one
+///   is clip (no indicator), two or more (or a lone break) is `+`;
+/// - a string go-yaml cannot write as a block (empty, a character it will not
+///   write raw, a space before a break, a trailing space, any break other
+///   than `\n`) is `None`, and its caller falls back to quoting;
+/// - folded writes an empty line for every `\n` -- except that go-yaml tests the
+///   first character of the *string*, not the one after the break, so a string
+///   starting with a space, tab or break gets none.
+pub fn go_yaml_block_scalar(s: &str, folded: bool, indent: &str, step: usize) -> Option<String> {
+    if s.is_empty() || step == 0 || step > 9 {
+        return None;
+    }
+    let last = s.chars().next_back()?;
+    if go_yaml_forces_double_quotes(s) || last == ' ' || (last != '\n' && is_yaml_line_break(last))
+    {
+        return None;
+    }
+    // go-yaml tests the string's first character only, so `"\n a"` gets no indicator
+    // and reads back as `"\na"` (yq cannot read its own output). A literal block looks
+    // past the leading breaks instead, as `stream_yaml_block_scalar` does for a source
+    // block scalar (#836): output that corrupts the value is the one place the reference
+    // is not followed (ADR-0018). Folded keeps go-yaml's rule, which its own quirk below
+    // is tied to.
+    let first_is_space = if folded {
+        s.starts_with(' ')
+    } else {
+        s.chars().find(|&c| !is_yaml_line_break(c)) == Some(' ')
+    };
+    let hint = if first_is_space {
+        char::from_digit(step as u32, 10)?.to_string()
+    } else {
+        String::new()
+    };
+    let breaks_at_end = s
+        .chars()
+        .rev()
+        .take_while(|&c| is_yaml_line_break(c))
+        .count();
+    let chomp = match breaks_at_end {
+        0 => "-",
+        1 if s.len() > 1 => "",
+        _ => "+",
+    };
+    let mut out = format!("{}{hint}{chomp}\n", if folded { '>' } else { '|' });
+    // The final break is the entry separator, not content.
+    let text: &str = s.strip_suffix(is_yaml_line_break).unwrap_or(s);
+    if folded {
+        // go-yaml's quirk, see the doc comment: the test reads the string's start.
+        let extra_break = s
+            .chars()
+            .find(|&c| !is_yaml_line_break(c))
+            .is_some_and(|c| !matches!(c, ' ' | '\t'));
+        let mut breaks = true;
+        let mut leading_spaces = true;
+        for c in text.chars() {
+            if is_yaml_line_break(c) {
+                if !breaks && !leading_spaces && c == '\n' && extra_break {
+                    out.push('\n');
+                }
+                out.push(c);
+                breaks = true;
+            } else {
+                if breaks {
+                    out.push_str(indent);
+                    leading_spaces = matches!(c, ' ' | '\t');
+                }
+                out.push(c);
+                breaks = false;
+            }
+        }
+        // The final break, when the string ended in one, still goes through the
+        // loop above in go-yaml and earns its extra empty line.
+        if s.ends_with('\n') && !breaks && !leading_spaces && extra_break {
+            out.push('\n');
+        }
+    } else {
+        let mut breaks = true;
+        for c in text.chars() {
+            if is_yaml_line_break(c) {
+                out.push(c);
+                breaks = true;
+            } else {
+                if breaks {
+                    out.push_str(indent);
+                }
+                out.push(c);
+                breaks = false;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A string holding a line break, as go-yaml's encoder writes it in block context (#3587).
+///
+/// `None` for a string with none. `indent` is the indent of a literal block's
+/// lines (and of what follows a break inside single quotes) and `step` the width of one
+/// indent unit, as for [`go_yaml_block_scalar`]; the text has no final line break.
+///
+/// - A `\n` asks for the literal style, which the emitter allows or turns into double
+///   quotes ([`go_yaml_block_scalar`]).
+/// - Any other break (`\r`, U+0085, U+2028, U+2029) asks for plain, which a break
+///   refuses; single quotes take it unless the string holds a character the emitter
+///   will not write raw (`\r`, U+0085, a tab) or a space next to a break, and double
+///   quotes otherwise. Inside single quotes a break is written as itself and the
+///   next character is indented.
+#[must_use]
+pub fn go_yaml_multiline_scalar(s: &str, indent: &str, step: usize) -> Option<String> {
+    if !has_break(s) {
+        return None;
+    }
+    if s.contains('\n') {
+        return Some(
+            go_yaml_block_scalar(s, false, indent, step)
+                .unwrap_or_else(|| go_yaml_double_quoted_scalar(s)),
+        );
+    }
+    let mut previous = '\0';
+    let refused = s.chars().any(|c| {
+        let adjacent = (previous == ' ' && is_break(c)) || (is_break(previous) && c == ' ');
+        previous = c;
+        !is_printable(c) || adjacent
+    });
+    if refused {
+        return Some(go_yaml_double_quoted_scalar(s));
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    let mut breaks = false;
+    for c in s.chars() {
+        if is_break(c) {
+            out.push(c);
+            breaks = true;
+        } else {
+            if breaks {
+                out.push_str(indent);
+            }
+            if c == '\'' {
+                out.push('\'');
+            }
+            out.push(c);
+            breaks = false;
+        }
+    }
+    out.push('\'');
+    Some(out)
+}
+
+/// Whether `s` is written as an ordinary `key:` (#3587).
+///
+/// One line and at most 128 bytes (`yaml_emitter_check_simple_key`). Cheap, for a caller
+/// that would otherwise build the indent [`go_yaml_explicit_key_scalar`] takes for every key.
+#[must_use]
+pub fn go_yaml_key_is_simple(s: &str) -> bool {
+    s.len() <= 128 && !has_break(s)
+}
+
+/// The scalar go-yaml writes after the `? ` of a mapping key that needs explicit-key
+/// syntax, or `None` for a key that is written the ordinary way (#3587).
+///
+/// `yaml_emitter_check_simple_key`: a key is simple only if its scalar is one line and
+/// at most 128 bytes. The scalar after the `? ` is chosen as a value's is (the
+/// restriction to a simple key does not apply to it): [`go_yaml_multiline_scalar`] for a
+/// line break, the single-line choice for a long key.
+#[must_use]
+pub fn go_yaml_explicit_key_scalar(s: &str, indent: &str, step: usize) -> Option<String> {
+    if go_yaml_key_is_simple(s) {
+        return None;
+    }
+    go_yaml_multiline_scalar(s, indent, step).or_else(|| go_yaml_string_scalar(s, false))
 }
 
 /// Writes `s` in the style go-yaml's encoder picks, or returns `None` for a line break.
@@ -1207,5 +1427,89 @@ mod tests {
             );
         }
         assert_eq!(go_yaml_dom_scalar("a\nb", false, false, false), None);
+    }
+
+    /// #3587: every row is yq v4.53.3's output for the string as a mapping value
+    /// (`yq -p json -o yaml`, indent step 2), the literal block where go-yaml's emitter
+    /// allows one and double quotes where not.
+    #[test]
+    fn a_line_break_gives_a_literal_block_or_double_quotes_3587() {
+        let value = |s: &str| go_yaml_multiline_scalar(s, "  ", 2);
+        for (s, expected) in [
+            ("x\ny", "|-\n  x\n  y"),
+            ("p\n", "|\n  p"),
+            ("\n", "|+\n"),
+            ("a\n\nb\n\n", "|+\n  a\n\n  b\n"),
+            ("\n\nc", "|-\n\n\n  c"),
+            ("a\tb\nc", "|-\n  a\tb\n  c"),
+            // A leading space asks for the indentation indicator.
+            (" x\ny", "|2-\n   x\n  y"),
+            ("x\n y", "|-\n  x\n   y"),
+            // Refused by the emitter: a space before a break, a trailing space, a
+            // character it will not write raw.
+            ("x \ny", "\"x \\ny\""),
+            ("x\ny ", "\"x\\ny \""),
+            ("x\r\ny", "\"x\\r\\ny\""),
+            ("x\u{85}\ny", "\"x\\N\\ny\""),
+            ("\n\u{1F600}", "\"\\n\\U0001F600\""),
+            ("a\nb\u{7F}", "\"a\\nb\\x7F\""),
+            // Only U+2028/U+2029: single quotes, a break written raw and the next
+            // character indented.
+            ("a\u{2028}b", "'a\u{2028}  b'"),
+            ("\u{2028}", "'\u{2028}'"),
+            ("a\u{2028}", "'a\u{2028}'"),
+            ("it's\u{2029}x", "'it''s\u{2029}  x'"),
+            // ... unless a space touches the break, or a tab is present.
+            (" \u{2028}", "\" \\L\""),
+            ("\u{2028} ", "\"\\L \""),
+            ("\u{2028}\t", "\"\\L\\t\""),
+            ("a\rb", "\"a\\rb\""),
+        ] {
+            assert_eq!(value(s).as_deref(), Some(expected), "{s:?}");
+        }
+        assert_eq!(value("no break"), None);
+    }
+
+    /// #3587: the one deliberate divergence. go-yaml tests only the first character of
+    /// the string for the indentation indicator, so `"\n a"` is written `|-` and reads
+    /// back as `"\na"` (yq cannot read its own output); a literal block looks past the
+    /// leading breaks instead, as `stream_yaml_block_scalar` does for a source block.
+    #[test]
+    fn a_literal_block_looks_past_leading_breaks_for_its_indicator_3587() {
+        assert_eq!(
+            go_yaml_multiline_scalar("\n a", "  ", 2).as_deref(),
+            Some("|2-\n\n   a")
+        );
+        // Folded keeps go-yaml's own rule.
+        assert_eq!(
+            go_yaml_block_scalar("\n a", true, "  ", 2).as_deref(),
+            Some(">-\n\n   a")
+        );
+    }
+
+    /// #3587: `yaml_emitter_check_simple_key`: a key over 128 bytes or with a break is
+    /// written `? key`, the scalar chosen as a value's is.
+    #[test]
+    fn explicit_keys_follow_the_emitters_simple_key_rule_3587() {
+        let key = |s: &str| go_yaml_explicit_key_scalar(s, "  ", 2);
+        assert_eq!(key("plain"), None);
+        assert_eq!(key(&"k".repeat(128)), None);
+        assert_eq!(key(&"k".repeat(129)), Some("k".repeat(129)));
+        assert_eq!(
+            key(&format!("{} x", "k".repeat(129))),
+            Some(format!("{} x", "k".repeat(129)))
+        );
+        assert_eq!(
+            key(&format!("- {}", "k".repeat(129))),
+            Some(format!("'- {}'", "k".repeat(129)))
+        );
+        assert_eq!(key("a\nb").as_deref(), Some("|-\n  a\n  b"));
+        assert_eq!(key("a\r").as_deref(), Some("\"a\\r\""));
+        assert_eq!(key("a\u{2028}").as_deref(), Some("'a\u{2028}'"));
+        // The long-key path takes the single-line quoting rule: a tab forces double quotes.
+        assert_eq!(
+            key(&format!("a\t{}", "k".repeat(129))).as_deref(),
+            Some(&*format!("\"a\\t{}\"", "k".repeat(129)))
+        );
     }
 }

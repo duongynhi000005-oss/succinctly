@@ -24793,6 +24793,91 @@ fn test_double_quoted_scalar_uses_go_yaml_escapes_on_the_dom_route_4380() -> Res
     Ok(())
 }
 
+/// #3587: a JSON string with a line break is a literal block (`|-`, `|`, `|+`) where go-yaml's
+/// emitter allows one and double quotes where it does not, a key with one (or over 128 bytes)
+/// is `? key` with the `:` on its own line, and U+2028/U+2029 alone is single-quoted across
+/// lines. Every expected block is `yq -p json -o yaml`'s own output (v4.53.3), on the
+/// streaming route and on `-P`'s DOM route; the one row that deliberately differs is the next
+/// test's.
+#[test]
+fn test_json_string_with_a_line_break_is_a_literal_block_3587() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        ("{\"a\":\"x\\ny\",\"b\":\"p\\n\",\"c\":\"z\"}", "a: |-\n  x\n  y\nb: |\n  p\nc: z\n"),
+        ("{\"a\":\"\\n\"}", "a: |+\n\n"),
+        ("{\"a\":\"a\\n\\nb\\n\\n\",\"b\":\"\\n\\nc\"}", "a: |+\n  a\n\n  b\n\nb: |-\n\n\n  c\n"),
+        ("{\"a\":\" x\\ny\",\"b\":\"x\\n y\"}", "a: |2-\n   x\n  y\nb: |-\n  x\n   y\n"),
+        ("{\"a\":\"x \\ny\",\"b\":\"x\\ny \",\"c\":\"x\\r\\ny\",\"d\":\"x\\u0085\\ny\",\"e\":\"\\n\\ud83d\\ude00\",\"f\":\"a\\tb\\nc\"}", "a: \"x \\ny\"\nb: \"x\\ny \"\nc: \"x\\r\\ny\"\nd: \"x\\N\\ny\"\ne: \"\\n\\U0001F600\"\nf: |-\n  a\tb\n  c\n"),
+        ("{\"o\":{\"a\":\"x\\ny\"},\"l\":[\"u\\nv\",{\"k\":\"w\\nz\"}],\"m\":[[\"s\\nt\"]]}", "o:\n  a: |-\n    x\n    y\nl:\n  - |-\n    u\n    v\n  - k: |-\n      w\n      z\nm:\n  - - |-\n      s\n      t\n"),
+        ("[{\"a\\nb\":\"c\\nd\"}]", "- ? |-\n    a\n    b\n  : |-\n    c\n    d\n"),
+        ("{\"ls\":\"a\\u2028b\",\"ls2\":\"\\u2028x\",\"ls3\":\"x\\u2028\",\"ls4\":\" \\u2028\",\"lsn\":\"a\\u2028b\\n\",\"lsq\":\"it's\\u2029x\"}", "ls: 'a\u{2028}  b'\nls2: '\u{2028}  x'\nls3: 'x\u{2028}'\nls4: \" \\L\"\nlsn: |\n  a\u{2028}  b\nlsq: 'it''s\u{2029}  x'\n"),
+        ("{\"a\\u2028b\":1,\"a\\n\":{\"x\":\"y\"}}", "? 'a\u{2028}  b'\n: 1\n? |\n  a\n: x: y\n"),
+        ("{\"l\":[{\"k\\nk\":[\"a\\nb\",{\"z\":\"p\\nq\"}]}]}", "l:\n  - ? |-\n      k\n      k\n    : - |-\n        a\n        b\n      - z: |-\n          p\n          q\n"),
+    ];
+    for (json, expected) in rows {
+        for extra in [&[][..], &["-P"][..]] {
+            let mut argv = vec!["-p", "json", "-o", "yaml"];
+            argv.extend_from_slice(extra);
+            let (out, stderr, code) = run_yq_stdin_with_stderr(".", json, &argv)?;
+            assert_eq!(code, 0, "{json} {extra:?}: {stderr}");
+            assert_eq!(&out, expected, "{json} {extra:?}");
+        }
+    }
+    Ok(())
+}
+
+/// #3587: a key over 128 bytes is `? key` even with no line break (`yaml_emitter_check_simple_key`);
+/// 128 bytes is still a simple key.
+#[test]
+fn test_json_key_over_128_bytes_is_an_explicit_key_3587() -> Result<()> {
+    let long = "q".repeat(129);
+    let edge = "e".repeat(128);
+    let json = format!("{{\"{long}\":1,\"{edge}\":2}}");
+    let expected = format!("? {long}\n: 1\n{edge}: 2\n");
+    for extra in [&[][..], &["-P"][..]] {
+        let mut argv = vec!["-p", "json", "-o", "yaml"];
+        argv.extend_from_slice(extra);
+        let (out, stderr, code) = run_yq_stdin_with_stderr(".", &json, &argv)?;
+        assert_eq!(code, 0, "{extra:?}: {stderr}");
+        assert_eq!(out, expected, "{extra:?}");
+    }
+    Ok(())
+}
+
+/// #3587: where go-yaml's literal block would not read back, ours differs from yq on purpose.
+/// A string that starts with a line break and then a space is written by yq `|-` with the space
+/// folded into the indentation, so it reads back without it (`"\n a"` becomes `"\na"`); ours
+/// writes the indentation indicator (`|2-`), as the source-block path does (#836). ADR-0018:
+/// output the reference cannot read back is not followed.
+#[test]
+fn test_json_string_starting_with_a_break_then_a_space_keeps_its_indentation_3587() -> Result<()> {
+    let (out, stderr, code) = run_yq_stdin_with_stderr(
+        ".",
+        "{\"a\":\"\\n a\",\"b\":\"\\n\\n  b\"}",
+        &["-p", "json", "-o", "yaml"],
+    )?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "a: |2-\n\n   a\nb: |2-\n\n\n    b\n");
+    // ... and it reads back as the string it came from.
+    let (back, stderr, code) = run_yq_stdin_with_stderr(".", &out, &["-o", "json", "-I0"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(back, "{\"a\":\"\\n a\",\"b\":\"\\n\\n  b\"}\n");
+    Ok(())
+}
+
+/// #3587: a source literal block whose value is a lone `\n` keeps `+` (`a: |+` followed by one
+/// blank line); the clip it was written with before reads back as `""`.
+#[test]
+fn test_source_block_scalar_of_a_lone_newline_keeps_its_chomping_3587() -> Result<()> {
+    let input = "a: |+\n\nb: 1\n";
+    let (out, stderr, code) = run_yq_stdin_with_stderr(".", input, &[])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, input);
+    let (json, stderr, code) = run_yq_stdin_with_stderr(".", &out, &["-o", "json", "-I0"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json, "{\"a\":\"\\n\",\"b\":1}\n");
+    Ok(())
+}
+
 #[test]
 fn test_eval_all_ea_alias() -> Result<()> {
     let (f1, f2) = two_doc_fixtures()?;

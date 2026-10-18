@@ -682,13 +682,31 @@ they do in yq). A string that *starts* with U+FEFF has every following character
 well, which yq does and nothing else explains. Checked against about 30,000 random strings,
 values and keys, with no difference, and pinned by the `json_string_style_*_3575` goldens.
 
+A string with a line break and a key with one or over 128 bytes
+([#3587](https://github.com/rust-works/succinctly/issues/3587)) are closed on the cursor route and
+the DOM route alike. yaml.v3 asks for the literal style for any string holding a `\n`, and the emitter
+allows it unless the string ends in a space, has a space before a break, or holds a character it will
+not write raw (`\r`, U+0085, DEL, U+FEFF, a character outside the BMP; a tab is fine in a block, not
+in a one-line string); then it writes double quotes. A string whose only breaks are U+2028/U+2029 asks
+for plain, which a break refuses, so it is single-quoted across lines (the break raw, the next
+character indented) unless a space touches the break or it holds a tab. A key with a break, or
+longer than 128 bytes, is `? key` with the `:` on a line of its own, and a container value starts on
+that line (`: a: 1`). One definition, `yaml::go_yaml_block_scalar` / `go_yaml_multiline_scalar` /
+`go_yaml_explicit_key_scalar`, serves both routes (the DOM route's copy was moved, not duplicated).
+Captured from yq v4.53.3 with a differential over about 1,800 strings (every combination of up to
+three of `a`, a space, `\n`, `\r`, U+0085, U+2028, a tab, `é`, an emoji, `:`, `#`, BEL, NBSP, U+FEFF)
+in eight contexts (mapping value, nested, sequence item, sequence in mapping, mapping in sequence,
+nested sequence, key, root), through the streaming route and a write; the pinned rows are
+`json_string_style_line_break_*_3587` and `test_json_string_with_a_line_break_is_a_literal_block_3587`.
+
+**One deliberate divergence (ADR-0018, output the reference cannot read back).** go-yaml tests only the
+first character of the string for the indentation indicator, so a string that starts with a break and
+then a space (`"\n a"`) is written `|-` / blank / `   a`, and reads back as `"\na"` even in yq. Ours
+writes `|2-`, as the source-block path does (#836).
+
 Still open, each separate from this fix:
 
-- **A string with a line break** ([#3587](https://github.com/rust-works/succinctly/issues/3587)) (`\n`, `\r`, U+0085, U+2028, U+2029). yq writes a literal block
-  for a value (`k: |-` / `  a` / `  b`) and `? ` explicit-key syntax for a key; this route, like
-  `-P`, writes the escaped double-quoted form (`"a\nb"`). The style function declines these
-  (`None`) so the old text is unchanged.
-- **A key over 128 bytes** (also #3587). yq writes `? key` / `: value`; this route writes an ordinary key.
+
 - **A JSON object key `<<` on the DOM route** ([#3600](https://github.com/rust-works/succinctly/issues/3600)). yq keeps it in YAML output as the string key `"<<": 1`; a write, `del`, `sort_keys` or `-P` here drops the entry.
 
 The DOM route ([#3588](https://github.com/rust-works/succinctly/issues/3588)) is closed. `-P`, every write

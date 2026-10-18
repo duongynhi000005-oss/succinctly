@@ -22,7 +22,10 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::string::ToString;
 
-use super::encode_style::{write_go_yaml_double_quoted, write_go_yaml_string};
+use super::encode_style::{
+    go_yaml_explicit_key_scalar, go_yaml_key_is_simple, go_yaml_multiline_scalar,
+    write_go_yaml_double_quoted, write_go_yaml_string,
+};
 use super::index::YamlIndex;
 use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
 use super::scalar::{
@@ -1988,43 +1991,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // oracle); the quoted form is spelled `\U` like
                             // real yq's (#4850).
                             let has_astral = decoded.chars().any(|c| c as u32 > 0xFFFF);
-                            // A block scalar's content indentation is
-                            // either explicit (`|N`) or auto-detected from
-                            // the first non-blank content line. If that
-                            // line has literal leading whitespace of its
-                            // own (only possible when the source itself
-                            // used an explicit indent indicator, since
-                            // auto-detection always consumes all of a
-                            // first line's leading whitespace as
-                            // structural), omitting the indicator makes a
-                            // re-parse misjudge where the structural
-                            // indent ends - corrupting the content on
-                            // round-trip (#836). `indent_spaces` (this
-                            // level's own step, not `indent`'s accumulated
-                            // length) is the indicator's value - verified
-                            // against the oracle to hold regardless of
-                            // nesting depth, since every call site computes
-                            // a child's `indent` as exactly
-                            // `indent_spaces` more characters than its
-                            // parent's own.
-                            let first_content_line =
-                                decoded.split('\n').find(|line| !line.is_empty());
-                            let needs_explicit_indent =
-                                first_content_line.is_some_and(|line| line.starts_with(' '));
-                            let explicit_indent = if needs_explicit_indent {
-                                // The indicator digit is only valid as a
-                                // single ASCII digit 1-9 (YAML 1.2
-                                // §8.1.1.1) - an indent step outside that
-                                // range can't be represented at all, so
-                                // falls back to quoting rather than emit an
-                                // indicator that can't round-trip.
-                                match u8::try_from(indent_spaces) {
-                                    Ok(n) if (1..=9).contains(&n) => Some(Some(n)),
-                                    _ => None,
-                                }
-                            } else {
-                                Some(None)
-                            };
+                            let explicit_indent =
+                                block_scalar_indent_hint(&decoded, indent_spaces).ok();
                             if let Some(explicit_indent) = explicit_indent {
                                 if !decoded.is_empty() && !has_trailing_space && !has_astral {
                                     return Ok(stream_yaml_block_scalar(
@@ -2050,11 +2018,17 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                 // `Undecodable::PreserveEmpty` because a key that will not
                 // decode is deliberately kept as `""` on every route,
                 // streamed or materialized alike (#1642/#222).
+                //
+                // #3587: block context (a bare scalar root has none), where a JSON string
+                // holding a line break can be a literal block.
+                let block =
+                    (indent_spaces != 0 && !indent.is_empty()).then_some((indent, indent_spaces));
                 stream_yaml_string_value(
                     out,
                     &s,
                     self.index.canonicalize_numbers(),
                     Undecodable::Raise,
+                    block,
                 )
             }
             YamlValue::Mapping(_) => {
@@ -2145,7 +2119,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                         first = false;
                         let key_cursor = field.key_cursor();
                         self.write_head_comments_at(out, indent, key_cursor.bp_pos)?;
-                        write_yaml_field_key(out, field)?;
+                        let explicit_key =
+                            write_yaml_block_field_key(out, field, indent, indent_spaces, unit)?;
                         out.write_char(':')?;
                         // Check if value needs newline
                         let value = field.value_cursor();
@@ -2201,11 +2176,17 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             } else {
                                 write_anchor_tag(out, value.anchor(), value.explicit_tag_at(None))?;
                             }
-                            out.write_char('\n')?;
                             // #1485/#1881: rounded up from the field's own
                             // (compact-adjusted) column.
                             let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
-                            out.write_str(&child_indent)?;
+                            if explicit_key {
+                                // `? key` / `: a: 1`: the value's first entry shares the
+                                // `: ` line (#3587); it is as wide as one indent step.
+                                out.write_char(' ')?;
+                            } else {
+                                out.write_char('\n')?;
+                                out.write_str(&child_indent)?;
+                            }
                             value.stream_yaml_value(
                                 out,
                                 &child_indent,
@@ -8928,10 +8909,55 @@ fn write_yaml_field_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
             s,
             field.key_cursor().index.canonicalize_numbers(),
             Undecodable::PreserveEmpty,
+            None,
         )
     } else {
         Ok(stream_yaml_nonstring_key(out, &key)?)
     }
+}
+
+/// [`write_yaml_field_key`] for a block mapping's entry, which also writes a JSON-sourced key
+/// that go-yaml gives `? ` explicit-key syntax (#3587) -- one with a line break, or longer
+/// than 128 bytes -- followed by the line break and `indent` that put the `:` at the
+/// mapping's own column. Returns whether it did, so the caller starts a container value
+/// on the `: ` line. A genuine YAML key keeps the style it was written in.
+///
+/// The key is decoded once either way: this stands in for the JSON branch of
+/// [`stream_yaml_string_value`] (which a key reaches with `Undecodable::PreserveEmpty`).
+fn write_yaml_block_field_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
+    out: &mut Out,
+    field: YamlField<'_, W>,
+    indent: &str,
+    indent_spaces: usize,
+    unit: char,
+) -> Result<bool, StreamFailure> {
+    if field.key_cursor().index.canonicalize_numbers() {
+        if let YamlValue::String(s @ YamlString::DoubleQuoted { .. }) = field.key() {
+            if let Ok(decoded) = s.as_str() {
+                if !go_yaml_key_is_simple(&decoded) {
+                    let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
+                    if let Some(scalar) =
+                        go_yaml_explicit_key_scalar(&decoded, &child_indent, indent_spaces)
+                    {
+                        out.write_str("? ")?;
+                        out.write_str(&scalar)?;
+                        out.write_char('\n')?;
+                        out.write_str(indent)?;
+                        return Ok(true);
+                    }
+                }
+                // A JSON key has no anchor or tag: go-yaml's choice for the text decoded above.
+                // (A line break would have been an explicit key above.)
+                match write_go_yaml_string(out, &decoded, false) {
+                    Some(written) => written?,
+                    None => write_go_yaml_double_quoted(out, &decoded)?,
+                }
+                return Ok(false);
+            }
+        }
+    }
+    write_yaml_field_key(out, field)?;
+    Ok(false)
 }
 
 /// Write a child value that is always inline (flow-style mapping/sequence
@@ -9691,6 +9717,38 @@ fn stream_yaml_nonstring_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
     }
 }
 
+/// The indentation indicator a block scalar holding `decoded` needs (#836).
+///
+/// `Ok(None)` for none, `Ok(Some(n))` for `|n`/`>n`, and `Err(())` when one is needed but
+/// cannot be written, which makes the caller quote the value instead.
+///
+/// A block scalar's content indentation is either explicit (`|N`) or auto-detected
+/// from the first non-blank content line. If that line has literal leading
+/// whitespace of its own (only possible when the source itself used an explicit
+/// indent indicator, since auto-detection always consumes all of a first line's
+/// leading whitespace as structural), omitting the indicator makes a re-parse
+/// misjudge where the structural indent ends - corrupting the content on
+/// round-trip. `indent_spaces` (this level's own step, not `indent`'s accumulated
+/// length) is the indicator's value - verified against the oracle to hold
+/// regardless of nesting depth, since every call site computes a child's `indent`
+/// as exactly `indent_spaces` more characters than its parent's own.
+#[allow(clippy::result_unit_err)] // private, and `()` is the only way it can fail
+fn block_scalar_indent_hint(decoded: &str, indent_spaces: usize) -> Result<Option<u8>, ()> {
+    let first_content_line = decoded.split('\n').find(|line| !line.is_empty());
+    let needs_explicit_indent = first_content_line.is_some_and(|line| line.starts_with(' '));
+    if needs_explicit_indent {
+        // The indicator digit is only valid as a single ASCII digit 1-9 (YAML
+        // 1.2 §8.1.1.1) - an indent step outside that range can't be
+        // represented at all.
+        match u8::try_from(indent_spaces) {
+            Ok(n) if (1..=9).contains(&n) => Ok(Some(n)),
+            _ => Err(()),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
 /// Write a block scalar (`|` literal or `>` folded), re-emitting its
 /// original style instead of falling back to [`stream_yaml_block_scalar_quoted`]'s
 /// smart quoting (#836). `decoded` is the scalar's already-decoded value
@@ -9809,7 +9867,8 @@ fn stream_yaml_block_scalar_quoted<Out: core::fmt::Write>(
 fn chomping_indicator(decoded: &str) -> ChompingIndicator {
     match decoded.strip_suffix('\n') {
         None => ChompingIndicator::Strip,
-        Some(rest) if !rest.ends_with('\n') => ChompingIndicator::Clip,
+        // A lone `\n` is kept too (`|+`): clipping it would read back as `""`.
+        Some(rest) if !rest.is_empty() && !rest.ends_with('\n') => ChompingIndicator::Clip,
         Some(_) => ChompingIndicator::Keep,
     }
 }
@@ -9959,6 +10018,7 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
     s: &YamlString<'_>,
     canonicalize: bool,
     undecodable: Undecodable,
+    block: Option<(&str, usize)>,
 ) -> StreamResult {
     // Try to get the string value. Decoded exactly once, whichever policy
     // applies: the `Err` arm below is the *only* decode-failure check on this
@@ -9981,11 +10041,21 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
         // #3575: a JSON string has no YAML style of its own to preserve, so
         // `canonicalize` (a JSON-sourced index, see above) hands the choice to
         // the encoder yq itself uses. A string it declines to decide (one with a
-        // line break) keeps the escaped double-quoted form it always had.
+        // line break) is written by `go_yaml_multiline_scalar` in block context (#3587).
         YamlString::DoubleQuoted { .. } if canonicalize => {
             match write_go_yaml_string(out, &str_val, false) {
                 Some(written) => Ok(written?),
-                None => Ok(write_go_yaml_double_quoted(out, &str_val)?),
+                // #3587: a line break is what it declined. In block context (`block` is the
+                // indent of a literal block's lines and the width of one indent step) yq
+                // writes a literal block, or single quotes across lines, where go-yaml's
+                // emitter allows one; otherwise, and for the rest, double quotes with
+                // go-yaml's own escapes (`\N`, `\U0001F600`).
+                None => match block
+                    .and_then(|(indent, step)| go_yaml_multiline_scalar(&str_val, indent, step))
+                {
+                    Some(scalar) => Ok(out.write_str(&scalar)?),
+                    None => Ok(write_go_yaml_double_quoted(out, &str_val)?),
+                },
             }
         }
         YamlString::DoubleQuoted { .. } => Ok(write_go_yaml_double_quoted(out, &str_val)?),
