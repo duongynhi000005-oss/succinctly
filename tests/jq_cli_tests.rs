@@ -162158,6 +162158,70 @@ fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_b
     ])
 }
 
+/// #4843: a `//` stage in a pipe is read per output like one that is the whole UPDATE (#4837), whatever
+/// the stage after it is. A `//` ahead of the stage that moves the register (`(.a? // 1) | FE`) restores
+/// nothing for that stage's outputs, and in two stages that each hold a `//` the second runs from the
+/// register the first left: after the left side's own output (which moved it) the second is refused too,
+/// after the alternate it states the register it entered with. `null` documents refuse with
+/// `Invalid path expression with result null` for `path`, `del` and `|=` (jq answers `["a"]`,
+/// `["a","a"]` and the writes there; a `del` that answered `null` did so by deleting the root rather than
+/// `["a"]`); the controls where no `foreach` runs stay `[]`. Captured from `/usr/bin/jq` 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_extract_after_alternatives_in_a_pipe_is_read_per_branch_4843() -> Result<()> {
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    let moved = format!("(1 | {fe}) // 5");
+    for update in [
+        format!("(.a? // 1) | ({fe})"),
+        format!("(.a? // 1) | (1 | {fe})"),
+        format!("(.a // 1) | (1 | {fe})"),
+        format!("((.a? // 1) | {fe}) | ."),
+        format!("({moved}) | ({moved})"),
+        format!("({moved}) | (1 | {fe})"),
+        format!("(.a? // 1) | ({moved})"),
+        format!("({moved}) | ((select(false) | 1 | {fe}) // 5)"),
+        format!("({moved}) | (5 // (1 | {fe}))"),
+        format!("({moved}) | (. // 5)"),
+    ] {
+        for wrap in ["path(X)", "del(X)", "(X) |= 9", "path(X) | ."] {
+            let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+            let filter = wrap.replace('X', &inner);
+            let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
+            assert_eq!(code, 5, "{filter}: stdout {stdout:?} stderr {stderr:?}");
+            assert_eq!(stdout, "", "{filter}");
+            assert!(
+                stderr.contains("Invalid path expression with result null"),
+                "{filter}: {stderr:?}"
+            );
+        }
+    }
+    let never = format!("(select(false) | 1 | {fe}) // 5");
+    let truthy = format!("5 // (1 | {fe})");
+    let mut rows = Vec::new();
+    for document in ["null", "true", "false"] {
+        for update in [
+            format!("(.a? // 1) | ({never})"),
+            format!("(.a? // 1) | ({truthy})"),
+            format!("({never}) | ({never})"),
+            format!("({never}) | ({truthy})"),
+            format!("({truthy}) | ({never})"),
+            format!("(5 // 1) | ({never})"),
+            format!("({truthy}) | ({truthy})"),
+        ] {
+            let filter = format!(r"path(. as $x | foreach . as $i (.; {update}; $i))");
+            // The row type holds `'static` text; a test process may leak what it builds.
+            rows.push((
+                document,
+                &*Box::leak(filter.into_boxed_str()),
+                "[]\n",
+                "",
+                0,
+            ));
+        }
+    }
+    assert_path_rows_both_routes_3749(&rows)
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's
