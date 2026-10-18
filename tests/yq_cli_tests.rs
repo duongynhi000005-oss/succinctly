@@ -131,6 +131,93 @@ fn test_recursive_descent_stops_at_an_alias_4214() -> Result<()> {
     Ok(())
 }
 
+/// Pinned yq v4.53.3: a write through `..` reaches an anchored node once (#4223). `..` yields an
+/// alias node and does not go into it, so the expanded copy's children are not targets; they were,
+/// each redirected onto the anchor's node, and `|= . + 1` added to it twice. Every row was captured
+/// from the pinned binary, `-o=json -I=0`.
+#[test]
+fn test_write_through_recursive_descent_reaches_an_anchored_node_once_4223() -> Result<()> {
+    let args = &["-o=json", "-I=0"];
+    let doc = "anchors:\n  base: &b {p: 1, q: 2}\n  copy: *b\n";
+    let both = r#"{"anchors":{"base":{"p":2,"q":3},"copy":{"p":2,"q":3}}}"#;
+    for (filter, expected) in [
+        (r#"(.. | select(tag == "!!int")) |= . + 1"#, both),
+        (r#"(.. | select(tag == "!!int")) += 1"#, both),
+        (r#"(.. | select(tag == "!!int")) |= (. + 1)"#, both),
+        (
+            r#"(.. | select(tag == "!!int")) *= 2"#,
+            r#"{"anchors":{"base":{"p":2,"q":4},"copy":{"p":2,"q":4}}}"#,
+        ),
+        (
+            r#"(.. | select(tag == "!!int")) -= 1"#,
+            r#"{"anchors":{"base":{"p":0,"q":1},"copy":{"p":0,"q":1}}}"#,
+        ),
+        (
+            r#"(.. | select(tag == "!!int" and . > 1)) |= . + 1"#,
+            r#"{"anchors":{"base":{"p":1,"q":3},"copy":{"p":1,"q":3}}}"#,
+        ),
+        // Reached from a navigated start, the alias node itself still a target.
+        (
+            r#".anchors | (.. | select(tag == "!!int")) |= . + 10"#,
+            r#"{"base":{"p":11,"q":12},"copy":{"p":11,"q":12}}"#,
+        ),
+        (
+            r#"(.. | select(has("p"))) |= . + {"z": 1}"#,
+            r#"{"anchors":{"base":{"p":1,"q":2,"z":1},"copy":{"p":1,"q":2,"z":1}}}"#,
+        ),
+        // Idempotent writes and a plain `..` already agreed.
+        (
+            r#"(.. | select(tag == "!!int")) = 9"#,
+            r#"{"anchors":{"base":{"p":9,"q":9},"copy":{"p":9,"q":9}}}"#,
+        ),
+        (
+            r#"del(.. | select(tag == "!!int"))"#,
+            r#"{"anchors":{"base":{},"copy":{}}}"#,
+        ),
+        (
+            ".. |= .",
+            r#"{"anchors":{"base":{"p":1,"q":2},"copy":{"p":1,"q":2}}}"#,
+        ),
+        // Explicit paths through the alias are not a descent: yq's rule 6 still accumulates.
+        (
+            "(.anchors.base.p, .anchors.copy.p) |= . + 1",
+            r#"{"anchors":{"base":{"p":3,"q":2},"copy":{"p":3,"q":2}}}"#,
+        ),
+        (
+            ".anchors[] .p += 1",
+            r#"{"anchors":{"base":{"p":3,"q":2},"copy":{"p":3,"q":2}}}"#,
+        ),
+        (
+            "(.anchors.copy.p) |= . + 1",
+            r#"{"anchors":{"base":{"p":2,"q":2},"copy":{"p":2,"q":2}}}"#,
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(filter, doc, args)?;
+        assert_eq!((out.trim(), code), (expected, 0), "{filter}");
+    }
+    // Scalars and sequences behind aliases, and an alias of a scalar.
+    let doc = "a: &x [1, 2]\nb: *x\nc: &y {n: 5}\nd:\n  - *y\n  - *x\n";
+    let (out, code) = run_yq_stdin(r#"(.. | select(tag == "!!int")) |= . + 1"#, doc, args)?;
+    assert_eq!(
+        (out.trim(), code),
+        (
+            r#"{"a":[2,3],"b":[2,3],"c":{"n":6},"d":[{"n":6},[2,3]]}"#,
+            0
+        )
+    );
+    let doc = "a: &x 1\nb: *x\nc: [*x, 2]\n";
+    let (out, code) = run_yq_stdin(r#"(.. | select(tag == "!!int")) |= . + 1"#, doc, args)?;
+    assert_eq!((out.trim(), code), (r#"{"a":2,"b":2,"c":[2,3]}"#, 0));
+    // A document without aliases is untouched.
+    let (out, code) = run_yq_stdin(
+        r#"(.. | select(tag == "!!int")) |= . + 1"#,
+        "a: {b: [1, 2]}\n",
+        args,
+    )?;
+    assert_eq!((out.trim(), code), (r#"{"a":{"b":[2,3]}}"#, 0));
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `*` and `?` in a mapping key are wildcards, so a traversal
 /// emits the value of every matching key in document order (#3374). No match reads
 /// `null` and writes create the pattern as a literal key. Every row captured from

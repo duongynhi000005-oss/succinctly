@@ -1168,6 +1168,52 @@ pub mod alias_identity {
         });
     }
 
+    /// Drop every path of a recursive descent that lies strictly *below* an alias position that
+    /// is still its anchor's untouched copy (#4223): yq's `..` visits an alias node and does not
+    /// go into it, so `(.. | select(tag == "!!int")) |= . + 1` over `base: &b {p: 1}` /
+    /// `copy: *b` adds one to `p`. The paths here are the expanded copy's, which
+    /// [`redirect_paths`] would send to the anchor's node once each: the same node written twice.
+    /// The alias position itself stays (`.. |= f` still reaches the alias node).
+    ///
+    /// Not [`redirect_paths`]: an explicit path through an alias (`.copy.p`, `.[] .p`) is yq's
+    /// rule 6 and accumulates; only the paths a `..` produced are the descent's to drop.
+    pub(crate) fn drop_below_alias(paths: &mut Vec<Expr>, doc: &OwnedValue) {
+        with_table(|table| {
+            paths.retain(|path| {
+                let mut components = Vec::new();
+                push_path_components(&mut components, path);
+                let mut prefix: Vec<OwnedValue> = Vec::new();
+                for (i, component) in components.iter().enumerate() {
+                    match unwrap_path_component(component).0 {
+                        Expr::Field(name) => prefix.push(OwnedValue::String(name.clone().into())),
+                        Expr::Index { idx, .. } => {
+                            let Some(OwnedValue::Array(arr)) = get_value_at_path(doc, &prefix)
+                            else {
+                                return true;
+                            };
+                            let len = arr.len() as i64;
+                            let norm = if *idx < 0 { *idx + len } else { *idx };
+                            if norm < 0 || norm >= len {
+                                return true;
+                            }
+                            prefix.push(OwnedValue::Int(norm));
+                        }
+                        _ => return true,
+                    }
+                    let is_proper_prefix = i + 1 < components.len();
+                    if is_proper_prefix {
+                        if let Some(def) = table.anchor_for(&prefix) {
+                            if same_node(doc, &prefix, def) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            });
+        });
+    }
+
     /// Per-entry-point options for [`redirect_paths`].
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct Redirect {
@@ -1364,6 +1410,8 @@ pub mod alias_identity {
     }
 
     pub(crate) fn redirect_paths(_paths: &mut Vec<Expr>, _doc: &OwnedValue, _opts: Redirect) {}
+
+    pub(crate) fn drop_below_alias(_paths: &mut Vec<Expr>, _doc: &OwnedValue) {}
 
     pub(crate) fn redirect_concrete_path(_path: &mut Vec<OwnedValue>, _doc: &OwnedValue) {}
 
@@ -68346,6 +68394,31 @@ fn iterate_of_nothing_target(expr: &Expr, input: &OwnedValue) -> Option<Vec<Expr
 /// no-`Untracked::Skip` exception now live. Everything below therefore
 /// always takes the `path()`/`=`/`|=` reading of both.
 fn resolve_dynamic_indexes<S: EvalSemantics>(
+    expr: &Expr,
+    input: &OwnedValue,
+    defer_trailing_iterate: bool,
+) -> Result<Vec<Expr>, (Vec<Expr>, EvalEscape)> {
+    let mut resolved = resolve_dynamic_indexes_all::<S>(expr, input, defer_trailing_iterate);
+    // #4223: yq's `..` does not go into an alias node, so what it resolves below one is not a
+    // target. Checked only when a write installed an alias table, and then only for a target
+    // that holds a recursive descent.
+    if S::TAG == EvalTag::Yq
+        && alias_identity::active()
+        && crate::jq::walk::any_subexpr(expr, &mut |e| {
+            matches!(
+                e,
+                Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown)
+            )
+        })
+    {
+        match &mut resolved {
+            Ok(paths) | Err((paths, _)) => alias_identity::drop_below_alias(paths, input),
+        }
+    }
+    resolved
+}
+
+fn resolve_dynamic_indexes_all<S: EvalSemantics>(
     expr: &Expr,
     input: &OwnedValue,
     defer_trailing_iterate: bool,
