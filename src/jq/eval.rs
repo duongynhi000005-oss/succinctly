@@ -57556,10 +57556,22 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             && any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_)))
             && head_spine_navigates(head)
     };
-    // #4831: `head` without the stages that hand their input on unchanged, when it has any.
-    let neutral_stripped_head = marker_navigation_head()
-        .then(|| strip_neutral_stages(head))
-        .flatten();
+    // #4831: the outputs of `head` without the stages that hand their input on unchanged, in the order
+    // `sources` has them (the stripped stages neither add nor drop one), read at most once and only for a
+    // `bound` the cheaper tests did not place.
+    let stripped_outputs: core::cell::OnceCell<Option<Vec<OwnedValue>>> =
+        core::cell::OnceCell::new();
+    let stripped_outputs = || {
+        stripped_outputs.get_or_init(|| {
+            if !marker_navigation_head() {
+                return None;
+            }
+            let stripped = strip_neutral_stages(head)?;
+            let (outputs, trailing) =
+                eval_owned_expr_fork::<S>(&stripped, value, false, Reentry::at_register(trackable));
+            (trailing.is_none() && outputs.len() == sources.len()).then_some(outputs)
+        })
+    };
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
     // Only a retry reads it (`refusal_is_exact` below, `head_may_be_register`), and the
     // last alternative never retries, so a single pattern skips the walk.
@@ -57603,7 +57615,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
         sink(branch)
     };
     let sink: &mut dyn FnMut(PathBranch<'a>) -> Demand = &mut guarded;
-    for bound in &sources {
+    for (position, bound) in sources.iter().enumerate() {
         // A shape `resolves_to_register` refuses (including one it was
         // never asked about, for `Expr::Identity`/`TrackedVar`) still gets
         // jq's own null/bool value-identity fallback per `bound`, since a
@@ -57622,15 +57634,12 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                     // #4831: ...also behind the stages that hand a value on unchanged (`| .`, `| select(true)`,
                     // `| first(.)`, a `?` on the lookup), whose by-value evaluation bridges through a fresh copy
                     // of the node: the head without them yields the same node, and shares its storage.
-                    || (register.is_some_and(|reg| {
-                        marker_navigation_head()
-                            && neutral_stripped_head.as_ref().is_some_and(|stripped| {
-                                eval_owned_expr_fork::<S>(stripped, value, false, Reentry::at_register(trackable))
-                                    .0
-                                    .iter()
-                                    .any(|out| out == bound && out.shares_storage_with(reg))
-                            })
-                    }))
+                    || register.is_some_and(|reg| {
+                        stripped_outputs()
+                            .as_ref()
+                            .and_then(|outputs| outputs.get(position))
+                            .is_some_and(|out| out == bound && out.shares_storage_with(reg))
+                    })
             }
         };
         // Whether a first-step refusal is jq's own verdict rather than this
@@ -67792,7 +67801,7 @@ fn is_identity_pipe(expr: &Expr) -> bool {
 }
 
 /// `head` with the stages that hand their input on unchanged removed (#4831): `.`, `select(true)`,
-/// `first(.)`, and a postfix `?` on a field or index lookup (which, for an output, is the lookup). `None`
+/// `first(.)`, and a postfix `?` on a field lookup (which, for an output, is the lookup). `None`
 /// when `head` has none, so nothing differs from it. Read by [`resolve_as_pattern`] to find the node a
 /// navigation of a `$x` marker yields, whose storage the register may share although the by-value
 /// evaluation of the stages after it bridges through a copy.
@@ -67824,9 +67833,7 @@ fn strip_neutral_stages(head: &Expr) -> Option<Expr> {
                 return None;
             }
             match stage {
-                Expr::Optional(inner)
-                    if matches!(unwrap_paren(inner), Expr::Field(_) | Expr::Index { .. }) =>
-                {
+                Expr::Optional(inner) if matches!(unwrap_paren(inner), Expr::Field(_)) => {
                     changed = true;
                     Some(unwrap_paren(inner).clone())
                 }
@@ -67834,7 +67841,13 @@ fn strip_neutral_stages(head: &Expr) -> Option<Expr> {
             }
         })
         .collect();
-    (changed && !kept.is_empty()).then(|| Expr::pipe(kept))
+    // Only a pure navigation (a variable, a name, a literal index) is evaluated a second time: a computed key
+    // that debugs, reads input or writes to stderr would run twice.
+    let pure = |e: &Expr| match e {
+        Expr::TrackedVar(_) | Expr::Field(_) | Expr::Index { .. } => true,
+        _ => false,
+    };
+    (changed && !kept.is_empty() && kept.iter().all(pure)).then(|| Expr::pipe(kept))
 }
 
 /// `.` or `(.)`.

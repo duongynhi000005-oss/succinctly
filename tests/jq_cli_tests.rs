@@ -163511,8 +163511,8 @@ fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_va
 /// #4831: the heads of #4827 behind a stage that hands its input on unchanged -- `| select(true)`, `| .`,
 /// `| first(.)`, a `?` on the lookup. Their by-value evaluation bridges through a copy of the node, so the
 /// storage test of #4827 saw a node that was not the register's; the head without those stages is asked instead.
-/// The controls: `$x.c` (equal in value to the register, another node) still raises, and a `1` value head raises
-/// `with result`. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+/// The controls: `$x.c` (equal in value to the register, another node) still raises, also first in a comma beside the register's
+/// own node (a comma head is not stripped, so nothing changes there), and a `1` value head raises `with result`. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 fn test_foreach_update_destructuring_a_wrapped_navigation_of_the_root_marker_4831() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -163626,6 +163626,20 @@ fn test_foreach_update_destructuring_a_wrapped_navigation_of_the_root_marker_483
             r"path(. as $x | foreach .a as $i (.; 1 | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
             "",
             "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach ((($x.c, $x.a) | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach ((($x.c, $x.a) | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
             5,
         ),
     ])
