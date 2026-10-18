@@ -55603,15 +55603,63 @@ fn leading_destructure_of_dot_element(source: &Expr) -> Option<OwnedValue> {
             if is_identity_pipe(expr)
                 && (patterns.len() == 1 || patterns_all_destructuring_chain(patterns)) =>
         {
-            match patterns.last()? {
-                Pattern::Array(_) => Some(OwnedValue::Int(0)),
-                Pattern::Object(entries) => match entries.first().map(|entry| &entry.key) {
-                    Some(ObjectKey::Literal(key)) => Some(OwnedValue::from(key.as_str())),
-                    _ => None,
-                },
-                Pattern::Var(_) => None,
-            }
+            first_destructure_step_element(patterns)
         }
+        _ => None,
+    }
+}
+
+/// The element the first pattern step indexes with: `0` for an array pattern, the key of an object
+/// pattern's first literal entry (the last alternative's, for a `?//` chain). `None` for a computed
+/// key or a bare variable, which spell no step of their own.
+fn first_destructure_step_element(patterns: &[Pattern]) -> Option<OwnedValue> {
+    match patterns.last()? {
+        Pattern::Array(_) => Some(OwnedValue::Int(0)),
+        Pattern::Object(entries) => match entries.first().map(|entry| &entry.key) {
+            Some(ObjectKey::Literal(key)) => Some(OwnedValue::from(key.as_str())),
+            _ => None,
+        },
+        Pattern::Var(_) => None,
+    }
+}
+
+/// [`leading_destructure_of_dot_element`] for the destructure of one of `markers` (`$x as P`,
+/// `$x | . as P`) that `source` begins with (#4826): the element the first pattern step indexes
+/// with, and the marker's value, which jq names as the container the step raises on. `None` where
+/// `source` may reach another stage first, or the destructure is of anything but a listed marker.
+fn leading_destructure_of_marker(
+    source: &Expr,
+    markers: &[*const Tracked],
+) -> Option<(OwnedValue, OwnedValue)> {
+    // The first step of `marker as P`, with `marker`'s value as the container it indexes.
+    let step_on = |marker: &Rc<Tracked>, patterns: &[Pattern]| {
+        if !markers.contains(&Rc::as_ptr(marker))
+            || !(patterns.len() == 1 || patterns_all_destructuring_chain(patterns))
+        {
+            return None;
+        }
+        Some((
+            first_destructure_step_element(patterns)?,
+            marker.value.clone(),
+        ))
+    };
+    match unwrap_paren(source) {
+        Expr::Pipe(stages) => {
+            let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
+            let first = rest.next()?;
+            if let Expr::TrackedVar(marker) = unwrap_paren(first) {
+                // `$x | . as P`: the marker is the value the bind's `.` meets.
+                let Expr::AsPattern { expr, patterns, .. } = unwrap_paren(rest.next()?) else {
+                    return None;
+                };
+                return step_on(marker, patterns).filter(|_| is_identity_pipe(expr));
+            }
+            leading_destructure_of_marker(first, markers)
+        }
+        Expr::AsPattern { expr, patterns, .. } => match unwrap_paren(expr) {
+            Expr::TrackedVar(marker) => step_on(marker, patterns),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -55967,7 +56015,33 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::depth() != 0
         && ambient.frame.at.is_some()
         && try_free();
-    let foreign_pairs = if S::TAG == EvalTag::Jq
+    // #4826: in the body of a `reduce` whose source named the element it moved the register onto, a
+    // `$x` holding a container bound at another position is not the register whatever the accumulator
+    // is (a `null` or `1 |` stage ahead of the fold, or the accumulator itself equal to `$x`): its
+    // pattern step raises, as it does for the `caught` form ([`caught_foreign_destructure`]).
+    let moved_foreign_pairs = if S::TAG == EvalTag::Jq
+        && fold_body::depth() != 0
+        && fold_body::source_moved_here()
+        && try_free()
+    {
+        fold_body::source_moved_at_here()
+            .map(|at| {
+                foreign_register_markers_with::<S>(
+                    source,
+                    ambient,
+                    false,
+                    &passing_selects,
+                    Some(&at),
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let moved_foreign = !moved_foreign_pairs.is_empty();
+    let foreign_pairs = if moved_foreign {
+        moved_foreign_pairs
+    } else if S::TAG == EvalTag::Jq
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0
@@ -56113,21 +56187,26 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 // #4604: dropping the `select` also exposes a destructure of `.`, which a `reduce`
                 // source backtracks and answers, as does a `foreach` one where the accumulator is
                 // the register: only a destructure of a marker is read there.
-                source_destructures_register_with(&selected, true, foreign_markers, false, false)
-                    && ((foreach_source && select_passes)
-                        || !source_destructures_register_with(
-                            &collapse_marker_pipes(
-                                foreign_source,
-                                &[],
-                                &truthy_markers,
-                                &passing_selects,
-                                true,
-                            ),
+                source_destructures_register_with(
+                    &selected,
+                    true,
+                    foreign_markers.clone(),
+                    false,
+                    false,
+                ) && ((foreach_source && select_passes)
+                    || !source_destructures_register_with(
+                        &collapse_marker_pipes(
+                            foreign_source,
+                            &[],
+                            &truthy_markers,
+                            &passing_selects,
                             true,
-                            Vec::new(),
-                            false,
-                            false,
-                        ))
+                        ),
+                        true,
+                        Vec::new(),
+                        false,
+                        false,
+                    ))
             })
     };
     // #4709: a `try`/`?` around the destructure of a foreign marker catches the raise and leaves the
@@ -56267,7 +56346,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
         // provably off it: the pattern's step raises, so the resolver decides rather than the
         // by-value drive, which has no register to check the step against.
-        || (foreign_verdict && (off_body || null_foreign))
+        || (foreign_verdict && (off_body || null_foreign || moved_foreign))
         // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
         // result, a fresh value beside the register in a comma): the pattern's step raises on it
         // whatever the register is. Not gated on `ambient.trackable` (#4522): a path-expression
@@ -56358,6 +56437,18 @@ fn drive_fold_source_with<S: EvalSemantics>(
             Some(element) => {
                 EvalError::invalid_path_expression_near_access(&element, ambient.value)
             }
+            // #4826: a destructure of a `$x` proven foreign is jq's own raise, on `$x`: its pattern
+            // step is path-checked against a register `$x` is not, and says so.
+            None if foreign_verdict
+                && (moved_foreign || (!destructures_unplaced_register && !equal_verdict)) =>
+            {
+                match leading_destructure_of_marker(source, &foreign_markers) {
+                    Some((element, container)) => {
+                        EvalError::invalid_path_expression_near_access(&element, &container)
+                    }
+                    None => EvalError::invalid_path_expression_guessed(ambient.value),
+                }
+            }
             None => EvalError::invalid_path_expression_guessed(ambient.value),
         };
         return Flow::Escaped(Control::Error(refusal));
@@ -56431,7 +56522,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // certify against refuses it, as the bare `.a` already is.
     let moved_frame;
     let (source_snapshot, source_frame) =
-        if S::TAG == EvalTag::Jq && fold_body::source_moved_onto_non_null_here() {
+        // #4826: ...or a `$x` holding a container, bound at another position than the element a
+        // `null` one is: the register is `null` there, which no container is.
+        if S::TAG == EvalTag::Jq
+            && (fold_body::source_moved_onto_non_null_here() || (moved_foreign && foreign_verdict))
+        {
             moved_frame = ambient.frame.unknown();
             (Snapshot::No, &moved_frame)
         } else {
