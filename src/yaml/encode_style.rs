@@ -496,12 +496,39 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
     out.write_char('"')
 }
 
+/// Whether `s` holds a character go-yaml's emitter will not write raw (a tab, DEL, a C1 control,
+/// U+FEFF, a character outside the BMP, ...), which keeps it out of the plain and single-quoted
+/// styles whatever style its source had (#4858). A line break (`\n`, U+0085, U+2028, U+2029) is
+/// left to the line-break rules, which differ from this one.
+#[must_use]
+pub(crate) fn has_unwritable_char(s: &str) -> bool {
+    unwritable_char(s, false)
+}
+
+/// [`has_unwritable_char`] for the content of a block scalar, where a tab is written as it is
+/// (`|-` over `x<TAB>y` stays a literal block in yq).
+#[must_use]
+pub(crate) fn has_unwritable_char_in_block(s: &str) -> bool {
+    unwritable_char(s, true)
+}
+
+fn unwritable_char(s: &str, tab_ok: bool) -> bool {
+    !s.bytes().all(|b| (0x20..0x7F).contains(&b) || b == b'\n')
+        && s.chars()
+            .any(|c| !(is_break(c) || is_printable(c) || (tab_ok && c == '\t')))
+}
+
 /// `s` as go-yaml's emitter writes a single-quoted scalar, quotes included: `'`
-/// is doubled and everything else is raw.
+/// is doubled and everything else is raw. A string with a character the emitter will not write
+/// raw ([`has_unwritable_char`]) is double-quoted instead, as yq re-emits a single-quoted source
+/// scalar that holds one (#4858).
 pub(crate) fn write_go_yaml_single_quoted<Out: core::fmt::Write>(
     out: &mut Out,
     s: &str,
 ) -> core::fmt::Result {
+    if has_unwritable_char(s) {
+        return write_go_yaml_double_quoted(out, s);
+    }
     out.write_char('\'')?;
     for c in s.chars() {
         if c == '\'' {
