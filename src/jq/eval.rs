@@ -43976,8 +43976,8 @@ fn carry_frame_register<'a>(
 }
 
 /// Whether `expr` is, as a whole, a `//` or a comma of them and of siblings that leave jq's
-/// register alone ([`sibling_leaves_register`]): the UPDATE shapes whose `foreach` EXTRACT is
-/// judged per output (#4800). With `states`, each `//` must also have an operand that leaves the
+/// register alone ([`sibling_leaves_register`]), or one such shape between pipe stages that move
+/// nothing (#4837): the UPDATE shapes whose `foreach` EXTRACT is judged per output (#4800). With `states`, each `//` must also have an operand that leaves the
 /// register alone, so that its outputs state the register they entered with
 /// ([`carry_frame_register`]) whatever the other operand does; the outputs of the operand that
 /// moved it state what it did, and the EXTRACT behind them is judged on that.
@@ -44009,7 +44009,9 @@ fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
                     if seen {
                         return None;
                     }
-                    shape::<S>(stage, states)?;
+                    if !shape::<S>(stage, states)? {
+                        return None;
+                    }
                     seen = true;
                 }
                 seen.then_some(true)
@@ -50752,7 +50754,7 @@ impl FoldRegister {
         // (`live_register`), which the alternate of a `//` states when it leaves the register
         // alone ([`carry_frame_register`]): jq runs it after backtracking out of everything the
         // left operand navigated, so that is the register at the entry. Read for a `//` UPDATE
-        // alone ([`alternate_update_shape`]); a branch that came through the left operand
+        // alone, or between stages that move nothing ([`alternate_update_shape`]); a branch that came through the left operand
         // states what it did and is judged on its own.
         let mut alternate: Option<bool> = None;
         let mut deliver = |branch: PathBranch<'_>| {
@@ -61964,8 +61966,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && !extract_reg.trackable
                                     && extract_reg.path.depth() == 0
                                     && extract_reg.frame.register_loss.is_lost()
-                                    // A `//` nested deeper (behind an `if` or a pipe stage) is not
-                                    // read per output and keeps the exemption it had.
+                                    // A `//` nested deeper (behind an `if`, or a pipe stage that
+                                    // moves something) is not read per output and keeps the
+                                    // exemption it had.
                                     && (alternate_update_shape::<S>(&bound_update, false)
                                         || !any_subexpr(&bound_update, &mut |e| {
                                             // #4837: a `//` that moves nothing on either side

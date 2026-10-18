@@ -161838,6 +161838,11 @@ fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_b
         "((L) // empty) | .",
         "(((L) // 5) // 6) | .",
         "(L) | (. // 5)",
+        // a `//` that moves nothing restores no register, wherever it sits
+        "(5 // 6) | (L)",
+        "(L) | select(. // true)",
+        "if (. // true) then (L) else 4 end",
+        "((L) // 5) | limit(1; .)",
     ] {
         for wrap in ["path(X)", "del(X)", "(X) |= 9", "path(X) | ."] {
             let update = update.replace('L', &format!("1 | {fe}"));
