@@ -168,6 +168,14 @@ pub fn can_use_m2_streaming(expr: &Expr) -> bool {
         // `map(.+1)` and `map(length)` keep the DOM path exactly as before.
         Expr::Builtin(Builtin::Map(f)) => can_use_m2_streaming(f),
 
+        // `..` answers each node as its own live cursor (spine 2416, #2428),
+        // the same shape `.[]` streams. Without an arm here the DOM path's
+        // unconditional `to_owned()` flattens every node back into an
+        // `IndexMap`-backed `OwnedValue` at output time, re-collapsing a
+        // duplicate mapping key inside a node that yq prints intact (#1344).
+        // `recurse`/`recurse_down` are the same walk (#3719).
+        Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown) => true,
+
         // Everything else requires OwnedValue
         _ => false,
     }
@@ -253,5 +261,20 @@ mod tests {
         assert!(!can_use_m2_streaming(&parse("[.[] | key]")));
         assert!(!can_use_m2_streaming(&parse("parent")));
         assert!(!can_use_m2_streaming(&parse("key")));
+    }
+
+    /// #1344: `..` and the `recurse` spellings that are the same walk stream
+    /// their node cursors, so a node prints with its duplicate keys instead of
+    /// being re-collapsed by the DOM path; a computing stage after it does not.
+    #[test]
+    fn recursive_descent_streams_cursors_1344() {
+        let parse = |f: &str| succinctly::jq::parse(f).expect("parses");
+        assert!(can_use_m2_streaming(&parse("..")));
+        assert!(can_use_m2_streaming(&parse(
+            ".. | select(tag == \"!!map\")"
+        )));
+        assert!(can_use_m2_streaming(&parse("recurse")));
+        assert!(!can_use_m2_streaming(&parse(".. | length")));
+        assert!(!can_use_m2_streaming(&parse("[..]")));
     }
 }
