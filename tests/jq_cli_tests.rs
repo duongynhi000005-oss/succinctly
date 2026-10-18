@@ -103342,6 +103342,51 @@ fn test_del_fractional_index_matches_jv_dels_3302() -> Result<()> {
     Ok(())
 }
 
+/// #4875: `paths(f)` reads each path's node back by key; over a wide object that was a scan of
+/// the object at every path (quadratic). Rows from jq 1.7.1, plus a 3,000-member object whose
+/// answer is built here.
+#[test]
+fn test_paths_filter_over_a_wide_object_4875() -> Result<()> {
+    let small = r#"{"a":{"b":[1,{"c":2}],"d":null},"e":"x"}"#;
+    for (filter, expected) in [
+        (
+            r#"[paths(type == "number")]"#,
+            r#"[["a","b",0],["a","b",1,"c"]]"#,
+        ),
+        ("[paths(. == null)]", r#"[["a","d"]]"#),
+        (r#"[paths(type == "string")]"#, r#"[["e"]]"#),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(small))?;
+        assert_eq!(
+            (stdout.trim_end(), code),
+            (expected, 0),
+            "{filter}: {stderr}"
+        );
+    }
+    let wide = format!(
+        "{{{}}}",
+        (0..3000)
+            .map(|i| format!("\"k{i}\":{{\"a\":{},\"b\":\"x{i}\"}}", i % 7))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let expected = format!(
+        "[{}]",
+        (0..3000)
+            .filter(|i| i % 7 == 3)
+            .map(|i| format!("[\"k{i}\",\"a\"]"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let (stdout, stderr, code) = run_jq_full(&["-c", "[paths(. == 3)]"], Some(&wide))?;
+    assert_eq!(
+        (stdout.trim_end(), code),
+        (expected.as_str(), 0),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 /// yq mode is not touched by #3302's jq-semantics fix: real yq rejects every fractional index, so
 /// `succinctly yq` refuses it (#4749) instead of truncating, and `del()` leaves the input alone.
 #[test]

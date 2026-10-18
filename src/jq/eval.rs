@@ -77790,14 +77790,11 @@ fn get_value_at_path(value: &OwnedValue, path: &[OwnedValue]) -> Option<OwnedVal
         return Some(value.clone());
     }
     match (&path[0], value) {
-        (OwnedValue::String(key), OwnedValue::Object(entries)) => {
-            for (k, v) in entries {
-                if k == key {
-                    return get_value_at_path(v, &path[1..]);
-                }
-            }
-            None
-        }
+        // A hash lookup: an object holds each key once, and the scan this replaced cost a wide
+        // object's whole width at every path into it (#4875).
+        (OwnedValue::String(key), OwnedValue::Object(entries)) => entries
+            .get(key.as_str())
+            .and_then(|v| get_value_at_path(v, &path[1..])),
         (OwnedValue::Int(idx), OwnedValue::Array(arr)) => {
             let index = if *idx < 0 {
                 (arr.len() as i64 + *idx) as usize
