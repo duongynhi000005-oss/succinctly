@@ -25891,6 +25891,67 @@ fn test_envsubst_follows_a8m_envsubst_4872() -> Result<()> {
     Ok(())
 }
 
+/// #4872: `ff` stops at the first of several errors (yq lists them all without it), and a
+/// syntax error comes first, ahead of the variables found before it.
+#[test]
+fn test_envsubst_fail_fast_and_syntax_errors_4872() -> Result<()> {
+    for (text, flags, expected) in [
+        (
+            "$SUCCINCTLY_T0$SUCCINCTLY_T2",
+            "(nu,ne)",
+            "variable ${SUCCINCTLY_T0} not set\nvariable ${SUCCINCTLY_T2} set but empty",
+        ),
+        (
+            "$SUCCINCTLY_T0$SUCCINCTLY_T2",
+            "(nu,ne,ff)",
+            "variable ${SUCCINCTLY_T0} not set",
+        ),
+        (
+            "$SUCCINCTLY_T2$SUCCINCTLY_T0",
+            "(nu,ne,ff)",
+            "variable ${SUCCINCTLY_T2} set but empty",
+        ),
+        (
+            "$SUCCINCTLY_T0 ${SUCCINCTLY_T1",
+            "(nu)",
+            "closing brace expected\nvariable ${SUCCINCTLY_T0} not set",
+        ),
+        (
+            "$SUCCINCTLY_T0 ${SUCCINCTLY_T1",
+            "(nu,ff)",
+            "closing brace expected",
+        ),
+    ] {
+        let filter = format!(". | envsubst{flags}");
+        let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+            .args(["yq", "-p", "json", "-o", "json", "-I0", &filter])
+            .env("SUCCINCTLY_T1", "bar")
+            .env("SUCCINCTLY_T2", "")
+            .env_remove("SUCCINCTLY_T0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(format!("{text:?}").as_bytes())?;
+                child.wait_with_output()
+            })?;
+        assert_eq!(output.status.code(), Some(1), "{text} {flags}");
+        let stderr = String::from_utf8(output.stderr)?;
+        assert_eq!(
+            stderr.trim().trim_start_matches("Error: "),
+            expected,
+            "{text} {flags}"
+        );
+    }
+    Ok(())
+}
+
 /// #4872: a non-string is yq's error (the tag it names), and `|=` is the way to use it.
 #[test]
 fn test_envsubst_of_a_non_string_names_its_tag_4872() -> Result<()> {

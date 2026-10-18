@@ -22587,7 +22587,9 @@ fn builtin_envsubst<W: Clone + AsRef<[u64]>>(
             );
         }
     };
-    match super::envsubst::envsubst(&text, flags, &|name| std::env::var(name).ok()) {
+    match super::envsubst::envsubst(&text, flags, &|name| {
+        std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+    }) {
         Ok(out) => QueryResult::Owned(OwnedValue::String(out.into())),
         Err(message) => suppress_or_raise(EvalError::new(message), optional),
     }

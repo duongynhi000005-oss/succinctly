@@ -5506,7 +5506,7 @@ matches. Only two shapes differ, both a lexer artifact in `a8m/envsubst`: a `${`
 that is not a name (`${${MISSING-d}...`, `${ =...`, `${:=...`), where yq's own answer depends on a nested
 brace scan this does not model (a `${-}`, `${@}`, `${.}` or `${}` standing alone is literal text, as in
 yq); and a lone `${_` (yq prints it literally, `${_U}` is a variable). `${FOO^^}`, `${FOO:1}`,
-`${FOO/a/b}` and `${FOO:?m}` are `$FOO` in yq, which is mirrored. `envsubst` reads the process
+`${FOO/a/b}` and `${FOO:?m}` are `$FOO` in yq, which is mirrored. An operand (`d` of `${X:-d}`) has its own `$Y` and `$$` substituted, as in yq; a nested `${` in an operand (`${X:-${Y}}`, which yq reads as `${Y` with a stray `}`) is left as written. `envsubst` reads the process
 environment, so it needs the `std` feature.
 
 ### `with`, `from_json` and `from_yaml` residuals (#4206)

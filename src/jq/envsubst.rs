@@ -50,17 +50,29 @@ pub(crate) fn envsubst(
             Some('{')
                 if !chars
                     .get(i + 2)
-                    .is_some_and(|&n| n.is_alphanumeric() || matches!(n, '_' | ' ' | '#')) =>
+                    .is_some_and(|&n| is_alnum(n) || matches!(n, '_' | ' ' | '#')) =>
             {
                 out.push('$');
                 i += 1;
             }
             Some('{') => {
-                let (consumed, value) = braced(&chars[i + 2..], flags, lookup, &mut errors)?;
+                let (consumed, value) = match braced(&chars[i + 2..], flags, lookup, &mut errors) {
+                    Ok(done) => done,
+                    // A syntax error is reported first, then the variables found before it.
+                    Err(mut message) => {
+                        if !flags.fail_fast {
+                            for error in &errors {
+                                message.push('\n');
+                                message.push_str(error);
+                            }
+                        }
+                        return Err(message);
+                    }
+                };
                 out.push_str(&value);
                 i += 2 + consumed;
             }
-            Some(&n) if n.is_alphanumeric() => {
+            Some(&n) if is_alnum(n) => {
                 let len = chars[i + 1..]
                     .iter()
                     .take_while(|&&c| is_name_char(c))
@@ -74,19 +86,25 @@ pub(crate) fn envsubst(
                 i += 1;
             }
         }
-        if flags.fail_fast && !errors.is_empty() {
-            break;
-        }
     }
     if errors.is_empty() {
         Ok(out)
     } else {
+        // `ff` reports the first only (the whole text is still scanned: yq finds a syntax error
+        // before it substitutes anything, so one later in the text outranks an earlier variable).
+        errors.truncate(if flags.fail_fast { 1 } else { errors.len() });
         Err(errors.join("\n"))
     }
 }
 
+/// A letter or digit, or `_`, for the characters after a name's first (Go's `unicode.IsLetter`/
+/// `IsDigit`; non-ASCII digits other than `Nd` are not told apart).
 fn is_name_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    is_alnum(c) || c == '_'
+}
+
+fn is_alnum(c: char) -> bool {
+    c.is_ascii_alphanumeric() || (!c.is_ascii() && c.is_alphabetic())
 }
 
 /// A plain variable: its value, or "" and the errors the flags ask for.
@@ -96,16 +114,26 @@ fn variable(
     lookup: &dyn Fn(&str) -> Option<String>,
     errors: &mut Vec<String>,
 ) -> String {
-    match lookup(name) {
+    check(name, lookup(name), flags, errors)
+}
+
+/// [`variable`] for a value already looked up.
+fn check(
+    name: &str,
+    value: Option<String>,
+    flags: EnvsubstFlags,
+    errors: &mut Vec<String>,
+) -> String {
+    match value {
         None => {
             if flags.no_unset {
-                errors.push(alloc_format(name, "not set"));
+                errors.push(variable_error(name, "not set"));
             }
             String::new()
         }
         Some(v) if v.is_empty() => {
             if flags.no_empty {
-                errors.push(alloc_format(name, "set but empty"));
+                errors.push(variable_error(name, "set but empty"));
             }
             v
         }
@@ -113,12 +141,49 @@ fn variable(
     }
 }
 
-fn alloc_format(name: &str, what: &str) -> String {
-    let mut s = String::from("variable ${");
-    s.push_str(name);
-    s.push_str("} ");
-    s.push_str(what);
-    s
+fn variable_error(name: &str, what: &str) -> String {
+    let mut message = String::from("variable ${");
+    message.push_str(name);
+    message.push_str("} ");
+    message.push_str(what);
+    message
+}
+
+/// The text of an operator's operand (`d` of `${X:-d}`): its own `$Y` and `$$` are substituted,
+/// as yq does, with the same flags. Only those two forms are modelled; any other `$` in it (a nested
+/// `${`, a trailing `$$`) is left as written.
+fn operand(
+    text: &str,
+    flags: EnvsubstFlags,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    errors: &mut Vec<String>,
+) -> String {
+    if !text.contains('$') {
+        return String::from(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let simple_name = chars.get(i + 1).is_some_and(|&n| is_alnum(n));
+        let escaped_text = chars.get(i + 1) == Some(&'$') && chars.get(i + 2).is_some();
+        if chars[i] == '$' && escaped_text {
+            out.push('$');
+            i += 2;
+        } else if chars[i] == '$' && simple_name {
+            let len = chars[i + 1..]
+                .iter()
+                .take_while(|&&c| is_name_char(c))
+                .count();
+            let name: String = chars[i + 1..i + 1 + len].iter().collect();
+            out.push_str(&variable(&name, flags, lookup, errors));
+            i += 1 + len;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The `${...}` after its `${`: how many characters it consumed (closing brace included) and
@@ -135,15 +200,14 @@ fn braced(
     let body: &[char] = &rest[..close];
     let consumed = close + 1;
     if body.is_empty() {
-        let mut literal = String::from("${}");
-        return Ok((consumed, std_mem_take(&mut literal)));
+        return Ok((consumed, String::from("${}")));
     }
     // The name is the run of identifier characters (a leading blank or `#` is part of it, as yq
     // reads `${ FOO }` and `${#FOO}`); whatever follows that is not an operator is ignored, so
     // `${FOO^^}` and `${FOO:1}` are `$FOO`.
     let name_len = body
         .iter()
-        .position(|&c| !(c.is_alphanumeric() || matches!(c, '_' | ' ' | '#')))
+        .position(|&c| !(is_alnum(c) || matches!(c, '_' | ' ' | '#')))
         .unwrap_or(body.len());
     let name: String = body[..name_len]
         .iter()
@@ -154,42 +218,37 @@ fn braced(
     let value = lookup(&name);
     let set = value.is_some();
     let non_empty = value.as_deref().is_some_and(|v| !v.is_empty());
-    let text = |v: &Option<String>| v.clone().unwrap_or_default();
     let out = if let Some(default) = operator
         .strip_prefix(":-")
         .or_else(|| operator.strip_prefix(":="))
     {
         if non_empty {
-            text(&value)
+            value.unwrap_or_default()
         } else {
-            String::from(default)
+            operand(default, flags, lookup, errors)
         }
     } else if let Some(default) = operator
         .strip_prefix('-')
         .or_else(|| operator.strip_prefix('='))
     {
         if set {
-            variable(&name, flags, lookup, errors)
+            check(&name, value, flags, errors)
         } else {
-            String::from(default)
+            operand(default, flags, lookup, errors)
         }
     } else if let Some(alt) = operator
         .strip_prefix(":+")
         .or_else(|| operator.strip_prefix('+'))
     {
         if set {
-            String::from(alt)
+            operand(alt, flags, lookup, errors)
         } else {
             String::new()
         }
     } else {
-        variable(&name, flags, lookup, errors)
+        check(&name, value, flags, errors)
     };
     Ok((consumed, out))
-}
-
-fn std_mem_take(s: &mut String) -> String {
-    core::mem::take(s)
 }
 
 #[cfg(test)]
@@ -237,6 +296,26 @@ mod tests {
         }
         assert_eq!(
             run("${FOO", none),
+            Err("closing brace expected".to_string())
+        );
+
+        // The syntax error comes first, then what was found before it (yq lists both).
+        let nu = EnvsubstFlags {
+            no_unset: true,
+            ..none
+        };
+        assert_eq!(
+            run("$MISSING ${FOO", nu),
+            Err("closing brace expected\nvariable ${MISSING} not set".to_string())
+        );
+        assert_eq!(
+            run(
+                "$MISSING ${FOO",
+                EnvsubstFlags {
+                    fail_fast: true,
+                    ..nu
+                }
+            ),
             Err("closing brace expected".to_string())
         );
     }
