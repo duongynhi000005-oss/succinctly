@@ -233,6 +233,14 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
     out: &mut Out,
     s: &str,
 ) -> core::fmt::Result {
+    // The common case, printable ASCII with nothing to escape, is written whole.
+    if s.bytes()
+        .all(|b| (0x20..0x7F).contains(&b) && b != b'"' && b != b'\\')
+    {
+        out.write_char('"')?;
+        out.write_str(s)?;
+        return out.write_char('"');
+    }
     out.write_char('"')?;
     let escape_all = s.starts_with('\u{FEFF}');
     for c in s.chars() {

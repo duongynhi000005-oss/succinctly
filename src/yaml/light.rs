@@ -22,7 +22,7 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::string::ToString;
 
-use super::encode_style::write_go_yaml_string;
+use super::encode_style::{write_go_yaml_double_quoted, write_go_yaml_string};
 use super::index::YamlIndex;
 use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
 use super::scalar::{
@@ -1985,15 +1985,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // containing a supplementary-plane character
                             // (U+10000+, e.g. most emoji) rather than keep
                             // it block-styled (verified against the pinned
-                            // oracle). Matched here even though our own
-                            // quoting doesn't escape it the way real yq's
-                            // `\U` form does - a separate, pre-existing gap
-                            // in `stream_yaml_double_quoted` that predates
-                            // this fix and affects *any* double-quoted
-                            // source scalar, not just block scalars - this
-                            // narrows the divergence to that one
-                            // already-existing gap instead of adding a
-                            // second, style-selection one on top of it.
+                            // oracle); the quoted form is spelled `\U` like
+                            // real yq's (#4850).
                             let has_astral = decoded.chars().any(|c| c as u32 > 0xFFFF);
                             // A block scalar's content indentation is
                             // either explicit (`|N`) or auto-detected from
@@ -9692,7 +9685,7 @@ fn stream_yaml_nonstring_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
 ) -> core::fmt::Result {
     let s = key.key_string();
     if needs_yaml_quoting(&s) {
-        stream_yaml_double_quoted(out, &s)
+        write_go_yaml_double_quoted(out, &s)
     } else {
         out.write_str(&s)
     }
@@ -9802,7 +9795,7 @@ fn stream_yaml_block_scalar_quoted<Out: core::fmt::Write>(
     decoded: &str,
 ) -> core::fmt::Result {
     if needs_yaml_quoting(decoded) {
-        stream_yaml_double_quoted(out, decoded)
+        write_go_yaml_double_quoted(out, decoded)
     } else {
         out.write_str(decoded)
     }
@@ -9992,10 +9985,10 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
         YamlString::DoubleQuoted { .. } if canonicalize => {
             match write_go_yaml_string(out, &str_val, false) {
                 Some(written) => Ok(written?),
-                None => Ok(stream_yaml_double_quoted(out, &str_val)?),
+                None => Ok(write_go_yaml_double_quoted(out, &str_val)?),
             }
         }
-        YamlString::DoubleQuoted { .. } => Ok(stream_yaml_double_quoted(out, &str_val)?),
+        YamlString::DoubleQuoted { .. } => Ok(write_go_yaml_double_quoted(out, &str_val)?),
         YamlString::SingleQuoted { .. } => Ok(stream_yaml_single_quoted(out, &str_val)?),
         YamlString::Unquoted { .. } => {
             // #996: checked before the verbatim-echo fallback below,
@@ -10022,7 +10015,7 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
                 || str_val.bytes().any(|b| b < 0x20)
                 || starts_seq_entry(str_val.as_bytes(), 0)
             {
-                Ok(stream_yaml_double_quoted(out, &str_val)?)
+                Ok(write_go_yaml_double_quoted(out, &str_val)?)
             } else {
                 Ok(out.write_str(&str_val)?)
             }
@@ -10142,32 +10135,6 @@ fn looks_like_yaml_number(s: &str) -> bool {
     }
 
     true
-}
-
-/// Stream a double-quoted YAML string with proper escaping.
-fn stream_yaml_double_quoted<Out: core::fmt::Write>(out: &mut Out, s: &str) -> core::fmt::Result {
-    out.write_char('"')?;
-
-    for ch in s.chars() {
-        match ch {
-            '"' => out.write_str("\\\"")?,
-            '\\' => out.write_str("\\\\")?,
-            '\n' => out.write_str("\\n")?,
-            '\r' => out.write_str("\\r")?,
-            '\t' => out.write_str("\\t")?,
-            c if (c as u32) < 0x20 => {
-                // Control characters as \xNN
-                let b = c as u8;
-                out.write_str("\\x")?;
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                out.write_char(HEX[(b >> 4) as usize] as char)?;
-                out.write_char(HEX[(b & 0xf) as usize] as char)?;
-            }
-            c => out.write_char(c)?,
-        }
-    }
-
-    out.write_char('"')
 }
 
 /// Stream a single-quoted YAML string with proper escaping.
