@@ -5887,7 +5887,7 @@ is `p: 2, q: 3` in yq and was `p: 3, q: 4` here, the shared node incremented twi
 resolves below an alias position that is still its anchor's copy are not targets
 (`alias_identity::drop_below_alias`); explicit paths through an alias are, as before (yq's rule 6).
 
-Still diverging: `..` over an owned value (`to_entries | .[] | ..` expands the alias), a merge key
+Still diverging: a `..` write behind a navigation stage (`.y | (.. | select(tag == "!!int")) |= . + 5`) still goes into an alias node inside the navigated subtree, since the alias table names positions from the document root; `..` over an owned value (`to_entries | .[] | ..` expands the alias), a merge key
 (`<<: *b`, which yq also treats as the stop, listing `m.<<` where this lists the merged `m.p`/`m.q`,
 and which it writes through to the anchor: `.m.p |= . + 1` also changes `base.p` there), and
 `recurse(f; cond)`.
