@@ -3347,6 +3347,10 @@ impl<'a> Parser<'a> {
                         Self::parse_first_expr,
                     )
                 } else if self.matches_keyword("last") {
+                    // #3560: yq has no `last` -- its lexer rejects the name in
+                    // every form -- so it is gated like the rest of the jq-only
+                    // surface (unlike `first`, which yq has its own operator for).
+                    self.reject_unless_jq_extensions("last")?;
                     self.parse_shadowable_special_form(keyword_start, "last", Self::parse_last_expr)
                 } else if self.matches_keyword("def") {
                     // Phase 9: Function definition
@@ -13344,6 +13348,7 @@ mod tests {
             "isinfinite",
             "isnan",
             "isnormal",
+            "last",
             "leaf_paths",
             "limit",
             "localtime",
@@ -13483,7 +13488,7 @@ mod tests {
             "inputs",
             "input_line_number",
         ];
-        /// yq's lexer rejects the name and `succinctly yq` still accepts it without the flag -- a known gap, not a decision (#3560 is the same question for `last`). Gating one means moving it to `GATED` and updating the tests that rely on it.
+        /// yq's lexer rejects the name and `succinctly yq` still accepts it without the flag -- a known gap, not a decision. Gating one means moving it to `GATED` and updating the tests that rely on it.
         const UNGATED_GAP: &[&str] = &[
             "arrays",
             "booleans",
@@ -13511,7 +13516,6 @@ mod tests {
             "iterables",
             "keys_unsorted",
             "label",
-            "last",
             "ltrim",
             "modulemeta",
             "normals",

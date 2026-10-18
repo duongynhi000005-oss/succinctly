@@ -41746,11 +41746,16 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         // `null | first = 9` wrote `9` where jq writes `[9]`). Re-dispatching
         // as the index step reuses every `Index` rule -- null input, an empty
         // array's `-1`, the near-access wording -- instead of restating them.
-        // jq mode only, because yq's `first` is not `.[0]`: it is a root-only
-        // operator (`first = 9` is `[9,2]` on `[1,2]`, `.a | first` is an
-        // error, and `last` is a lexer error, all yq v4.53.3), so yq mode has
-        // its own arm below (#3551).
-        Expr::Builtin(step @ (Builtin::First | Builtin::Last)) if S::TAG == EvalTag::Jq => {
+        // `first` is jq mode only, because yq's `first` is not `.[0]`: it is a
+        // root-only operator (`first = 9` is `[9,2]` on `[1,2]`, `.a | first` is
+        // an error, yq v4.53.3), so yq mode has its own arm below (#3551). `last`
+        // is not gated: real yq's lexer rejects it outright, so yq mode only
+        // reaches it through `--jq-extensions`, whose builtins mean what jq
+        // defines them as (#3560, as for `nth` below). Without this arm a write
+        // through it was silently discarded (`(.a | last) = 9` left `[1,2]`, exit 0).
+        Expr::Builtin(step @ (Builtin::First | Builtin::Last))
+            if S::TAG == EvalTag::Jq || matches!(step, Builtin::Last) =>
+        {
             let component = Expr::index(if matches!(step, Builtin::First) {
                 0
             } else {

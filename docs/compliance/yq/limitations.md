@@ -1635,9 +1635,10 @@ Under `--jq-extensions`, `path(first)` on an empty sequence or `null` yields no 
 
 Not changed here: real yq reads bare `first` only at the head of an expression (`.a | first` is
 `'|' expects 2 args but there is 1`), where `succinctly yq` applies it after a pipe as it does in
-jq mode. Whether bare and argument `last`, which real yq's lexer rejects, should be gated behind
-`--jq-extensions` is a separate decision, because existing tests pin it ungated by design
-(#1521); it is tracked in #3560.
+jq mode. Bare and argument `last`, which real yq's lexer rejects in every form, are gated behind
+`--jq-extensions` like the rest of the jq-only surface (#3560): ADR-0018 rule 3 makes matching the
+reference the default, and none of rule 4's conditions lets us keep accepting it. Under the flag
+they keep jq's meaning (#1521).
 
 ### `input`, `inputs`, `input_line_number` — resolved as a call target, matching real yq's lexer
 
@@ -1712,18 +1713,18 @@ in a yq filter is far more likely to be a jq habit (`limit(1; f)`, `reduce`, `fo
 empty result, and a loud error is the safer answer to it. The jq-style multi-argument forms that
 `--jq-extensions` enables (`limit`, `range`, `sub`, ...) are unaffected.
 
-### Jq-only names yq's lexer rejects that are still accepted without `--jq-extensions` (#1887, #3560)
+### Jq-only names yq's lexer rejects that are still accepted without `--jq-extensions` (#1887)
 
 A test (`every_parsed_keyword_is_classified_for_the_jq_extensions_gate_1887`, `src/jq/parser.rs`)
 now classifies every keyword the parser matches against the pinned `yq` — gated, yq-native, a
 documented succinctly extension, or a known gap — so a new jq-only name can no longer ship ungated
 unnoticed. The sweep behind it found the gap list below: names yq's lexer rejects
 (`invalid input text`) that `succinctly yq` parses without the flag. Gating them is a behaviour
-change for existing yq scripts and tests (#3560 is the same question for `last`), so they stay
-accepted until it is decided; moving one to the test's `GATED` table is the whole change on the
+change for existing yq scripts and tests, so they stay accepted until it is decided (`last` was
+gated by #3560); moving one to the test's `GATED` table is the whole change on the
 parser side.
 
-`arrays`, `booleans`, `break`, `builtins`, `catch`, `def`, `elif`, `else`, `empty`, `end`, `finites`, `fromjsonstream`, `halt`, `halt_error`, `if`, `in`, `isarray`, `isboolean`, `isnull`, `isnumber`, `isobject`, `isstring`, `isvalid`, `iterables`, `keys_unsorted`, `label`, `last`, `ltrim`, `modulemeta`, `normals`, `nulls`, `numbers`, `objects`, `recurse`, `recurse_down`, `repeat`, `rtrim`, `scalars`, `stderr`, `strings`, `then`, `toboolean`, `tojsonstream`, `try`, `until`, `utf8bytelength`, `values`, `while`.
+`arrays`, `booleans`, `break`, `builtins`, `catch`, `def`, `elif`, `else`, `empty`, `end`, `finites`, `fromjsonstream`, `halt`, `halt_error`, `if`, `in`, `isarray`, `isboolean`, `isnull`, `isnumber`, `isobject`, `isstring`, `isvalid`, `iterables`, `keys_unsorted`, `label`, `ltrim`, `modulemeta`, `normals`, `nulls`, `numbers`, `objects`, `recurse`, `recurse_down`, `repeat`, `rtrim`, `scalars`, `stderr`, `strings`, `then`, `toboolean`, `tojsonstream`, `try`, `until`, `utf8bytelength`, `values`, `while`.
 
 ### 3-argument `sub(re; s; flags)` — resolved, real yq ignores everything past the pattern
 

@@ -7351,7 +7351,8 @@ fn test_duplicate_mapping_key_survives_first_last_stream() -> Result<()> {
     assert_eq!(code, 0);
     assert_eq!(first, "a: 1\na: 2\n");
 
-    let (last, code) = run_yq_stdin("last(.[])", yaml, &[])?;
+    // yq has no `last`, so the flag is what lets it parse at all (#3560).
+    let (last, code) = run_yq_stdin("last(.[])", yaml, &["--jq-extensions"])?;
     assert_eq!(code, 0);
     assert_eq!(last, "b: 3\nb: 4\n");
 
@@ -10591,7 +10592,7 @@ fn test_yaml_explicit_tag_error_messages_agree_with_type_903() -> Result<()> {
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "");
 
-    let (_, err, code) = run_yq_stdin_with_stderr(".a | last", input, &[])?;
+    let (_, err, code) = run_yq_stdin_with_stderr(".a | last", input, &["--jq-extensions"])?;
     assert_eq!(code, 1);
     assert!(err.contains("Cannot index string with"), "{err}");
 
@@ -18412,7 +18413,11 @@ fn test_array_keys_unsorted_yaml_materialize_fallback_684() -> Result<()> {
     assert_eq!(code, 0);
     assert_eq!(output.trim(), "0");
 
-    let (output, code) = run_yq_stdin("keys_unsorted | last", input, &["-o", "json", "-I0"])?;
+    let (output, code) = run_yq_stdin(
+        "keys_unsorted | last",
+        input,
+        &["--jq-extensions", "-o", "json", "-I0"],
+    )?;
     assert_eq!(code, 0);
     assert_eq!(output.trim(), "2");
 
@@ -57398,13 +57403,18 @@ mod issue_1360_identity_not_jq_equality {
 /// (ADR-0018). Kept in this file because the yq spawn helpers live here.
 #[test]
 fn test_wrong_arity_special_form_keeps_yq_parse_error_2686() -> Result<()> {
-    for (filter, want_fragment) in [
-        ("until(1;2;3)", "expected ')', found ';'"),
-        ("while(1;2;3)", "expected ')', found ';'"),
-        ("first(1;2)", "expected ')', found ';'"),
-        ("last(1;2)", "expected ')', found ';'"),
+    for (filter, want_fragment, args) in [
+        ("until(1;2;3)", "expected ')', found ';'", &[][..]),
+        ("while(1;2;3)", "expected ')', found ';'", &[][..]),
+        ("first(1;2)", "expected ')', found ';'", &[][..]),
+        // yq has no `last`, so it parses only under the flag (#3560).
+        (
+            "last(1;2)",
+            "expected ')', found ';'",
+            &["--jq-extensions"][..],
+        ),
     ] {
-        let (_stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "a: 1\n", &[])?;
+        let (_stdout, stderr, code) = run_yq_stdin_with_stderr(filter, "a: 1\n", args)?;
         assert_ne!(code, 0, "`{filter}`: expected a rejection");
         assert!(
             stderr.contains(want_fragment),
@@ -62514,9 +62524,16 @@ fn test_yq_def_call_over_last_keeps_no_path_register_4109() -> Result<()> {
         "del(. as $x | def g: last(.a); g | $x.b)",
         "(. as $x | def g: last(.a); g | $x.b) = 5",
     ] {
-        let (stdout, code) = run_yq_stdin(filter, doc, &["-o", "json"])?;
+        // yq has no `last`, so the flag is what lets the filter parse (#3560); without it the
+        // gate's error would satisfy the refusal checks for the wrong reason.
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["--jq-extensions", "-o", "json"])?;
         assert_ne!(code, 0, "`{filter}`: stdout {stdout:?}");
         assert!(stdout.is_empty(), "`{filter}`: stdout {stdout:?}");
+        assert!(
+            !stderr.contains("is not part of yq's syntax"),
+            "`{filter}`: refused by the parse gate, not the register: {stderr:?}"
+        );
     }
     Ok(())
 }
@@ -63601,7 +63618,10 @@ fn test_yq_recurse_structural_descent_reads_position_like_recursive_descent_3773
 fn test_yq_consumer_of_a_prefetched_key_body_keeps_the_eager_pipe_3639() -> Result<()> {
     for (filter, extra) in [
         (r#"{"a":1} | [first((.a, error("E2")) | key)]"#, ""),
-        (r#"{"a":1} | [last((.a, error("E2")) | key)]"#, ""),
+        (
+            r#"{"a":1} | [last((.a, error("E2")) | key)]"#,
+            "--jq-extensions",
+        ),
         (
             r#"{"a":1} | isempty((.a, error("E2")) | key)"#,
             "--jq-extensions",
@@ -65005,6 +65025,69 @@ fn test_yq_reduce_foreach_are_gated_behind_jq_extensions_2065() -> Result<()> {
     // A mapping key spelled like the keyword is a field name, not the fold.
     let (out, code) = run_yq_stdin(".reduce", "reduce: 7\n", &[])?;
     assert_eq!((out.trim(), code), ("7", 0));
+    Ok(())
+}
+
+/// #3560: real yq v4.53.3's lexer rejects `last` in every form (`lexer: invalid input text
+/// "last"`), so yq mode gates it behind `--jq-extensions` like the rest of the jq-only surface
+/// (ADR-0018 rule 3). `first` is not gated: yq has its own operator of that name (#3545).
+#[test]
+fn test_yq_last_is_gated_behind_jq_extensions_3560() -> Result<()> {
+    for filter in [
+        "last",
+        "last(.a[])",
+        ".a | last",
+        "[.a | last]",
+        // A branch that never runs is rejected too: the gate is a parse-time one.
+        "if false then last else . end",
+    ] {
+        let (_, stderr, code) = run_yq_stdin_with_stderr(filter, "a: [1, 2]\n", &[])?;
+        assert_eq!(code, 1, "`{filter}`: {stderr:?}");
+        assert!(
+            stderr.contains("\"last\" is not part of yq's syntax")
+                && stderr.contains("--jq-extensions"),
+            "`{filter}`: {stderr:?}"
+        );
+    }
+    for (filter, expected) in [
+        (".a | last", "2"),
+        ("last(.a[])", "2"),
+        ("[.a | last]", "[2]"),
+        // Under the flag `last` is jq's `.[-1]` in a path too; a write through it
+        // used to be discarded at exit 0.
+        ("(.a | last) = 9 | .a", "[1,9]"),
+        ("(.a | last) |= . + 1 | .a", "[1,3]"),
+        ("del(.a | last) | .a", "[1]"),
+        ("[.a | path(last)]", "[[-1]]"),
+    ] {
+        let (out, code) = run_yq_stdin(
+            filter,
+            "a: [1, 2]\n",
+            &["--jq-extensions", "-o=json", "-I=0"],
+        )?;
+        assert_eq!((out.trim(), code), (expected, 0), "`{filter}`");
+    }
+    // The write lands on the slurp and eval-all routes too, not only on the default one.
+    for (filter, flag) in [
+        ("(.[0].a | last) = 9 | .[0].a", "-s"),
+        ("(.a | last) = 9 | .a", "--eval-all"),
+    ] {
+        let (out, code) = run_yq_stdin(
+            filter,
+            "a: [1, 2]\n",
+            &["--jq-extensions", "-o=json", "-I=0", flag],
+        )?;
+        assert_eq!((out.trim(), code), ("[1,9]", 0), "`{filter}` {flag}");
+    }
+    // A mapping key spelled like the keyword is a field name, not the builtin.
+    let (out, code) = run_yq_stdin(".last", "last: 7\n", &[])?;
+    assert_eq!((out.trim(), code), ("7", 0));
+    // `first` is yq's own operator and stays ungated.
+    let (out, code) = run_yq_stdin(".a | first", "a: [1, 2]\n", &[])?;
+    assert_eq!((out.trim(), code), ("1", 0));
+    // jq mode is a different reference and keeps `last`.
+    let (out, _, code) = run_jq_stdin_with_stderr("last", "[1,2]", &["-c"])?;
+    assert_eq!((out.trim(), code), ("2", 0));
     Ok(())
 }
 
