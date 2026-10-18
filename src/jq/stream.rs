@@ -1209,30 +1209,10 @@ pub fn stream_lazy_keys_yaml<W: core::fmt::Write, F: DocumentFields>(
     }
 }
 
-/// Stream a double-quoted YAML string with proper escaping.
+/// Stream a double-quoted YAML string the way go-yaml's emitter writes one (#4850), as
+/// `crate::yaml`'s source-scalar writer does.
 fn stream_yaml_double_quoted<W: core::fmt::Write>(out: &mut W, s: &str) -> core::fmt::Result {
-    out.write_char('"')?;
-
-    for ch in s.chars() {
-        match ch {
-            '"' => out.write_str("\\\"")?,
-            '\\' => out.write_str("\\\\")?,
-            '\n' => out.write_str("\\n")?,
-            '\r' => out.write_str("\\r")?,
-            '\t' => out.write_str("\\t")?,
-            c if c < ' ' => {
-                // Control characters as \xNN
-                let b = c as u8;
-                out.write_str("\\x")?;
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                out.write_char(HEX[(b >> 4) as usize] as char)?;
-                out.write_char(HEX[(b & 0xf) as usize] as char)?;
-            }
-            c => out.write_char(c)?,
-        }
-    }
-
-    out.write_char('"')
+    write_go_yaml_double_quoted(out, s)
 }
 
 #[cfg(test)]

@@ -12668,16 +12668,12 @@ fn test_block_scalar_bare_top_level_projection_drops_all_styling_852() -> Result
 fn test_block_scalar_astral_character_falls_back_to_quoted() -> Result<()> {
     // Real yq always quotes a block scalar containing a supplementary-
     // plane character (U+10000+, e.g. most emoji) rather than keep it
-    // block-styled (found in review, verified against the pinned oracle).
-    // Our own quoting doesn't escape it the way real yq's `\U` form does
-    // (a separate, pre-existing gap in `stream_yaml_double_quoted`
-    // predating this fix, unrelated to block scalars specifically) - this
-    // test only pins the *style* choice (quoted, not block), not the
-    // escape bytes.
+    // block-styled (found in review, verified against the pinned oracle), spelled
+    // `\U0001F389` (#4850 closed the gap where it was written raw).
     let input = "a: |\n  emoji \u{1F389} here\nb: next\n";
     let (output, exit_code) = run_yq_stdin(".", input, &[])?;
     assert_eq!(exit_code, 0);
-    assert_eq!(output, "a: \"emoji \u{1F389} here\\n\"\nb: next\n");
+    assert_eq!(output, "a: \"emoji \\U0001F389 here\\n\"\nb: next\n");
     Ok(())
 }
 
@@ -13941,6 +13937,38 @@ fn test_yq_json_control_char_escaping_consistent_across_paths() -> Result<()> {
     // Mutual consistency is the core guarantee (#262).
     assert_eq!(stream.trim(), dom.trim(), "streaming vs DOM");
     assert_eq!(stream.trim(), pretty.trim(), "streaming vs pretty");
+    Ok(())
+}
+
+/// #4850: the M2 streaming route writes a double-quoted source scalar the way go-yaml's emitter does,
+/// as the DOM route (any write) already does: the escape letters (`\a \b \e \v \f \0 \N \L \P`),
+/// `\x7F` in upper case, `\U`/`\u` for what it will not write raw, and a printable scalar whole.
+/// Expected text captured from yq v4.53.3.
+#[test]
+fn test_yq_streaming_double_quoted_scalar_escapes_like_go_yaml_4850() -> Result<()> {
+    for (yaml, expected) in [
+        (
+            "a: \"\\a\\b\\e\\x7f\\N\\_ \\0 \\v\\f z\"\n",
+            "a: \"\\a\\b\\e\\x7F\\N\u{a0} \\0 \\v\\f z\"\n",
+        ),
+        (
+            "b: \"\\U0001F600 \\uFEFF x \\x85 \\u2028 \u{e9}\"\n",
+            "b: \"\\U0001F600 \\uFEFF x \\N \\L \u{e9}\"\n",
+        ),
+        (
+            "c: \"plain \\\" q \\\\ s \\t\\n\\r\"\n",
+            "c: \"plain \\\" q \\\\ s \\t\\n\\r\"\n",
+        ),
+        ("d: \"plain\"\n", "d: \"plain\"\n"),
+    ] {
+        let (streamed, code) = run_yq_stdin(".", yaml, &[])?;
+        assert_eq!(code, 0, "{yaml:?}");
+        assert_eq!(streamed, expected, "streaming route for {yaml:?}");
+        // The DOM route (a write) is the reference this agrees with.
+        let (dom, code) = run_yq_stdin(".z = 1", yaml, &[])?;
+        assert_eq!(code, 0, "{yaml:?}");
+        assert_eq!(dom, format!("{expected}z: 1\n"), "DOM route for {yaml:?}");
+    }
     Ok(())
 }
 
