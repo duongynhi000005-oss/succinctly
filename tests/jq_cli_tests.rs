@@ -163655,7 +163655,8 @@ fn test_foreach_update_destructuring_a_wrapped_navigation_of_the_root_marker_483
 /// catch leaves the outer state `null`, which its end-of-path check refuses with the old wording. Every row
 /// captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
-fn test_foreign_marker_destructure_refusal_names_the_pattern_step_in_a_fold_update_4826() -> Result<()> {
+fn test_foreign_marker_destructure_refusal_names_the_pattern_step_in_a_fold_update_4826(
+) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":false}"#,
@@ -164054,6 +164055,107 @@ fn test_foreign_marker_destructure_refusal_names_the_pattern_step_in_a_fold_upda
             r"(. as $x | reduce .a as $i (.; null | try reduce ($x as {a:$a} | .) as $y (.; .))) |= 9",
             "",
             r"Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
+/// #4826: the same wording where the `$x` is bound by an ordinary `.a as $x` ahead of a fold whose register is
+/// elsewhere (#4588), the pattern is a `?//` chain (the last alternative's step names the element), `{$b}`, an array
+/// pattern or a source that indexes the bind's result, and for a `reduce` over a moving source the same chain, `{$a}`,
+/// `[$a]`, `$x | . as P` and a navigated bind. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+fn test_foreign_marker_destructure_refusal_wording_across_patterns_and_routes_4826() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | reduce (1,2) as $i (.; reduce ($x as {b:$b} | .) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as [$b] | .) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$b} ?// [$b] | .) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {$b} | .) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach (($x as {b:$b} | .) | .c) as $y (.; .; .); .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of {"b":1}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $i (.; reduce ($x as {a:$a} ?// [$a] | .) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of {"a":{"b":1}}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $i (.; reduce ($x as {$a} | .) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":{"b":1}}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $i (.; reduce (($x as {a:$a} | .) | .b) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":{"b":1}}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $i (.; reduce ($x as [$a] | .) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element 0 of {"a":{"b":1}}"#,
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $i (.; reduce ($x | . as {a:$a} | .) as $y (.; .)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of {"a":{"b":1}}"#,
             5,
         ),
     ])

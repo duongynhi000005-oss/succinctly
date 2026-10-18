@@ -55631,42 +55631,35 @@ fn leading_destructure_of_marker(
     source: &Expr,
     markers: &[*const Tracked],
 ) -> Option<(OwnedValue, OwnedValue)> {
+    // The first step of `marker as P`, with `marker`'s value as the container it indexes.
+    let step_on = |marker: &Rc<Tracked>, patterns: &[Pattern]| {
+        if !markers.contains(&Rc::as_ptr(marker))
+            || !(patterns.len() == 1 || patterns_all_destructuring_chain(patterns))
+        {
+            return None;
+        }
+        Some((
+            first_destructure_step_element(patterns)?,
+            marker.value.clone(),
+        ))
+    };
     match unwrap_paren(source) {
         Expr::Pipe(stages) => {
             let mut rest = stages.iter().filter(|stage| !is_identity_stage(stage));
             let first = rest.next()?;
             if let Expr::TrackedVar(marker) = unwrap_paren(first) {
                 // `$x | . as P`: the marker is the value the bind's `.` meets.
-                if !markers.contains(&Rc::as_ptr(marker)) {
-                    return None;
-                }
                 let Expr::AsPattern { expr, patterns, .. } = unwrap_paren(rest.next()?) else {
                     return None;
                 };
-                if !is_identity_pipe(expr)
-                    || !(patterns.len() == 1 || patterns_all_destructuring_chain(patterns))
-                {
-                    return None;
-                }
-                return Some((
-                    first_destructure_step_element(patterns)?,
-                    marker.value.clone(),
-                ));
+                return step_on(marker, patterns).filter(|_| is_identity_pipe(expr));
             }
             leading_destructure_of_marker(first, markers)
         }
-        Expr::AsPattern { expr, patterns, .. }
-            if patterns.len() == 1 || patterns_all_destructuring_chain(patterns) =>
-        {
-            let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
-                return None;
-            };
-            markers.contains(&Rc::as_ptr(marker)).then_some(())?;
-            Some((
-                first_destructure_step_element(patterns)?,
-                marker.value.clone(),
-            ))
-        }
+        Expr::AsPattern { expr, patterns, .. } => match unwrap_paren(expr) {
+            Expr::TrackedVar(marker) => step_on(marker, patterns),
+            _ => None,
+        },
         _ => None,
     }
 }
