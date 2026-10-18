@@ -2181,8 +2181,10 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
                             if explicit_key {
                                 // `? key` / `: a: 1`: the value's first entry shares the
-                                // `: ` line (#3587); it is as wide as one indent step.
-                                out.write_char(' ')?;
+                                // `:` line (#3587), at the column one indent step in.
+                                for _ in 1..indent_spaces {
+                                    out.write_char(' ')?;
+                                }
                             } else {
                                 out.write_char('\n')?;
                                 out.write_str(&child_indent)?;

@@ -24843,6 +24843,40 @@ fn test_json_key_over_128_bytes_is_an_explicit_key_3587() -> Result<()> {
     Ok(())
 }
 
+/// #3587: a container value after `? key` starts on the `:` line at the column one indent step in
+/// (`:   c: 1` at `-I4`), and with an anchor it starts on the next line (`: &x` then the content);
+/// both from yq v4.53.3, on the streaming route and the DOM route.
+#[test]
+fn test_explicit_key_container_value_follows_the_indent_step_3587() -> Result<()> {
+    let json = "{\"a\\nb\":{\"c\":1},\"d\\ne\":[1,2]}";
+    for (step, expected) in [
+        (
+            "3",
+            "? |-\n   a\n   b\n:  c: 1\n? |-\n   d\n   e\n:  - 1\n   - 2\n",
+        ),
+        (
+            "4",
+            "? |-\n    a\n    b\n:   c: 1\n? |-\n    d\n    e\n:   - 1\n    - 2\n",
+        ),
+    ] {
+        for extra in [&[][..], &["-P"][..]] {
+            let mut argv = vec!["-p", "json", "-o", "yaml", "-I", step];
+            argv.extend_from_slice(extra);
+            let (out, stderr, code) = run_yq_stdin_with_stderr(".", json, &argv)?;
+            assert_eq!(code, 0, "-I{step} {extra:?}: {stderr}");
+            assert_eq!(out, expected, "-I{step} {extra:?}");
+        }
+    }
+    let (out, stderr, code) = run_yq_stdin_with_stderr(
+        ".[\"a\\nb\"] anchor=\"x\"",
+        "{\"a\\nb\":{\"c\":1}}",
+        &["-p", "json", "-o", "yaml"],
+    )?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "? |-\n  a\n  b\n: &x\n  c: 1\n");
+    Ok(())
+}
+
 /// #3587: where go-yaml's literal block would not read back, ours differs from yq on purpose.
 /// A string that starts with a line break and then a space is written by yq `|-` with the space
 /// folded into the indentation, so it reads back without it (`"\n a"` becomes `"\na"`); ours

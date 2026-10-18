@@ -7133,13 +7133,15 @@ fn emit_yaml_value_at_depth(
                         // #3587: a JSON key go-yaml cannot write as a simple key (a line
                         // break, over 128 bytes) is `? key` and the `:` on a line of its own
                         // at the mapping's column.
-                        let explicit_key = config
-                            .json_sourced_floats
-                            .then(|| {
-                                go_yaml_explicit_key_scalar(k, &val_indent, config.indent_str.len())
-                            })
-                            .flatten()
-                            .map(|scalar| format!("? {scalar}\n{indent}"));
+                        let explicit_key = (config.json_sourced_floats
+                            && comments.key_style(k).is_empty()
+                            && comments.key_anchor(k).is_none()
+                            && comments.key_tag(k).is_none())
+                        .then(|| {
+                            go_yaml_explicit_key_scalar(k, &val_indent, config.indent_str.len())
+                        })
+                        .flatten()
+                        .map(|scalar| format!("? {scalar}\n{indent}"));
                         let is_explicit_key = explicit_key.is_some();
                         let key = explicit_key.unwrap_or_else(|| {
                             with_key_anchor(
@@ -7189,11 +7191,17 @@ fn emit_yaml_value_at_depth(
                             // comment text (#763).
                             let tag = block_container_tag(v, field_comments)
                                 .map_or_else(String::new, |tag| format!(" {tag}"));
-                            if is_explicit_key {
+                            if is_explicit_key
+                                && anchor.is_empty()
+                                && tag.is_empty()
+                                && key_comment_suffix.is_empty()
+                            {
                                 // `? key` / `: a: 1`: the value's first entry shares the
-                                // `: ` line (#3587).
+                                // `:` line (#3587), at the column one indent step in. With an
+                                // anchor, tag or comment it starts on the next line, as yq's does.
                                 let first = val.strip_prefix(val_indent.as_str()).unwrap_or(&val);
-                                format!("{indent}{key}:{anchor}{tag}{key_comment_suffix} {first}")
+                                let pad = " ".repeat(config.indent_str.len().saturating_sub(1));
+                                format!("{indent}{key}:{pad}{first}")
                             } else {
                                 format!("{indent}{key}:{anchor}{tag}{key_comment_suffix}\n{val}")
                             }
