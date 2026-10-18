@@ -34,9 +34,11 @@ use succinctly::json::light::JsonCursor;
 use succinctly::json::validate;
 use succinctly::json::JsonIndex;
 use succinctly::yaml::{
-    deeper_yaml_indent, format_float_yq_yaml, format_float_yq_yaml_nested, go_yaml_dom_scalar,
-    go_yaml_double_quoted_scalar, go_yaml_tagged_str_scalar, resolve_plain_sourced,
-    stream_json_sequence, stream_yaml_sequence, ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
+    deeper_yaml_indent, format_float_yq_yaml, format_float_yq_yaml_nested, go_yaml_block_scalar,
+    go_yaml_dom_scalar, go_yaml_double_quoted_scalar, go_yaml_explicit_key_scalar,
+    go_yaml_forces_double_quotes, go_yaml_multiline_scalar, go_yaml_tagged_str_scalar,
+    resolve_plain_sourced, stream_json_sequence, stream_yaml_sequence, ResolvedScalar, YamlCursor,
+    YamlIndex, YamlValue,
 };
 
 use super::m2_gate::{can_use_m2_streaming, eval_all_matches_per_document};
@@ -7125,21 +7127,36 @@ fn emit_yaml_value_at_depth(
                 let items: Vec<(String, bool)> = entries
                     .iter()
                     .map(|(k, v)| {
-                        let key = with_key_anchor(
-                            comments,
-                            k,
-                            yaml_quote_key(
-                                k,
-                                comments.key_style(k),
-                                false,
-                                config.json_sourced_floats,
-                            ),
-                        );
-                        let field_comments = comments.field(k);
-                        let comment_suffix = trailing_comment_suffix(field_comments, indent);
                         // #1485/#1881: rounded up from the field's own
                         // column -- see `compact_child_indent`.
                         let val_indent = compact_child_indent(indent, &config.indent_str);
+                        // #3587: a JSON key go-yaml cannot write as a simple key (a line
+                        // break, over 128 bytes) is `? key` and the `:` on a line of its own
+                        // at the mapping's column.
+                        let explicit_key = (config.json_sourced_floats
+                            && comments.key_style(k).is_empty()
+                            && comments.key_anchor(k).is_none()
+                            && comments.key_tag(k).is_none())
+                        .then(|| {
+                            go_yaml_explicit_key_scalar(k, &val_indent, config.indent_str.len())
+                        })
+                        .flatten()
+                        .map(|scalar| format!("? {scalar}\n{indent}"));
+                        let is_explicit_key = explicit_key.is_some();
+                        let key = explicit_key.unwrap_or_else(|| {
+                            with_key_anchor(
+                                comments,
+                                k,
+                                yaml_quote_key(
+                                    k,
+                                    comments.key_style(k),
+                                    false,
+                                    config.json_sourced_floats,
+                                ),
+                            )
+                        });
+                        let field_comments = comments.field(k);
+                        let comment_suffix = trailing_comment_suffix(field_comments, indent);
                         let anchor = anchor_decl_prefix(field_comments);
                         // Check if value needs to be on next line - a
                         // flow-styled container stays on the key's own line
@@ -7174,7 +7191,20 @@ fn emit_yaml_value_at_depth(
                             // comment text (#763).
                             let tag = block_container_tag(v, field_comments)
                                 .map_or_else(String::new, |tag| format!(" {tag}"));
-                            format!("{indent}{key}:{anchor}{tag}{key_comment_suffix}\n{val}")
+                            if is_explicit_key
+                                && anchor.is_empty()
+                                && tag.is_empty()
+                                && key_comment_suffix.is_empty()
+                            {
+                                // `? key` / `: a: 1`: the value's first entry shares the
+                                // `:` line (#3587), at the column one indent step in. With an
+                                // anchor, tag or comment it starts on the next line, as yq's does.
+                                let first = val.strip_prefix(val_indent.as_str()).unwrap_or(&val);
+                                let pad = " ".repeat(config.indent_str.len().saturating_sub(1));
+                                format!("{indent}{key}:{pad}{first}")
+                            } else {
+                                format!("{indent}{key}:{anchor}{tag}{key_comment_suffix}\n{val}")
+                            }
                         } else if let Some(kc) = comments.key_comment_if_value_absent(k) {
                             // The deferred value materialized as nothing at
                             // all - the key's own comment stands alone with
@@ -7331,33 +7361,6 @@ fn yaml_single_quote_escaped(s: &str) -> String {
 /// (no `\n`, `\t`, ...), unlike double-quoted.
 fn can_single_quote(s: &str) -> bool {
     !s.chars().any(|c| c.is_ascii_control())
-}
-
-/// A character go-yaml's emitter treats as a line break, other than `\r`, which it
-/// will not write raw.
-fn is_yaml_line_break(c: char) -> bool {
-    matches!(c, '\n' | '\u{85}' | '\u{2028}' | '\u{2029}')
-}
-
-/// Whether go-yaml writes a string with a line break double-quoted whatever the
-/// requested style: a character its emitter will not write raw (a control, `\r`,
-/// a character outside the BMP) or a space before a line break (libyaml's
-/// `special_characters` and `space_break`).
-fn go_yaml_forces_double_quotes(s: &str) -> bool {
-    let printable = |c: char| {
-        matches!(
-            c,
-            '\n' | '\t' | '\u{20}'..='\u{7E}' | '\u{A0}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}'
-        ) && c != '\u{FEFF}'
-    };
-    let mut previous = '\0';
-    for c in s.chars() {
-        if !printable(c) || (previous == ' ' && is_yaml_line_break(c)) {
-            return true;
-        }
-        previous = c;
-    }
-    false
 }
 
 /// One element of a flow collection being rendered: its text, and the line comment
@@ -7682,7 +7685,7 @@ fn tagged_string_text(
         if in_flow {
             go_yaml_double_quoted_scalar(s)
         } else {
-            emit_block_scalar(s, false, indent, config.indent_str.len())
+            go_yaml_block_scalar(s, false, indent, config.indent_str.len())
                 .unwrap_or_else(|| go_yaml_double_quoted_scalar(s))
         }
     } else {
@@ -7716,9 +7719,19 @@ fn emit_string_scalar(
             _ => None,
         };
         if let Some(folded) = folded {
-            if let Some(block) = emit_block_scalar(s, folded, indent, config.indent_str.len()) {
+            if let Some(block) = go_yaml_block_scalar(s, folded, indent, config.indent_str.len()) {
                 return block;
             }
+        }
+    }
+    // U+2028/U+2029 alone: single quotes across lines where go-yaml allows them (#3587).
+    if !in_flow
+        && matches!(style, "" | "flow" | VALUE_STYLE_STRING)
+        && !s.contains('\n')
+        && s.contains(['\u{2028}', '\u{2029}'])
+    {
+        if let Some(scalar) = go_yaml_multiline_scalar(s, indent, config.indent_str.len()) {
+            return scalar;
         }
     }
     if matches!(style, "literal" | "folded")
@@ -7770,99 +7783,6 @@ fn with_trailing_comment(rendered: String, comment_suffix: &str) -> String {
         }
     }
     format!("{rendered}{comment_suffix}")
-}
-
-/// The block scalar (`|` literal or `>` folded) go-yaml writes for `s`, header
-/// line included and without the final line break (the entry separator
-/// supplies it), or `None` when go-yaml would not write one (#2707).
-///
-/// `indent` is the indent of the content lines and `step` the width of one
-/// indent unit, which is the indentation indicator go-yaml writes when the first
-/// line starts with a space (`|2-`). Ported from libyaml's
-/// `yaml_emitter_analyze_scalar` (what disqualifies a block) and
-/// `yaml_emitter_write_{literal,folded}_scalar` (how it is written), then
-/// checked against yq v4.53.3 on random strings:
-///
-/// - the chomping indicator comes from the trailing breaks: none is `-`, one
-///   is clip (no indicator), two or more (or a lone break) is `+`;
-/// - a string go-yaml cannot write as a block (empty, a character it will not
-///   write raw, a space before a break, a trailing space, any break other
-///   than `\n`) is `None`, and its caller falls back to quoting;
-/// - folded writes an empty line for every `\n` -- except that go-yaml tests the
-///   first character of the *string*, not the one after the break, so a string
-///   starting with a space, tab or break gets none.
-fn emit_block_scalar(s: &str, folded: bool, indent: &str, step: usize) -> Option<String> {
-    if s.is_empty() || step == 0 || step > 9 {
-        return None;
-    }
-    let last = s.chars().next_back()?;
-    if go_yaml_forces_double_quotes(s) || last == ' ' || (last != '\n' && is_yaml_line_break(last))
-    {
-        return None;
-    }
-    let hint = if s.starts_with(' ') {
-        char::from_digit(step as u32, 10)?.to_string()
-    } else {
-        String::new()
-    };
-    let breaks_at_end = s
-        .chars()
-        .rev()
-        .take_while(|&c| is_yaml_line_break(c))
-        .count();
-    let chomp = match breaks_at_end {
-        0 => "-",
-        1 if s.len() > 1 => "",
-        _ => "+",
-    };
-    let mut out = format!("{}{hint}{chomp}\n", if folded { '>' } else { '|' });
-    // The final break is the entry separator, not content.
-    let text: &str = s.strip_suffix(is_yaml_line_break).unwrap_or(s);
-    if folded {
-        // go-yaml's quirk, see the doc comment: the test reads the string's start.
-        let extra_break = s
-            .chars()
-            .find(|&c| !is_yaml_line_break(c))
-            .is_some_and(|c| !matches!(c, ' ' | '\t'));
-        let mut breaks = true;
-        let mut leading_spaces = true;
-        for c in text.chars() {
-            if is_yaml_line_break(c) {
-                if !breaks && !leading_spaces && c == '\n' && extra_break {
-                    out.push('\n');
-                }
-                out.push(c);
-                breaks = true;
-            } else {
-                if breaks {
-                    out.push_str(indent);
-                    leading_spaces = matches!(c, ' ' | '\t');
-                }
-                out.push(c);
-                breaks = false;
-            }
-        }
-        // The final break, when the string ended in one, still goes through the
-        // loop above in go-yaml and earns its extra empty line.
-        if s.ends_with('\n') && !breaks && !leading_spaces && extra_break {
-            out.push('\n');
-        }
-    } else {
-        let mut breaks = true;
-        for c in text.chars() {
-            if is_yaml_line_break(c) {
-                out.push(c);
-                breaks = true;
-            } else {
-                if breaks {
-                    out.push_str(indent);
-                }
-                out.push(c);
-                breaks = false;
-            }
-        }
-    }
-    Some(out)
 }
 
 /// Quote a YAML string the way [`yaml_quote_string`] does, except honoring
