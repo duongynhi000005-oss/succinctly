@@ -419,8 +419,8 @@ fn test_parity_formats_over_iteration() {
     }
 }
 
-/// Non-finite floats exercise `numeric_display_string`/`owned_to_yaml`/
-/// `props_value_to_string` (eval.rs), which already rendered `"inf"`/`".nan"`/
+/// Non-finite floats exercise `numeric_display_string`/`owned_value_to_yaml_format`/
+/// `props_value_to_string` (eval.rs, stream.rs), which already rendered `"inf"`/`".nan"`/
 /// etc. consistently before #124 -- both evaluators agreed on these even when
 /// the generic evaluator had no direct `Expr::Format` arm, since its catch-all
 /// round-trip goes through `to_json_for_reindex` (preserving, #561), not plain
@@ -451,7 +451,7 @@ fn test_formats_non_finite_parity_124() {
         (b"-1e400", "@text", r#""-1E+400""#),
         (b"1e400", "@uri", r#""1E%2B400""#),
         (b"1e400", "@html", r#""1E+400""#),
-        (b"1e400", "@yaml", r#"".inf""#),
+        (b"1e400", "@yaml", r#"".inf\n""#),
         (b"1e400", "@props", r#"".inf""#),
         (b"[1e400]", "@csv", r#""1E+400""#),
         (b"[1e400]", "@tsv", r#""1E+400""#),

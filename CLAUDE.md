@@ -211,7 +211,7 @@ The jq implementation supports format functions for converting values to strings
 | **@base64d** | `@base64d`          | Base64 decoding                                   | `hello`             |
 | **@html**    | `@html`             | HTML entity escaping                              | `&lt;script&gt;`    |
 | **@sh**      | `@sh`               | Shell quoting                                     | `'hello world'`     |
-| **@yaml**    | `@yaml`             | YAML flow-style encoding (yq)                     | `{a: 1, b: 2}`      |
+| **@yaml**    | `@yaml`             | YAML block-style encoding (yq)                    | `a: 1\nb: 2\n`      |
 | **@props**   | `@props`            | Java properties format (yq)                       | `key = value`       |
 
 **@uri/@base64/@html on arrays/objects (jq mode only):** a container is JSON-encoded

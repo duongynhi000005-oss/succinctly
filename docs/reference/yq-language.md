@@ -514,13 +514,15 @@ Beyond jq's standard formats (`@json`, `@csv`, `@base64`, etc.), yq adds:
 
 | Format    | Description                        | Example Output           |
 |-----------|------------------------------------|--------------------------|
-| `@yaml`   | YAML flow-style encoding           | `{a: 1, b: 2}`           |
+| `@yaml`   | YAML block-style encoding          | `a: 1\nb: 2\n`           |
 | `@props`  | Java properties format             | `key = value`            |
 
 ```bash
-# Encode as YAML string (flow-style)
-echo '{a: 1, b: [2, 3]}' | succinctly yq '@yaml'
-# Output: "{a: 1, b: [2, 3]}"
+# Encode as YAML string (block-style, trailing newline included, like yq)
+echo '{a: 1, b: [2, 3]}' | succinctly yq -o json -I 0 '@yaml'
+# Output: "a: 1\nb:\n  - 2\n  - 3\n"
+# (yq keeps `b: [2, 3]` flow-style here because it remembers the source's style;
+# an owned value carries none -- #739, #865)
 
 # Encode as Java properties
 echo '{database: "postgres", port: 5432}' | succinctly yq '@props'

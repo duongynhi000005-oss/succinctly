@@ -844,6 +844,36 @@ fn stream_owned_value_yaml<W: core::fmt::Write>(
     stream_owned_value_yaml_at_depth(value, out, indent, indent_spaces, unit, sort_keys, 0)
 }
 
+/// The string `@yaml` produces for `value` (#1183): real yq's block-style
+/// document for it, trailing newline included.
+///
+/// This is [`stream_owned_value_yaml`] -- the very renderer the CLI's YAML
+/// output runs -- at yq's default two-space indent, so `@yaml` can no longer
+/// drift from it the way its own flow-style copy did. Two root-position
+/// details are measured against yq v4.53.3:
+///
+/// - A root string keeps its quoting (`"1" | @yaml` is `"1"`, `"a: b"` is
+///   `'a: b'`), where [`StreamableValue::stream_yaml`] writes a root string
+///   bare (#852).
+/// - A root computed float stays untagged (`3.0*1 | @yaml` is `3`, yq says
+///   `!!float 3`): yq tags a computed float but not a document-sourced
+///   `!!float 3` scalar, and an [`OwnedValue::Float`] cannot tell the two apart
+///   (#1090). A nested float is tagged, as in the CLI's own output.
+///
+/// A flow-sourced container comes out block here, since an [`OwnedValue`]
+/// carries no source style (#739, #865).
+pub(crate) fn owned_value_to_yaml_format(value: &OwnedValue) -> String {
+    let mut out = String::new();
+    let written = match value {
+        OwnedValue::String(s) => stream_yaml_string(&mut out, s),
+        _ => stream_owned_value_yaml(value, &mut out, "", 2, ' ', false),
+    };
+    // Writing to a `String` cannot fail.
+    written.expect("writing to a String cannot fail");
+    out.push('\n');
+    out
+}
+
 /// Panics past [`MAX_VALUE_TREE_DEPTH`](super::value::MAX_VALUE_TREE_DEPTH)
 /// levels of nesting (#1021, following #1005's precedent).
 fn stream_owned_value_yaml_at_depth<W: core::fmt::Write>(
@@ -2337,6 +2367,44 @@ mod tests {
             result.is_err(),
             "stream_owned_value_json_with should panic at MAX_VALUE_TREE_DEPTH"
         );
+    }
+
+    /// #1183: `@yaml` and the CLI's YAML output share one renderer, so for
+    /// every value the two documents agree except where `@yaml` deliberately
+    /// differs (a root string -- see
+    /// [`owned_value_to_yaml_format`]). A fifth copy of the renderer cannot
+    /// appear without this failing.
+    #[test]
+    fn at_yaml_agrees_with_the_cli_streamer_1183() {
+        let values = [
+            OwnedValue::Null,
+            OwnedValue::Bool(true),
+            OwnedValue::Int(5),
+            OwnedValue::Array(Vec::new().into()),
+            OwnedValue::Array(
+                vec![
+                    OwnedValue::Int(1),
+                    OwnedValue::String("a: b".into()),
+                    OwnedValue::Array(vec![OwnedValue::Null].into()),
+                ]
+                .into(),
+            ),
+        ];
+        for value in &values {
+            let mut cli = String::new();
+            value
+                .stream_yaml(
+                    &mut cli,
+                    IndentSpec {
+                        width: 2,
+                        unit: ' ',
+                    },
+                    false,
+                )
+                .unwrap();
+            cli.push('\n');
+            assert_eq!(owned_value_to_yaml_format(value), cli, "{value:?}");
+        }
     }
 
     /// #1021: `stream_owned_value_yaml` (backs `stream_yaml`/`yq`'s default

@@ -135,7 +135,7 @@ below and [ADR-0019](../adrs/adr-0019.md).
 - [x] `@uri` / `@urid` - Percent encoding / decoding
 - [x] `@html` - HTML entity escaping
 - [x] `@sh` - Shell quoting
-- [x] `@yaml` - YAML flow-style encoding (yq)
+- [x] `@yaml` - YAML block-style encoding (yq)
 - [x] `@props` - Java properties format (yq)
 - [x] Format-prefixed string interpolation: `@base64 "v=\(.)"` -- each `\(...)`
       slot is run through the format first, jq's own `gen_format` rule; a

@@ -114806,7 +114806,7 @@ fn test_format_prefixed_string_succinctly_extensions_3316() -> Result<()> {
             r#"{"arr":["a","b"]}"#,
             "\"\\\"a\\\"|\\\"b\\\"\"\n",
         ),
-        (r#"@yaml "v: \(1)""#, "null", "\"v: 1\"\n"),
+        (r#"@yaml "v: \(1)""#, "null", "\"v: 1\\n\"\n"),
         (r#"@props "k=\(1)""#, "null", "\"k=1\"\n"),
         (r#"@urid "\(.s)""#, r#"{"s":"a b"}"#, "\"a b\"\n"),
     ] {

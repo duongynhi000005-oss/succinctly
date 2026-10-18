@@ -59159,6 +59159,120 @@ mod computed_float_through_container_2902 {
     }
 }
 
+/// #1183: `@yaml` renders the block-style document real yq prints for the
+/// value, trailing newline included, through the same streamer as the CLI's
+/// own YAML output. Every `want` was captured from yq v4.53.3 with
+/// `-o=json -I=0` unless the row says it is a recorded gap.
+mod yaml_format_block_style_1183 {
+    use super::run_yq_stdin;
+    use anyhow::Result;
+
+    fn check_on(input: &str, rows: &[(&str, &str)]) -> Result<()> {
+        for (filter, want) in rows {
+            let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+            assert_eq!(code, 0, "`{filter}` exited {code}: {out:?}");
+            assert_eq!(out, format!("{want}\n"), "`{filter}`");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn constructed_containers_render_block_1183() -> Result<()> {
+        check_on(
+            "null\n",
+            &[
+                (r#"{"v": 3.0*1} | @yaml"#, r#""v: !!float 3\n""#),
+                ("[1,2] | @yaml", r#""- 1\n- 2\n""#),
+                ("[] | @yaml", r#""[]\n""#),
+                ("{} | @yaml", r#""{}\n""#),
+                (
+                    r#"{"a":{"b":[1,2]}} | @yaml"#,
+                    r#""a:\n  b:\n    - 1\n    - 2\n""#,
+                ),
+                (
+                    r#"[{"a":1,"b":2},{"c":3}] | @yaml"#,
+                    r#""- a: 1\n  b: 2\n- c: 3\n""#,
+                ),
+                (
+                    r#"[[1,2],{"a":[]}] | @yaml"#,
+                    r#""- - 1\n  - 2\n- a: []\n""#,
+                ),
+                (
+                    r#"{"a":"x: y","b c":1,"d":null} | @yaml"#,
+                    r#""a: 'x: y'\nb c: 1\nd: null\n""#,
+                ),
+                (r#"{"a":{"b":{}}} | @yaml"#, r#""a:\n  b: {}\n""#),
+                (r#"{"k":[]} | @yaml"#, r#""k: []\n""#),
+                (r#"{"a":[{"b":1}]} | @yaml"#, r#""a:\n  - b: 1\n""#),
+                ("[[[1]]] | @yaml", r#""- - - 1\n""#),
+            ],
+        )
+    }
+
+    /// A root string keeps the quoting the CLI's document printer would drop
+    /// (#852): `@yaml` is not the document printer.
+    #[test]
+    fn root_scalars_keep_their_quoting_1183() -> Result<()> {
+        check_on(
+            "null\n",
+            &[
+                (r#""hello" | @yaml"#, r#""hello\n""#),
+                (r#""a: b" | @yaml"#, r#""'a: b'\n""#),
+                (r#""1" | @yaml"#, r#""\"1\"\n""#),
+                (r#""true" | @yaml"#, r#""\"true\"\n""#),
+                (r#""" | @yaml"#, r#""\"\"\n""#),
+                (r#""~" | @yaml"#, r#""\"~\"\n""#),
+                ("null | @yaml", r#""null\n""#),
+                ("5 | @yaml", r#""5\n""#),
+                ("[3.0*1] | @yaml", r#""- !!float 3\n""#),
+                ("[1e17*1] | .[0] | @yaml", r#""1e+17\n""#),
+            ],
+        )
+    }
+
+    #[test]
+    fn document_sourced_block_values_are_unchanged_1183() -> Result<()> {
+        check_on(
+            "a: 2.0\nb:\n  c: 1\n  d:\n    - x\n",
+            &[
+                (r#"{"v": .a} | @yaml"#, r#""v: 2.0\n""#),
+                (".a | @yaml", r#""2.0\n""#),
+                (".b | @yaml", r#""c: 1\nd:\n  - x\n""#),
+            ],
+        )
+    }
+
+    /// Recorded gaps, each pinned at what succinctly prints today with real
+    /// yq's answer beside it, so closing one fails loudly here.
+    #[test]
+    fn recorded_gaps_1183() -> Result<()> {
+        // An `OwnedValue` carries no source style (#739, #865): a
+        // flow-sourced container comes out block, where yq keeps flow
+        // (`{b: 1}\n`, `[1, 2]\n`).
+        check_on(
+            "a: {b: 1}\nc: [1, 2]\n",
+            &[
+                (".a | @yaml", r#""b: 1\n""#),
+                (".c | @yaml", r#""- 1\n- 2\n""#),
+            ],
+        )?;
+        check_on(
+            "null\n",
+            &[
+                // yq keeps a multi-line string as a literal block (`|-`): #3587.
+                (r#""x\ny" | @yaml"#, r#""\"x\\ny\"\n""#),
+                // yq tags a root computed float (`!!float 2`) but not a
+                // document-sourced `!!float 2` scalar (#1090's test); an
+                // `OwnedValue::Float` cannot tell them apart, so the root
+                // stays untagged, as before this fix.
+                ("2.0*1 | @yaml", r#""2\n""#),
+                // yq spells it `!!float +Inf`: #1071.
+                ("(1/0) | @yaml", r#"".inf\n""#),
+            ],
+        )
+    }
+}
+
 /// #2785: real yq's `==`/`!=` between two scalars compares their *text*, with
 /// its wildcard matcher applied to the right-hand operand -- not jq's typed
 /// equality. See `eval::yq_scalar_text_eq`. Every expectation below was
