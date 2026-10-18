@@ -54498,6 +54498,25 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
     // neither a construct the resolver's walk of a bound does not model nor a pipe that starts at a
     // bare `null` (#4756's and #4775's: the chain beneath is read as the register by kind there, and
     // the resolver's walk refuses a `del` through it that the by-value drive answers).
+    // `isempty(..)`, read through a `try`/`?` that hands its answer on unchanged.
+    fn is_isempty_head(e: &Expr) -> bool {
+        match unwrap_bind_source(e) {
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => is_isempty_head(expr),
+            Expr::Builtin(Builtin::IsEmpty(_)) => true,
+            _ => false,
+        }
+    }
+    fn holds_unrouted(operand: &Expr) -> bool {
+        crate::jq::walk::any_subexpr(operand, &mut |e| {
+            matches!(
+                e,
+                Expr::Reduce { .. }
+                    | Expr::Foreach { .. }
+                    | Expr::FuncDef { .. }
+                    | Expr::DefCall { .. }
+            )
+        })
+    }
     fn operand_ok(operand: &Expr) -> bool {
         let mut chain = false;
         let mut unrouted = false;
@@ -54539,8 +54558,18 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
             {
                 operand_ok(expr)
             }
-            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            Expr::FirstExpr(inner)
+            | Expr::Builtin(Builtin::FirstStream(inner) | Builtin::IsEmpty(inner)) => {
                 operand_ok(inner)
+            }
+            // #4819: the `isempty` of a chain feeding further stages (`isempty(CHAIN) | select(.|not)`):
+            // the stages after it see the answer, and are read by the resolver as they are in the
+            // by-value drive's absence. Only an `isempty` head, and no fold or `def` in the tail.
+            Expr::Pipe(stages)
+                if stages.first().is_some_and(is_isempty_head)
+                    && stages.iter().skip(1).all(|stage| !holds_unrouted(stage)) =>
+            {
+                go(&stages[0], budget)
             }
             _ => false,
         }
