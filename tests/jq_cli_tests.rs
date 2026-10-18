@@ -163026,6 +163026,208 @@ fn test_caught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind_v
     ])
 }
 
+/// #4823: the same shapes with the inner `foreach` *uncaught*. A same-kind value head (`null | FE`)
+/// hands it a `null` ambient that reads as jq's register by kind, so the `$x` bound at the root -- a
+/// container, never `jv_identical` to it -- went unchecked and the pattern's step was taken as passing: `path`
+/// answered `["a"]`, `|=` wrote and `del` deleted, where jq raises at the step. A caught `try`, a head that is
+/// not of the landing's kind and the head-less form (which raised) are the controls. Every row captured from
+/// `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+fn test_uncaught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind_value_heads_4823(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.,.a) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\"]\n",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.,.a) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.,.a) as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; 1 | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; 1 | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; 1 | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; . | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; . | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; . | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; select(true) | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; select(true) | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; select(true) | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; null | try foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; null | try foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; null | try foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+    ])
+}
+
 /// #4608: a `?//` bind in the body of a fold whose accumulator the walk places off jq's register (a computed
 /// container, not INIT `.`) retries its next alternative when the first one's body raises jq's own path
 /// error (`. as $q ?// $z | (if $q then true else empty end | .a?)`: alternative 1 binds the state, runs

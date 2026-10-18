@@ -55774,6 +55774,17 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // (try ($x as {b:$b} | .)) as $y (.; .)` is answered).
     // #4626: ...or where the accumulator is provably off the register and the frame names it.
     let off_body = foreign_in_off_body::<S>(ambient);
+    // #4823: ...and on a `null` ambient the register is `null` by kind, which a `$x` holding a container is
+    // never: the pattern's step raises on it as it does off the register (`null | foreach ($x as {a:$a} | .)
+    // ...` in the UPDATE of a `foreach` whose source stepped onto a `null` element, `$x` bound at the root).
+    // A `null` or boolean `$x` is by kind the register and is not read here.
+    let null_foreign = S::TAG == EvalTag::Jq
+        && foreach_source
+        && ambient.trackable
+        && matches!(ambient.value, OwnedValue::Null)
+        && fold_body::depth() != 0
+        && ambient.frame.at.is_some()
+        && try_free();
     let foreign_pairs = if S::TAG == EvalTag::Jq
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
@@ -55781,7 +55792,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && try_free()
     {
         foreign_register_markers::<S>(source, ambient, &passing_selects)
-    } else if off_body {
+    } else if off_body || null_foreign {
         foreign_register_markers_with::<S>(source, ambient, true, &passing_selects, None)
     } else {
         Vec::new()
@@ -56072,7 +56083,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4626: a `$x` bound elsewhere than the register, destructured in a body whose accumulator is
         // provably off it: the pattern's step raises, so the resolver decides rather than the
         // by-value drive, which has no register to check the step against.
-        || (foreign_verdict && off_body)
+        || (foreign_verdict && (off_body || null_foreign))
         // #4494: a `reduce` source that destructures a fresh value (a call whose `def` builds its
         // result, a fresh value beside the register in a comma): the pattern's step raises on it
         // whatever the register is. Not gated on `ambient.trackable` (#4522): a path-expression
