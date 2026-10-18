@@ -27655,7 +27655,7 @@ pub(crate) fn yq_array_number_key_refused<S: EvalSemantics>(key: &OwnedValue) ->
         return false;
     }
     match key {
-        OwnedValue::Float(f) => !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6,
+        OwnedValue::Float(f) => yq_computed_float_not_plain_integer(*f),
         OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => !f.is_finite() || f.fract() != 0.0,
         _ => false,
     }
@@ -29190,6 +29190,14 @@ pub(crate) fn owned_bound_to_i64_for<S: EvalSemantics>(
     owned_bound_to_i64(v, round)
 }
 
+/// Whether a computed float is text `strconv.ParseInt` refuses: not finite, fractional, or of the
+/// `1e6` magnitude where Go's `%g` switches to an exponent (#3970). The one rule a slice bound
+/// ([`yq_slice_bound_not_integral`]) and an array index key ([`yq_array_number_key_refused`], #4749)
+/// share.
+fn yq_computed_float_not_plain_integer(f: f64) -> bool {
+    !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6
+}
+
 /// Whether yq's `ParseInt` would refuse this bound's scalar text (#3415, #3970).
 ///
 /// A computed float is handed over as its rendered text, and yq renders a float with Go's shortest
@@ -29202,7 +29210,7 @@ pub(crate) fn owned_bound_to_i64_for<S: EvalSemantics>(
 /// must keep doing so.
 fn yq_slice_bound_not_integral(v: &OwnedValue) -> bool {
     match v {
-        OwnedValue::Float(f) => !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6,
+        OwnedValue::Float(f) => yq_computed_float_not_plain_integer(*f),
         OwnedValue::NumberLiteral(NumberRepr::Float(_), _) => true,
         _ => false,
     }

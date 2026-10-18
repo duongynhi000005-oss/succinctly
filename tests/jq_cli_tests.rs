@@ -103345,7 +103345,7 @@ fn test_del_fractional_index_matches_jv_dels_3302() -> Result<()> {
 /// yq mode is not touched by #3302's jq-semantics fix: real yq rejects every fractional index, so
 /// `succinctly yq` refuses it (#4749) instead of truncating, and `del()` leaves the input alone.
 #[test]
-fn test_del_fractional_index_yq_mode_unchanged_3302() -> Result<()> {
+fn test_del_fractional_index_yq_mode_refused_4749() -> Result<()> {
     for (input, filter) in [
         ("[10,20,30]", "del(.[-0.5])"),
         ("[10,20,30]", "del(.[-0.5], .[1])"),
