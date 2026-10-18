@@ -162233,6 +162233,120 @@ fn test_foreach_extract_after_alternatives_in_a_pipe_is_read_per_branch_4843() -
     assert_path_rows_both_routes_3749(&rows)
 }
 
+/// #4800: a `foreach` UPDATE made of single-pattern binds of `.` that hand `.` back
+/// (`. as {a:$q} | .`, `(. as {a:$q} | .) | .`) stores the register's own node as the state, so jq
+/// checks nothing at the UPDATE and the answer is the EXTRACT's: `$i` is `result 1`, `.a` is the index
+/// error on `{"a":1}`, `empty` is no error at all. The bind's `.` was handed on only for an outermost
+/// `reduce` or a `?//` chain, so the UPDATE itself was refused naming its own state (`result {"a":1}`),
+/// which also turned `empty` and a caught `path` into wrong refusals. Controls that must not move: an
+/// EXTRACT of `.` (the state is not where the pattern left the register, `result {"a":1}` in both), a
+/// source that moves the register (`.a?`).
+#[test]
+fn test_foreach_update_body_dot_hand_on_of_a_single_pattern_bind_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; . as {a:$q} | .; $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":{"a":2}}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .) | .; $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (1) as $i (.; . as {a:$q} | .; $i)) |= 9",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1) as $i (.; . as {a:$q} | .; $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[path(foreach (1) as $i (.; . as {a:$q} | .; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"try path(foreach (1) as $i (.; . as {a:$q} | .; $i)) catch .",
+            "\"Invalid path expression with result 1\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; . as {a:$q} | .; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; . as {a:$q} | .; empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1) as $i (.; . as {a:$q} | .; empty))",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        // Past the first step: the state the bind handed back is the register's node again.
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2,3) as $i (.; . as {a:$q} | .; null))?]",
+            "[[\"a\"],[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; . as {a:$q} | .; empty))",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (null,1) as $i (.; . as {a:$q} | .; $i))",
+            "[\"a\"]\n",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        // Controls.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; . as {a:$q} | .; .))",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach .a? as $i (.; . as {a:$q} | .; $i))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's
