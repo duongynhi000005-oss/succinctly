@@ -55774,6 +55774,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // and the loud refusal after it are both decided by it.
     let unplaced_body = S::TAG == EvalTag::Jq
         && (!ambient.trackable || !(fold_body::depth() == 0 || fold_body::acc_is_register_here()));
+    // #4818: the source meets the register where it is written: outside every fold body, or in one whose
+    // accumulator is the register and whose ambient is tracked (`resolve_foreach` marks the UPDATE of an
+    // outer fold that holds such a source, `alt_bind_update_on_register`, and an inner INIT that navigates
+    // leaves the ambient untracked). Read by the #4669 routing below.
+    let chain_source_on_register = fold_body::depth() == 0 || !unplaced_body;
     // #4505: the body of a `reduce` whose source moved jq's register (onto a descendant, so a
     // container accumulator is not the register, and neither is a `$x` equal to it). A pattern step
     // on either raises there whether or not the source backtracks it.
@@ -56126,7 +56131,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // jq's is, and refuses rows jq answers. An inner INIT that navigates leaves the ambient untracked.
         || (S::TAG == EvalTag::Jq
             && foreach_source
-            && (fold_body::depth() == 0 || !unplaced_body)
+            && chain_source_on_register
             && bounded_chain_behind_stages(source))
         // #4677/#4682: the part of a bare `//` or `try ... catch` source that always runs.
         || (S::TAG == EvalTag::Jq

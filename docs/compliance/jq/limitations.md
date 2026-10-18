@@ -723,20 +723,28 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   $a | .)) as $k (.; .; .))` on `{"a":1}` printed two paths where jq prints one, and `(., .) | CHAIN` under
   `limit(1)`/`limit(2)`/`limit(3)` printed 2/3/2 where jq prints 1/1/2. They are routed to the resolver's
   walk of a bound (`bounded_chain_behind_stages`), outside every fold body and not for an operand holding a
-  fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Since
-  [#4818](https://github.com/rust-works/succinctly/issues/4818) also as the source of a `foreach` that is the
-  UPDATE of an outermost `foreach` or `reduce` whose source and INIT cannot move the register
-  (`foreach (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed six paths where jq
-  prints two): there `.` is the register at the inner source (`acc_is_register_here`), which the outer fold's
-  mark now also sets for such a source (`alt_bind_update_on_register`), and the routing requires a tracked
-  ambient (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value. Still by
-  value: the same source in any other fold-body position (a `try`, `if` or comma around the inner `foreach`,
-  the outer EXTRACT, a third nesting level, an outer source that navigates), where the routed source refuses
-  rows jq answers. Over the 157 bounded-chain operands (`--stage-only --sample 20000 --seed 4818`, 20,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build) MATCH went 17,388 to 17,411, DIFF 133 to 114 and ACCEPT_WRONG 30 to 28, with no regression; a 45,360-row nested-fold grid (36 chain sources x 5 inner INITs x 7 documents x `path`/`del`/`first(path)`) moved 878 rows to MATCH and none away. Of the other `label`/`break` consumers over such a chain, `any`/`all` match and `isempty` is routed the
-  same way since [#4819](https://github.com/rust-works/succinctly/issues/4819) (below). Pinned by
-  `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669` and, for what the routing
-  leaves alone, `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669` and, for the fold-UPDATE source, `test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`; over the 113
-  `first`/`limit`/`nth` `?//` operands, `--stage-only` (235,067 rows, `/usr/bin/jq` 1.7.1, against a
+  fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Since [#4818](https://github.com/rust-works/succinctly/issues/4818) also as the source of a `foreach` that
+  is the UPDATE of an outermost `foreach` or `reduce` whose source and INIT cannot move the register (`foreach
+  (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed six paths where jq prints
+  two): there `.` is the register at the inner source (`acc_is_register_here`), which the outer fold's mark
+  now also sets for such a source (`alt_bind_update_on_register`), and the routing requires a tracked ambient
+  (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value. Still by value,
+  where the routed source refuses rows jq answers: the same source in any other fold-body position (a `try`,
+  `if` or comma around the inner `foreach`, the outer EXTRACT, a third nesting level), and under an outer
+  source that `cannot_move_register` reads as not moving it but that navigates (`foreach (last(.[]?)) as $i
+  (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` prints three paths where jq prints one, as it
+  did before). Over the 157 bounded-chain operands (`--stage-only --sample 20000 --seed 4818`, 20,027 rows,
+  `/usr/bin/jq` 1.7.1, against a `main` build) MATCH went 17,388 to 17,411, DIFF 133 to 114 and ACCEPT_WRONG
+  30 to 28, with no regression; a 45,360-row nested-fold grid (36 chain sources x 5 inner INITs x 7 documents
+  x `path`/`del`/`first(path)`) moved 878 rows to MATCH and none away. Of the other `label`/`break` consumers
+  over such a chain, `any`/`all` match and `isempty` is routed the same way since
+  [#4819](https://github.com/rust-works/succinctly/issues/4819) (below). Pinned by
+  `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`, for the fold-UPDATE source
+  `test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818` and, for
+  what the routing leaves alone,
+  `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669`;
+  over the 113 `first`/`limit`/`nth` `?//` operands,
+  `--stage-only` (235,067 rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) MATCH went 202,119 to 202,931 and DIFF 2,280 to 1,608 with ACCEPT_WRONG (329) unchanged;
   its only regressions were nine safe-direction `del` rows over `first`/`limit`/`nth(null | CHAIN)`,
   which the `null` exclusion removes (the 25 operands naming `null`, re-run: 0 regressions). Since

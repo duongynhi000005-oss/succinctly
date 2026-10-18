@@ -164776,8 +164776,9 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_466
 /// leaves alone, and the shapes beside it. Value mode never reached the routed drive; a pipe that starts
 /// at a literal keeps the by-value answer for a `del` through it (the first draft of the routing refused
 /// the `null` ones jq answers); a chain in a non-output position counts as jq does. Every row captured
-/// from jq 1.7.1 with `-c`. (Its last row, the same source inside another fold's body, was the by-value
-/// count until #4818 routed it: `test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`.)
+/// from jq 1.7.1 with `-c`, except the last six, which are the fold-body positions #4818's routing does
+/// not reach (each has jq's count in its comment: the recorded divergences in `limitations.md`). The plain
+/// nested UPDATE is routed since #4818 (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
 fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669(
@@ -164864,6 +164865,54 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal
             r#"{"a":1}"#,
             r"path(foreach (limit(2; (.,.) | map(1) | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
             "[]\n[]\n",
+            "",
+            0,
+        ),
+        // a `try` around the inner `foreach`: jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; try foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // an `if` around it: jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; if true then foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .) else . end; .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // a comma beside it in the UPDATE: jq prints 4 paths, the by-value count is 8.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)), .; .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // the outer EXTRACT: jq prints 2 paths, the by-value count is 6.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; .; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .)))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // a third nesting level: jq prints 4 paths, the by-value count is 12.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        // an outer source `last(.[]?)`, which `cannot_move_register` reads as not moving the register: jq prints 1 paths, the by-value count is 3.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (last(.[]?)) as $i (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; .; .); .))",
+            "[]\n[]\n[]\n",
             "",
             0,
         ),
@@ -165025,6 +165074,13 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_e
         ),
         (
             r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.; $k; .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
             r"del(foreach (1,2) as $i (.; foreach (limit(2; (.,.)|. as {a:$a} ?// $a | .)) as $k (.a; .; .); .))",
             "",
             "Invalid path expression near attempt to access element \"a\" of 1",
@@ -165134,8 +165190,9 @@ fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Resu
 /// #4819: what `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`'s routing leaves
 /// alone. Value mode never reached the routed drive (jq emits the `false` twice there). The last three rows
 /// are the operands the routing excludes -- a fold or `def` in the stages after the `isempty`, a pipe that
-/// starts at a bare `null` inside it -- which keep the by-value count (two paths where jq prints one).
-/// Inside another fold's UPDATE the source is routed too since #4818
+/// starts at a bare `null` inside it -- which keep the by-value count (two paths where jq prints one), and
+/// the last row, a third nesting level, which keeps it too (see below). Inside another fold's UPDATE the
+/// source is routed since #4818
 /// (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
 /// Every other row captured from jq 1.7.1 with `-c`.
 #[allow(clippy::literal_string_with_formatting_args)]
@@ -165167,6 +165224,14 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
             r#"{"a":1}"#,
             r"path(foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .))",
             "[]\n[]\n",
+            "",
+            0,
+        ),
+        // A third nesting level keeps the by-value count: jq prints four paths, this prints eight.
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .); .))",
+            "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
             "",
             0,
         ),
