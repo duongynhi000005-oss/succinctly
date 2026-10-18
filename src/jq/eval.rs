@@ -56064,7 +56064,10 @@ fn drive_fold_source_with<S: EvalSemantics>(
     } else if S::TAG == EvalTag::Jq
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
-        && fold_body::depth() != 0
+        // #4832: ...and a `reduce` source outside every fold body, which the by-value drive answered:
+        // the pattern's step on a `$x` bound elsewhere than the register raises there as it does for a
+        // `foreach` source, which the resolver decides already.
+        && (fold_body::depth() != 0 || !foreach_source)
         && try_free()
     {
         foreign_register_markers::<S>(source, ambient, &passing_selects)
