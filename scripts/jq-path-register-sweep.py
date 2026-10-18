@@ -993,6 +993,13 @@ OPERANDS = [
     "(foreach (isempty(. as {a:$a} ?// $a | empty) | select(.|not)) as $k (.; .; .))",
     "(foreach (isempty(select(false) | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
     "(foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; $k))",
+    # (#4829) the operands #4819 excluded: a pipe that starts at a bare `null`, a `def` or fold inside the operand, a fold in the tail (a `def` tail stays by value)
+    "(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+    "(foreach (isempty((def f: . as {a:$a} ?// $a | .; f)) | select(.|not)) as $k (.; .; .))",
+    "(foreach (isempty((reduce 1 as $i (.; .)) | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+    "(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
+    "(foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .))",
+    "(foreach (isempty(. as {a:$a} ?// $a | .?) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
     "(foreach (any((., .) | . as {a:$a} ?// $a | .; false) | select(.|not)) as $k (.; .; .))",
     "(foreach (all((., .) | . as {a:$a} ?// $a | .; true) | select(.|not)) as $k (.; .; .))",
     "(foreach (1, 2) as $i (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .))",

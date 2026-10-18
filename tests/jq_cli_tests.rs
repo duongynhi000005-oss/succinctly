@@ -165300,10 +165300,10 @@ fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Resu
 }
 
 /// #4819: what `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`'s routing leaves
-/// alone. Value mode never reached the routed drive (jq emits the `false` twice there). The last three rows
-/// are the operands the routing excludes -- a fold or `def` in the stages after the `isempty`, a pipe that
-/// starts at a bare `null` inside it -- which keep the by-value count (two paths where jq prints one), and
-/// the last row, a third nesting level, which keeps it too (see below). Inside another fold's UPDATE the
+/// alone. Value mode never reached the routed drive (jq emits the `false` twice there). The rows after the first
+/// are the operands the routing still excludes -- a fold in the stages after an `isempty` whose chain sits behind a
+/// `?`, and a `def` in those stages -- which keep the by-value count (two paths where jq prints one; #4829 routes the
+/// rest), and the last row, a third nesting level, which keeps it too (see below). Inside another fold's UPDATE the
 /// source is routed since #4818
 /// (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
 /// Every other row captured from jq 1.7.1 with `-c`.
@@ -165320,14 +165320,7 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
         ),
         (
             r#"{"a":1}"#,
-            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
-            "[]\n[]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":1}"#,
-            r"path(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .?) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
             "[]\n[]\n",
             "",
             0,
@@ -165339,11 +165332,96 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
             "",
             0,
         ),
+        // The `def` tail stays by value: walked, the resolver refuses this `del`, which jq answers.
+        (
+            "null",
+            r"del(. as [$q] ?// $q | (foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
         // A third nesting level keeps the by-value count: jq prints four paths, this prints eight.
         (
             r#"{"a":1}"#,
             r"path(foreach (1,2) as $i (.; foreach (1,2) as $j (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .); .))",
             "[]\n[]\n[]\n[]\n[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4829: the `isempty` operands #4819 left to the by-value drive -- a pipe that starts at a bare `null`, a
+/// `def` or `reduce`/`foreach` inside the operand, and a fold in the stages after the `isempty` --
+/// are routed to the resolver's `isempty` arm too: the arm hands back a boolean, so the chain is not read as the
+/// register by kind. Each printed `[]` twice where jq prints it once; the `del` and `|=` rows are the
+/// safe-direction writes #4669's first draft regressed for `first`/`limit`/`nth` and stay answered. Every row
+/// captured from jq 1.7.1 with `-c`, both routes.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn test_foreach_source_isempty_of_alt_chain_behind_null_folds_and_defs_counts_every_emission_4829(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(null | . as {a:$a} ?// $a | .)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((def f: . as {a:$a} ?// $a | .; f)) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((reduce 1 as $i (.; .)) | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty((foreach (1,2) as $i (.; .; .)) | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .)) |= 9",
+            "9\n",
             "",
             0,
         ),
