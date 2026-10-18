@@ -67238,6 +67238,12 @@ fn test_yq_refuses_a_fractional_array_index_4749() -> Result<()> {
 #[test]
 fn test_p_moves_a_flow_collections_trailing_comment_to_the_next_line_4377() -> Result<()> {
     for (input, filter, expected) in [
+        // A comment inside a flow parent is overwritten by the parent's own, which is the one held.
+        (
+            "a: {x: [1] # xi\n  } # ec\nb: 3\n",
+            ".",
+            "a:\n  x:\n    - 1\nb: 3 # ec\n",
+        ),
         (
             "a:\n  e: [1, 2] # ec\n",
             ".",

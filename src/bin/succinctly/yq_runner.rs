@@ -5935,12 +5935,9 @@ fn defer_flow_line_comments_at(
                 let CommentTree::Object(_, fields, _) = &mut *tree else {
                     break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Object and nothing in the loop changes its variant"
                 };
-                // A member the tree never saw (a computed key) can only take a held comment.
+                // A member the tree never saw has no style or comment to move or to take.
                 if !fields.contains_key(key.as_str()) {
-                    if held.is_empty() {
-                        continue;
-                    }
-                    fields.insert(key.clone(), CommentTree::empty());
+                    continue;
                 }
                 // A collection is written on the lines below its key, so the held comment ends
                 // the key's line; any other value ends the line itself.
@@ -5976,10 +5973,7 @@ fn defer_flow_line_comments_at(
                     break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Array and nothing in the loop changes its variant"
                 };
                 if i >= slots.len() {
-                    if held.is_empty() {
-                        continue;
-                    }
-                    slots.resize_with(i + 1, CommentTree::empty);
+                    continue;
                 }
                 // A collection item opens on its dash, and the writer puts a comment there as the
                 // head comment of the item's first member (#4231).
