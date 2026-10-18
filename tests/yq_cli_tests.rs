@@ -67826,6 +67826,21 @@ fn test_kind_names_an_alias_and_a_null_tagged_collection_4866() -> Result<()> {
             "{filter}"
         );
     }
+    // Empty collections, sequence items (a collection item opens on its dash), an alias item and a
+    // computed value.
+    let items = "a: &x {p: 1}\nl:\n  - {q: 1}\n  - [1]\n  - *x\n  - x\ne: {}\nf: []\n";
+    for (filter, expected) in [
+        (".e | kind", "\"map\"\n"),
+        (".f | kind", "\"seq\"\n"),
+        ("[.l[] | kind]", "[\"map\",\"seq\",\"alias\",\"scalar\"]\n"),
+        (".l | map(kind)", "[\"map\",\"seq\",\"alias\",\"scalar\"]\n"),
+        ("(.a + {}) | kind", "\"map\"\n"),
+        ("[.a] | kind", "\"seq\"\n"),
+        (".a | tojson | kind", "\"scalar\"\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, items, &["-o=json", "-I=0"])?;
+        assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}: {stderr}");
+    }
     // JSON input has no alias to name: a collection is `map`/`seq`, anything else `scalar`.
     assert_eq!(
         run_yq_stdin_with_stderr(
