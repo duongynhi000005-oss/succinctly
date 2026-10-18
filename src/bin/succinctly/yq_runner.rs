@@ -7508,9 +7508,10 @@ fn yaml_single_quote_escaped(s: &str) -> String {
 
 /// Whether `s` can round-trip through single-quote style at all — a
 /// single-quoted YAML scalar has no escape syntax for control characters
-/// (no `\n`, `\t`, ...), unlike double-quoted.
+/// (no `\n`, `\t`, ...), unlike double-quoted — and go-yaml's emitter writes nothing it will not
+/// write raw there either (a C1 control, U+FEFF, a character outside the BMP; #4858).
 fn can_single_quote(s: &str) -> bool {
-    !s.chars().any(|c| c.is_ascii_control())
+    !s.chars().any(|c| c.is_ascii_control()) && !succinctly::yaml::has_unwritable_char(s)
 }
 
 /// One element of a flow collection being rendered: its text, and the line comment

@@ -1991,13 +1991,13 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // it block-styled (verified against the pinned
                             // oracle); the quoted form is spelled `\U` like
                             // real yq's (#4850). So does any character the emitter will not
-                            // write raw (DEL, U+FEFF, ...), astral or not (#4858).
-                            let has_astral = has_unwritable_char_in_block(&decoded)
-                                || decoded.chars().any(|c| c as u32 > 0xFFFF);
+                            // write raw (DEL, U+FEFF, a C1 control, ...), which an astral
+                            // character is one of (#4858).
+                            let unwritable = has_unwritable_char_in_block(&decoded);
                             let explicit_indent =
                                 block_scalar_indent_hint(&decoded, indent_spaces).ok();
                             if let Some(explicit_indent) = explicit_indent {
-                                if !decoded.is_empty() && !has_trailing_space && !has_astral {
+                                if !decoded.is_empty() && !has_trailing_space && !unwritable {
                                     return Ok(stream_yaml_block_scalar(
                                         out,
                                         &decoded,
@@ -9900,8 +9900,8 @@ fn stream_yaml_block_scalar<Out: core::fmt::Write>(
 /// scalar's already-decoded value, exactly like
 /// [`stream_yaml_string_value`]'s own `_` (block scalar) arm - shared
 /// so a block scalar disqualified from [`stream_yaml_block_scalar`]
-/// (empty, a trailing space, an astral character, or an unrepresentable
-/// explicit-indent digit) can reuse the decode `stream_yaml_value`'s
+/// (empty, a trailing space, a character the emitter will not write raw, or an
+/// unrepresentable explicit-indent digit) can reuse the decode `stream_yaml_value`'s
 /// `String` arm already performed rather than pay for a second one inside
 /// `stream_yaml_string_value` (#836 review).
 fn stream_yaml_block_scalar_quoted<Out: core::fmt::Write>(
@@ -10138,8 +10138,8 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
             // indicator — `- x` emitted bare under a `- ` would read back as a
             // nested sequence, #332).
             if str_val.is_empty()
-                || str_val.bytes().any(|b| b < 0x20)
-                || has_unwritable_char(&str_val)
+                || (!str_val.bytes().all(|b| (0x20..0x7F).contains(&b))
+                    && (str_val.bytes().any(|b| b < 0x20) || has_unwritable_char(&str_val)))
                 || starts_seq_entry(str_val.as_bytes(), 0)
             {
                 Ok(write_go_yaml_double_quoted(out, &str_val)?)
@@ -10217,6 +10217,8 @@ fn needs_yaml_quoting(s: &str) -> bool {
         }
     }
 
+    // ...and for one the emitter will not write raw (DEL, a C1 control, U+FEFF, an astral
+    // character), which only double quotes can spell (#4858).
     has_unwritable_char(s)
 }
 
@@ -12033,6 +12035,12 @@ mod tests {
         assert!(!needs_yaml_quoting("+5x")); // not a number: digits then non-digit
         assert!(!needs_yaml_quoting("+")); // `+` alone isn't a number and isn't a leading indicator (only `-` is)
         assert!(needs_yaml_quoting("-foo")); // leading `-` is a sequence indicator
+                                             // #4858: a character the emitter will not write raw needs double quotes.
+        assert!(needs_yaml_quoting("x\u{7f}y")); // DEL
+        assert!(needs_yaml_quoting("x\u{90}y")); // C1 control
+        assert!(needs_yaml_quoting("\u{feff}x")); // BOM
+        assert!(needs_yaml_quoting("x\u{1F600}")); // astral
+        assert!(!needs_yaml_quoting("x\u{e9}y")); // printable non-ASCII
 
         assert!(looks_like_yaml_number("123"));
         assert!(looks_like_yaml_number("-123"));

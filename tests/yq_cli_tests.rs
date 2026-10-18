@@ -14196,6 +14196,20 @@ fn test_yq_streaming_scalar_with_an_unwritable_character_is_double_quoted_4858()
         assert_eq!(code, 0, "{yaml:?}");
         assert_eq!(out, expected, "streaming route for {yaml:?}");
     }
+    // The same characters through other filters, a write (the DOM route), a forced style, a
+    // multi-line block scalar and a key.
+    for (yaml, filter, expected) in [
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".", "a: \"x\\x7Fy\"\nb: \"p\\tq\"\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".a", "x\u{7f}y\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".b = 1", "a: \"x\\x7Fy\"\nb: 1\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".b style=\"single\"", "a: \"x\\x7Fy\"\nb: \"p\\tq\"\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", "keys", "- a\n- b\n- \"k\\x7F\"\n- c\n- d\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", "to_entries | .[0]", "key: a\nvalue: \"x\\x7Fy\"\n"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, yaml, &[])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(out, expected, "{filter} over {yaml:?}");
+    }
     Ok(())
 }
 
