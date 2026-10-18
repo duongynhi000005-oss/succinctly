@@ -706,7 +706,7 @@ writes `|2-`, as the source-block path does (#836).
 
 Still open, each separate from this fix:
 
-
+- **A string with a `\n` that ends in U+2028/U+2029 or has one in its last line** (`"a\n\u2028"`, `"\na\u2028"`). yq writes a literal block with the break raw and no indentation after it (output it reads back differently); this route double-quotes it with `\L`. 16 of the 1,844 strings in the differential above, all with a U+2028 beside the end.
 - **A JSON object key `<<` on the DOM route** ([#3600](https://github.com/rust-works/succinctly/issues/3600)). yq keeps it in YAML output as the string key `"<<": 1`; a write, `del`, `sort_keys` or `-P` here drops the entry.
 
 The DOM route ([#3588](https://github.com/rust-works/succinctly/issues/3588)) is closed. `-P`, every write
@@ -5985,6 +5985,6 @@ Captured live (v4.53.3):
 |--------------------------------|-------------------|---------------|-------------------------------------------------------------------------------------------------------------------------|
 | `a: {b: 1}` then `.a \| @yaml` | `{b: 1}\n`        | `b: 1\n`      | an owned value carries no source style (#739, #865)                                                                     |
 | `a: [1, 2]` then `.a \| @yaml` | `[1, 2]\n`        | `- 1\n- 2\n`  | same                                                                                                                    |
-| `"x\ny" \| @yaml`              | `\|-\n  x\n  y\n` | `"x\ny"\n`    | a line break is double-quoted, not a literal block (#3587)                                                              |
+| `"x\ny" \| @yaml`              | `\|-\n  x\n  y\n` | `"x\ny"\n`    | a line break is double-quoted, not a literal block (the computed-value streamer; #3587 closed the JSON route)                                                              |
 | `2.0*1 \| @yaml`               | `!!float 2\n`     | `2\n`         | yq tags a computed float but not a document-sourced `!!float 2` (the #1090 test); an owned float cannot tell them apart |
 | `(1/0) \| @yaml`               | `!!float +Inf\n`  | `.inf\n`      | non-finite spelling (#1071)                                                                                             |
