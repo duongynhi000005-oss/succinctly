@@ -10173,6 +10173,62 @@ pub fn eval_with_cursor_using<S: EvalSemantics, C: DocumentCursor>(
     with_anchor_scope::<S, _>(expr, || eval_with_cursor_unscoped::<S, C>(expr, cursor))
 }
 
+/// A `,` of branches, each evaluated in order against the same input, as one result.
+///
+/// With `keep_nodes` set, the branches that answer nodes of the document stay cursors (#1361):
+/// the result is `ManyCursor`, which the yq runner prints with the comments, style and anchors
+/// the cursors carry (`.[]` yields one), where an owned tree has none of them -- `.x, .y` lost
+/// all three, each half on its own kept them. The first branch that answers anything else turns
+/// the nodes collected so far into owned values and the rest runs as it always has, so
+/// `.x, (.y | length)` is owned throughout. Without it every branch is made owned as it comes,
+/// which is what a `,` inside a bigger expression needs: an array, a pipe stage and a `?` all
+/// read the values, and a `?` over the group has to see a malformed node's failure itself.
+fn eval_comma_generic<S: EvalSemantics, V: DocumentValue>(
+    exprs: &[Expr],
+    value: V,
+    optional: bool,
+    cursor: Option<V::Cursor>,
+    keep_nodes: bool,
+) -> GenericResult<V> {
+    let mut out: Vec<OwnedValue> = Vec::new();
+    // The nodes held so far, while every branch has answered nodes (and `keep_nodes` asked for it).
+    let mut held: Vec<V::Cursor> = Vec::new();
+    let mut holding = keep_nodes;
+    for expr in exprs {
+        let result = eval_single::<S, _>(expr, value.clone(), optional, cursor);
+        if holding {
+            match result.materialize_lazy::<S>() {
+                GenericResult::None => continue,
+                GenericResult::OneCursor(c) => held.push(c),
+                GenericResult::ManyCursor(cs) => held.extend(cs),
+                other => {
+                    // Not a node: the nodes held so far become copies, then this branch.
+                    holding = false;
+                    let nodes: GenericResult<V> =
+                        GenericResult::ManyCursor(core::mem::take(&mut held));
+                    for part in [nodes, other] {
+                        if let Some(control) = push_generic_owned_values::<_, S>(part, &mut out) {
+                            return partial_generic(out, control);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(control) = push_generic_owned_values::<_, S>(result, &mut out) {
+            return partial_generic(out, control);
+        }
+    }
+    if !holding {
+        return owned_vec_to_generic_result(out);
+    }
+    match held.len() {
+        0 => GenericResult::None,
+        1 => GenericResult::OneCursor(held.remove(0)),
+        _ => GenericResult::ManyCursor(held),
+    }
+}
+
 /// [`eval_with_cursor_using`] inside the anchor scope it opens (#3134).
 fn eval_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     expr: &Expr,
@@ -10190,6 +10246,20 @@ fn eval_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
         // marker `expr` carries that isn't proven to be this document node.
         let root = RootWitness::of(Some(&cursor));
         return eval_each_owned_collect::<S, C::Value>(expr, &owned, false, Reentry::Against(root));
+    }
+    // #1361: a yq query that is itself a `,` keeps the nodes its branches answer as cursors, so
+    // the printer finds their comments, style and anchors. Only the whole query: a `,` inside a
+    // bigger expression is read by what encloses it.
+    if S::TAG == EvalTag::Yq {
+        if let Expr::Comma(exprs) = unwrap_paren(expr) {
+            return eval_comma_generic::<S, C::Value>(
+                exprs,
+                cursor.value(),
+                false,
+                Some(cursor),
+                true,
+            );
+        }
     }
     eval_single::<S, C::Value>(expr, cursor.value(), false, Some(cursor))
 }
@@ -13842,16 +13912,7 @@ fn eval_single<S: EvalSemantics, V: DocumentValue>(
             collect_each_generic::<S, V>(expr, value, optional, cursor)
         }
 
-        Expr::Comma(exprs) => {
-            let mut out: Vec<OwnedValue> = Vec::new();
-            for expr in exprs {
-                let result = eval_single::<S, _>(expr, value.clone(), optional, cursor);
-                if let Some(control) = push_generic_owned_values::<_, S>(result, &mut out) {
-                    return partial_generic(out, control);
-                }
-            }
-            owned_vec_to_generic_result(out)
-        }
+        Expr::Comma(exprs) => eval_comma_generic::<S, V>(exprs, value, optional, cursor, false),
 
         // Fall back to the full evaluator for complex expressions
         _ => {
