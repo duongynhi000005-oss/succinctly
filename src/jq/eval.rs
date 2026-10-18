@@ -16228,6 +16228,19 @@ fn builtin_length<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // doesn't matter: `.abs()` of either infinity is the same
                 // positive infinity (#1083/#1087), and NaN stays NaN.
                 QueryResult::Owned(OwnedValue::Float(f.abs()))
+            } else if S::TAG == EvalTag::Yq
+                && n.is_bridge()
+                && n.bridge_computed_float().is_none()
+                && !bridge_integral_float_rendering(n.raw_bytes())
+            {
+                // #3604: an owned number written out by the reindex bridge carries the
+                // spelling it had in its YAML document (`OwnedValue::NumberLiteral`: `2.0`,
+                // `1e5`, `1.50`), and yq measures that text, as `tostring` echoes it. A JSON
+                // document's number was collapsed to a plain `Int`/`Float` on the way in
+                // (#3597), so its text is the rendering that is measured there too.
+                QueryResult::Owned(OwnedValue::Int(
+                    String::from_utf8_lossy(n.raw_bytes()).chars().count() as i64,
+                ))
             } else if let Ok(i) = n.as_i64() {
                 QueryResult::Owned(numeric_length_owned::<S>(OwnedValue::Int(i)))
             } else if let Ok(f) = json_number_f64::<S>(n) {
@@ -20629,6 +20642,18 @@ pub(crate) fn owned_to_string<S: EvalSemantics>(value: &OwnedValue) -> String {
         // scientific-notation element all preserve it.
         OwnedValue::Array(_) | OwnedValue::Object(_) => owned_value_to_json::<S>(value),
     }
+}
+
+/// Whether a reindex-bridge number's text is the rendering of an integral `Float` past the exact `f64`
+/// integers (`123456789012345678901.0`, signed or not) and not a spelling (#3604). A JSON document's integer too big for
+/// an `i64` is collapsed to such a `Float`, whose width yq measures as the number it prints
+/// (`1.2345678901234568e+20`), so its text is left to the numeric arm. A YAML spelling of that shape is
+/// the rare case this also sends there.
+fn bridge_integral_float_rendering(text: &[u8]) -> bool {
+    text.strip_suffix(b".0").is_some_and(|number| {
+        let digits = number.strip_prefix(b"-").unwrap_or(number);
+        digits.len() > 16 && digits.iter().all(u8::is_ascii_digit)
+    })
 }
 
 /// `Builtin::Length` of a materialized (cursor-less) number: jq's own

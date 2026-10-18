@@ -3179,6 +3179,14 @@ impl<'a> JsonNumber<'a> {
         crate::jq::OwnedValue::bridge_nonfinite_from_bytes(self.raw_bytes())
     }
 
+    /// Whether this number was read from the reindex bridge's text (an owned value written out
+    /// to be evaluated again) and not from a document: its text is then the spelling the owned
+    /// value carries, or a rendering of a computed one (#3604).
+    #[inline]
+    pub fn is_bridge(&self) -> bool {
+        self.bridge
+    }
+
     /// [`bridge_value`](Self::bridge_value) restricted to the computed-float
     /// token (#2902): `None` for the NaN/infinity tokens and for everything
     /// read outside the bridge.
