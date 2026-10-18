@@ -5930,7 +5930,7 @@ fn defer_flow_line_comments_at(
     let children_in_flow = tree.style() == "flow";
     match (value, &mut *tree) {
         (OwnedValue::Object(members), CommentTree::Object(..)) => {
-            for (key, child) in members.iter() {
+            for (key, child) in members {
                 let key_commented = tree.key_comment(key).is_some();
                 let CommentTree::Object(_, fields, _) = &mut *tree else {
                     break; // patchcov: coverage tolerate-line reason="unreachable: the match arm above proved the tree is an Object and nothing in the loop changes its variant"
