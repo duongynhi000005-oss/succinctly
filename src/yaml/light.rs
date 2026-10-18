@@ -8387,6 +8387,12 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
         Some(self.key_string_kind())
     }
 
+    /// Only a string key is matched by its text: `field_key_is_named` never matches an alias
+    /// key by name and matches a collection key to `""` alone (#4003).
+    fn key_is_indexable(&self) -> bool {
+        matches!(self, YamlValue::String(_))
+    }
+
     /// The branches of [`YamlValue::key_string_kind`] that spell `""` for want
     /// of a scalar form, as opposed to a `String` (or an alias to one), whose
     /// failure to decode is a different answer.
@@ -8535,6 +8541,35 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentFields for YamlFields<'a, W> {
 
     fn find_cursor(&self, name: &str) -> Result<Option<Self::Cursor>, EvalError> {
         Ok(YamlFields::find_cursor(self, name))
+    }
+
+    /// The walk [`find_cursor`](Self::find_cursor) makes, counted (#4003): what lets the
+    /// evaluator see that a mapping is wide and index it. A merge-resolved list is answered
+    /// by yq's traversal and is never indexed, so it reports `0`.
+    fn find_cursor_counted(&self, name: &str) -> (Result<Option<Self::Cursor>, EvalError>, usize) {
+        let FieldsInner::Direct(_) = &self.inner else {
+            return (Ok(YamlFields::find_cursor(self, name)), 0);
+        };
+        let mut fields = self.clone();
+        let mut result = None;
+        let mut walked = 0usize;
+        while let Some((field, rest)) = fields.uncons() {
+            walked += 1;
+            if field_key_is_named(&field.key(), name) {
+                result = Some(field.value_cursor());
+            }
+            fields = rest;
+        }
+        (Ok(result), walked)
+    }
+
+    /// The first key of a mapping with no merge key; a merge-resolved list holds entries no
+    /// member of the mapping spells, so it has none (#4003).
+    fn head_key_cursor(&self) -> Option<Self::Cursor> {
+        match &self.inner {
+            FieldsInner::Direct(key_cursor) => *key_cursor,
+            FieldsInner::Merged { .. } => None,
+        }
     }
 
     fn is_empty(&self) -> bool {
