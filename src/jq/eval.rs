@@ -37205,6 +37205,33 @@ fn update_is_alt_bind(update: &Expr) -> bool {
         || take_wrapped_bare_chain(update).is_some()
 }
 
+/// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
+/// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
+/// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
+/// bind's `.` is a hand-on rather than a path check (#3853). Narrower than
+/// [`update_returns_its_input`] on purpose: a nested fold or a `label` has marks and statements of its
+/// own that this relaxation was not measured against.
+fn update_is_single_bind_returning_input(update: &Expr) -> bool {
+    fn binds(e: &Expr) -> Option<bool> {
+        match e {
+            Expr::Identity => Some(false),
+            Expr::Paren(inner) => binds(inner),
+            Expr::Pipe(stages) => stages
+                .iter()
+                .try_fold(false, |any, stage| Some(binds(stage)? || any)),
+            Expr::AsPattern {
+                expr,
+                patterns,
+                body,
+            } if patterns.len() == 1 && matches!(unwrap_paren(expr), Expr::Identity) => {
+                binds(body).map(|_| true)
+            }
+            _ => None,
+        }
+    }
+    binds(update) == Some(true)
+}
+
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
 /// enclosing fold left it: a chain behind other stages ([`bounded_chain_behind_stages`], #4669), or a
 /// bare `first(CHAIN)` ([`take_wrapped_bare_chain`], #4537) as the body itself. The body is that
@@ -61795,13 +61822,18 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         // `f` (#4795), so the first step meets `.` on it as for a source that never moves it.
         && (cannot_move_register(input) || is_last_of_navigation(input))
         && cannot_move_register(init);
+    // #4800: ...and a single-pattern bind of `.` that hands it back, whose state is then the register's
+    // node at every step ([`update_returns_its_input`]), so the next step meets `.` on it again.
+    let single_bind_update_on_register =
+        first_step_on_register && update_is_single_bind_returning_input(update);
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
             // over a bounded chain behind other stages (`limit(2; (., .) | CHAIN)`), which the routing in
             // `drive_fold_source_with` then sends to the resolver's walk of a bound (#4669). #4835: also
             // behind a `try`, a comma, a pipe or an `if`.
-            || body_holds_chain_foreach(update, chain_foreach_may_move_init));
+            || body_holds_chain_foreach(update, chain_foreach_may_move_init))
+        || single_bind_update_on_register;
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register = first_step_on_register
         && extract.is_some_and(|extract| {
@@ -62127,6 +62159,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             Some(live) => (live, true),
                             None => (active_reg, active_at_register),
                         };
+                        // #4800: a step whose UPDATE hands `.` back through single-pattern binds leaves the
+                        // state at the register: jq backtracks the binds' moves to the fork the step began at.
+                        let state_stays_at_register =
+                            single_bind_update_on_register && active_at_register && !live_stepped;
                         let mut delivered = false;
                         let update_stop_at = core::cell::Cell::new(None::<u64>);
                         let mut on_update = |update_branch: PathBranch<'a>| -> Demand {
@@ -62173,6 +62209,18 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             state_path = update_branch
                                 .trackable
                                 .then(|| Rc::clone(&update_branch.path));
+                            if state_stays_at_register {
+                                state_at_register = true;
+                                state_snapshot = accumulator_provenance::<S>(
+                                    &PathBranch::new(
+                                        Rc::clone(&reg.path),
+                                        Cow::Borrowed(&update_branch.value),
+                                        true,
+                                    ),
+                                    frame,
+                                );
+                                state_path = Some(Rc::clone(&reg.path));
+                            }
                             // #3580: this emission's register is the one UPDATE's
                             // output left, which is the entry's when it said so.
                             let update_unmoved = update_states_entry
