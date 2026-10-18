@@ -43914,6 +43914,29 @@ fn carry_frame_register<'a>(
     carry_register_when(branch, frame, || operand_leaves_register(operand))
 }
 
+/// Whether `expr` is a `//` with an operand that leaves jq's register alone, or a comma of such
+/// and of siblings that do ([`sibling_leaves_register`]): the shapes whose outputs state the
+/// register they entered with from that operand ([`carry_frame_register`], #4800) whatever the
+/// other operand does. Only the outputs that operand makes: an output of the operand that moved
+/// the register states what it did, and the `foreach` EXTRACT behind it is judged on that.
+fn alternate_states_register(expr: &Expr) -> bool {
+    fn states(expr: &Expr) -> Option<bool> {
+        match unwrap_paren(expr) {
+            Expr::Alternative(left, right) => {
+                (operand_leaves_register(left) || operand_leaves_register(right)).then_some(true)
+            }
+            Expr::Comma(items) => items
+                .iter()
+                .try_fold(false, |seen, item| match states(item) {
+                    Some(stated) => Some(seen || stated),
+                    None => sibling_leaves_register(item).then_some(seen),
+                }),
+            _ => None,
+        }
+    }
+    states(expr) == Some(true)
+}
+
 /// [`carry_frame_register`] for one sibling of a comma (#3960): also a bare builtin that
 /// navigates nothing ([`is_bare_register_neutral_builtin`]). Only a comma sibling is asked
 /// this, never an alternate's operand or a pipe stage, because the register statement it makes
@@ -50642,6 +50665,14 @@ impl FoldRegister {
         // The shape of a fixed expression is constant, so it is asked at most once per
         // call, and only when a branch actually carries a statement.
         let mut forwards: Option<bool> = None;
+        // #4800: an untracked entry holds the `null`/boolean register the frame carries
+        // (`live_register`), which the alternate of a `//` states when it leaves the register
+        // alone ([`carry_frame_register`]): jq runs it after backtracking out of everything the
+        // left operand navigated, so that is the register at the entry. Read for a `//` UPDATE
+        // alone; a branch that came through the left operand states what it did and is judged
+        // on its own.
+        let alternate_leaves_register = S::TAG == EvalTag::Jq && alternate_states_register(expr);
+        let alternate_entry = live_register.filter(|_| alternate_leaves_register);
         let mut deliver = |branch: PathBranch<'_>| {
             // Jq mode only, like every register admission here: yq's scalar-write
             // no-op convention would turn a wrongly carried register into silent
@@ -50659,12 +50690,13 @@ impl FoldRegister {
                 // Read only through an expression every producer of which forwards
                 // its branch unchanged ([`entry_marker_stage`]'s allowlist), and a
                 // handler's `Unmoved` against the fold's own register.
-                && *forwards.get_or_insert_with(|| {
-                    matches!(entry_marker_shape(expr), EntryMarkers::Forwarded)
-                })
+                && (alternate_leaves_register && matches!(branch.register, BranchRegister::Unmoved(_))
+                    || *forwards.get_or_insert_with(|| {
+                        matches!(entry_marker_shape(expr), EntryMarkers::Forwarded)
+                    }))
                 && states_register_at_entry(
                     &branch.register,
-                    self.trackable.then_some(&self.value),
+                    self.trackable.then_some(&self.value).or(alternate_entry),
                 );
             let relocated = self.relocate_one::<S>(branch.into_owned_value(), identical_eligible);
             sink(if at_entry && !relocated.trackable {
@@ -61772,15 +61804,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && extract_reg.trackable
                                     && extract_reg.path.depth() > reg.path.depth()
                                     && cannot_move_register(ext_expr);
-                                // ...except behind a `//`, which backtracks a falsy left side and
-                                // leaves the register where it entered (`(FE) // 5`).
+                                // ...judged per output behind a `//`: the alternate jq runs after
+                                // it backtracked the left side states the register it entered with
+                                // (`(FE) // 5` on `true`), the left side's own output states what
+                                // it did ([`alternate_states_register`], #4800).
                                 let register_lost_at_the_root = S::TAG == EvalTag::Jq
                                     && !extract_reg.trackable
                                     && extract_reg.path.depth() == 0
-                                    && extract_reg.frame.register_loss.is_lost()
-                                    && !any_subexpr(&bound_update, &mut |e| {
-                                        matches!(e, Expr::Alternative(..))
-                                    });
+                                    && extract_reg.frame.register_loss.is_lost();
                                 let update_has_comma =
                                     register_lost_at_the_root && has_branching_comma(&bound_update);
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
