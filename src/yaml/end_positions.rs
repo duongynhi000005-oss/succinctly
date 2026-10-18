@@ -52,7 +52,9 @@ use core::cell::Cell;
 
 use crate::util::broadword::select_in_word;
 
-use super::advance_positions::{build_cumulative_rank, build_select_samples, SELECT_SAMPLE_RATE};
+use super::advance_positions::{
+    build_cumulative_rank, build_select_samples, FAR_SELECT_ONES, SELECT_SAMPLE_RATE,
+};
 
 /// Cursor state for sequential access optimization.
 ///
@@ -382,6 +384,12 @@ impl CompactEndPositions {
             return Some(cursor.last_ib_result);
         }
 
+        // A far hop forward (an alias read after its anchor, a run of skipped containers)
+        // would scan every word in between; the sampled select does not (#4871).
+        if k - cursor.ib_ones_before > FAR_SELECT_ONES {
+            return self.reselect(k, cursor);
+        }
+
         // Forward scan in IB bitmap from cursor position
         let mut remaining = k - cursor.ib_ones_before;
         let mut wi = cursor.ib_word_idx;
@@ -407,6 +415,21 @@ impl CompactEndPositions {
 
         self.cursor.set(cursor);
         None
+    }
+
+    /// [`get_sequential`](Self::get_sequential)'s answer for IB select argument `k` by the
+    /// sampled select, leaving `cursor` where that select ended (#4871).
+    #[inline(never)]
+    fn reselect(&self, k: usize, mut cursor: SequentialCursor) -> Option<usize> {
+        let found = self.ib_select1_with_state(k);
+        if let Some((pos, word_idx, ones_before)) = found {
+            cursor.ib_ones_before = ones_before;
+            cursor.ib_word_idx = word_idx;
+            cursor.last_ib_arg = k;
+            cursor.last_ib_result = pos;
+        }
+        self.cursor.set(cursor);
+        found.map(|(pos, _, _)| pos)
     }
 
     /// Random access path (backwards jump): full rank/select computation,
@@ -917,6 +940,40 @@ mod tests {
                 Some(positions[i] as usize),
                 "random access i={i}"
             );
+        }
+    }
+
+    /// #4871: a hop forward of more than a few select samples is answered by the sampled select, and
+    /// the cursor it leaves must still serve the next short hop and the next backward jump. The shape
+    /// is an alias read after its anchor: far ahead, far back, one step on, far ahead again.
+    #[test]
+    fn test_far_forward_hops_leave_the_cursor_usable_4871() {
+        let positions = irregular_positions(6000, 4);
+        let ep = EndPositions::build(&positions, 40_000);
+        assert!(ep.is_compact());
+        let at = |i: usize| ep.get(i);
+        let mut anchor = 0usize;
+        let mut alias = 3000usize;
+        while alias < positions.len() {
+            assert_eq!(at(alias), Some(positions[alias] as usize), "alias {alias}");
+            assert_eq!(
+                at(anchor),
+                Some(positions[anchor] as usize),
+                "anchor {anchor}"
+            );
+            assert_eq!(
+                at(anchor + 1),
+                Some(positions[anchor + 1] as usize),
+                "next of anchor {anchor}"
+            );
+            anchor += 7;
+            alias += 7;
+        }
+        // A long forward pass in one call, then short steps from where it landed.
+        assert_eq!(at(5999), Some(positions[5999] as usize));
+        assert_eq!(at(0), Some(positions[0] as usize));
+        for i in (1..40).chain(2900..2940) {
+            assert_eq!(at(i), Some(positions[i] as usize), "step {i}");
         }
     }
 }

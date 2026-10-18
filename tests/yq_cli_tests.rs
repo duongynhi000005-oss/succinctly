@@ -68365,6 +68365,54 @@ fn test_wide_yaml_mapping_lookups_answer_as_the_walk_does_4003() -> Result<()> {
     Ok(())
 }
 
+/// #4871: `document_index` of the k-th document of a stream is k (it was found by counting the
+/// documents before it, so a stream of n documents cost n squared), and a document whose aliases
+/// follow thousands of anchors streams out whole (the alias target is read a long hop back from the
+/// cursor, which then hops a long way forward again).
+#[test]
+fn test_many_documents_and_many_aliases_stay_correct_4871() -> Result<()> {
+    let docs: String = (0..3000).map(|i| format!("---\nid: {i}\n")).collect();
+    assert_eq!(
+        run_yq_stdin_with_stderr("select(document_index == 2999) | .id", &docs, &["-o=json"])?,
+        ("2999\n".to_string(), String::new(), 0)
+    );
+    let (stdout, stderr, code) =
+        run_yq_stdin_with_stderr("document_index", &docs, &["-o=json", "-N"])?;
+    assert_eq!(code, 0, "{stderr}");
+    let indexes: Vec<usize> = stdout.lines().map(|l| l.parse().unwrap()).collect();
+    assert_eq!(indexes, (0..3000).collect::<Vec<_>>());
+
+    let n = 3000;
+    let mut yaml: String = (0..n)
+        .map(|i| format!("k{i}: &a{i} {{v: {i}}}\n"))
+        .collect();
+    yaml.extend((0..n).map(|i| format!("r{i}: *a{i}\n")));
+    let mut expected = String::from("{");
+    for i in 0..n {
+        expected.push_str(&format!("\"k{i}\":{{\"v\":{i}}},"));
+    }
+    for i in 0..n {
+        expected.push_str(&format!(
+            "\"r{i}\":{{\"v\":{i}}}{}",
+            if i + 1 < n { "," } else { "" }
+        ));
+    }
+    expected.push_str("}\n");
+    assert_eq!(
+        run_yq_stdin_with_stderr(".", &yaml, &["-o=json", "-I=0"])?,
+        (expected, String::new(), 0)
+    );
+    assert_eq!(
+        run_yq_stdin_with_stderr(
+            "[.. | select(kind == \"alias\")] | length",
+            &yaml,
+            &["-o=json", "-I=0"]
+        )?,
+        (format!("{n}\n"), String::new(), 0)
+    );
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.

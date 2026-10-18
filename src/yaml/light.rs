@@ -3273,27 +3273,13 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             doc_ancestor = parent;
         }
 
-        // Count preceding siblings to get the document index
-        // Start from root's first child and count until we reach doc_ancestor
-        let root = YamlCursor::new(self.index, self.text, 0);
-        let mut current = root.first_child()?;
-        let mut index = 0;
-
-        loop {
-            if current.bp_pos == doc_ancestor.bp_pos {
-                return Some(index);
-            }
-            match current.next_sibling() {
-                Some(next) => {
-                    current = next;
-                    index += 1;
-                }
-                None => {
-                    // Shouldn't happen if doc_ancestor is valid, but safety fallback
-                    return Some(0);
-                }
-            }
+        // The document's place among the root's children (#4871). A position that is not one
+        // (a root with no children) falls back to the first document, as the sibling walk did.
+        let starts = self.index.document_starts();
+        if starts.is_empty() {
+            return None;
         }
+        Some(starts.binary_search(&doc_ancestor.bp_pos).unwrap_or(0))
     }
 
     /// Get the style of this node.
