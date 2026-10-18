@@ -62411,9 +62411,16 @@ fn test_yq_def_call_over_last_keeps_no_path_register_4109() -> Result<()> {
         "del(. as $x | def g: last(.a); g | $x.b)",
         "(. as $x | def g: last(.a); g | $x.b) = 5",
     ] {
-        let (stdout, code) = run_yq_stdin(filter, doc, &["-o", "json"])?;
+        // yq has no `last`, so the flag is what lets the filter parse (#3560); without it the
+        // gate's error would satisfy the refusal checks for the wrong reason.
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(filter, doc, &["--jq-extensions", "-o", "json"])?;
         assert_ne!(code, 0, "`{filter}`: stdout {stdout:?}");
         assert!(stdout.is_empty(), "`{filter}`: stdout {stdout:?}");
+        assert!(
+            !stderr.contains("is not part of yq's syntax"),
+            "`{filter}`: refused by the parse gate, not the register: {stderr:?}"
+        );
     }
     Ok(())
 }
@@ -64946,6 +64953,18 @@ fn test_yq_last_is_gated_behind_jq_extensions_3560() -> Result<()> {
             &["--jq-extensions", "-o=json", "-I=0"],
         )?;
         assert_eq!((out.trim(), code), (expected, 0), "`{filter}`");
+    }
+    // The write lands on the slurp and eval-all routes too, not only on the default one.
+    for (filter, flag) in [
+        ("(.[0].a | last) = 9 | .[0].a", "-s"),
+        ("(.a | last) = 9 | .a", "--eval-all"),
+    ] {
+        let (out, code) = run_yq_stdin(
+            filter,
+            "a: [1, 2]\n",
+            &["--jq-extensions", "-o=json", "-I=0", flag],
+        )?;
+        assert_eq!((out.trim(), code), ("[1,9]", 0), "`{filter}` {flag}");
     }
     // A mapping key spelled like the keyword is a field name, not the builtin.
     let (out, code) = run_yq_stdin(".last", "last: 7\n", &[])?;
