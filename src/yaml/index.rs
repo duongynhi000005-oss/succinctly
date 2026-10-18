@@ -967,19 +967,20 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
 
     /// Whether `text` could hold a mapping key that decodes to `<<`, so that a mapping's
     /// members need reading for merge keys. `false` is a proof that none does and `true` only
-    /// that one might: it looks for the two ways to spell the key, a literal `<<` and a
-    /// double-quoted escape (`"\x3c\x3c"`, `"\u003c<"`), and answers from the first measurement
-    /// afterwards (#4102).
+    /// that one might: it looks for the ways to spell the key, a literal `<<`, a double-quoted
+    /// hex escape (`"\x3c\x3c"`, `"\u003c<"`) and an escaped line break that joins two `<`
+    /// (`"<\` newline `  <"`), and answers from the first measurement afterwards (#4102).
+    /// `text` must be the text the index was built from: the first answer is kept.
     ///
     /// A mapping with no merge key is the overwhelmingly common case, and finding that out
     /// reads every key of the mapping, so building the fields of a mapping `value()` at each
     /// of a wide mapping's members made a fan-out over them quadratic. Most documents never
     /// contain `<<`, and for them one pass over the bytes answers every mapping at once.
     #[must_use]
-    pub fn may_have_merge_keys(&self, text: &[u8]) -> bool {
+    pub(crate) fn may_have_merge_keys(&self, text: &[u8]) -> bool {
         *self.may_have_merge_keys.get_or_init(|| {
-            // `contains` is the vectorized byte search, so the pass costs a fraction of a
-            // millisecond a megabyte; the loops below only run where the byte occurs.
+            // `contains` is the standard library's byte search, which is what a document with
+            // none of the byte pays; the loops below walk the occurrences of one that has some.
             let mut rest = text;
             if rest.contains(&b'<') {
                 while let Some(at) = rest.iter().position(|&b| b == b'<') {
@@ -992,7 +993,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             let mut rest = text;
             if rest.contains(&b'\\') {
                 while let Some(at) = rest.iter().position(|&b| b == b'\\') {
-                    if matches!(rest.get(at + 1), Some(b'x' | b'u' | b'U')) {
+                    if matches!(rest.get(at + 1), Some(b'x' | b'u' | b'U' | b'\n' | b'\r')) {
                         return true;
                     }
                     // Skip the escaped byte too, so `\\x` (a backslash, then `x`) is not read as `\x`.
@@ -2804,6 +2805,8 @@ mod tests {
             ("m:\n  \"\\u003c\\u003c\": 1\n", true),
             ("m:\n  \"\\U0000003c<\": 1\n", true),
             ("a: 1 <<\n", true),
+            ("m:\n  \"<\\\n  <\": 1\n", true),
+            ("m:\n  \"<\\\r\n  <\": 1\n", true),
             ("a: 1 <", false),
         ] {
             let index = YamlIndex::build(text.as_bytes()).expect("should parse");

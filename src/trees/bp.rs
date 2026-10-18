@@ -2899,8 +2899,11 @@ impl<W: AsRef<[u64]>, S: SelectSupport> BalancedParens<W, S> {
                 }
             }
             let wi = w - 1;
-            let total = i32::from(*self.l0_word_excess.get(wi)?);
-            let min = i32::from(*self.l0_min_excess.get(wi)?).min(0);
+            // A word the L0 index does not cover is scanned like one it lets through.
+            let (total, min) = match (self.l0_word_excess.get(wi), self.l0_min_excess.get(wi)) {
+                (Some(&total), Some(&min)) => (i32::from(total), i32::from(min).min(0)),
+                _ => (0, i32::MIN / 2),
+            };
             if excess + total - min >= 1 {
                 let word = words[wi];
                 for bit in (0..64).rev() {
