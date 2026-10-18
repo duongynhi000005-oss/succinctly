@@ -849,29 +849,27 @@ fn stream_owned_value_yaml<W: core::fmt::Write>(
 ///
 /// This is [`stream_owned_value_yaml`] -- the very renderer the CLI's YAML
 /// output runs -- at yq's default two-space indent, so `@yaml` can no longer
-/// drift from it the way its own flow-style copy did. Two things differ from
-/// the CLI's document-root rules, both measured against yq v4.53.3:
+/// drift from it the way its own flow-style copy did. Two root-position
+/// details are measured against yq v4.53.3:
 ///
 /// - A root string keeps its quoting (`"1" | @yaml` is `"1"`, `"a: b"` is
 ///   `'a: b'`), where [`StreamableValue::stream_yaml`] writes a root string
 ///   bare (#852).
-/// - A root computed float carries its `!!float` tag (`3.0*1 | @yaml` is
-///   `!!float 3`), where the CLI drops it at document-root position (#949):
-///   the tag is only suppressed by the document printer, which `@yaml` is not
-///   a part of.
+/// - A root computed float stays untagged (`3.0*1 | @yaml` is `3`, yq says
+///   `!!float 3`): yq tags a computed float but not a document-sourced
+///   `!!float 3` scalar, and an [`OwnedValue::Float`] cannot tell the two apart
+///   (#1090). A nested float is tagged, as in the CLI's own output.
 ///
 /// A flow-sourced container comes out block here, since an [`OwnedValue`]
 /// carries no source style (#739, #865).
 pub(crate) fn owned_value_to_yaml_format(value: &OwnedValue) -> String {
-    use core::fmt::Write as _;
     let mut out = String::new();
     let written = match value {
-        OwnedValue::Float(f) if f.is_finite() => out.write_str(&format_float_yq_yaml_nested(*f)),
         OwnedValue::String(s) => stream_yaml_string(&mut out, s),
         _ => stream_owned_value_yaml(value, &mut out, "", 2, ' ', false),
     };
     // Writing to a `String` cannot fail.
-    debug_assert!(written.is_ok());
+    written.expect("writing to a String cannot fail");
     out.push('\n');
     out
 }
@@ -2371,11 +2369,9 @@ mod tests {
         );
     }
 
-    /// #1021: `stream_owned_value_yaml` (backs `stream_yaml`/`yq`'s default
-    /// output) had no depth guard at all before this issue.
     /// #1183: `@yaml` and the CLI's YAML output share one renderer, so for
     /// every value the two documents agree except where `@yaml` deliberately
-    /// differs (a root string or root float -- see
+    /// differs (a root string -- see
     /// [`owned_value_to_yaml_format`]). A fifth copy of the renderer cannot
     /// appear without this failing.
     #[test]
@@ -2411,6 +2407,8 @@ mod tests {
         }
     }
 
+    /// #1021: `stream_owned_value_yaml` (backs `stream_yaml`/`yq`'s default
+    /// output) had no depth guard at all before this issue.
     #[test]
     fn stream_owned_value_yaml_panics_past_nesting_depth_limit_1021() {
         use crate::jq::value::MAX_VALUE_TREE_DEPTH;

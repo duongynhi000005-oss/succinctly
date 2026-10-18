@@ -59210,10 +59210,9 @@ mod yaml_format_block_style_1183 {
     }
 
     /// A root string keeps the quoting the CLI's document printer would drop
-    /// (#852), and a root computed float keeps the tag it would suppress
-    /// (#949): `@yaml` is not the document printer.
+    /// (#852): `@yaml` is not the document printer.
     #[test]
-    fn root_scalars_keep_their_quoting_and_tag_1183() -> Result<()> {
+    fn root_scalars_keep_their_quoting_1183() -> Result<()> {
         check_on(
             "null\n",
             &[
@@ -59225,7 +59224,6 @@ mod yaml_format_block_style_1183 {
                 (r#""~" | @yaml"#, r#""\"~\"\n""#),
                 ("null | @yaml", r#""null\n""#),
                 ("5 | @yaml", r#""5\n""#),
-                ("2.0*1 | @yaml", r#""!!float 2\n""#),
                 ("[3.0*1] | @yaml", r#""- !!float 3\n""#),
                 ("[1e17*1] | .[0] | @yaml", r#""1e+17\n""#),
             ],
@@ -59263,6 +59261,11 @@ mod yaml_format_block_style_1183 {
             &[
                 // yq keeps a multi-line string as a literal block (`|-`): #3587.
                 (r#""x\ny" | @yaml"#, r#""\"x\\ny\"\n""#),
+                // yq tags a root computed float (`!!float 2`) but not a
+                // document-sourced `!!float 2` scalar (#1090's test); an
+                // `OwnedValue::Float` cannot tell them apart, so the root
+                // stays untagged, as before this fix.
+                ("2.0*1 | @yaml", r#""2\n""#),
                 // yq spells it `!!float +Inf`: #1071.
                 ("(1/0) | @yaml", r#"".inf\n""#),
             ],

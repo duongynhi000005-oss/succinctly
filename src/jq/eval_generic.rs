@@ -4490,7 +4490,7 @@ fn eval_on_owned_over<S: EvalSemantics, V: DocumentValue>(
     // Formats need neither an index nor a cursor, so the round-trip below is
     // pure overhead for them (#124). No non-finite-float guard is needed here
     // either: every non-JSON format bottoms out in `numeric_display_string`,
-    // `owned_to_yaml`, or `props_value_to_string` (eval.rs), which already
+    // `owned_value_to_yaml_format` (stream.rs), or `props_value_to_string` (eval.rs), which already
     // render NaN/Infinity directly from an `OwnedValue::Float` or
     // `NumberLiteral` -- jq mode's `"null"`/`DBL_MAX`-text substitution
     // (#1075) or yq mode's `.nan`/`.inf`/`-.inf` -- with no dependence on

@@ -5906,3 +5906,17 @@ first result of `.a[1] | ..`. A block container's `&anchor`/`!tag` line prints a
 container's below it, as in yq. An alias item (`- # own` / `  *x`) prints its target after the comment, where yq
 prints `*x` (the pre-existing root-alias expansion, #1350). Separately, `.a` on a sequence whose dash-comment item
 carries an `&anchor` drops that anchor (`- &x` is printed as `-`), which predates this change.
+
+## `@yaml` of a flow-sourced container, a multi-line string, a root computed float or a non-finite float ([#1183](https://github.com/rust-works/succinctly/issues/1183))
+
+`@yaml` runs the same owned-value YAML streamer as the CLI's own output, so it inherits that
+streamer's known gaps; each is pinned in `recorded_gaps_1183` (`tests/yq_cli_tests.rs`).
+Captured live (v4.53.3):
+
+| filter                         | real yq           | succinctly yq | why                                                                                                                     |
+|--------------------------------|-------------------|---------------|-------------------------------------------------------------------------------------------------------------------------|
+| `a: {b: 1}` then `.a \| @yaml` | `{b: 1}\n`        | `b: 1\n`      | an owned value carries no source style (#739, #865)                                                                     |
+| `a: [1, 2]` then `.a \| @yaml` | `[1, 2]\n`        | `- 1\n- 2\n`  | same                                                                                                                    |
+| `"x\ny" \| @yaml`              | `\|-\n  x\n  y\n` | `"x\ny"\n`    | a line break is double-quoted, not a literal block (#3587)                                                              |
+| `2.0*1 \| @yaml`               | `!!float 2\n`     | `2\n`         | yq tags a computed float but not a document-sourced `!!float 2` (the #1090 test); an owned float cannot tell them apart |
+| `(1/0) \| @yaml`               | `!!float +Inf\n`  | `.inf\n`      | non-finite spelling (#1071)                                                                                             |
