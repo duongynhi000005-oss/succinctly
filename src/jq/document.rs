@@ -1432,7 +1432,7 @@ pub trait DocumentValue: Sized + Clone {
         false
     }
 
-    /// Whether a [`KeyIndex`](crate::jq::key_index::KeyIndex) may hold this key (#4003).
+    /// Whether the per-object key index may hold this key (#4003).
     ///
     /// The index finds a member by the hash of its decoded key, which is the lookup a
     /// format's own walk performs only when the walk matches every key by its decoded text.
