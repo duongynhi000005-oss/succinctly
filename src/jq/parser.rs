@@ -6473,6 +6473,40 @@ impl<'a> Parser<'a> {
                 self.consume_keyword("from_yaml");
                 return Ok(Some(Builtin::FromYaml));
             }
+            // #4872: `envsubst`, with the `nu`/`ne`/`ff` flags as bare words.
+            if self.matches_keyword("envsubst") {
+                self.consume_keyword("envsubst");
+                self.skip_ws();
+                let mut flags = super::envsubst::EnvsubstFlags::default();
+                if self.peek() == Some('(') {
+                    self.next();
+                    loop {
+                        self.skip_ws();
+                        if self.peek() == Some(')') {
+                            self.next();
+                            break;
+                        }
+                        let start = self.pos;
+                        let word = self.parse_ident()?;
+                        match word.as_str() {
+                            "nu" => flags.no_unset = true,
+                            "ne" => flags.no_empty = true,
+                            "ff" => flags.fail_fast = true,
+                            _ => {
+                                return Err(ParseError::new(
+                                    format!("envsubst takes the flags nu, ne and ff, not {word}"),
+                                    start,
+                                ))
+                            }
+                        }
+                        self.skip_ws();
+                        if self.peek() == Some(',') {
+                            self.next();
+                        }
+                    }
+                }
+                return Ok(Some(Builtin::Envsubst(flags)));
+            }
         }
         if self.matches_keyword("tojson") {
             self.consume_keyword("tojson");
@@ -13444,6 +13478,7 @@ mod tests {
             "document_index",
             "downcase",
             "env",
+            "envsubst",
             "error",
             "explode",
             "false",

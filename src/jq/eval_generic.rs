@@ -34352,6 +34352,7 @@ fn owned_identity_rule(stage: &Expr) -> Option<OwnedIdentityRule> {
             | Builtin::ToJson
             | Builtin::FromJson
             | Builtin::FromYaml
+            | Builtin::Envsubst(_)
             | Builtin::AsciiDowncase
             | Builtin::AsciiUpcase
             | Builtin::Length

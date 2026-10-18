@@ -5497,6 +5497,18 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
   `object (...) and number (1) cannot be multiplied`, not yq's `cannot multiply !!map with
   !!int`; the exit status agrees (a message-only divergence shared with every other `*`).
 
+### `envsubst` ([#4872](https://github.com/rust-works/succinctly/issues/4872))
+
+The substitution table was fitted to yq v4.53.3 by a fuzz over about 2,600 strings (tokens: `$`,
+`${`, `}`, names set / empty / unset, the operators `-` `:-` `=` `:=` `+` `:+`, `$$`, text) under every
+flag combination, not read from the Go source: every string whose `${` is followed by a variable name
+matches. Only two shapes differ, both a lexer artifact in `a8m/envsubst`: a `${` followed by something
+that is not a name (`${${MISSING-d}...`, `${ =...`, `${:=...`), where yq's own answer depends on a nested
+brace scan this does not model (a `${-}`, `${@}`, `${.}` or `${}` standing alone is literal text, as in
+yq); and a lone `${_` (yq prints it literally, `${_U}` is a variable). `${FOO^^}`, `${FOO:1}`,
+`${FOO/a/b}` and `${FOO:?m}` are `$FOO` in yq, which is mirrored. `envsubst` reads the process
+environment, so it needs the `std` feature.
+
 ### `with`, `from_json` and `from_yaml` residuals (#4206)
 
 `with(path; update)` is `path |= <what update changes>` (`with_update_effect`): assignments,
