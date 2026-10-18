@@ -47,6 +47,12 @@ use crate::util::broadword::select_in_word;
 /// Trade-off: lower = faster random access, more memory.
 pub(super) const SELECT_SAMPLE_RATE: usize = 256;
 
+/// A forward IB select argument more than this many ones past the cursor is answered by the
+/// sampled select instead of the word scan from the cursor (#4871): the scan costs a word per
+/// 64 bits it crosses, the sampled select at most a sample's worth. Short hops, which dominate
+/// ordinary streaming, keep the scan.
+pub(super) const FAR_SELECT_ONES: usize = 4 * SELECT_SAMPLE_RATE;
+
 /// Open position storage with automatic optimization.
 ///
 /// Uses memory-efficient Advance Index encoding when positions are monotonically
@@ -406,6 +412,12 @@ impl AdvancePositions {
         let start_wi = cursor.ib_word_idx;
         let remaining = k - cursor.ib_ones_before;
 
+        // A far hop forward (an alias read after its anchor, a run of skipped containers) would
+        // scan every word in between; the sampled select does not (#4871).
+        if remaining > FAR_SELECT_ONES {
+            return self.reselect(k, cursor);
+        }
+
         if let Some((wi, rem)) = scan_select(&self.ib_words, start_wi, remaining) {
             let word = self.ib_words[wi];
             let bit_pos = select_in_word(word, rem as u32) as usize;
@@ -430,6 +442,21 @@ impl AdvancePositions {
 
         self.cursor.set(cursor);
         None
+    }
+
+    /// [`get_sequential`](Self::get_sequential)'s answer for IB select argument `k` by the
+    /// sampled select, leaving `cursor` where that select ended (#4871).
+    #[inline(never)]
+    fn reselect(&self, k: usize, mut cursor: SequentialCursor) -> Option<u32> {
+        let found = self.ib_select1_with_state(k);
+        if let Some((pos, word_idx, ones_before)) = found {
+            cursor.ib_ones_before = ones_before;
+            cursor.ib_word_idx = word_idx;
+            cursor.last_ib_arg = k;
+            cursor.last_ib_result = pos;
+        }
+        self.cursor.set(cursor);
+        found.map(|(pos, _, _)| pos as u32)
     }
 
     /// Advance the cursor from its current position to `target` open_idx.
@@ -1169,6 +1196,35 @@ mod tests {
         for _ in 0..20_000 {
             let i = rng.random_range(0..positions.len());
             assert_eq!(ap.get(i), Some(positions[i]), "random access i={i}");
+        }
+    }
+
+    /// #4871: a hop forward of more than a few select samples is answered by the sampled select, and
+    /// the cursor it leaves must still serve the next short hop and the next backward jump. The shape
+    /// is an alias read after its anchor: far ahead, far back, one step on, far ahead again.
+    #[test]
+    fn test_far_forward_hops_leave_the_cursor_usable_4871() {
+        let positions = irregular_positions(6000, 4);
+        let ap = AdvancePositions::build_unchecked(&positions, 40_000);
+        let at = |i: usize| ap.get(i);
+        let mut anchor = 0usize;
+        let mut alias = 3000usize;
+        while alias < positions.len() {
+            assert_eq!(at(alias), Some(positions[alias]), "alias {alias}");
+            assert_eq!(at(anchor), Some(positions[anchor]), "anchor {anchor}");
+            assert_eq!(
+                at(anchor + 1),
+                Some(positions[anchor + 1]),
+                "next of anchor {anchor}"
+            );
+            anchor += 7;
+            alias += 7;
+        }
+        // A long forward pass in one call, then short steps from where it landed.
+        assert_eq!(at(5999), Some(positions[5999]));
+        assert_eq!(at(0), Some(positions[0]));
+        for i in (1..40).chain(2900..2940) {
+            assert_eq!(at(i), Some(positions[i]), "step {i}");
         }
     }
 }

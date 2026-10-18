@@ -127,6 +127,9 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Whether the indexed text could spell a `<<` merge key, measured once on first use (#4102);
     /// see [`Self::may_have_merge_keys`].
     may_have_merge_keys: OnceCell<bool>,
+    /// The BP position of every document's content node, in document order, measured once on
+    /// first use (#4871); see [`Self::document_starts`].
+    document_starts: OnceCell<Vec<usize>>,
     /// The leading lines (and the same-line columns of the first content line) real yq does not
     /// count when it numbers `line`/`column`, measured once on first use (#4363; see
     /// `light.rs`'s `yq_position_preamble`).
@@ -227,6 +230,7 @@ impl YamlIndex<Vec<u64>> {
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
             may_have_merge_keys: OnceCell::new(),
+            document_starts: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         };
         index.validate_alias_acyclicity()?;
@@ -299,6 +303,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
             may_have_merge_keys: OnceCell::new(),
+            document_starts: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         }
     }
@@ -963,6 +968,26 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[inline]
     pub fn to_line_column(&self, offset: usize, text: &[u8]) -> (usize, usize) {
         self.ensure_lines(text).to_line_column(offset)
+    }
+
+    /// The BP position of each document's content node, in stream order (#4871).
+    ///
+    /// A cursor's `document_index` is its document's place in this list, found by binary
+    /// search; counting the siblings that precede it made a pass over a stream of `n` documents
+    /// cost `n` squared. Built from the root's children on first use, so a stream whose
+    /// documents are never numbered keeps the memory.
+    #[must_use]
+    pub(crate) fn document_starts(&self) -> &[usize] {
+        self.document_starts.get_or_init(|| {
+            let bp = self.bp();
+            let mut starts = Vec::new();
+            let mut at = bp.first_child(0);
+            while let Some(pos) = at {
+                starts.push(pos);
+                at = bp.next_sibling(pos);
+            }
+            starts
+        })
     }
 
     /// Whether `text` could hold a mapping key that decodes to `<<`, so that a mapping's
