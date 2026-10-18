@@ -1253,7 +1253,7 @@ fn test_yq_field_name_keeps_tab_cr_nbsp_3377() -> Result<()> {
 /// gap #3377's own test above deliberately routed around (see its doc
 /// comment). Inputs here use an actual Rust `\r`/`\n` escape, producing the
 /// literal control byte in the JSON text itself (unlike `#3377`'s
-/// `r"...\r..."` fixtures, whose `\r` is JSON's own two-character escape
+/// `r#"...\r..."#` fixtures, whose `\r` is JSON's own two-character escape
 /// sequence, decoded by the parser rather than appearing as a raw byte).
 /// Covers both a raw byte as an object key (`keys`) and as an ordinary
 /// string value, plus the deeper bug: the same raw byte was folded in the
@@ -71320,23 +71320,41 @@ fn test_yq_yaml_sourced_number_length_on_the_owned_route_is_its_spelling_3604() 
 /// as `123456789012345678901.0`) keeps the width of `1.2345678901234568e+20`.
 #[test]
 fn test_yq_json_sourced_number_length_on_the_owned_route_is_unchanged_3604() -> Result<()> {
-    let json = r#"{"p":2.0,"q":1e5,"r":1.50,"t":123456789012345678901,"x":-123456789012345678901}"#;
+    let json = r#"{"p":2.0,"q":1e5,"r":1.50,"t":123456789012345678901,"x":-123456789012345678901,"u":9223372036854775808,"v":9007199254740993,"w":1e19}"#;
     for (filter, expected) in [
-        (r"to_entries | map(.value | length)", "[1,6,3,22,23]\n"),
+        (
+            r"to_entries | map(.value | length)",
+            "[1,6,3,22,23,19,16,5]\n",
+        ),
         (
             r"map_values(length)",
-            "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23}\n",
+            "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23,\"u\":19,\"v\":16,\"w\":5}\n",
         ),
         (
             r"with_entries(.value |= length)",
-            "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23}\n",
+            "{\"p\":1,\"q\":6,\"r\":3,\"t\":22,\"x\":23,\"u\":19,\"v\":16,\"w\":5}\n",
         ),
-        (r"[.[]] | map(length)", "[1,6,3,22,23]\n"),
+        (r"[.[]] | map(length)", "[1,6,3,22,23,19,16,5]\n"),
     ] {
         let (stdout, code) =
             run_yq_stdin(filter, json, &["--input-format", "json", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "`{filter}`");
         assert_eq!(stdout, expected, "`{filter}` on a JSON document");
+    }
+    Ok(())
+}
+
+/// #3604: a number literal of the filter is measured by its spelling too, as yq does (`1e16` is 4, `2e0` is
+/// 3, `1.50` is 4), where the owned route answered the width of the value (5, 1, 3).
+#[test]
+fn test_yq_number_literal_length_is_its_spelling_3604() -> Result<()> {
+    for (filter, expected) in [
+        ("[1e16, 2e0, 1.50] | map(length)", "[4,3,4]\n"),
+        ("[1.50] | .[0] | length", "4\n"),
+    ] {
+        let (stdout, code) = run_yq_stdin(filter, "", &["-n", "-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "`{filter}`");
+        assert_eq!(stdout, expected, "`{filter}`");
     }
     Ok(())
 }
