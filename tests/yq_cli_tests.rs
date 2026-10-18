@@ -66888,6 +66888,123 @@ fn test_yq_reads_an_array_by_a_string_key_that_spells_an_index_4274() -> Result<
     Ok(())
 }
 
+/// #4749: yq hands an array index key's text to `strconv.ParseInt`, so a fractional number key
+/// (`.[1.5]`, `.[1/3]`, `.[1.50]`) is refused on a read, a write and a `del()`, where jq truncates it.
+/// A float that is integral by computation still indexes (`.[3/3]`, up to the `1e6` magnitude where Go's
+/// `%g` writes an exponent), `?` suppresses a read, and a `null`, mapping or scalar target is not an
+/// array so it keeps its own rule. Rows captured from yq v4.53.3 (`-p=json -o=json -I=0`, input
+/// `[10,20,30]` unless noted); the refusal keeps this build's own wording, `Cannot index array with
+/// number`, not yq's `cannot index array with '1.5' (strconv.ParseInt: ...)`.
+#[test]
+fn test_yq_refuses_a_fractional_array_index_4749() -> Result<()> {
+    let args = &["-p=json", "-o=json", "-I=0"];
+    let refused = [
+        ("[10,20,30]", ".[1.5]"),
+        ("[10,20,30]", ".[1.50]"),
+        ("[10,20,30]", ".[-0.5]"),
+        ("[10,20,30]", ".[1/3]"),
+        ("[10,20,30]", ".[3/2]"),
+        ("[10,20,30]", ".[0,1.5]"),
+        ("[10,20,30]", "1.5 as $k | .[$k]"),
+        ("[10,20,30]", ".[1.0*1000000]"),
+        ("[10,20,30]", "(. + [])[1.5]"),
+        ("[10,20,30]", "(.[0:2])[1.5]"),
+        ("[10,20,30]", "to_entries | .[1.5]"),
+        ("[]", ".[1.5]"),
+        ("[[1]]", ".[1.5]"),
+        ("{\"a\":[1,2]}", ".a[1.5]"),
+        ("{\"a\":[1,2],\"k\":1.5}", ".a[.k]"),
+        // A write and a delete refuse it too.
+        ("[10,20,30]", ".[1.5] = 9"),
+        ("[10,20,30]", ".[1.5] |= 9"),
+        ("[10,20,30]", ".[1.5] += 1"),
+        ("[10,20,30]", "1.5 as $k | .[$k] = 3"),
+        ("[10,20,30]", "del(.[1.5])"),
+        ("[10,20,30]", "1.5 as $k | del(.[$k])"),
+        ("[10,20,30]", "del(.[0.5], .[0])"),
+        ("[10,20,30]", "del(.[2.5], .[0])"),
+        ("{\"a\":[1,2]}", "del(.a[1/3])"),
+        ("{\"a\":[1,2]}", ".a[1/3] = 1"),
+    ];
+    for (input, filter) in refused {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, input, args)?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", 1),
+            "{input} | {filter}: {stderr}"
+        );
+        assert!(
+            stderr.contains("Cannot index array with number"),
+            "{input} | {filter}: {stderr}"
+        );
+    }
+    // `?` suppresses a read of the refused key, and the other keys of a comma still answer.
+    for (filter, expected) in [
+        (".[1.5]?", ""),
+        ("[.[1.5]?]", "[]\n"),
+        ("[.[0,1.5]?]", "[10]\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, "[10,20,30]", args)?,
+            (expected.to_string(), String::new(), 0),
+            "{filter}"
+        );
+    }
+    // An integral float that renders as digits still indexes, a negative one wraps, a spelled
+    // integral float stays an index, and an out-of-range one reads `null`.
+    for (filter, expected) in [
+        (".[3/3]", "20"),
+        (".[-3/3]", "30"),
+        (".[1.0*999999]", "null"),
+        (".[1.0]", "20"),
+        (".[1.5 - 0.5]", "20"),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, "[10,20,30]", args)?,
+            (format!("{expected}\n"), String::new(), 0),
+            "{filter}"
+        );
+    }
+    // A target that is not an array keeps its own rule: `null` and a mapping read `null`, a
+    // scalar reads nothing.
+    for (input, filter, expected) in [
+        ("null", ".[1.5]", "null\n"),
+        ("{\"a\":1}", ".[1.5]", "null\n"),
+        ("{\"a\":1}", ".b[1.5]", "null\n"),
+        ("\"abc\"", ".[1.5]", ""),
+        ("5", ".[1.5]", ""),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, input, args)?,
+            (expected.to_string(), String::new(), 0),
+            "{input} | {filter}"
+        );
+    }
+    // A YAML sequence is refused the same way, on the streaming and the DOM route.
+    for extra in [&[][..], &["-P"][..]] {
+        let (stdout, stderr, code) =
+            run_yq_stdin_with_stderr(".a[.k]", "k: 1.5\na: [10, 20, 30]\n", extra)?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{extra:?}: {stderr}");
+        assert!(
+            stderr.contains("Cannot index array with number"),
+            "{extra:?}: {stderr}"
+        );
+    }
+    // jq mode truncates, as jq does.
+    for (filter, expected) in [
+        (".[1.5]", "20"),
+        (".[1.5] = 9", "[10,9,30]"),
+        ("del(.[1.5])", "[10,30]"),
+    ] {
+        assert_eq!(
+            run_jq_stdin_with_stderr(filter, "[10,20,30]", &["-c"])?,
+            (format!("{expected}\n"), String::new(), 0),
+            "jq {filter}"
+        );
+    }
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.

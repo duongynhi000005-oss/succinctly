@@ -27288,6 +27288,14 @@ fn index_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             return index_one::<W, S>(target, &index, optional);
         }
     }
+    // #4749: yq refuses a fractional number key against an array.
+    if matches!(target, StandardJson::Array(_)) && yq_array_number_key_refused::<S>(key) {
+        return if optional {
+            QueryResult::None
+        } else {
+            QueryResult::Error(yq_array_number_key_error())
+        };
+    }
     let indexable_by_string = matches!(target, StandardJson::Object(_) | StandardJson::Null);
     // #2459: yq mode also indexes a mapping by number (into `null`, via
     // `index_array_by_position`'s own `Object` arm) -- see
@@ -27473,6 +27481,14 @@ pub(crate) fn index_one_owned<S: EvalSemantics>(
             map.get(text.as_str()).cloned().unwrap_or(OwnedValue::Null),
         ));
     }
+    // #4749: yq refuses a fractional number key against an array.
+    if matches!(target, OwnedValue::Array(_)) && yq_array_number_key_refused::<S>(key) {
+        return if optional {
+            Ok(None)
+        } else {
+            Err(yq_array_number_key_error())
+        };
+    }
     match (key, target) {
         (OwnedValue::String(s), OwnedValue::Object(map)) => Ok(Some(
             map.get(s.as_str()).cloned().unwrap_or(OwnedValue::Null),
@@ -27624,6 +27640,31 @@ pub(crate) fn yq_array_string_key_index<S: EvalSemantics>(key: &OwnedValue) -> O
         OwnedValue::String(text) => yq_parse_int64(text).map(OwnedValue::Int),
         _ => None,
     }
+}
+
+/// Whether yq refuses a number key against an array (#4749): it hands the key's text to
+/// `strconv.ParseInt`, so `.[1.5]`, `.[1/3]` and `.[1.50]` raise `cannot index array with '1.5'`
+/// where jq truncates. A float that is integral by computation renders as digits and indexes
+/// (`.[3/3]`), up to the magnitude where Go's `%g` switches to an exponent (`1.0*999999` reads
+/// `null`, `1.0*1000000` raises `1e+06`, as the slice bound's [`yq_slice_bound_not_integral`]
+/// found). An integral *spelled* float (`NumberLiteral`) stays an index: a JSON-sourced `1.0`
+/// indexes in yq and a YAML-sourced or literal one does not, and the value tree cannot tell them
+/// apart. `false` outside yq mode and for every other key kind.
+pub(crate) fn yq_array_number_key_refused<S: EvalSemantics>(key: &OwnedValue) -> bool {
+    if S::TAG != EvalTag::Yq {
+        return false;
+    }
+    match key {
+        OwnedValue::Float(f) => yq_computed_float_not_plain_integer(*f),
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => !f.is_finite() || f.fract() != 0.0,
+        _ => false,
+    }
+}
+
+/// The error for a key [`yq_array_number_key_refused`] refused, with the container's own
+/// wording rather than yq's `cannot index array with '1.5' (strconv.ParseInt: ...)`.
+pub(crate) fn yq_array_number_key_error() -> EvalError {
+    EvalError::cannot_index_with_type("array", "number")
 }
 
 /// [`index_one_owned`] for a *read*: yq answers nothing, not jq's `Cannot index <type> with
@@ -29149,6 +29190,14 @@ pub(crate) fn owned_bound_to_i64_for<S: EvalSemantics>(
     owned_bound_to_i64(v, round)
 }
 
+/// Whether a computed float is text `strconv.ParseInt` refuses: not finite, fractional, or of the
+/// `1e6` magnitude where Go's `%g` switches to an exponent (#3970). The one rule a slice bound
+/// ([`yq_slice_bound_not_integral`]) and an array index key ([`yq_array_number_key_refused`], #4749)
+/// share.
+fn yq_computed_float_not_plain_integer(f: f64) -> bool {
+    !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6
+}
+
 /// Whether yq's `ParseInt` would refuse this bound's scalar text (#3415, #3970).
 ///
 /// A computed float is handed over as its rendered text, and yq renders a float with Go's shortest
@@ -29161,7 +29210,7 @@ pub(crate) fn owned_bound_to_i64_for<S: EvalSemantics>(
 /// must keep doing so.
 fn yq_slice_bound_not_integral(v: &OwnedValue) -> bool {
     match v {
-        OwnedValue::Float(f) => !f.is_finite() || f.fract() != 0.0 || f.abs() >= 1e6,
+        OwnedValue::Float(f) => yq_computed_float_not_plain_integer(*f),
         OwnedValue::NumberLiteral(NumberRepr::Float(_), _) => true,
         _ => false,
     }

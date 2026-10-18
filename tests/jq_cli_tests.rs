@@ -103342,19 +103342,14 @@ fn test_del_fractional_index_matches_jv_dels_3302() -> Result<()> {
     Ok(())
 }
 
-/// yq mode keeps truncating: real yq rejects every fractional index (a
-/// separate gap), and #3302's fix is gated on jq semantics so `succinctly yq`
-/// answers exactly as it did before.
+/// yq mode is not touched by #3302's jq-semantics fix: real yq rejects every fractional index, so
+/// `succinctly yq` refuses it (#4749) instead of truncating, and `del()` leaves the input alone.
 #[test]
-fn test_del_fractional_index_yq_mode_unchanged_3302() -> Result<()> {
-    for (input, filter, expected) in [
-        ("[10,20,30]", "del(.[-0.5])", "[20,30]"),
-        ("[10,20,30]", "del(.[-0.5], .[1])", "[30]"),
-        (
-            "[[1,2,3],20,30]",
-            "del(.[0.5][0], .[0][0])",
-            "[[2,3],20,30]",
-        ),
+fn test_del_fractional_index_yq_mode_refused_4749() -> Result<()> {
+    for (input, filter) in [
+        ("[10,20,30]", "del(.[-0.5])"),
+        ("[10,20,30]", "del(.[-0.5], .[1])"),
+        ("[[1,2,3],20,30]", "del(.[0.5][0], .[0][0])"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
             .args(["yq", "-o", "json", "-I", "0", filter])
@@ -103370,12 +103365,15 @@ fn test_del_fractional_index_yq_mode_unchanged_3302() -> Result<()> {
                     .write_all(input.as_bytes())?;
                 child.wait_with_output()
             })?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(
-            stdout.trim_end(),
-            expected,
-            "#3302 (yq): `{filter}`: stderr={:?}",
-            String::from_utf8_lossy(&output.stderr)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.stdout.is_empty() && !output.status.success(),
+            "#3302 (yq): `{filter}`: stdout={:?} stderr={stderr:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            stderr.contains("Cannot index array with number"),
+            "#3302 (yq): `{filter}`: stderr={stderr:?}"
         );
     }
     Ok(())

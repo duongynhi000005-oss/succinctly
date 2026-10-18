@@ -21287,6 +21287,14 @@ fn index_one_generic<S: EvalSemantics, V: DocumentValue>(
             Err(err) => return GenericResult::Error(err),
         }
     }
+    // #4749: yq refuses a fractional number key against an array.
+    if target.as_array().is_some() && crate::jq::eval::yq_array_number_key_refused::<S>(key) {
+        return if optional {
+            GenericResult::None
+        } else {
+            GenericResult::Error(crate::jq::eval::yq_array_number_key_error())
+        };
+    }
     match key {
         // #4274: an array read by a string key spells its index.
         OwnedValue::String(_)

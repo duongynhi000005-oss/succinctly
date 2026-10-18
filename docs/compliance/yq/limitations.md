@@ -2423,7 +2423,7 @@ mechanism at all and turned out to have a separate, more severe divergence (a ha
 instead of missing autovivification) — see
 [#1919](https://github.com/rust-works/succinctly/issues/1919).
 
-### An array read or written by a string key ([#4274](https://github.com/rust-works/succinctly/issues/4274), [#4404](https://github.com/rust-works/succinctly/issues/4404)); a fractional key and a mapping's numeric `del` remain
+### An array read or written by a string key ([#4274](https://github.com/rust-works/succinctly/issues/4274), [#4404](https://github.com/rust-works/succinctly/issues/4404)); a float-spelled key and a mapping's numeric `del` remain
 
 yq reads a string key against an array as the integer it spells (`parseInt64`, the reader `pick`
 uses, #4257): `[10,20,30] | .["1"]` is `20`, `.["-1"]` is `30` (a negative index wraps), `.["01"]`,
@@ -2440,11 +2440,15 @@ JSON and YAML input alike; a string that is no integer keeps the ordinary error.
 
 **Not matched:**
 
-- **A fractional number key.** `.[1.5]` and `.[1.0]` index here (truncating); yq raises `cannot index
-  array with '1.5'` (a JSON-sourced `1.0` does index in yq, and the two cannot be told apart in the
-  owned value).
+- **A float-spelled integral number key.** `.[1.0]` indexes here; yq raises `cannot index array with
+  '1.0'` for a literal or YAML-sourced one but indexes a JSON-sourced `1.0`, and the two cannot be told
+  apart in the owned value. A *fractional* key (`.[1.5]`, `.[1/3]`, `.[1.50]`) is refused (#4749) on a
+  read, a write and a `del()`, `?` suppressing a read, and so is a computed float of `1e6` or more (`.[1.0*1000000]`,
+  where Go's `%g` writes `1e+06`); `.[3/3]` and `.[1.0*999999]` still index. A `null`, mapping or scalar
+  target is not an array and keeps its own rule. jq mode truncates, as jq does.
 - **The wording of the refusal.** yq's is `cannot index array with ' 1' (strconv.ParseInt: parsing
-  " 1": invalid syntax)`; this build keeps its own `Cannot index array with string " 1"`.
+  " 1": invalid syntax)`; this build keeps its own `Cannot index array with string " 1"`, and
+  `Cannot index array with number` for a fractional key.
 - **A mapping indexed by a number**, `{"0":"z"} | del(.[0])` (and `a: {"1": x}` | `del(.a[1])`), which yq
   deletes when the key is a string and this build leaves: a `1:` key is an `!!int`, which yq's delete leaves
   alone (#2353), and the value tree does not keep which spelling a key had.
@@ -4034,9 +4038,8 @@ and `.[(1.0*1000000):]` raises `strconv.ParseInt: parsing "1e+06": invalid synta
 the text is `value out of range` or an exponent form depending on how the operands were spelled,
 and raises either way). Swept against yq v4.53.3 for both signs; `succinctly yq` refuses every
 float of that size with its usual text. An *integer* product of any size is accepted by both.
-The plain *index* path is not covered: `.[(1.0*1000000)]` raises `cannot index array with '1e+06'`
-in yq and reads `null` here (a write pads the array to that length), the same family as the
-fractional and string index keys tracked in [#4404](https://github.com/rust-works/succinctly/issues/4404).
+The plain *index* path follows the same rule since #4749: `.[(1.0*1000000)]` raises `Cannot index
+array with number` (yq: `cannot index array with '1e+06'`) and `.[(1.0*999999)]` reads `null`.
 
 A bound with **no** output is not part of that divergence: yq raises `expected to find 1 number,
 got 0 instead` for it wherever the slice is read or written (`.b[select(false):]`, `.b[$typo:]`,
