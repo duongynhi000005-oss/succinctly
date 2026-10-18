@@ -161806,6 +161806,13 @@ fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() ->
             "",
             0,
         ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; if . then (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5 else 4 end; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
 }
 
