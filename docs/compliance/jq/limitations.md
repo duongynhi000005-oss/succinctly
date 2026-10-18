@@ -740,7 +740,8 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))` on `{"a":1}` printed `[]` twice
   where jq prints it once. The same source inside another fold's body keeps the by-value count (`foreach
   (1,2) as $i (.; foreach (isempty(CHAIN) | select(.|not)) as $k (.; .; .); .)` prints four paths where jq
-  prints two). Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
+  prints two), as do an `isempty` whose tail holds a fold or `def` or whose chain sits behind a bare
+  `null |`. Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
   `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819`; over the 51
   `isempty` `?//` operands, `--stage-only` (104,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   MATCH went 96,607 to 96,770, DIFF 396 to 235 and ACCEPT_WRONG 4 to 2, no regression. Since

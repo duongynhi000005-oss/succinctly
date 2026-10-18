@@ -164608,8 +164608,10 @@ fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Resu
 /// #4819: what `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`'s routing leaves
 /// alone. Value mode never reached the routed drive (jq emits the `false` twice there), and inside
 /// another fold's body the by-value count is kept, as for #4669 (the last row: jq prints two paths, the
-/// by-value count is four, a recorded divergence in `limitations.md`). Every other row captured from jq
-/// 1.7.1 with `-c`.
+/// by-value count is four, a recorded divergence in `limitations.md`). The last three rows are the
+/// operands the routing excludes -- a fold or `def` in the stages after the `isempty`, a pipe that starts at
+/// a bare `null` inside it -- which keep the by-value count (two paths where jq prints one). Every other
+/// row captured from jq 1.7.1 with `-c`.
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
 fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819() -> Result<()> {
@@ -164625,6 +164627,27 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
             r#"{"a":1}"#,
             r"path(foreach (1,2) as $i (.; foreach (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .); .))",
             "[]\n[]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | select(reduce 1 as $i (.; .)|not)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(null | . as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))",
+            "[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .))",
+            "[]\n[]\n",
             "",
             0,
         ),
