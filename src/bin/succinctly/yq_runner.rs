@@ -5886,7 +5886,7 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
 /// the value's order, which is the order the document is written in.
 fn defer_flow_line_comments(value: &OwnedValue, tree: &mut CommentTree) {
     let mut held = std::collections::VecDeque::new();
-    defer_flow_line_comments_at(value, tree, false, false, &mut held, 0);
+    defer_flow_line_comments_at(value, tree, LineComment::Free, false, &mut held, 0);
 }
 
 /// Whether `value` is a collection with members, the only kind `-P` rewrites from flow to block.
@@ -5898,13 +5898,24 @@ fn is_non_empty_collection(value: &OwnedValue) -> bool {
     }
 }
 
-/// `key_commented`: the line already ends in a comment that belongs to the key (`k: # note`), so
-/// yq's encoder overwrites the held comment there instead of waiting. `in_flow`: `tree`'s parent
-/// stays flow-written, where a nested collection's trailing comment is lost rather than held.
+/// How the line a node opens already ends, for [`defer_flow_line_comments_at`].
+#[derive(Clone, Copy)]
+enum LineComment {
+    /// No comment yet: the node's own comment, if it has none, takes a held one.
+    Free,
+    /// The line ends in a comment that belongs to the key (`k: # note`), so yq's encoder
+    /// overwrites the held comment there instead of waiting.
+    Overwritten,
+    /// The caller already wrote a held comment on this line (a key or dash line).
+    Placed,
+}
+
+/// `in_flow`: `tree`'s parent stays flow-written, where a nested collection's trailing comment is
+/// lost rather than held.
 fn defer_flow_line_comments_at(
     value: &OwnedValue,
     tree: &mut CommentTree,
-    key_commented: bool,
+    line: LineComment,
     in_flow: bool,
     held: &mut std::collections::VecDeque<String>,
     depth: usize,
@@ -5920,12 +5931,17 @@ fn defer_flow_line_comments_at(
     } else {
         None
     };
-    if key_commented {
-        held.pop_front();
-    } else if tree.own().is_none() {
-        if let Some(comment) = held.pop_front() {
-            tree.meta_mut().comment = Some(comment);
+    match line {
+        LineComment::Overwritten => {
+            held.pop_front();
         }
+        LineComment::Placed => {}
+        LineComment::Free if tree.own().is_none() => {
+            if let Some(comment) = held.pop_front() {
+                tree.meta_mut().comment = Some(comment);
+            }
+        }
+        LineComment::Free => {}
     }
     let children_in_flow = tree.style() == "flow";
     match (value, &mut *tree) {
@@ -5959,7 +5975,13 @@ fn defer_flow_line_comments_at(
                     defer_flow_line_comments_at(
                         child,
                         slot,
-                        key_commented || on_key,
+                        if on_key {
+                            LineComment::Placed
+                        } else if key_commented {
+                            LineComment::Overwritten
+                        } else {
+                            LineComment::Free
+                        },
                         children_in_flow,
                         held,
                         depth + 1,
@@ -5988,7 +6010,11 @@ fn defer_flow_line_comments_at(
                 defer_flow_line_comments_at(
                     child,
                     &mut slots[i],
-                    on_dash,
+                    if on_dash {
+                        LineComment::Placed
+                    } else {
+                        LineComment::Free
+                    },
                     children_in_flow,
                     held,
                     depth + 1,
