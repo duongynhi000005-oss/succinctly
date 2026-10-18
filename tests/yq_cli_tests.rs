@@ -67797,6 +67797,66 @@ fn test_p_moves_a_flow_collections_trailing_comment_to_the_next_line_4377() -> R
     Ok(())
 }
 
+/// #4866: `kind` reads the node itself, not a copy of its subtree, so an alias is `alias` (yq keeps
+/// the reference as its own kind) and an explicit `!!null` on a collection is a `scalar`. Rows captured
+/// from yq v4.53.3 (`-o=json -I=0`).
+#[test]
+fn test_kind_names_an_alias_and_a_null_tagged_collection_4866() -> Result<()> {
+    let doc = "a: &x {p: 1}\nb: *x\nc: &y [1]\nd: *y\ne: &z 5\nf: *z\ng: !!str 5\nh: ~\ni: !!null {a: 1}\nj: \"q\"\nk: 2.5\n";
+    for (filter, expected) in [
+        (".a | kind", "\"map\"\n"),
+        (".b | kind", "\"alias\"\n"),
+        (".c | kind", "\"seq\"\n"),
+        (".d | kind", "\"alias\"\n"),
+        (".e | kind", "\"scalar\"\n"),
+        (".f | kind", "\"alias\"\n"),
+        (".g | kind", "\"scalar\"\n"),
+        (".h | kind", "\"scalar\"\n"),
+        (".i | kind", "\"scalar\"\n"),
+        (".j | kind", "\"scalar\"\n"),
+        ("[.[] | kind]", "[\"map\",\"alias\",\"seq\",\"alias\",\"scalar\",\"alias\",\"scalar\",\"scalar\",\"scalar\",\"scalar\",\"scalar\"]\n"),
+        ("map(kind)", "[\"map\",\"alias\",\"seq\",\"alias\",\"scalar\",\"alias\",\"scalar\",\"scalar\",\"scalar\",\"scalar\",\"scalar\"]\n"),
+        (". | kind", "\"map\"\n"),
+        (".b.p | kind", "\"scalar\"\n"),
+        (".d[0] | kind", "\"scalar\"\n"),
+    ] {
+        assert_eq!(
+            run_yq_stdin_with_stderr(filter, doc, &["-o=json", "-I=0"])?,
+            (expected.to_string(), String::new(), 0),
+            "{filter}"
+        );
+    }
+    // Empty collections, sequence items (a collection item opens on its dash), an alias item and a
+    // computed value.
+    let items = "a: &x {p: 1}\nl:\n  - {q: 1}\n  - [1]\n  - *x\n  - x\ne: {}\nf: []\n";
+    for (filter, expected) in [
+        (".e | kind", "\"map\"\n"),
+        (".f | kind", "\"seq\"\n"),
+        ("[.l[] | kind]", "[\"map\",\"seq\",\"alias\",\"scalar\"]\n"),
+        (".l | map(kind)", "[\"map\",\"seq\",\"alias\",\"scalar\"]\n"),
+        ("(.a + {}) | kind", "\"map\"\n"),
+        ("[.a] | kind", "\"seq\"\n"),
+        (".a | tojson | kind", "\"scalar\"\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(filter, items, &["-o=json", "-I=0"])?;
+        assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}: {stderr}");
+    }
+    // JSON input has no alias to name: a collection is `map`/`seq`, anything else `scalar`.
+    assert_eq!(
+        run_yq_stdin_with_stderr(
+            "[.[] | kind]",
+            "[1, [2], {\"a\": null}, null]",
+            &["-p=json", "-o=json", "-I=0"]
+        )?,
+        (
+            "[\"scalar\",\"seq\",\"map\",\"scalar\"]\n".to_string(),
+            String::new(),
+            0
+        )
+    );
+    Ok(())
+}
+
 /// Pinned yq v4.53.3: `@uri` is Go's `url.QueryEscape` and `@urid` is `url.QueryUnescape`, so a
 /// space is `+` and `+` is a space (#4204). jq's `@uri` writes `%20` and its `@urid` keeps a
 /// literal `+`. Every yq row was captured from the pinned binary, `-n -o=json -I=0`.
