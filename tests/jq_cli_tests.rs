@@ -163508,6 +163508,129 @@ fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_va
     ])
 }
 
+/// #4831: the heads of #4827 behind a stage that hands its input on unchanged -- `| select(true)`, `| .`,
+/// `| first(.)`, a `?` on the lookup. Their by-value evaluation bridges through a copy of the node, so the
+/// storage test of #4827 saw a node that was not the register's; the head without those stages is asked instead.
+/// The controls: `$x.c` (equal in value to the register, another node) still raises, and a `1` value head raises
+/// `with result`. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+fn test_foreach_update_destructuring_a_wrapped_navigation_of_the_root_marker_4831() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x | .a | .) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x | .a | .) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x | .a | .) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.a?) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x.a?) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x.a?) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x | .a | first(.)) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; null | foreach (($x | .a | first(.)) as {a:$a} | .) as $y (.; .; .); .))",
+            "{\"a\":{}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; null | foreach (($x | .a | first(.)) as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.c | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.c?) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"c":{"b":1}}"#,
+            r"path(. as $x | foreach .a as $i (.; null | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; 1 | foreach (($x.a | select(true)) as {a:$a} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+    ])
+}
+
 /// #4608: a `?//` bind in the body of a fold whose accumulator the walk places off jq's register (a computed
 /// container, not INIT `.`) retries its next alternative when the first one's body raises jq's own path
 /// error (`. as $q ?// $z | (if $q then true else empty end | .a?)`: alternative 1 binds the state, runs
