@@ -21642,9 +21642,10 @@ fn format_sh<S: EvalSemantics>(value: &OwnedValue, _optional: bool) -> Result<St
     }
 }
 
-/// @yaml - Format value as YAML string (yq)
+/// @yaml - Format value as YAML string (yq): the block-style document the
+/// CLI would print for it, trailing newline included (#1183).
 fn format_yaml(value: &OwnedValue) -> Result<String, EvalError> {
-    Ok(owned_to_yaml(value))
+    Ok(super::stream::owned_value_to_yaml_format(value))
 }
 
 /// @props - Format value as Java properties format (yq)
@@ -21743,132 +21744,6 @@ fn props_value_to_string(value: &OwnedValue) -> String {
         }
         // Objects and arrays should not reach here, but handle gracefully
         OwnedValue::Object(_) | OwnedValue::Array(_) => value.to_json(),
-    }
-}
-
-/// Convert OwnedValue to YAML flow-style (compact, single-line like JSON).
-/// This matches yq's @yaml behavior which outputs flow-style YAML.
-fn owned_to_yaml(value: &OwnedValue) -> String {
-    owned_to_yaml_at_depth(value, 0)
-}
-
-/// Panics past [`MAX_VALUE_TREE_DEPTH`](super::value::MAX_VALUE_TREE_DEPTH)
-/// levels of nesting (#1017) -- see [`format_props_recursive`], the
-/// sibling this mirrors: both were unguarded, unlike `format_json_impl`
-/// (#1015).
-fn owned_to_yaml_at_depth(value: &OwnedValue, depth: usize) -> String {
-    assert_value_tree_depth(depth);
-    match value {
-        OwnedValue::Null => "null".to_string(),
-        OwnedValue::Bool(true) => "true".to_string(),
-        OwnedValue::Bool(false) => "false".to_string(),
-        OwnedValue::Int(n) => format!("{n}"),
-        OwnedValue::Float(f) if f.is_nan() || f.is_infinite() => {
-            nonfinite_display_string::<YqSemantics>(*f).to_string()
-        }
-        // A computed float, spelled by yq's own computed-float rule
-        // (shortest form, scientific past yq's threshold): `[1e17*1] | .[0]
-        // | @yaml` is `1e+17` in real yq. Reachable since #2902 -- see the
-        // identical arm in `props_value_to_string` above.
-        OwnedValue::Float(f) => crate::yaml::format_float_yq_yaml(*f),
-        OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() || f.is_infinite() => {
-            nonfinite_display_string::<YqSemantics>(*f).to_string()
-        }
-        // Echo verbatim (#1008): `@yaml` is documented as a yq-flavored
-        // format function (CLAUDE.md's format table marks it `(yq)`) --
-        // reachable from `succinctly jq` too, but real yq's preservation
-        // convention is the correct one regardless of which binary calls
-        // it, not jq's `format_number_jq_compat` reformatting.
-        OwnedValue::NumberLiteral(_, literal) => literal.to_string(),
-        OwnedValue::String(s) => yaml_quote_string(s),
-        OwnedValue::Array(arr) => {
-            let items: Vec<String> = arr
-                .iter()
-                .map(|v| owned_to_yaml_at_depth(v, depth + 1))
-                .collect();
-            format!("[{}]", items.join(", "))
-        }
-        OwnedValue::Object(obj) => {
-            let pairs: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}: {}",
-                        yaml_quote_string(k),
-                        owned_to_yaml_at_depth(v, depth + 1)
-                    )
-                })
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
-        }
-    }
-}
-
-/// Quote a string for YAML output if necessary
-fn yaml_quote_string(s: &str) -> String {
-    // Check if string needs quoting
-    let needs_quoting = s.is_empty()
-        || s.starts_with(' ')
-        || s.ends_with(' ')
-        || s.contains(':')
-        || s.contains('#')
-        || s.contains('\n')
-        || s.contains('\r')
-        || s.contains('\t')
-        || s.contains('"')
-        || s.contains('\'')
-        || s.contains('\\')
-        || s.starts_with('-')
-        || s.starts_with('?')
-        || s.starts_with('*')
-        || s.starts_with('&')
-        || s.starts_with('!')
-        || s.starts_with('|')
-        || s.starts_with('>')
-        || s.starts_with('%')
-        || s.starts_with('@')
-        || s.starts_with('`')
-        || s.starts_with('{')
-        || s.starts_with('}')
-        || s.starts_with('[')
-        || s.starts_with(']')
-        || s.starts_with(',')
-        || s == "true"
-        || s == "false"
-        || s == "null"
-        || s == "~"
-        || s == "yes"
-        || s == "no"
-        || s == "on"
-        || s == "off"
-        || s.parse::<i64>().is_ok()
-        || s.parse::<f64>().is_ok();
-
-    if needs_quoting {
-        // Use double quotes and escape special characters
-        let mut result = string_with_capacity(s.len() + 2);
-        result.push('"');
-        for c in s.chars() {
-            match c {
-                '"' => result.push_str("\\\""),
-                '\\' => result.push_str("\\\\"),
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                // YAML's `\xNN`, not JSON's `\u00xx` — so this is deliberately
-                // not one of the writers #385 unified in `super::escape`, and
-                // `is_control()` is the right predicate here: YAML has an 8-bit
-                // escape and `Cc` (C0, DEL, C1) is exactly what it covers.
-                c if c.is_control() => {
-                    result.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c => result.push(c),
-            }
-        }
-        result.push('"');
-        result
-    } else {
-        s.to_string()
     }
 }
 
@@ -112388,86 +112263,86 @@ mod tests {
         // Simple object
         query!(br#"{"a": 1, "b": 2}"#, "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "{a: 1, b: 2}");
+                assert_eq!(s, "a: 1\nb: 2\n");
             }
         );
 
         // Array
         query!(br"[1, 2, 3]", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "[1, 2, 3]");
+                assert_eq!(s, "- 1\n- 2\n- 3\n");
             }
         );
 
         // Nested structure
         query!(br#"{"name": "test", "items": [1, 2]}"#, "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "{name: test, items: [1, 2]}");
+                assert_eq!(s, "name: test\nitems:\n  - 1\n  - 2\n");
             }
         );
 
         // String that needs quoting (reserved word)
         query!(br#"{"value": "true"}"#, "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "{value: \"true\"}");
+                assert_eq!(s, "value: \"true\"\n");
             }
         );
 
         // Null and boolean
         query!(br#"{"flag": true, "nothing": null}"#, "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "{flag: true, nothing: null}");
+                assert_eq!(s, "flag: true\nnothing: null\n");
             }
         );
 
         // Empty containers
         query!(br"[]", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "[]");
+                assert_eq!(s, "[]\n");
             }
         );
 
         query!(br"{}", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "{}");
+                assert_eq!(s, "{}\n");
             }
         );
 
         // Float values
         query!(br"3.14", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "3.14");
+                assert_eq!(s, "3.14\n");
             }
         );
 
         // #1064: NaN/Infinity spell YAML-native, not jq's bare NaN/inf.
         query!(br"null", "nan | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".nan");
+                assert_eq!(s, ".nan\n");
             }
         );
         query!(br"null", "infinite | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf");
+                assert_eq!(s, ".inf\n");
             }
         );
         query!(br"null", "-infinite | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf");
+                assert_eq!(s, "-.inf\n");
             }
         );
 
         // Same, but for a *document-sourced* NumberLiteral (an exponent
         // overflowing to +/-infinity), not a computed Float -- a separate
-        // match arm in owned_to_yaml_at_depth.
+        // match arm in `stream_owned_value_yaml_at_depth`.
         query!(br"1e400", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf");
+                assert_eq!(s, ".inf\n");
             }
         );
         query!(br"-1e400", "@yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf");
+                assert_eq!(s, "-.inf\n");
             }
         );
     }
@@ -136378,22 +136253,22 @@ mod tests {
         );
     }
 
-    /// #1017: `@yaml`'s flow-style formatter had no guard, reachable on a
-    /// value constructed via `reduce`/`foreach`/etc. with no adversarial
-    /// document involved.
+    /// #1017: `@yaml`'s formatter had no guard, reachable on a value
+    /// constructed via `reduce`/`foreach`/etc. with no adversarial document
+    /// involved. Since #1183 it is the CLI's shared YAML streamer, so this
+    /// pins that `format_yaml` still reaches that streamer's own guard.
     #[test]
-    fn owned_to_yaml_panics_past_nesting_depth_limit_1017() {
+    fn format_yaml_panics_past_nesting_depth_limit_1017() {
         use crate::jq::value::MAX_VALUE_TREE_DEPTH;
 
         let under = linear_array_nest(MAX_VALUE_TREE_DEPTH - 1);
-        let _ = owned_to_yaml(&under);
+        let _ = format_yaml(&under);
 
         let over = linear_array_nest(MAX_VALUE_TREE_DEPTH);
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owned_to_yaml(&over)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| format_yaml(&over)));
         assert!(
             result.is_err(),
-            "owned_to_yaml should panic at MAX_VALUE_TREE_DEPTH"
+            "format_yaml should panic at MAX_VALUE_TREE_DEPTH"
         );
     }
 

@@ -413,13 +413,13 @@ Supported timezone formats:
 **`@yaml`** / **`to_yaml`** - Encode value as YAML string ✅
 ```bash
 {a: 1, b: 2} | @yaml
-# → "{a: 1, b: 2}"  (flow-style YAML)
+# → "a: 1\nb: 2\n"  (block-style YAML, trailing newline included)
 
 # Embedding YAML in YAML (common use case)
 .config = (.data | @yaml)
 ```
 
-**Note**: Our `@yaml` outputs flow-style (compact) YAML, matching yq's `to_yaml(0)` behavior.
+**Note**: `@yaml` outputs block-style YAML with a trailing newline, as yq's `@yaml` does (#1183). (An earlier version printed flow style, which was yq's `to_yaml(0)`, not `@yaml`.)
 
 **`@props`** / **`to_props`** - Encode as Java properties ✅
 ```bash
@@ -445,7 +445,7 @@ Supported timezone formats:
 ```
 
 **Implementation Notes:**
-- `@yaml` reuses existing YAML output formatting
+- `@yaml` runs the CLI's own owned-value YAML streamer (`owned_value_to_yaml_format`, #1183)
 - `@props` is straightforward key=value formatting
 - `@xml` requires handling attributes (prefix convention: `+@attr`)
 - All encoders should handle nested structures
