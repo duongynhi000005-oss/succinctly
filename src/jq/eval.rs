@@ -43885,7 +43885,9 @@ fn resolve_alternative_sink<'a, S: EvalSemantics>(
                 return Demand::Continue;
             }
             emitted = true;
-            sink(branch)
+            // #4843: a left operand that navigates nothing (`5 // (1 | FE)`) leaves the register
+            // where the `//` entered it, as the alternate does.
+            sink(carry_frame_register(left, branch, frame))
         },
     );
     match flow {
@@ -44025,8 +44027,9 @@ fn carry_frame_register<'a>(
 }
 
 /// Whether `expr` is, as a whole, a `//` or a comma of them and of siblings that leave jq's
-/// register alone ([`sibling_leaves_register`]), or one such shape between pipe stages that move
-/// nothing (#4837): the UPDATE shapes whose `foreach` EXTRACT is judged per output (#4800). With `states`, each `//` must also have an operand that leaves the
+/// register alone ([`sibling_leaves_register`]), or such shapes between pipe stages that move
+/// nothing (#4837), however many of them the pipe holds (#4843, each stage states the register it
+/// ran from): the UPDATE shapes whose `foreach` EXTRACT is judged per output (#4800). With `states`, each `//` must also have an operand that leaves the
 /// register alone, so that its outputs state the register they entered with
 /// ([`carry_frame_register`]) whatever the other operand does; the outputs of the operand that
 /// moved it state what it did, and the EXTRACT behind them is judged on that.
@@ -44055,9 +44058,6 @@ fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
                     {
                         continue;
                     }
-                    if seen {
-                        return None;
-                    }
                     if !shape::<S>(stage, states)? {
                         return None;
                     }
@@ -44069,6 +44069,27 @@ fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
         }
     }
     shape::<S>(expr, states) == Some(true)
+}
+
+/// Whether every `//` in a foreach UPDATE that moves something is one the UPDATE reads per output
+/// ([`alternate_update_shape`]), stage by stage through a pipe (#4843): a `//` a stage holds that is
+/// not read so keeps the exemption it had from the #4800 refusal, and a stage with no such `//`
+/// loses the register on its own account whatever the stages around it hold, so `(.a? // 1) | FE`
+/// and `((1 | FE) // 5) | ((1 | FE) // 5)` are read output by output instead of exempted whole.
+fn alternates_read_per_output<S: EvalSemantics>(expr: &Expr) -> bool {
+    match peel_register_transparent(expr) {
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| alternates_read_per_output::<S>(stage)),
+        other => {
+            alternate_update_shape::<S>(other, false)
+                // #4837: a `//` that moves nothing on either side (`. // 5` after the stage that
+                // lost the register) restores nothing.
+                || !any_subexpr(other, &mut |e| {
+                    matches!(e, Expr::Alternative(..)) && !neutral_leaves_register(e)
+                })
+        }
+    }
 }
 
 /// [`carry_frame_register`] for one sibling of a comma (#3960): also a bare builtin that
@@ -62147,14 +62168,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     // A `//` nested deeper (behind an `if`, or a pipe stage that
                                     // moves something) is not read per output and keeps the
                                     // exemption it had.
-                                    && (alternate_update_shape::<S>(&bound_update, false)
-                                        || !any_subexpr(&bound_update, &mut |e| {
-                                            // #4837: a `//` that moves nothing on either side
-                                            // (`. // 5` after the stage that lost the register)
-                                            // restores nothing.
-                                            matches!(e, Expr::Alternative(..))
-                                                && !neutral_leaves_register(e)
-                                        }));
+                                    && alternates_read_per_output::<S>(&bound_update);
                                 let update_has_comma =
                                     register_lost_at_the_root && has_branching_comma(&bound_update);
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
@@ -67195,6 +67209,10 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         || (branch_trackable && compound_states_register_per_result::<S>(element))
         || (!branch_trackable && foreach_states_register_on_untracked_entry::<S>(element))
         || (!branch_trackable && reduce_states_register_on_untracked_entry::<S>(element));
+    // #4843: ...and an alternative stage on an untracked entry states it per result as well.
+    let alternate_stage_untracked = S::TAG == EvalTag::Jq
+        && !branch_trackable
+        && matches!(peel_register_through_calls(element), Expr::Alternative(..));
     let mut place_step = |step: PathBranch<'a>| -> Demand {
         // #3293: only a `?//` retry re-invokes this after a stop.
         downstream.begin();
@@ -67271,13 +67289,18 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
                     | BranchRegister::LostSomewhere
                     | BranchRegister::LostOffRoot
             );
-        let register_entering = if !(stage_preserves_register || seed || states_register) {
-            None
-        } else if trackable_step_eligible {
-            step_register.unmoved_value()
-        } else {
-            carried_register.as_deref()
-        };
+        // #4843: an untracked `//` stage hands on what its alternate stated, which is the register
+        // the stage entered with ([`carry_frame_register`]), so the stage after it runs from that
+        // register instead of from none. Only an explicit `Unmoved`, never an absent statement.
+        let states_alternate = alternate_stage_untracked && !facts.navigated && step_unmoved;
+        let register_entering =
+            if !(stage_preserves_register || seed || states_register || states_alternate) {
+                None
+            } else if trackable_step_eligible {
+                step_register.unmoved_value()
+            } else {
+                carried_register.as_deref()
+            };
         let reestablished =
             reestablishes_register::<S>(&facts, register_entering, &stage_frame, &resulting);
         let path = if reestablished {
@@ -67332,7 +67355,8 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         // but cost an allocation at *every* recording, including the
         // overwhelmingly common case where the register is never consulted
         // again.
-        let reports_register = stage_reports_register || (facts.navigated && step_unmoved);
+        let reports_register =
+            stage_reports_register || (facts.navigated && step_unmoved) || states_alternate;
         let carries_register = !trackable
             && if reports_register {
                 step_unmoved
