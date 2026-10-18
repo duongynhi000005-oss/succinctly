@@ -56120,11 +56120,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
         || destructures_unplaced_register
         // #4669: a `first`/`limit`/`nth` over a `?//` chain behind other stages (`(., 1) | CHAIN`): the
         // chain's refused emission counts against the bound and `?//` retries it, which only the
-        // resolver's walk of a bound models. Outside every fold body, as [`take_wrapped_bare_chain`]'s
-        // own routing is: inside one the routed source refuses rows jq answers.
+        // resolver's walk of a bound models. Outside every fold body, or in one whose accumulator is the
+        // register (#4818, [`fold_body::acc_is_register_here`] with a tracked ambient: `!unplaced_body`):
+        // elsewhere the routed source's pattern step is checked against a register that is not where
+        // jq's is, and refuses rows jq answers. An inner INIT that navigates leaves the ambient untracked.
         || (S::TAG == EvalTag::Jq
             && foreach_source
-            && fold_body::depth() == 0
+            && (fold_body::depth() == 0 || !unplaced_body)
             && bounded_chain_behind_stages(source))
         // #4677/#4682: the part of a bare `//` or `try ... catch` source that always runs.
         || (S::TAG == EvalTag::Jq
@@ -61281,9 +61283,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && cannot_move_register(init);
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
-            // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there.
+            // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
+            // over a bounded chain behind other stages (`limit(2; (., .) | CHAIN)`), which the routing in
+            // `drive_fold_source_with` then sends to the resolver's walk of a bound (#4669).
             || matches!(unwrap_paren(update), Expr::Foreach { input, .. }
-                if take_wrapped_bare_chain(input).is_some()));
+                if take_wrapped_bare_chain(input).is_some() || bounded_chain_behind_stages(input)));
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register =
         first_step_on_register && extract.is_some_and(update_is_alt_bind);

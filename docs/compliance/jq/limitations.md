@@ -723,10 +723,16 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   $a | .)) as $k (.; .; .))` on `{"a":1}` printed two paths where jq prints one, and `(., .) | CHAIN` under
   `limit(1)`/`limit(2)`/`limit(3)` printed 2/3/2 where jq prints 1/1/2. They are routed to the resolver's
   walk of a bound (`bounded_chain_behind_stages`), outside every fold body and not for an operand holding a
-  fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Still by value: the same
-  source inside another fold's body (`foreach (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k
-  (.; .; .); .)` prints six paths where jq prints two; the routed source refuses rows jq answers there),
-  and the other `label`/`break` consumers over such a chain (`any`/`all` match; `isempty` is routed the
+  fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Since
+  [#4818](https://github.com/rust-works/succinctly/issues/4818) also as the source of a `foreach` that is the
+  UPDATE of an outermost `foreach` or `reduce` whose source and INIT cannot move the register
+  (`foreach (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .); .)` printed six paths where jq
+  prints two): there `.` is the register at the inner source (`acc_is_register_here`), which the outer fold's
+  mark now also sets for such a source (`alt_bind_update_on_register`), and the routing requires a tracked
+  ambient (`!unplaced_body`) so an inner INIT that navigates (`... as $k (.a; .; .)`) stays by value. Still by
+  value: the same source in any other fold-body position (a `try`, `if` or comma around the inner `foreach`,
+  the outer EXTRACT, a third nesting level, an outer source that navigates), where the routed source refuses
+  rows jq answers; and the other `label`/`break` consumers over such a chain (`any`/`all` match; `isempty` is routed the
   same way since [#4819](https://github.com/rust-works/succinctly/issues/4819), below). Pinned by
   `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669` and, for what the routing
   leaves alone, `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669`; over the 113
@@ -738,10 +744,10 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   routed the same way (`bounded_chain_behind_stages`, also through a `try`/`?` and when stages follow it):
   jq defines `isempty` with a `label`/`break` the chain's `?//` catches and retries, so `path(foreach
   (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))` on `{"a":1}` printed `[]` twice
-  where jq prints it once. The same source inside another fold's body keeps the by-value count (`foreach
-  (1,2) as $i (.; foreach (isempty(CHAIN) | select(.|not)) as $k (.; .; .); .)` prints four paths where jq
-  prints two), as do an `isempty` whose tail holds a fold or `def` or whose chain sits behind a bare
-  `null |`. Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
+  where jq prints it once. The same source as the `foreach` UPDATE of an outermost fold is routed too since #4818
+  (`foreach (1,2) as $i (.; foreach (isempty(CHAIN) | select(.|not)) as $k (.; .; .); .)` printed four paths
+  where jq prints two; the other fold-body positions are listed above), while an `isempty` whose tail holds a
+  fold or `def` or whose chain sits behind a bare `null |` keeps the by-value count. Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
   `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819`; over the 51
   `isempty` `?//` operands, `--stage-only` (104,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   MATCH went 96,607 to 96,770, DIFF 396 to 235 and ACCEPT_WRONG 4 to 2, no regression. Since
