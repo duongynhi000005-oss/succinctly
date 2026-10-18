@@ -59159,6 +59159,119 @@ mod computed_float_through_container_2902 {
     }
 }
 
+/// #1344: `..` lists a node's children the way `.[]` does (a repeated mapping key
+/// collapses onto its last occurrence) while the node itself prints with every
+/// occurrence, and `tostream` -- gated, so with no oracle -- walks the document
+/// like `paths` does. Every `..` expectation was captured from yq v4.53.3 with
+/// `-o=json -I=0`.
+mod recursive_descent_duplicate_keys_1344 {
+    use super::run_yq_stdin;
+    use anyhow::Result;
+
+    fn check_on(input: &str, args: &[&str], rows: &[(&str, &str)]) -> Result<()> {
+        for (filter, want) in rows {
+            let mut full = vec!["-o=json", "-I=0"];
+            full.extend_from_slice(args);
+            let (out, code) = run_yq_stdin(filter, input, &full)?;
+            assert_eq!(code, 0, "`{filter}` exited {code}: {out:?}");
+            assert_eq!(out.replace('\n', " ").trim_end(), *want, "`{filter}`");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn descent_keeps_the_node_and_collapses_its_children_1344() -> Result<()> {
+        check_on(
+            "a: 1\na: 2\nb: 3\n",
+            &[],
+            &[
+                ("..", r#"{"a":1,"a":2,"b":3} 2 3"#),
+                (r#".. | select(tag == "!!map")"#, r#"{"a":1,"a":2,"b":3}"#),
+                (".. | key", r#""a" "b""#),
+                (".. | select(. == 2)", "2"),
+                (".. | path", r#"[] ["a"] ["b"]"#),
+            ],
+        )?;
+        check_on(
+            "n:\n  x: 1\n  x: 2\nm: [1, 2]\n",
+            &[],
+            &[
+                (
+                    "..",
+                    r#"{"n":{"x":1,"x":2},"m":[1,2]} {"x":1,"x":2} 2 [1,2] 1 2"#,
+                ),
+                (
+                    r#".. | select(tag == "!!map")"#,
+                    r#"{"n":{"x":1,"x":2},"m":[1,2]} {"x":1,"x":2}"#,
+                ),
+            ],
+        )?;
+        check_on(
+            "- a: 1\n  a: 2\n  b: 3\n- 5\n",
+            &[],
+            &[
+                ("..", r#"[{"a":1,"a":2,"b":3},5] {"a":1,"a":2,"b":3} 2 3 5"#),
+                (
+                    ".. | .. | select(tag == \"!!map\")",
+                    r#"{"a":1,"a":2,"b":3} {"a":1,"a":2,"b":3}"#,
+                ),
+            ],
+        )
+    }
+
+    /// The shapes where `..` still collapses a repeated key because the node is
+    /// materialized, pinned at today's answer (yq keeps both entries in every
+    /// one of them; see `docs/compliance/yq/limitations.md`, #1344).
+    #[test]
+    fn descent_still_collapses_a_materialized_node_1344() -> Result<()> {
+        check_on(
+            "a: 1\na: 2\nb: 3\n",
+            &[],
+            &[
+                ("[..]", r#"[{"a":2,"b":3},2,3]"#),
+                (".., 1", r#"{"a":2,"b":3} 2 3 1"#),
+                (".. as $x | $x", r#"{"a":2,"b":3} 2 3"#),
+            ],
+        )
+    }
+
+    /// `tostream` names a mapping's keys the way `paths` does, so a key that
+    /// reads as an int is an int path component in both.
+    #[test]
+    fn tostream_names_keys_like_paths_1344() -> Result<()> {
+        check_on(
+            "1: a\n2: b\n",
+            &["--jq-extensions"],
+            &[
+                ("[tostream]", r#"[[[1],"a"],[[2],"b"],[[2]]]"#),
+                ("[paths]", "[[1],[2]]"),
+            ],
+        )
+    }
+
+    /// No oracle: yq's lexer rejects `tostream`, so this is pinned to be
+    /// consistent with `paths` on the same document (both list `a` twice).
+    #[test]
+    fn tostream_lists_every_occurrence_of_a_repeated_key_1344() -> Result<()> {
+        check_on(
+            "a: 1\na: 2\nb: 3\n",
+            &["--jq-extensions"],
+            &[
+                ("[tostream]", r#"[[["a"],1],[["a"],2],[["b"],3],[["b"]]]"#),
+                ("[paths]", r#"[["a"],["a"],["b"]]"#),
+            ],
+        )?;
+        check_on(
+            "a: 1\na: 2\nb: [x, {c: ~}]\ne: {}\nf: []\n",
+            &["--jq-extensions"],
+            &[(
+                "[tostream]",
+                r#"[[["a"],1],[["a"],2],[["b",0],"x"],[["b",1,"c"],null],[["b",1,"c"]],[["b",1]],[["e"],{}],[["f"],[]],[["f"]]]"#,
+            )],
+        )
+    }
+}
+
 /// #1183: `@yaml` renders the block-style document real yq prints for the
 /// value, trailing newline included, through the same streamer as the CLI's
 /// own YAML output. Every `want` was captured from yq v4.53.3 with

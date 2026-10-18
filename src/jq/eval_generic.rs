@@ -15316,10 +15316,17 @@ fn each_recurse_cursor_generic<S: EvalSemantics, V: DocumentValue>(
         // neither a trail link nor an owned key for a path this walk never
         // reads.
         let first_child = pending.len();
+        //
+        // `true`, not `S::COLLAPSE_DUPLICATE_KEYS` (#1344): `..` lists a
+        // node's children the way `.[]` does, which collapses a repeated key
+        // onto its last occurrence in both modes (#1398) -- `[..]` on
+        // `a: 1 / a: 2 / b: 3` is `[{"a":1,"a":2,"b":3}, 2, 3]` in yq, the
+        // node itself keeping both occurrences while only its children
+        // collapse.
         let stepped = path_iterate_step_generic::<S, V, NoTrail>(
             &PathNode::At(cursor),
             &NoTrail,
-            S::COLLAPSE_DUPLICATE_KEYS,
+            true,
             &mut |_, child| {
                 match child {
                     PathNode::At(c) => pending.push(c),
@@ -23666,6 +23673,83 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
         }
     } else if leaves_only {
         paths.push(OwnedValue::Array(current_path.clone().into()));
+    }
+    Ok(())
+}
+
+/// The events `tostream` emits for `value`, one per leaf (`[path, leaf]`) and one
+/// per non-empty container after its last child (`[path of that child]`),
+/// walking the document itself so a repeated mapping key contributes every
+/// occurrence (#1344) -- the twin of `eval.rs`'s `collect_tostream_events`,
+/// which walks an `OwnedValue` whose mapping already merged them. Reached only
+/// where duplicate keys survive (yq): `paths`/`to_entries` are the precedent
+/// (#868, #443), and the leaf and closing-event shapes are jq's.
+///
+/// The closing event names the last *occurrence*, like `.[]` reading a repeated
+/// key last; the `[path, leaf]` events before it name every one.
+fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
+    value: &V,
+    cursor: &V::Cursor,
+    current_path: &mut Vec<OwnedValue>,
+    events: &mut Vec<OwnedValue>,
+) -> Result<(), EvalError> {
+    guard_path_walk_depth(current_path.len())?;
+    let leaf = |current_path: &[OwnedValue], leaf: OwnedValue| {
+        OwnedValue::Array(vec![OwnedValue::Array(current_path.to_vec().into()), leaf].into())
+    };
+    let closing = |current_path: &[OwnedValue]| {
+        OwnedValue::Array(vec![OwnedValue::Array(current_path.to_vec().into())].into())
+    };
+    if let Some(fields) = value.as_object() {
+        let checked = effective_fields_checked(&fields, false)?;
+        if checked.is_empty() {
+            empty_fields_tail_gap_ok(&fields, Some(cursor))?;
+            events.push(leaf(
+                current_path,
+                OwnedValue::Object(indexmap::IndexMap::new().into()),
+            ));
+            return Ok(());
+        }
+        let last = checked.len() - 1;
+        for (i, field) in checked.into_iter().enumerate() {
+            let Some(key) = key_display_string(&field.key) else {
+                return Err(fields.malformed_member_error());
+            };
+            current_path.push(if S::TAG == EvalTag::Yq {
+                yq_path_component(key, &field.key_cursor)
+            } else {
+                OwnedValue::String(key.into_owned().into())
+            });
+            collect_tostream_generic::<S, _>(
+                &field.value,
+                &field.value_cursor,
+                current_path,
+                events,
+            )?;
+            if i == last {
+                events.push(closing(current_path));
+            }
+            current_path.pop();
+        }
+    } else if let Some(elements) = value.as_array() {
+        let cursors = elements.collect_cursors_checked()?;
+        if cursors.is_empty() {
+            empty_elements_tail_gap_ok(&elements, Some(cursor))?;
+            events.push(leaf(current_path, OwnedValue::Array(Vec::new().into())));
+            return Ok(());
+        }
+        let last = cursors.len() - 1;
+        for (i, elem_cursor) in cursors.into_iter().enumerate() {
+            current_path.push(OwnedValue::Int(i as i64));
+            let elem = elem_cursor.value();
+            collect_tostream_generic::<S, _>(&elem, &elem_cursor, current_path, events)?;
+            if i == last {
+                events.push(closing(current_path));
+            }
+            current_path.pop();
+        }
+    } else {
+        events.push(leaf(current_path, to_owned_cursor::<S, _>(cursor)?));
     }
     Ok(())
 }
@@ -32509,6 +32593,28 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             ) {
                 Ok(()) => collapse_vec(
                     paths,
+                    || GenericResult::None,
+                    GenericResult::Owned,
+                    GenericResult::ManyOwned,
+                ),
+                Err(e) => GenericResult::Error(e),
+            }
+        }
+
+        // #1344: native where duplicate keys survive (yq), for the reason
+        // `Paths` is above -- the fallback's `to_owned_with_cursor` merges a
+        // repeated mapping key before `collect_tostream_events` sees it. jq
+        // mode (collapsing) keeps the fallback.
+        Builtin::ToStream if !S::COLLAPSE_DUPLICATE_KEYS && cursor.is_some() => {
+            let mut events = Vec::new();
+            match collect_tostream_generic::<S, _>(
+                &value,
+                cursor.as_ref().expect("guarded"),
+                &mut Vec::new(),
+                &mut events,
+            ) {
+                Ok(()) => collapse_vec(
+                    events,
                     || GenericResult::None,
                     GenericResult::Owned,
                     GenericResult::ManyOwned,
