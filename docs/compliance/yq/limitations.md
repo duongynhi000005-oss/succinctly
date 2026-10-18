@@ -5259,10 +5259,8 @@ divergence, not a gap: real yq *drops* every floated comment but the last when a
 sequence holding several closes to an outer item or to end of input inside a mapping
 (`- k:\n  - # c\n  - # d\n- 2\n` keeps only `d`), which ADR-0018 rule 4 forbids
 matching — the rest go forward as the next node's head instead of being discarded to
-match. Two more are separate, pre-existing gaps, not divergences licensed by that
-rule: a tag with no value on the item's next line (`- # c\n  !!str\n- 2\n`) drops both
-tag and comment here where yq keeps the tag and floats the comment; and — unlike the
-now-fixed *ordinary* (non-floated) case above — a comment *floated* off an absent bare
+match. One more is a separate, pre-existing gap, not a divergence licensed by that
+rule: unlike the now-fixed *ordinary* (non-floated) case above, a comment *floated* off an absent bare
 item still attaches to its next sibling's first key/inner item rather than the sibling
 itself when that sibling is a compact mapping or a nested sequence (`- # c\n- b: 1\n` is
 `.[1] | head_comment` in real yq, `.[1].b | key | head_comment` here). This residual is
@@ -5271,6 +5269,15 @@ originally conflated with, and is tracked separately as
 [#2835](https://github.com/rust-works/succinctly/issues/2835). Blank lines in any
 of these shapes are unmodelled on both sides (yq keeps a `\n` inside the slot value and
 reorders).
+
+A tag or anchor alone on the line under a bare `-` or `key:` names an empty node (#2835), and
+a comment on that bare `-` goes forward as the next node's head, as in yq. Three small
+differences remain, pinned by `test_own_line_properties_residuals_2835`: a comment after the
+properties (`a:` / `  !!str # d` / `b: 1`) stays on the item where yq moves it onto the next node
+(`b: 1 # d`); two own-line property lines in a row are accepted, the second naming the node,
+where yq rejects them with `did not find expected key`; and a block that settles past a
+sequence closing under a tagged empty item (`k:` / `  - # c` / `    # x` / `    !!str` / `z: 1`)
+prints a blank line before the next key that yq leaves out (the getters agree).
 
 A bare item's comment before a value that *does* follow (`- # note` / `  k: v`, #1079's other
 half) is the head comment of that value's first node in yq: the first key of a block mapping or the
