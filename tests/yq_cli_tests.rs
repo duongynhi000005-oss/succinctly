@@ -13991,6 +13991,48 @@ fn test_yq_streaming_double_quoted_scalar_escapes_like_go_yaml_4850() -> Result<
     Ok(())
 }
 
+/// #4849: a write that gives an empty flow `{}` / `[]` its first child leaves it block-styled, as
+/// go-yaml's emitter does (an empty container has the one spelling, so flow is kept only until it has
+/// a child); the comment beside the flow spelling goes with it, and a container that was already
+/// non-empty keeps its flow style. Expected text captured from yq v4.53.3.
+#[test]
+fn test_yq_write_into_an_empty_flow_container_is_block_4849() -> Result<()> {
+    for (yaml, filter, expected) in [
+        ("{}\n", ".a = 5", "a: 5\n"),
+        ("[]\n", ".[0] = 5", "- 5\n"),
+        ("x: {}\n", ".x.a = 5", "x:\n  a: 5\n"),
+        ("x: {}\n", ".x.a = 5 | .x.b = 6", "x:\n  a: 5\n  b: 6\n"),
+        ("x: []\n", ".x[0] = 1", "x:\n  - 1\n"),
+        ("x: []\n", ".x += [1]", "x:\n  - 1\n"),
+        ("x: {}\n", ".x = {\"a\":1}", "x:\n  a: 1\n"),
+        ("x: {} # c\n", ".x.a = 5", "x:\n  a: 5\n"),
+        ("x: [] # c\n", ".x[0] = 5", "x:\n  - 5\n"),
+        (
+            "- {}\n- []\n",
+            ".[0].a = 1 | .[1][0] = 2",
+            "- a: 1\n- - 2\n",
+        ),
+        // Not grown, or already non-empty: the flow spelling and its comment stay.
+        ("x: {} # c\n", ".y = 1", "x: {} # c\ny: 1\n"),
+        ("x: {b: 1} # c\n", ".x.a = 5", "x: {b: 1, a: 5} # c\n"),
+        ("x: {}\n", ".x.a = 1 | del(.x.a)", "x: {}\n"),
+        (
+            "x: [[], {}]\n",
+            ".x[0][0] = 1 | .x[1].k = 2",
+            "x: [[1], {k: 2}]\n",
+        ),
+    ] {
+        let (out, code) = run_yq_stdin(filter, yaml, &[])?;
+        assert_eq!(code, 0, "{yaml:?} {filter}");
+        assert_eq!(out, expected, "{yaml:?} {filter}");
+    }
+    // `--eval-all` takes the same route.
+    let (out, code) = run_yq_stdin(".[0] = 5", "[]\n", &["--eval-all"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "- 5\n");
+    Ok(())
+}
+
 // ============================================================================
 // line / column builtins (#532) — position-based navigation on the default
 // (cursor-preserving) YAML CLI path. Before this fix, `line`/`column`
