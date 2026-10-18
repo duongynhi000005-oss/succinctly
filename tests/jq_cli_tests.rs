@@ -165332,6 +165332,14 @@ fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_48
             "",
             0,
         ),
+        // The `def` tail stays by value: walked, the resolver refuses this `del`, which jq answers.
+        (
+            "null",
+            r"del(. as [$q] ?// $q | (foreach (isempty(. as {a:$a} ?// $a | .) | (def f: select(.|not); f)) as $k (.; .; .)))",
+            "null\n",
+            "",
+            0,
+        ),
         // A third nesting level keeps the by-value count: jq prints four paths, this prints eight.
         (
             r#"{"a":1}"#,

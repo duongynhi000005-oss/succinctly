@@ -54537,9 +54537,10 @@ fn is_literal_count(n: &Expr) -> bool {
 /// bound again. The by-value drive counted the first emission as delivered (or not at all), so
 /// `path(foreach (limit(2; (., .) | CHAIN)) as $k (.; .; .))` printed three outputs where jq prints one.
 ///
-/// The operand is read only if it holds no fold, `def` or call of one (those are not modelled
-/// by the resolver's walk of a bound and keep their by-value answer) and no pipe that starts at a bare
-/// `null`. A chain nested in a non-output position (`(CHAIN) as $x | ..`, a `select` argument) is
+/// The operand of a `first`/`limit`/`nth` is read only if it holds no fold, `def` or call of one (those are not
+/// modelled by the resolver's walk of a bound and keep their by-value answer) and no pipe that starts at a bare
+/// `null`; an `isempty` operand may hold them (#4829), and the stages after an `isempty` may hold a fold, but not
+/// a `def`, and not behind a `try`/`?` in the `isempty` (see the pipe arm in `go`). A chain nested in a non-output position (`(CHAIN) as $x | ..`, a `select` argument) is
 /// routed too: the sweep rows and `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`
 /// pin that the resolver counts those as jq does.
 fn bounded_chain_behind_stages(e: &Expr) -> bool {
@@ -54591,6 +54592,18 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
             _ => false,
         }
     }
+    // Whether the stages `tail` after the `isempty` head `head` are walked by the resolver (#4829): none holds a
+    // `def` or call of one (walked, it refuses `del` rows jq answers inside a `try` or an alternative pattern), and
+    // a fold in them is walked only if the head holds no `try`/`?` (where the walk refuses rows jq answers).
+    fn isempty_tail_routed(head: &Expr, tail: &[Expr]) -> bool {
+        let holds = |e: &Expr, pred: &dyn Fn(&Expr) -> bool| {
+            crate::jq::walk::any_subexpr(e, &mut |inner| pred(inner))
+        };
+        let is_def = |e: &Expr| matches!(e, Expr::FuncDef { .. } | Expr::DefCall { .. });
+        let is_try = |e: &Expr| matches!(e, Expr::Optional(_) | Expr::Try { .. });
+        !tail.iter().any(|stage| holds(stage, &is_def))
+            && (!tail.iter().any(|stage| holds(stage, &unrouted)) || !holds(head, &is_try))
+    }
     fn go(e: &Expr, budget: u8) -> bool {
         let Some(budget) = budget.checked_sub(1) else {
             return false;
@@ -54617,17 +54630,7 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
                 if stages
                     .first()
                     .is_some_and(|head| is_isempty_head(head, budget))
-                    && stages[1..].iter().all(|stage| {
-                        !crate::jq::walk::any_subexpr(stage, &mut |e| {
-                            matches!(e, Expr::FuncDef { .. } | Expr::DefCall { .. })
-                        })
-                    })
-                    && (stages[1..]
-                        .iter()
-                        .all(|stage| !crate::jq::walk::any_subexpr(stage, &mut unrouted))
-                        || !crate::jq::walk::any_subexpr(&stages[0], &mut |e| {
-                            matches!(e, Expr::Optional(_) | Expr::Try { .. })
-                        })) =>
+                    && isempty_tail_routed(&stages[0], &stages[1..]) =>
             {
                 go(&stages[0], budget)
             }
