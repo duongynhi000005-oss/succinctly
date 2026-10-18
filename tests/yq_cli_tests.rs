@@ -27843,7 +27843,8 @@ fn test_yaml_comma_scalar_and_empty_branches_match_iterate_1361() -> Result<()> 
     Ok(())
 }
 
-/// The first branch that is not a node of the document turns the nodes before it into copies, and
+/// The first branch that is not a node of the document (a literal, a computation, an absent key)
+/// turns the nodes before it into copies, and
 /// the comma runs as it always did: the comments on those nodes are gone (yq keeps them), pinned
 /// so a change is deliberate. A raise in a later branch loses the earlier outputs as before.
 #[test]
@@ -27853,6 +27854,9 @@ fn test_yaml_comma_mixed_branch_falls_back_to_owned_1361() -> Result<()> {
         (".x, (.y | length)", "p: 1\n1\n"),
         (".x, 1", "p: 1\n1\n"),
         ("1, .x", "1\np: 1\n"),
+        // An absent key answers a computed null, not a node.
+        (".x, .zz", "p: 1\nnull\n"),
+        (".zz, .x", "null\np: 1\n"),
         (".x, .y | length", "p: 1\n1\n"),
         ("(.x, .y) | length", "1\n1\n"),
     ] {

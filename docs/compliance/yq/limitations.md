@@ -2080,7 +2080,7 @@ $ echo '"a{}c"' | succinctly yq 'sub({};"X";"g")'   # Error: object ({}) is not 
 A filter that is a comma of document nodes (`.x, .y`) keeps comments, style and anchors since
 [#1361](https://github.com/rust-works/succinctly/issues/1361): its branches stay cursors, as
 `.[]`'s results do. A comma with a branch that is not a node of the document (`.x, (.y | length)`,
-`.x, 1`) is made of copies from its first such branch on, and a comma nested inside a bigger
+`.x, 1`, an absent key as in `.x, .zz`) is made of copies from its first such branch on, and a comma nested inside a bigger
 expression (`(.x, .y) | f`, `[.x, .y]`) is read by that expression: both still drop comments,
 style **and** anchors together. It predates [ADR-0017](../../adrs/adr-0017.md)'s mechanism and
 is not anchor-specific.

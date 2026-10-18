@@ -346,7 +346,7 @@ document cannot resolve.
 Two routes carry no `CommentTree` at all and so preserve nothing — not anchors, not
 comments, not style. Both predate #763 and neither is specific to anchors: a filter
 yielding *multiple* results through a comma that is not a plain comma of document nodes
-(`.x, (.y | length)`, `(.x, .y) | f`) is made of copies and loses its cursor before
+(`.x, (.y | length)`, `.x, .absent`, `(.x, .y) | f`) is made of copies and loses its cursor before
 `evaluate_yaml_cursor` can capture one (`.x, .y` itself keeps its nodes, #1361), and
 `--eval-all` evaluates through the owned-value route (#4380) -- unless its filter only
 navigates or writes a literal (`m2_gate.rs`'s `eval_all_matches_per_document`), when the run

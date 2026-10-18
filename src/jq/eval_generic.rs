@@ -10191,44 +10191,41 @@ fn eval_comma_generic<S: EvalSemantics, V: DocumentValue>(
     keep_nodes: bool,
 ) -> GenericResult<V> {
     let mut out: Vec<OwnedValue> = Vec::new();
-    let mut nodes: Option<Vec<V::Cursor>> = keep_nodes.then(Vec::new);
+    // The nodes held so far, while every branch has answered nodes (and `keep_nodes` asked for it).
+    let mut held: Vec<V::Cursor> = Vec::new();
+    let mut holding = keep_nodes;
     for expr in exprs {
         let result = eval_single::<S, _>(expr, value.clone(), optional, cursor);
-        if let Some(held) = nodes.as_mut() {
+        if holding {
             match result.materialize_lazy::<S>() {
                 GenericResult::None => continue,
-                GenericResult::OneCursor(c) => {
-                    held.push(c);
-                    continue;
-                }
-                GenericResult::ManyCursor(cs) => {
-                    held.extend(cs);
-                    continue;
-                }
+                GenericResult::OneCursor(c) => held.push(c),
+                GenericResult::ManyCursor(cs) => held.extend(cs),
                 other => {
-                    let held: GenericResult<V> =
-                        GenericResult::ManyCursor(nodes.take().unwrap_or_default());
-                    if let Some(control) = push_generic_owned_values::<_, S>(held, &mut out) {
-                        return partial_generic(out, control);
+                    // Not a node: the nodes held so far become copies, then this branch.
+                    holding = false;
+                    let nodes: GenericResult<V> =
+                        GenericResult::ManyCursor(core::mem::take(&mut held));
+                    for part in [nodes, other] {
+                        if let Some(control) = push_generic_owned_values::<_, S>(part, &mut out) {
+                            return partial_generic(out, control);
+                        }
                     }
-                    if let Some(control) = push_generic_owned_values::<_, S>(other, &mut out) {
-                        return partial_generic(out, control);
-                    }
-                    continue;
                 }
             }
+            continue;
         }
         if let Some(control) = push_generic_owned_values::<_, S>(result, &mut out) {
             return partial_generic(out, control);
         }
     }
-    match nodes {
-        Some(mut held) => match held.len() {
-            0 => GenericResult::None,
-            1 => GenericResult::OneCursor(held.remove(0)),
-            _ => GenericResult::ManyCursor(held),
-        },
-        None => owned_vec_to_generic_result(out),
+    if !holding {
+        return owned_vec_to_generic_result(out);
+    }
+    match held.len() {
+        0 => GenericResult::None,
+        1 => GenericResult::OneCursor(held.remove(0)),
+        _ => GenericResult::ManyCursor(held),
     }
 }
 
