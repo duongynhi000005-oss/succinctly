@@ -24586,6 +24586,48 @@ fn test_eval_all_list_reading_filters_keep_the_combined_route_4380() -> Result<(
     Ok(())
 }
 
+/// #4380: a navigated element keeps its anchor and comment (`yq ea '.l[0]'`), which the
+/// owned-value route drops along with the rest of the presentation.
+#[test]
+fn test_eval_all_navigation_keeps_an_elements_anchor_and_comment_4380() -> Result<()> {
+    let input = "l:\n  - a: &x 1 # c1\n    b: [1, 2]\n  - \"q\" # c2\n  - *x\n";
+    let (out, stderr, code) = run_yq_stdin_with_stderr(".l[0]", input, &["--eval-all"])?;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out, "a: &x 1 # c1\nb: [1, 2]\n");
+    Ok(())
+}
+
+/// #4380: an error in any document ends an `--eval-all` run with nothing on stdout,
+/// because the whole list is evaluated before anything is written (`yq ea '.a.b'` prints
+/// only the error). The per-document route would print the documents before it, so the
+/// rerouted run evaluates the list first and keeps the combined route's output on failure.
+#[test]
+fn test_eval_all_error_in_a_later_document_prints_nothing_4380() -> Result<()> {
+    let input = "a: {b: 1}\n---\na: [1]\n---\na: {b: 3}\n";
+    for filter in [".a.b", ".a.b = 5", ".a.b |= 7"] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(filter, input, &["--eval-all"])?;
+        assert_eq!(code, 1, "{filter}: {stderr}");
+        assert_eq!(out, "", "{filter}");
+        assert!(stderr.contains("Cannot index array"), "{filter}: {stderr}");
+    }
+    Ok(())
+}
+
+/// #4380: the per-document route's double-quoted writer spells a control character the way
+/// go-yaml does (`\a`, `\e`, `\x7F`, `\N`, `\0`), as `--eval-all`'s own writer did; it wrote
+/// `\x07`, `\x1b`, `\x7f`, `\x00`. Both routes, byte for byte with yq v4.53.3.
+#[test]
+fn test_double_quoted_scalar_uses_go_yaml_escapes_on_the_dom_route_4380() -> Result<()> {
+    let input = "a: \"\\a\\b\\e\\x7f\\N\\_ \\0 \\v\\f z\"\nb: \"plain\"\n";
+    let expected = "a: \"\\a\\b\\e\\x7F\\N\u{a0} \\0 \\v\\f z\"\nb: \"plain\"\nc: 1\n";
+    for argv in [&[][..], &["--eval-all"][..]] {
+        let (out, stderr, code) = run_yq_stdin_with_stderr(".c = 1", input, argv)?;
+        assert_eq!(code, 0, "{argv:?}: {stderr}");
+        assert_eq!(out, expected, "{argv:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_eval_all_ea_alias() -> Result<()> {
     let (f1, f2) = two_doc_fixtures()?;

@@ -1240,6 +1240,41 @@ fn resolve_run_input_format(format: InputFormat, files: &[String]) -> InputForma
     resolve_input_format(format, files.first().map(|f| Path::new(f.as_str())))
 }
 
+/// Every document of every source, each with its `(file, document)` origin and
+/// whether it came from JSON: the list `--eval-all` evaluates over (#2427).
+///
+/// Goes through [`parse_input`], so the nesting-depth, colliding-key and
+/// stray-comma refusals of the owned-value bridge fire here (#2282). `document`
+/// is `--doc`'s global document index.
+fn eval_all_documents(
+    input_sources: &[GatheredSource],
+    input_files: &[String],
+    document: Option<usize>,
+) -> Result<Vec<(OwnedValue, usize, usize, bool)>> {
+    let mut all_docs: Vec<(OwnedValue, usize, usize, bool)> = Vec::new();
+    let mut global_doc_index: usize = 0;
+    let source_file_indices = gathered_file_indices(input_files);
+    for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+        let file_idx = source_file_indices
+            .get(source_idx)
+            .copied()
+            .unwrap_or(source_idx);
+        // #2282: `to_owned_canonicalizing_numbers_at_depth` (reached via
+        // plain `parse_input` for JSON-sourced input) now reports its
+        // own nesting-depth violations as a catchable error rather than
+        // panicking -- see that function's own doc comment for why.
+        let inputs = parse_input(bytes, *format)?;
+        for (doc_idx, input) in inputs.into_iter().enumerate() {
+            let should_include = document.map_or(true, |target| target == global_doc_index);
+            if should_include {
+                all_docs.push((input, file_idx, doc_idx, *format == InputFormat::Json));
+            }
+            global_doc_index += 1;
+        }
+    }
+    Ok(all_docs)
+}
+
 /// Applies `--front-matter`, if set, to raw input bytes before format
 /// resolution and validation: the raw bytes (e.g. Markdown) aren't valid
 /// standalone YAML, so extraction must happen first. Returns
@@ -8432,22 +8467,46 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // #4380: `--eval-all` evaluates through the owned-value route, which
     // carries no `CommentTree`, so it drops every comment, anchor and style
     // even for `.`. For a filter real yq answers the same either way
-    // (`eval_all_matches_per_document`), evaluate per document instead: that
-    // route keeps all three.
+    // (`eval_all_matches_per_document`) the run is rerouted through the plain
+    // per-document route, which keeps all three -- once the owned-value route has
+    // shown it would have succeeded. That evaluation is the contract being kept:
+    // the bridge's nesting-depth, colliding-key and stray-comma refusals, a source
+    // failing `--validate` ending the run before any output (#1564), and an
+    // erroring document printing nothing at all, where the plain route would
+    // print the documents before it. A run it fails hands its results and its
+    // gathered sources on to the `--eval-all` branch below unchanged.
     //
-    // The M2 streamers validate less than `--eval-all`'s bridge does (nesting
-    // depth, a colliding complex key, a stray comma, a later file failing
-    // `--validate`), so the rerouted run stays off them: the DOM route is the one
-    // that shares the bridge's checks.
-    //
-    // JSON-sourced input is left on `--eval-all`'s route: it has no comment, anchor
-    // or style to keep, and the plain route spells a JSON float (`1e19`) its own way
-    // where `--eval-all` canonicalizes it (`1e+19`, #2902).
-    let eval_all_per_document = args.eval_all
+    // Left on that branch regardless: JSON-sourced input (no comment or anchor to
+    // keep, and the plain route spells `1e19` where `--eval-all` gives `1e+19`,
+    // #2902).
+    let mut eval_all_pregathered: Option<(Vec<GatheredSource>, Option<i32>)> = None;
+    let mut eval_all_results: Option<Vec<OwnedValue>> = None;
+    let mut eval_all_per_document = false;
+    if args.eval_all
+        && !args.null_input
         && resolve_run_input_format(args.input_format, &input_files) == InputFormat::Yaml
-        && eval_all_matches_per_document(&program.expr);
-    if eval_all_per_document {
-        args.eval_all = false;
+        && eval_all_matches_per_document(&program.expr)
+    {
+        let gathered = gather_input_sources(
+            &input_files,
+            args.input_format,
+            args.front_matter,
+            args.validate,
+            args.output_format,
+        )?;
+        if gathered.1.is_none() {
+            let all_docs = eval_all_documents(&gathered.0, &input_files, args.document)?;
+            let reported = sink.report_count();
+            let query_result: QueryResult<'_, Vec<u64>> =
+                jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
+            let results = query_result_to_owned_values(query_result, &mut sink);
+            if sink.report_count() == reported && sink.halted().is_none() {
+                eval_all_per_document = true;
+            } else {
+                eval_all_results = Some(results);
+            }
+        }
+        eval_all_pregathered = Some(gathered);
     }
 
     // M2/M2.5 streaming fast path: navigation queries stream results
@@ -8643,7 +8702,6 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         && args.front_matter.is_none()
         && split_expr.is_none()
         && !args.eval_all
-        && !eval_all_per_document
         && context.named.is_empty();
     // #2606: unlike the JSON gate above, this one never OR's in
     // `output_config.compact` -- `-I0` no longer means "compact" for YAML
@@ -8665,7 +8723,6 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         && args.front_matter.is_none()
         && split_expr.is_none()
         && !args.eval_all
-        && !eval_all_per_document
         && context.named.is_empty();
     let can_fast_path = can_json_fast_path || can_yaml_fast_path;
 
@@ -9488,7 +9545,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 }
             }
         }
-    } else if args.eval_all {
+    } else if args.eval_all && !eval_all_per_document {
         // Handle --eval-all: evaluate the filter once over the list of every
         // document of every file, exposing `file_index`/`fileIndex`/`fi`
         // (#715). Input-gathering mirrors --slurp's DOM path (all_docs
@@ -9498,13 +9555,16 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         // per document rather than handing the expression an array of them
         // (#2427). `--front-matter` is rejected in combination above, so
         // every gathered body is `None` here.
-        let (input_sources, validate_exit_code) = gather_input_sources(
-            &input_files,
-            args.input_format,
-            args.front_matter,
-            args.validate,
-            args.output_format,
-        )?;
+        let (input_sources, validate_exit_code) = match eval_all_pregathered.take() {
+            Some(gathered) => gathered,
+            None => gather_input_sources(
+                &input_files,
+                args.input_format,
+                args.front_matter,
+                args.validate,
+                args.output_format,
+            )?,
+        };
         if let Some(code) = validate_exit_code {
             // #1564: --eval-all combines every source into one evaluation
             // (see below), so a partial set missing the file that failed
@@ -9536,33 +9596,18 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         // `del(.name)` all apply per document, while `[.]` collects across
         // the whole list. Each entry carries its own `(file, document)`
         // origin, which is what `file_index`/`document_index` read back.
-        let mut all_docs: Vec<(OwnedValue, usize, usize, bool)> = Vec::new();
-        let mut global_doc_index: usize = 0;
-        let source_file_indices = gathered_file_indices(&input_files);
-        for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
-            let file_idx = source_file_indices
-                .get(source_idx)
-                .copied()
-                .unwrap_or(source_idx);
-            // #2282: `to_owned_canonicalizing_numbers_at_depth` (reached via
-            // plain `parse_input` for JSON-sourced input) now reports its
-            // own nesting-depth violations as a catchable error rather than
-            // panicking -- see that function's own doc comment for why.
-            let inputs = parse_input(bytes, *format)?;
-            for (doc_idx, input) in inputs.into_iter().enumerate() {
-                let should_include = args
-                    .document
-                    .map_or(true, |target| target == global_doc_index);
-                if should_include {
-                    all_docs.push((input, file_idx, doc_idx, *format == InputFormat::Json));
-                }
-                global_doc_index += 1;
+        // A run that reached here from the per-document gate (#4380) has already
+        // evaluated the list and failed; it hands the results over rather than
+        // evaluating, and reporting, a second time.
+        let results = match eval_all_results.take() {
+            Some(results) => results,
+            None => {
+                let all_docs = eval_all_documents(&input_sources, &input_files, args.document)?;
+                let query_result: QueryResult<'_, Vec<u64>> =
+                    jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
+                query_result_to_owned_values(query_result, &mut sink)
             }
-        }
-
-        let query_result: QueryResult<'_, Vec<u64>> =
-            jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
-        let results = query_result_to_owned_values(query_result, &mut sink);
+        };
 
         let mut split_doc_state = SplitDocState::new(has_split_doc);
         for (i, result) in results.iter().enumerate() {
@@ -10573,27 +10618,16 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         // Markdown) aren't valid standalone YAML; `process` mode's body is
         // carried alongside each source for reattachment in the output loop
         // below.
-        let (input_sources, validate_exit_code) = gather_input_sources(
-            &input_files,
-            args.input_format,
-            args.front_matter,
-            args.validate,
-            args.output_format,
-        )?;
-        // #4380: a run rerouted here from `--eval-all` keeps `--eval-all`'s
-        // all-or-nothing contract instead of the per-file one below: a source
-        // failing `--validate` ends the run before anything is written (#1564),
-        // and every source passes through the same owned-value bridge
-        // (`parse_input`) first, whose nesting-depth, colliding-key and stray-comma
-        // refusals the cursor route does not make.
-        if eval_all_per_document {
-            if let Some(code) = validate_exit_code {
-                return Ok(code);
-            }
-            for (bytes, format, _) in &input_sources {
-                parse_input(bytes, *format)?;
-            }
-        }
+        let (input_sources, validate_exit_code) = match eval_all_pregathered.take() {
+            Some(gathered) => gathered,
+            None => gather_input_sources(
+                &input_files,
+                args.input_format,
+                args.front_matter,
+                args.validate,
+                args.output_format,
+            )?,
+        };
         // #1564: each file's results are collected/emitted independently
         // of the others (the two loops below) -- process whatever passed
         // and report the failure once done, instead of losing every
