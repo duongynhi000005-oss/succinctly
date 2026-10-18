@@ -3454,6 +3454,20 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         if self.is_alias() {
             return "alias";
         }
+        // A container's kind is in the type bits: building its value would read all of a
+        // mapping's keys for a merge key just to say `map` (#4866).
+        if self.bp_pos != 0 && self.is_container() {
+            // yq reads an explicit `!!null` on a collection as the null it names, which is a
+            // scalar (`i: !!null {a: 1}`).
+            if self.index.has_explicit_tags() && self.explicit_tag_at(None) == Some("!!null") {
+                return "scalar";
+            }
+            return if self.index.is_sequence_at_bp(self.bp_pos) {
+                "seq"
+            } else {
+                "map"
+            };
+        }
         match self.value() {
             YamlValue::Null | YamlValue::String(_) => "scalar",
             YamlValue::Sequence(_) => "seq",
@@ -7777,6 +7791,11 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     #[inline]
     fn line_comment_raw(&self) -> Option<String> {
         YamlCursor::line_comment_raw(self).map(ToString::to_string)
+    }
+
+    #[inline]
+    fn kind(&self) -> Option<&'static str> {
+        Some(YamlCursor::kind(self))
     }
 
     #[inline]

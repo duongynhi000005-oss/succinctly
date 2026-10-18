@@ -5983,6 +5983,14 @@ documents x 8 filters. Still different:
 - **A collection built by an expression** (`[.]`, `{"k": .a}`, `to_entries`) carries no comment tree at all
   (#1361), so no comment is held or printed there.
 
+### `kind` of an alias on the owned routes ([#4866](https://github.com/rust-works/succinctly/issues/4866))
+
+`kind` asks the YAML cursor, so a `*name` reference is `alias` (`.b | kind`, `[.[] | kind]`, `map(kind)`,
+`.. | kind`), and a collection tagged `!!null` is `scalar`, as in yq. The routes that hold an owned copy of the
+value have no alias left to name and answer the target's kind: `to_entries | map(.value | kind)`, `kind` inside an
+assignment's right-hand side (`.z = (.b | kind)`, `.[] |= kind`) and `--eval-all`. Separately, `..` still descends
+into a `!!null`-tagged collection, where yq stops at the `scalar` (`[.. | kind]` has one more element).
+
 ## `@yaml` of a flow-sourced container, a multi-line string, a root computed float or a non-finite float ([#1183](https://github.com/rust-works/succinctly/issues/1183))
 
 `@yaml` runs the same owned-value YAML streamer as the CLI's own output, so it inherits that

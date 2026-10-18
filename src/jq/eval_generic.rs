@@ -31930,6 +31930,18 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
             GenericResult::Owned(OwnedValue::String(anchor.into()))
         }
 
+        // #4866: native, so a node is not converted whole just to name its kind, and an alias
+        // answers `alias` as in yq. Without a cursor (an owned value, JSON input) the value says.
+        Builtin::Kind => {
+            let kind = match cursor.and_then(|c| c.kind()) {
+                Some(kind) => kind,
+                None if value.as_array().is_some() => "seq",
+                None if value.as_object().is_some() => "map",
+                None => "scalar",
+            };
+            GenericResult::Owned(OwnedValue::String(kind.to_string().into()))
+        }
+
         Builtin::Style => {
             let style = cursor.map_or("", |c| c.style());
             GenericResult::Owned(OwnedValue::String(style.to_string().into()))

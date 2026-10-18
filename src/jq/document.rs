@@ -908,6 +908,15 @@ pub trait DocumentCursor: Sized + Copy + Clone {
         self.explicit_tag()
     }
 
+    /// The structural kind yq's `kind` reports for this node: `"scalar"`, `"seq"`, `"map"`, or
+    /// `"alias"` for an unexploded `*name` reference (#4866).
+    ///
+    /// `None` by default, where the node's value says what it is (an alias is already resolved
+    /// away); only a YAML cursor can tell an alias from its target.
+    fn kind(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Get the YAML style indicator for this node (e.g. `"flow"`, `"double"`).
     ///
     /// Returns `""` (no explicit style) by default; only YAML cursors
