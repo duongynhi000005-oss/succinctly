@@ -43981,9 +43981,9 @@ fn carry_frame_register<'a>(
 /// register alone, so that its outputs state the register they entered with
 /// ([`carry_frame_register`]) whatever the other operand does; the outputs of the operand that
 /// moved it state what it did, and the EXTRACT behind them is judged on that.
-fn alternate_update_shape(expr: &Expr, states: bool) -> bool {
-    fn shape(expr: &Expr, states: bool) -> Option<bool> {
-        match unwrap_paren(expr) {
+fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
+    fn shape<S: EvalSemantics>(expr: &Expr, states: bool) -> Option<bool> {
+        match peel_register_transparent(expr) {
             Expr::Alternative(left, right) => {
                 (!states || operand_leaves_register(left) || operand_leaves_register(right))
                     .then_some(true)
@@ -43991,15 +43991,33 @@ fn alternate_update_shape(expr: &Expr, states: bool) -> bool {
             Expr::Comma(items) => {
                 items
                     .iter()
-                    .try_fold(false, |seen, item| match shape(item, states) {
+                    .try_fold(false, |seen, item| match shape::<S>(item, states) {
                         Some(alternate) => Some(seen || alternate),
                         None => sibling_leaves_register(item).then_some(seen),
                     })
             }
+            // #4837: a `//` behind or ahead of stages that move nothing is the same UPDATE as far
+            // as the register goes -- the stages pass each output through, so its statement is the
+            // `//`'s.
+            Expr::Pipe(stages) => {
+                let mut seen = false;
+                for stage in stages {
+                    if neutral_leaves_register(stage) || stage_keeps_register_statically::<S>(stage)
+                    {
+                        continue;
+                    }
+                    if seen {
+                        return None;
+                    }
+                    shape::<S>(stage, states)?;
+                    seen = true;
+                }
+                seen.then_some(true)
+            }
             _ => None,
         }
     }
-    shape(expr, states) == Some(true)
+    shape::<S>(expr, states) == Some(true)
 }
 
 /// [`carry_frame_register`] for one sibling of a comma (#3960): also a bare builtin that
@@ -50752,7 +50770,7 @@ impl FoldRegister {
                     BranchRegister::AtEntry | BranchRegister::Unmoved(_)
                 )
                 && {
-                    let alternate = *alternate.get_or_insert_with(|| alternate_update_shape(expr, true));
+                    let alternate = *alternate.get_or_insert_with(|| alternate_update_shape::<S>(expr, true));
                     // Read only through an expression every producer of which forwards
                     // its branch unchanged ([`entry_marker_stage`]'s allowlist), and a
                     // handler's `Unmoved` against the fold's own register. #4800: or an
@@ -61948,9 +61966,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && extract_reg.frame.register_loss.is_lost()
                                     // A `//` nested deeper (behind an `if` or a pipe stage) is not
                                     // read per output and keeps the exemption it had.
-                                    && (alternate_update_shape(&bound_update, false)
+                                    && (alternate_update_shape::<S>(&bound_update, false)
                                         || !any_subexpr(&bound_update, &mut |e| {
+                                            // #4837: a `//` that moves nothing on either side
+                                            // (`. // 5` after the stage that lost the register)
+                                            // restores nothing.
                                             matches!(e, Expr::Alternative(..))
+                                                && !neutral_leaves_register(e)
                                         }));
                                 let update_has_comma =
                                     register_lost_at_the_root && has_branching_comma(&bound_update);

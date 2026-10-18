@@ -161816,6 +161816,95 @@ fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() ->
     ])
 }
 
+/// #4837: a `//` behind or ahead of stages that move nothing is judged per output like a `//` that is
+/// the whole UPDATE (#4800): the left side's output keeps jq's register where the `foreach` moved it
+/// (`["a"]`, `{"a":9}`), so a `null` document refuses, and the alternate states the register it entered
+/// with, so the controls stay `[]`. The refusal is `Invalid path expression with result null` for
+/// `path`, `del` and `|=` (a `del` that answered `null` did so by deleting the root rather than
+/// `["a"]`). Controls captured from `/usr/bin/jq` 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_branch_4837(
+) -> Result<()> {
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    for update in [
+        "((L) // 5) | .",
+        "((L) // 5) | select(true)",
+        "((L) // 5) | (. // 5)",
+        ". | ((L) // 5)",
+        ". | (((L) // 5))",
+        "first((L) // 5)",
+        "try ((L) // 5)",
+        "((L) // empty) | .",
+        "(((L) // 5) // 6) | .",
+        "(L) | (. // 5)",
+    ] {
+        for wrap in ["path(X)", "del(X)", "(X) |= 9", "path(X) | ."] {
+            let update = update.replace('L', &format!("1 | {fe}"));
+            let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+            let filter = wrap.replace('X', &inner);
+            let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some("null"))?;
+            assert_eq!(code, 5, "{filter}: stdout {stdout:?} stderr {stderr:?}");
+            assert_eq!(stdout, "", "{filter}");
+            assert!(
+                stderr.contains("Invalid path expression with result null"),
+                "{filter}: {stderr:?}"
+            );
+        }
+    }
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; ((select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5) | .; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; . | ((select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; first((select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; (5 // (1 | foreach ($x as {a:$a}|.) as $y (.; .; .))) | select(true); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; ((1 | foreach ($x as {a:$a}|.) as $y (.; .; .) | false) // 5) | .; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "true",
+            r"path(. as $x | foreach . as $i (.; ((select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5) | .; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach . as $i (.; if . then ((1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5) | . else 4 end; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's
