@@ -2824,7 +2824,101 @@ impl<W: AsRef<[u64]>, S: SelectSupport> BalancedParens<W, S> {
             return None;
         }
 
-        enclose(self.words.as_ref(), self.len, p)
+        self.enclose_indexed(p)
+    }
+
+    /// [`Self::enclose`] with the L0/L1/L2 min-excess index doing the skipping
+    /// the free [`enclose`] does one word at a time (#4102).
+    ///
+    /// Scanning backward from `p - 1`, a close counts -1 and an open +1, and the
+    /// parent is the first open that brings the running excess to +1. A block
+    /// of `bx` total excess and prefix minimum `mn` (both relative to its
+    /// start, `mn` never above 0) reaches at most `bx - mn` from its end, so a
+    /// block with `excess + bx - mn < 1` cannot hold the parent and is skipped
+    /// whole. `mn` also counts the position after the block's last bit, which
+    /// can only lower it, so the test overestimates and never skips a block that
+    /// holds the parent; a block it lets through is scanned bit by bit and
+    /// left behind when it turns out to hold nothing.
+    ///
+    /// A sibling walk reaches a first child's parent in a handful of steps, but
+    /// the k-th member of a wide mapping is k siblings away from it: the free
+    /// scan made `parent`, `document_index` and `head_comment` on such a member
+    /// linear in k, and a fan-out over the members quadratic.
+    fn enclose_indexed(&self, p: usize) -> Option<usize> {
+        if p == 0 {
+            return None;
+        }
+        let words = self.words.as_ref();
+        let word_idx = p / 64;
+        let bit_idx = p % 64;
+        let mut excess: i32 = 0;
+
+        // The bits of `p`'s own word below it.
+        if bit_idx > 0 {
+            let word = words[word_idx];
+            for bit in (0..bit_idx).rev() {
+                if (word >> bit) & 1 == 1 {
+                    excess += 1;
+                    if excess == 1 {
+                        return Some(word_idx * 64 + bit);
+                    }
+                } else {
+                    excess -= 1;
+                }
+            }
+        }
+
+        // Words `[0, w)` are left. Take the largest aligned block that ends at
+        // `w` and cannot hold the parent, else the word before `w`.
+        let mut w = word_idx;
+        while w > 0 {
+            if w % (FACTOR_L1 * FACTOR_L2) == 0 {
+                let block = w / (FACTOR_L1 * FACTOR_L2) - 1;
+                if let (Some(&min), Some(&total)) = (
+                    self.l2_min_excess.get(block),
+                    self.l2_block_excess.get(block),
+                ) {
+                    if excess + total - min.min(0) < 1 {
+                        excess += total;
+                        w -= FACTOR_L1 * FACTOR_L2;
+                        continue;
+                    }
+                }
+            }
+            if w % FACTOR_L1 == 0 {
+                let block = w / FACTOR_L1 - 1;
+                if let (Some(&min), Some(&total)) = (
+                    self.l1_min_excess.get(block),
+                    self.l1_block_excess.get(block),
+                ) {
+                    if excess + i32::from(total) - i32::from(min).min(0) < 1 {
+                        excess += i32::from(total);
+                        w -= FACTOR_L1;
+                        continue;
+                    }
+                }
+            }
+            let wi = w - 1;
+            let total = i32::from(*self.l0_word_excess.get(wi)?);
+            let min = i32::from(*self.l0_min_excess.get(wi)?).min(0);
+            if excess + total - min >= 1 {
+                let word = words[wi];
+                for bit in (0..64).rev() {
+                    if (word >> bit) & 1 == 1 {
+                        excess += 1;
+                        if excess == 1 {
+                            return Some(wi * 64 + bit);
+                        }
+                    } else {
+                        excess -= 1;
+                    }
+                }
+            } else {
+                excess += total;
+            }
+            w = wi;
+        }
+        None
     }
 
     /// Navigate to parent node.
@@ -4515,6 +4609,101 @@ mod tests {
             }
         }
         (words, bits.len())
+    }
+
+    /// A deterministic balanced sequence of about `target` bits whose depth
+    /// stays near `bias_depth`: shallow ones are wide (many siblings per
+    /// parent), deep ones are chains.
+    fn balanced_bits(seed: u64, target: usize, bias_depth: usize) -> Vec<bool> {
+        let mut state = seed | 1;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut bits = Vec::with_capacity(target + bias_depth + 8);
+        let mut depth = 0usize;
+        while bits.len() < target {
+            let want_open = match depth {
+                0 => true,
+                d if d < bias_depth => next() % 4 != 0,
+                _ => next() % 4 == 0,
+            };
+            bits.push(want_open);
+            if want_open {
+                depth += 1;
+            } else {
+                depth -= 1;
+            }
+        }
+        bits.extend(core::iter::repeat_n(false, depth));
+        bits
+    }
+
+    /// `enclose` against the linear backward scan for the opens of `bits`
+    /// `stride` apart (every open when `stride` is 1).
+    fn assert_enclose_matches_linear(bits: &[bool], stride: usize, what: &str) {
+        let (words, len) = pack_bits(bits);
+        let bp = BalancedParens::new(words.clone(), len);
+        for p in (0..len).filter(|&p| bits[p]).step_by(stride) {
+            assert_eq!(
+                bp.enclose(p),
+                enclose(&words, len, p),
+                "{what}: open at {p}"
+            );
+        }
+    }
+
+    /// #4102: the indexed `enclose` skips whole L0/L1/L2 blocks, so it is
+    /// checked against the word-at-a-time scan on sequences that cross many of
+    /// each: wide, deep and mixed, every open of the short ones and a sample of
+    /// the 600k-bit ones (nine L2 blocks).
+    #[test]
+    fn test_enclose_indexed_matches_linear_4102() {
+        for (seed, target, depth) in [
+            (1, 70, 2),
+            (2, 500, 3),
+            (3, 5_000, 2),
+            (4, 5_000, 40),
+            (5, 5_000, 400),
+            (6, 20_000, 1),
+        ] {
+            assert_enclose_matches_linear(
+                &balanced_bits(seed, target, depth),
+                1,
+                &format!("seed {seed}, {target} bits, depth {depth}"),
+            );
+        }
+        for (seed, depth) in [(11, 1), (12, 3), (13, 60), (14, 3_000)] {
+            assert_enclose_matches_linear(
+                &balanced_bits(seed, 600_000, depth),
+                37,
+                &format!("seed {seed}, 600000 bits, depth {depth}"),
+            );
+        }
+    }
+
+    /// A wide mapping's members (`(()())` repeated under one root): the parent of
+    /// each is the root, however many words away, and a member's own children
+    /// find it in the same word.
+    #[test]
+    fn test_enclose_of_a_wide_container_member_is_the_root_4102() {
+        let members = 100_000;
+        let mut bits = vec![true];
+        for _ in 0..members {
+            bits.extend([true, true, false, true, false, false]);
+        }
+        bits.push(false);
+        let (words, len) = pack_bits(&bits);
+        let bp = BalancedParens::new(words, len);
+        for k in [0, 1, 2, 10, 999, 1_000, 12_345, 99_999] {
+            let member = 1 + 6 * k;
+            assert_eq!(bp.enclose(member), Some(0), "member {k}");
+            assert_eq!(bp.enclose(member + 1), Some(member), "child of member {k}");
+            assert_eq!(bp.enclose(member + 3), Some(member), "second child of {k}");
+        }
+        assert_eq!(bp.enclose(0), None);
     }
 
     #[test]

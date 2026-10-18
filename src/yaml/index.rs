@@ -124,6 +124,9 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// that counts characters ([`Self::to_line_char_column`]) is the byte column in that
     /// case, so an ASCII document pays one scan for the whole run and no per-call prefix walk.
     text_is_ascii: OnceCell<bool>,
+    /// Whether the indexed text could spell a `<<` merge key, measured once on first use (#4102);
+    /// see [`Self::may_have_merge_keys`].
+    may_have_merge_keys: OnceCell<bool>,
     /// The leading lines (and the same-line columns of the first content line) real yq does not
     /// count when it numbers `line`/`column`, measured once on first use (#4363; see
     /// `light.rs`'s `yq_position_preamble`).
@@ -223,6 +226,7 @@ impl YamlIndex<Vec<u64>> {
             header_doc_markers: true,
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
+            may_have_merge_keys: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         };
         index.validate_alias_acyclicity()?;
@@ -294,6 +298,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             header_doc_markers: true,
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
+            may_have_merge_keys: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         }
     }
@@ -958,6 +963,44 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[inline]
     pub fn to_line_column(&self, offset: usize, text: &[u8]) -> (usize, usize) {
         self.ensure_lines(text).to_line_column(offset)
+    }
+
+    /// Whether `text` could hold a mapping key that decodes to `<<`, so that a mapping's
+    /// members need reading for merge keys. `false` is a proof that none does and `true` only
+    /// that one might: it looks for the two ways to spell the key, a literal `<<` and a
+    /// double-quoted escape (`"\x3c\x3c"`, `"\u003c<"`), and answers from the first measurement
+    /// afterwards (#4102).
+    ///
+    /// A mapping with no merge key is the overwhelmingly common case, and finding that out
+    /// reads every key of the mapping, so building the fields of a mapping `value()` at each
+    /// of a wide mapping's members made a fan-out over them quadratic. Most documents never
+    /// contain `<<`, and for them one pass over the bytes answers every mapping at once.
+    #[must_use]
+    pub fn may_have_merge_keys(&self, text: &[u8]) -> bool {
+        *self.may_have_merge_keys.get_or_init(|| {
+            // `contains` is the vectorized byte search, so the pass costs a fraction of a
+            // millisecond a megabyte; the loops below only run where the byte occurs.
+            let mut rest = text;
+            if rest.contains(&b'<') {
+                while let Some(at) = rest.iter().position(|&b| b == b'<') {
+                    if rest.get(at + 1) == Some(&b'<') {
+                        return true;
+                    }
+                    rest = &rest[at + 1..];
+                }
+            }
+            let mut rest = text;
+            if rest.contains(&b'\\') {
+                while let Some(at) = rest.iter().position(|&b| b == b'\\') {
+                    if matches!(rest.get(at + 1), Some(b'x' | b'u' | b'U')) {
+                        return true;
+                    }
+                    // Skip the escaped byte too, so `\\x` (a backslash, then `x`) is not read as `\x`.
+                    rest = rest.get(at + 2..).unwrap_or(&[]);
+                }
+            }
+            false
+        })
     }
 
     /// [`Self::to_line_column`] with the column counted in characters, not bytes (#4364):
@@ -2744,5 +2787,37 @@ mod tests {
             semi.tags,
         );
         assert!((0..rebuilt.bp().len()).all(|bp| rebuilt.property_start(bp).is_none()));
+    }
+
+    /// #4102: a document is cleared of merge keys only when no spelling of `<<` can occur in
+    /// it. `true` is allowed to be wrong (a `<<` in a string), `false` is not.
+    #[test]
+    fn test_may_have_merge_keys_4102() {
+        for (text, expected) in [
+            ("a: 1\nb: [2, 3]\n", false),
+            ("a: x < y\nb: <tag>\n", false),
+            ("a: \"tab\\there\\n\"\n", false),
+            ("a: 'C:\\path\\x'\n", true),
+            ("base: &b {k: 1}\nm:\n  <<: *b\n", true),
+            ("m:\n  \"<<\": 1\n", true),
+            ("m:\n  \"\\x3c\\x3c\": 1\n", true),
+            ("m:\n  \"\\u003c\\u003c\": 1\n", true),
+            ("m:\n  \"\\U0000003c<\": 1\n", true),
+            ("a: 1 <<\n", true),
+            ("a: 1 <", false),
+        ] {
+            let index = YamlIndex::build(text.as_bytes()).expect("should parse");
+            assert_eq!(
+                index.may_have_merge_keys(text.as_bytes()),
+                expected,
+                "{text:?}"
+            );
+            // The answer is measured once and then reused.
+            assert_eq!(
+                index.may_have_merge_keys(text.as_bytes()),
+                expected,
+                "{text:?} again"
+            );
+        }
     }
 }
