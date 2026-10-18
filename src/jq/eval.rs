@@ -55775,11 +55775,10 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // #4626: ...or where the accumulator is provably off the register and the frame names it.
     let off_body = foreign_in_off_body::<S>(ambient);
     // #4823: ...and on a `null` ambient the register is `null` by kind, which a `$x` holding a container is
-    // never: the pattern's step raises on it as it does off the register (`null | foreach ($x as {a:$a} | .)
-    // ...` in the UPDATE of a `foreach` whose source stepped onto a `null` element, `$x` bound at the root).
-    // A `null` or boolean `$x` is by kind the register and is not read here.
+    // never: the pattern's step raises on it as it does off the register, for a `foreach` or a `reduce` source
+    // (`null | foreach ($x as {a:$a} | .) ...` in the UPDATE of a `foreach` whose source stepped onto a `null`
+    // element, `$x` bound at the root). A `null` or boolean `$x` is by kind the register and is not read here.
     let null_foreign = S::TAG == EvalTag::Jq
-        && foreach_source
         && ambient.trackable
         && matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0

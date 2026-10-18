@@ -163026,7 +163026,7 @@ fn test_caught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind_v
     ])
 }
 
-/// #4823: the same shapes with the inner `foreach` *uncaught*. A same-kind value head (`null | FE`)
+/// #4823: the same shapes with the inner `foreach` (or `reduce`) source *uncaught*. A same-kind value head (`null | FE`)
 /// hands it a `null` ambient that reads as jq's register by kind, so the `$x` bound at the root -- a
 /// container, never `jv_identical` to it -- went unchecked and the pattern's step was taken as passing: `path`
 /// answered `["a"]`, `|=` wrote and `del` deleted, where jq raises at the step. A caught `try`, a head that is
@@ -163206,24 +163206,45 @@ fn test_uncaught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind
         ),
         (
             r#"{"a":null}"#,
-            r"path(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            r"path(. as $x | foreach .a as $i (.; null | reduce ($x as {a:$a} | .) as $y (.; .); .))",
             "",
             "Invalid path expression near attempt to access element",
             5,
         ),
         (
             r#"{"a":null}"#,
-            r"del(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .))",
+            r"del(. as $x | foreach .a as $i (.; null | reduce ($x as {a:$a} | .) as $y (.; .); .))",
             "",
             "Invalid path expression near attempt to access element",
             5,
         ),
         (
             r#"{"a":null}"#,
-            r"(. as $x | foreach .a as $i (.; null | foreach ($x as {a:$a} | .) as $y (.; .; .); .)) |= 9",
+            r"(. as $x | foreach .a as $i (.; null | reduce ($x as {a:$a} | .) as $y (.; .); .)) |= 9",
             "",
             "Invalid path expression near attempt to access element",
             5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; null | try reduce ($x as {a:$a} | .) as $y (.; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; null | try reduce ($x as {a:$a} | .) as $y (.; .); .))",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; null | try reduce ($x as {a:$a} | .) as $y (.; .); .)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
         ),
     ])
 }
