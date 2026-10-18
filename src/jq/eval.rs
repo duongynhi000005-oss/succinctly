@@ -54414,8 +54414,9 @@ fn is_literal_count(n: &Expr) -> bool {
 }
 
 /// Whether `e` is a `first`/`limit`/`nth` with a literal count, read through a `try`/`?` and a
-/// wrapper under a wrapper, whose operand holds a `?//` chain with a bare `$var` alternative behind
-/// other stages -- `limit(2; (., 1) | . as {a:$a} ?// $a | .)` (#4669). [`take_wrapped_bare_chain`]
+/// wrapper under a wrapper, whose operand holds a `?//` chain with a bare `$var` alternative, as
+/// [`wrapped_bare_chain`] reads the wrapper -- but anywhere in the operand, which is what lets the
+/// chain sit behind other stages: `limit(2; (., 1) | . as {a:$a} ?// $a | .)` (#4669). [`take_wrapped_bare_chain`]
 /// reads the chain only as the operand itself (or its leading comma leaf), so a comma stage in front
 /// of it left the source to the by-value drive, which has no register to refuse an emission against:
 /// the chain's destructuring alternative emits an element the consumer refuses (the pattern's step
@@ -54425,35 +54426,42 @@ fn is_literal_count(n: &Expr) -> bool {
 ///
 /// The operand is read only if it holds no fold, `def` or call of one (those are not modelled
 /// by the resolver's walk of a bound and keep their by-value answer) and no pipe that starts at a bare
-/// `null`.
+/// `null`. A chain nested in a non-output position (`(CHAIN) as $x | ..`, a `select` argument) is
+/// routed too: the sweep rows and `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`
+/// pin that the resolver counts those as jq does.
 fn bounded_chain_behind_stages(e: &Expr) -> bool {
-    fn holds_bare_chain(operand: &Expr) -> bool {
-        crate::jq::walk::any_subexpr(operand, &mut |e| {
-            matches!(e, Expr::AsPattern { patterns, .. }
-                if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
-        })
-    }
-    fn holds_unmodelled(operand: &Expr) -> bool {
-        crate::jq::walk::any_subexpr(operand, &mut |e| {
-            matches!(
-                e,
-                Expr::Reduce { .. }
-                    | Expr::Foreach { .. }
-                    | Expr::FuncDef { .. }
-                    | Expr::DefCall { .. }
-            )
-        })
-    }
-    // A pipe that starts at a bare `null` is #4756's/#4775's: the chain beneath it is read as the
-    // register by kind there, and the resolver's walk refuses a `del` through it that main answers.
-    fn starts_at_null(operand: &Expr) -> bool {
-        crate::jq::walk::any_subexpr(operand, &mut |e| {
-            matches!(e, Expr::Pipe(stages)
-                if matches!(stages.first().map(unwrap_bind_source), Some(Expr::Literal(Literal::Null))))
-        })
-    }
+    // One walk of the operand: it holds a `?//` chain with a bare `$var` alternative, and holds
+    // neither a construct the resolver's walk of a bound does not model nor a pipe that starts at a
+    // bare `null` (#4756's and #4775's: the chain beneath is read as the register by kind there, and
+    // the resolver's walk refuses a `del` through it that the by-value drive answers).
     fn operand_ok(operand: &Expr) -> bool {
-        holds_bare_chain(operand) && !holds_unmodelled(operand) && !starts_at_null(operand)
+        let mut chain = false;
+        let mut unrouted = false;
+        crate::jq::walk::any_subexpr(operand, &mut |e| {
+            match e {
+                Expr::AsPattern { patterns, .. }
+                    if patterns.len() > 1
+                        && patterns.iter().any(|p| matches!(p, Pattern::Var(_))) =>
+                {
+                    chain = true;
+                }
+                Expr::Reduce { .. }
+                | Expr::Foreach { .. }
+                | Expr::FuncDef { .. }
+                | Expr::DefCall { .. } => unrouted = true,
+                Expr::Pipe(stages)
+                    if matches!(
+                        stages.first().map(unwrap_bind_source),
+                        Some(Expr::Literal(Literal::Null))
+                    ) =>
+                {
+                    unrouted = true;
+                }
+                _ => {}
+            }
+            unrouted
+        });
+        chain && !unrouted
     }
     fn go(e: &Expr, budget: u8) -> bool {
         let Some(budget) = budget.checked_sub(1) else {

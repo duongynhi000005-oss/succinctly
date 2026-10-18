@@ -725,8 +725,11 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   walk of a bound (`bounded_chain_behind_stages`), outside every fold body and not for an operand holding a
   fold, a `def` or a pipe that starts at a bare `null` (#4756's, #4775's). Still by value: the same
   source inside another fold's body (`foreach (1,2) as $i (.; foreach (limit(2; (., .) | CHAIN)) as $k
-  (.; .; .); .)` prints the by-value count; the routed source refuses rows jq answers there). Pinned by
-  `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669`; over the 113
+  (.; .; .); .)` prints six paths where jq prints two; the routed source refuses rows jq answers there),
+  and the other `label`/`break` consumers over such a chain (`isempty(.. | CHAIN)` as a `foreach` source
+  counts one more than jq; `any`/`all` match). Pinned by
+  `test_foreach_source_bounded_alt_chain_behind_stages_counts_every_emission_4669` and, for what the routing
+  leaves alone, `test_foreach_source_bounded_alt_chain_behind_stages_leaves_value_mode_literal_heads_and_fold_bodies_4669`; over the 113
   `first`/`limit`/`nth` `?//` operands, `--stage-only` (235,067 rows, `/usr/bin/jq` 1.7.1, against a
   `main` build) MATCH went 202,119 to 202,931 and DIFF 2,280 to 1,608 with ACCEPT_WRONG (329) unchanged;
   its only regressions were nine safe-direction `del` rows over `first`/`limit`/`nth(null | CHAIN)`,
