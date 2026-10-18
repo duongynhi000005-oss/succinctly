@@ -754,9 +754,16 @@ $x (.; .[$x:]))` raises `E2`, was the slice error). What it leaves:
   (isempty(. as {a:$a} ?// $a | .) | select(.|not)) as $k (.; .; .))` on `{"a":1}` printed `[]` twice
   where jq prints it once. The same source as the `foreach` UPDATE of an outermost fold is routed too since #4818
   (`foreach (1,2) as $i (.; foreach (isempty(CHAIN) | select(.|not)) as $k (.; .; .); .)` printed four paths
-  where jq prints two; the other fold-body positions are listed above), while an `isempty` whose tail holds a
-  fold or `def` or whose chain sits behind a bare `null |` keeps the by-value count. Pinned by `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819` and
-  `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819`; over the 51
+  where jq prints two; the other fold-body positions are listed above), while an `isempty` whose chain sits
+  behind a `?`/`try` and whose tail holds a fold (`isempty(CHAIN | .?) | select(reduce 1 as $i (.; .)|not)`:
+  the walk refuses rows jq answers) and one whose tail holds a `def` (walked, it refuses `del` rows jq answers
+  inside a `try` or an alternative pattern) keep the by-value count. A chain behind a bare `null |`, a fold or
+  `def` inside the `isempty`, and a fold in its tail are routed since
+  [#4829](https://github.com/rust-works/succinctly/issues/4829) (the `isempty` arm hands back a boolean, so the
+  resolver does not read the chain as the register by kind). Pinned by
+  `test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819`,
+  `test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_fold_bodies_4819` and
+  `test_foreach_source_isempty_of_alt_chain_behind_null_folds_and_defs_counts_every_emission_4829`; over the 51
   `isempty` `?//` operands, `--stage-only` (104,027 rows, `/usr/bin/jq` 1.7.1, against a `main` build)
   MATCH went 96,607 to 96,770, DIFF 396 to 235 and ACCEPT_WRONG 4 to 2, no regression. Since
   [#4615](https://github.com/rust-works/succinctly/issues/4615) the gate also reads through a call to a

@@ -54561,12 +54561,14 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
         }
     }
     // One walk of the operand: it holds a `?//` chain with a bare `$var` alternative and no
-    // [`unrouted`] construct.
-    fn operand_ok(operand: &Expr) -> bool {
+    // [`unrouted`] construct. An `isempty` operand (`of_isempty`) may hold them (#4829): its arm hands back a
+    // boolean, so the resolver does not read the chain as the register by kind, and the sweep over the
+    // `null`-headed, fold and `def` operands found no row the routing loses.
+    fn operand_ok(operand: &Expr, of_isempty: bool) -> bool {
         let mut chain = false;
         let mut has_unrouted = false;
         crate::jq::walk::any_subexpr(operand, &mut |e| {
-            if unrouted(e) {
+            if !of_isempty && unrouted(e) {
                 has_unrouted = true;
             } else if matches!(e, Expr::AsPattern { patterns, .. }
                 if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
@@ -54595,26 +54597,37 @@ fn bounded_chain_behind_stages(e: &Expr) -> bool {
         };
         match unwrap_bind_source(e) {
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
-            Expr::Limit { n, expr } if is_literal_count(n) => operand_ok(expr),
+            Expr::Limit { n, expr } if is_literal_count(n) => operand_ok(expr, false),
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
                 if is_literal_count(n) =>
             {
-                operand_ok(expr)
+                operand_ok(expr, false)
             }
-            Expr::FirstExpr(inner)
-            | Expr::Builtin(Builtin::FirstStream(inner) | Builtin::IsEmpty(inner)) => {
-                operand_ok(inner)
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                operand_ok(inner, false)
             }
+            Expr::Builtin(Builtin::IsEmpty(inner)) => operand_ok(inner, true),
             // #4819: the `isempty` of a chain feeding further stages (`isempty(CHAIN) | select(.|not)`):
             // the resolver walks the stages after it as it walks the rest of a pipe. Only an `isempty`
-            // head, and no [`unrouted`] construct in the tail.
+            // head. #4829: a fold in the tail is walked too, except behind a `try`/`?` in the head
+            // (`isempty(CHAIN | .?) | select(reduce 1 as $i (.; .)|not)`), where the walk refuses rows jq answers.
+            // A `def` or call of one in the tail stays by value: walked, it refuses `del` rows jq answers
+            // inside a `try` or an alternative pattern (the sweep's `var-rebind-nav`, `alt-pattern` contexts).
             Expr::Pipe(stages)
                 if stages
                     .first()
                     .is_some_and(|head| is_isempty_head(head, budget))
-                    && stages[1..]
+                    && stages[1..].iter().all(|stage| {
+                        !crate::jq::walk::any_subexpr(stage, &mut |e| {
+                            matches!(e, Expr::FuncDef { .. } | Expr::DefCall { .. })
+                        })
+                    })
+                    && (stages[1..]
                         .iter()
-                        .all(|stage| !crate::jq::walk::any_subexpr(stage, &mut unrouted)) =>
+                        .all(|stage| !crate::jq::walk::any_subexpr(stage, &mut unrouted))
+                        || !crate::jq::walk::any_subexpr(&stages[0], &mut |e| {
+                            matches!(e, Expr::Optional(_) | Expr::Try { .. })
+                        })) =>
             {
                 go(&stages[0], budget)
             }
