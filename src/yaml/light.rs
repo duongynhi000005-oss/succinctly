@@ -24,7 +24,7 @@ use std::string::ToString;
 
 use super::encode_style::{
     go_yaml_explicit_key_scalar, go_yaml_key_is_simple, go_yaml_multiline_scalar,
-    has_unicode_line_separator, has_unwritable_char, has_unwritable_char_in_block,
+    go_yaml_unicode_separator_scalar, has_unwritable_char, has_unwritable_char_in_block,
     write_go_yaml_double_quoted, write_go_yaml_single_quoted, write_go_yaml_string,
 };
 use super::index::YamlIndex;
@@ -6098,6 +6098,18 @@ impl<'a> YamlString<'a> {
         }
     }
 
+    /// Whether this source scalar may hold U+2028 or U+2029, by a scan of its source bytes for the
+    /// lead byte `0xE2` (a single- or un-quoted scalar has no escape that spells either, so the
+    /// bytes are all there is; every other style is `false`). A cheap filter ahead of a decode
+    /// that would otherwise run for every flow item (#4865).
+    #[must_use]
+    pub(crate) fn may_hold_unicode_line_separator(&self) -> bool {
+        match self {
+            Self::SingleQuoted { text, .. } | Self::Unquoted { text, .. } => text.contains(&0xE2),
+            _ => false,
+        }
+    }
+
     /// Decode the string value.
     ///
     /// Returns a `Cow::Borrowed` for strings without escapes,
@@ -9043,9 +9055,11 @@ fn write_yaml_block_field_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
 /// entries), prefixing its anchor if it has one.
 ///
 /// `flow_indent` is the container's own indent and indent width when it sits in block output
-/// (`None` for a flow collection nested in another, or a `-I0` run): a scalar holding U+2028 or
-/// U+2029 is written as the multi-line single-quoted scalar yq's emitter gives it, which needs
-/// the column after the break (#4865).
+/// (`None` for a flow collection nested in another, which is written with the indent `0` that
+/// forces flow style, or a `-I0` run): a scalar holding U+2028 or U+2029 is written as the
+/// multi-line single-quoted scalar yq's emitter gives it, which needs the column after the break
+/// (#4865). Handing a nested collection its indent would also hand it a nonzero indent width, and
+/// a block-looking pair inside flow (`[k: [c]]`) would stop being forced into braces.
 fn write_yaml_child_inline<W: AsRef<[u64]>, Out: core::fmt::Write>(
     out: &mut Out,
     value: YamlCursor<'_, W>,
@@ -9127,28 +9141,28 @@ fn write_yaml_child_inline<W: AsRef<[u64]>, Out: core::fmt::Write>(
     if absent {
         return Ok(out.write_str("''")?);
     }
-    if let (Some((indent, step)), Some(YamlValue::String(string))) = (flow_indent, &resolved) {
-        if matches!(
-            string,
-            YamlString::SingleQuoted { .. } | YamlString::Unquoted { .. }
-        ) {
+    // The emitter's indent for what this flow collection holds: its own, one step in. A root flow
+    // collection has no block indent to sit under and is indented one step all the same.
+    let item_indent = flow_indent.map(|(indent, step)| {
+        let own = if indent.is_empty() {
+            deeper_yaml_indent(indent, step, unit)
+        } else {
+            String::from(indent)
+        };
+        (deeper_yaml_indent(&own, step, unit), step)
+    });
+    if let (Some((scalar_indent, step)), Some(YamlValue::String(string))) =
+        (&item_indent, &resolved)
+    {
+        if string.may_hold_unicode_line_separator() {
             if let Ok(text) = string.as_str() {
-                if has_unicode_line_separator(&text) && !text.contains('\n') {
-                    // A root flow collection has no block indent to sit under, and the
-                    // emitter indents it one step all the same (`{a: 'x<LS>    y'}`).
-                    let container_indent = if indent.is_empty() {
-                        deeper_yaml_indent(indent, step, unit)
-                    } else {
-                        String::from(indent)
-                    };
-                    let scalar_indent = deeper_yaml_indent(&container_indent, step, unit);
-                    if let Some(scalar) = go_yaml_multiline_scalar(&text, &scalar_indent, step) {
-                        if let Some(tag) = value.explicit_tag_at(resolved.as_ref()) {
-                            out.write_str(tag)?;
-                            out.write_char(' ')?;
-                        }
-                        return Ok(out.write_str(&scalar)?);
+                if let Some(scalar) = go_yaml_unicode_separator_scalar(&text, scalar_indent, *step)
+                {
+                    if let Some(tag) = value.explicit_tag_at(resolved.as_ref()) {
+                        out.write_str(tag)?;
+                        out.write_char(' ')?;
                     }
+                    return Ok(out.write_str(&scalar)?);
                 }
             }
         }
@@ -10150,16 +10164,12 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
     // #4865: a source single-quoted or plain scalar that holds U+2028/U+2029 is read as a line
     // break by yq's scanner, which the emitter then spells as a multi-line single-quoted scalar
     // (`'x<LS>  y'`, the break followed by the indent), never plain.
-    if matches!(
-        s,
-        YamlString::SingleQuoted { .. } | YamlString::Unquoted { .. }
-    ) && has_unicode_line_separator(&str_val)
-    {
-        if let Some(scalar) =
-            block.and_then(|(indent, step)| go_yaml_multiline_scalar(&str_val, indent, step))
-        {
-            return Ok(out.write_str(&scalar)?);
-        }
+    if let Some(scalar) = block.and_then(|(indent, step)| {
+        s.may_hold_unicode_line_separator()
+            .then(|| go_yaml_unicode_separator_scalar(&str_val, indent, step))
+            .flatten()
+    }) {
+        return Ok(out.write_str(&scalar)?);
     }
 
     // For quoted strings, preserve the quoting style

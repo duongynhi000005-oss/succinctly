@@ -500,9 +500,21 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
 ///
 /// Of go-yaml's line breaks these are the two its scanner keeps as characters in a folded scalar,
 /// and its emitter writes them followed by the indent, inside single quotes.
-#[must_use]
-pub fn has_unicode_line_separator(s: &str) -> bool {
+fn has_unicode_line_separator(s: &str) -> bool {
     !s.is_ascii() && s.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
+/// A string whose only line breaks are U+2028/U+2029, as yq writes a YAML source scalar (#4865).
+///
+/// `None` for any other string, which keeps the source's own spelling. The one definition the
+/// streaming route, the write route and a flow item share; [`go_yaml_multiline_scalar`] has the
+/// layout rules, and `indent` is the indent of the scalar itself.
+#[must_use]
+pub fn go_yaml_unicode_separator_scalar(s: &str, indent: &str, step: usize) -> Option<String> {
+    if s.contains('\n') || !has_unicode_line_separator(s) {
+        return None;
+    }
+    go_yaml_multiline_scalar(s, indent, step)
 }
 
 /// Whether `s` holds a character go-yaml's emitter will not write raw.
@@ -1196,6 +1208,16 @@ mod tests {
         assert!(has_unicode_line_separator("x\u{2028}y") && has_unicode_line_separator("\u{2029}"));
         assert!(!has_unicode_line_separator("plain") && !has_unicode_line_separator("a\nb\u{85}c"));
         assert!(!has_unicode_line_separator("caf\u{e9}"));
+        // Only a string whose breaks are all U+2028/U+2029 is respelled; a `\n` keeps the source style.
+        assert_eq!(
+            go_yaml_unicode_separator_scalar("x\u{2028}y", "  ", 2).as_deref(),
+            Some("'x\u{2028}  y'")
+        );
+        assert_eq!(
+            go_yaml_unicode_separator_scalar("x\u{2028}y\nz", "  ", 2),
+            None
+        );
+        assert_eq!(go_yaml_unicode_separator_scalar("plain", "  ", 2), None);
         assert!(has_unwritable_char("a\tb") && !has_unwritable_char_in_block("a\tb"));
         assert!(has_unwritable_char_in_block("a\u{7f}b"));
         assert!(!has_unwritable_char("plain text\nsecond line"));

@@ -62,7 +62,8 @@ fn test_4865_stream_block() -> Result<()> {
     ])
 }
 
-/// A flow-collection item on the streaming route, which writes it with the indent of the collection it sits in.
+/// A flow-collection item on the streaming route, which writes it with the indent of the collection
+/// it sits in (the first flow level only: a flow collection nested in another is #4913).
 #[test]
 fn test_4865_stream_flow() -> Result<()> {
     check(&[
@@ -86,8 +87,12 @@ fn test_4865_stream_flow() -> Result<()> {
             ".",
             "a: {k: 'x\u{2028}    y'}\n",
         ),
-        ("{a: 'x\u{2028}y'}\n", &[], ".", "{a: 'x\u{2028}    y'}\n"),
-        ("[x\u{2028}y]\n", &[], ".", "['x\u{2028}    y']\n"),
+        (
+            "a: [x\u{2028}y, z]\nb: {c: 'p\u{2029}q'}\n",
+            &[],
+            ".",
+            "a: ['x\u{2028}    y', z]\nb: {c: 'p\u{2029}    q'}\n",
+        ),
     ])
 }
 
@@ -149,6 +154,24 @@ fn test_4865_write_flow() -> Result<()> {
             &[],
             ".z = 1",
             "{a: 'x\u{2028}    y', z: 1}\n",
+        ),
+        (
+            "a: [[[x\u{2028}y]]]\n",
+            &[],
+            ".z = 1",
+            "a: [[['x\u{2028}        y']]]\nz: 1\n",
+        ),
+        (
+            "a: {b: [x\u{2028}y, {c: 'p\u{2029}q'}]}\n",
+            &[],
+            ".z = 1",
+            "a: {b: ['x\u{2028}      y', {c: 'p\u{2029}        q'}]}\nz: 1\n",
+        ),
+        (
+            "a: [x\u{2028}y, z]\nb: {c: 'p\u{2029}q'}\n",
+            &[],
+            ".z = 1",
+            "a: ['x\u{2028}    y', z]\nb: {c: 'p\u{2029}    q'}\nz: 1\n",
         ),
     ])
 }

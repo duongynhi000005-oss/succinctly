@@ -709,8 +709,10 @@ root flow collection's items one step past that; the streaming route knows it fo
 level only, the DOM route (a write) at every depth. Not covered: a flow collection nested in
 another on the streaming route (`a: [[x\u2028y]]`), an explicit-key scalar (`? 'x\u2028y'`), a scalar
 whose source has a space beside the break (yq trims it on decode, this keeps it and so
-double-quotes), and a *block* plain scalar with such a break, which yq rejects (`could not find
-expected ':'`) and this accepts.
+double-quotes), a multi-line source scalar that holds a `\n` as well, and a *block* plain scalar
+with such a break, which yq rejects (`could not find expected ':'`) and the parser has always
+accepted (a semi-index does not validate to that depth). The decode half is
+[#4913](https://github.com/rust-works/succinctly/issues/4913).
 
 **One deliberate divergence (ADR-0018, output the reference cannot read back).** go-yaml tests only the
 first character of the string for the indentation indicator, so a string that starts with a break and

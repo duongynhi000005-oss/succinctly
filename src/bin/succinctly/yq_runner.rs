@@ -36,9 +36,9 @@ use succinctly::json::JsonIndex;
 use succinctly::yaml::{
     deeper_yaml_indent, format_float_yq_yaml, format_float_yq_yaml_nested, go_yaml_block_scalar,
     go_yaml_dom_scalar, go_yaml_double_quoted_scalar, go_yaml_explicit_key_scalar,
-    go_yaml_forces_double_quotes, go_yaml_multiline_scalar, go_yaml_resolved_tag,
-    go_yaml_tagged_str_scalar, resolve_plain_sourced, stream_json_sequence, stream_yaml_sequence,
-    ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
+    go_yaml_forces_double_quotes, go_yaml_resolved_tag, go_yaml_tagged_str_scalar,
+    go_yaml_unicode_separator_scalar, resolve_plain_sourced, stream_json_sequence,
+    stream_yaml_sequence, ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
 };
 
 use super::m2_gate::{can_use_m2_streaming, eval_all_matches_per_document};
@@ -8006,11 +8006,8 @@ fn emit_string_scalar(
     }
     // U+2028/U+2029 alone: single quotes across lines where go-yaml allows them (#3587), and a
     // source single-quoted scalar is spelled the same way (#4865).
-    if matches!(style, "" | "flow" | "single" | VALUE_STYLE_STRING)
-        && !s.contains('\n')
-        && s.contains(['\u{2028}', '\u{2029}'])
-    {
-        if let Some(scalar) = go_yaml_multiline_scalar(s, indent, config.indent_str.len()) {
+    if matches!(style, "" | "flow" | "single" | VALUE_STYLE_STRING) {
+        if let Some(scalar) = go_yaml_unicode_separator_scalar(s, indent, config.indent_str.len()) {
             return scalar;
         }
     }
