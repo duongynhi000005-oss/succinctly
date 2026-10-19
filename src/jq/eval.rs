@@ -53299,8 +53299,8 @@ fn limit_literal_count(n: &Expr) -> Option<f64> {
 
 /// A number built from numeric literals under `+`, `-`, `*`, `/`, `%` and unary minus (`1 + 0`, `0 / 1`,
 /// `5 % 2`), or piped through `.` (`1 | . - 1`), which cannot raise, so a `limit` count of it is as fixed as
-/// a literal one (#4800). A `/` or `%` whose divisor is zero raises and is not folded; `%` divides the
-/// operands truncated to integers (jq's `dtoi`), so `5 % 0.5` is a zero divisor as well.
+/// a literal one (#4800). A `/` or `%` whose divisor is zero raises and is not folded; `%` is folded for
+/// whole operands only (jq truncates both to integers, so `5 % 0.5` raises there, where yq's float modulo does not).
 fn constant_number(e: &Expr) -> Option<f64> {
     constant_number_at(e, None)
 }
@@ -53329,11 +53329,12 @@ fn constant_number_at(e: &Expr, dot: Option<f64>) -> Option<f64> {
                 ArithOp::Mul(flags) if *flags == MergeFlags::default() => Some(left * right),
                 ArithOp::Div if right != 0.0 => Some(left / right),
                 ArithOp::Mod => {
-                    // jq truncates both operands to `intmax_t` (saturating); a divisor of `-1`
-                    // answers `0` rather than overflowing on the minimum dividend.
-                    let divisor = right as i64;
-                    (divisor != 0 && !left.is_nan() && !right.is_nan())
-                        .then(|| (left as i64).wrapping_rem(divisor) as f64)
+                    // Whole operands only, where jq's integer `%` and yq's float one agree on whether the
+                    // divisor is zero; a divisor of `-1` answers `0` rather than overflowing on the
+                    // minimum dividend. Magnitudes stay below 2^53 so the casts are exact.
+                    let whole = |n: f64| n.fract() == 0.0 && n.abs() < 9e15;
+                    (whole(left) && whole(right) && right != 0.0)
+                        .then(|| (left as i64).wrapping_rem(right as i64) as f64)
                 }
                 ArithOp::Mul(_) | ArithOp::Div => None,
             }
