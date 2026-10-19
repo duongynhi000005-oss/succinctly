@@ -176,3 +176,99 @@ fn test_1129_overflowed_int_keeps_its_digits_and_json_rounds() -> Result<()> {
     }
     Ok(())
 }
+
+/// #1129: the routes other than a plain YAML-sourced value read. Every row is captured from yq
+/// v4.53.3. `-r` writes a scalar's own text, so a root `-r -o=json` prints the digits while the same
+/// number inside a container is JSON-encoded (rounded); `-P`, an anchor/alias pair and `--eval-all`
+/// reach the value through the DOM or owned routes; a JSON-sourced document is a float to yq's JSON
+/// decoder (`1e+20`), so the digits are not kept there.
+#[test]
+fn test_1129_overflowed_int_on_other_routes() -> Result<()> {
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, &[&str], &str, &str)] = &[
+        (
+            "a: 99999999999999999999\n",
+            &["-r", "-o=json"],
+            ".a",
+            "99999999999999999999\n",
+        ),
+        (
+            "a: 99999999999999999999\n",
+            &["-r", "-o=json"],
+            "[.a] | .[0]",
+            "99999999999999999999\n",
+        ),
+        (
+            "a: 99999999999999999999\n",
+            &["-r", "-o=json"],
+            "[.a]",
+            "[\n  100000000000000000000.0\n]\n",
+        ),
+        (
+            "a: 99999999999999999999\n",
+            &["-P"],
+            ".a | tostring",
+            "99999999999999999999\n",
+        ),
+        (
+            "a: 99999999999999999999\n",
+            &["-P"],
+            ".a",
+            "99999999999999999999\n",
+        ),
+        (
+            "a: 99999999999999999999\nb: 1\n",
+            &["-P"],
+            ".b = 2",
+            "a: 99999999999999999999\nb: 2\n",
+        ),
+        (
+            "a: &x 99999999999999999999\nb: *x\n",
+            &[],
+            ".a | tostring",
+            "99999999999999999999\n",
+        ),
+        (
+            "a: &x 99999999999999999999\nb: *x\n",
+            &["-o=json", "-I=0"],
+            ".",
+            "{\"a\":100000000000000000000.0,\"b\":100000000000000000000.0}\n",
+        ),
+        (
+            "a: 99999999999999999999\n",
+            &["--eval-all"],
+            ".a | tostring",
+            "99999999999999999999\n",
+        ),
+        (
+            "{\"a\": 99999999999999999999}",
+            &["-p=json", "-o=yaml"],
+            ".a | tostring",
+            "1e+20\n",
+        ),
+        (
+            "a: 99999999999999999999\nb: [99999999999999999999, 1]\n",
+            &["-o=json", "-I=0"],
+            ".",
+            "{\"a\":100000000000000000000.0,\"b\":[100000000000000000000.0,1]}\n",
+        ),
+        (
+            "a: 99999999999999999999\nb: [99999999999999999999, 1]\n",
+            &[],
+            "[.a, .b[0]] | map(tostring)",
+            "- \"99999999999999999999\"\n- \"99999999999999999999\"\n",
+        ),
+    ];
+    for (input, args, filter, want) in cases {
+        let (out, code) = run_yq_stdin(filter, input, args)?;
+        assert_eq!(
+            code, 0,
+            "input {input:?} args {args:?} filter {filter:?}: {out:?}"
+        );
+        assert_eq!(
+            out, *want,
+            "input {input:?} args {args:?} filter {filter:?}"
+        );
+    }
+    Ok(())
+}

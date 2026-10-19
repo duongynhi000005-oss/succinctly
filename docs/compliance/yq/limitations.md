@@ -4082,6 +4082,30 @@ got 0 instead` for it wherever the slice is read or written (`.b[select(false):]
 v4.53.3). A bound with two or more values raises the same error with its count (#2056, above).
 jq mode keeps its own rule (an empty bound is "no slice").
 
+### An integer past `i64` echoes its digits only for a plain `[-]digits` spelling (#1129)
+
+Real yq keeps a scalar's text as its value, so `a: 99999999999999999999` answers
+`99999999999999999999` through `tostring`, string interpolation, `join`, `length` and a YAML
+re-emit, while its JSON encoder prints the double it parsed (`100000000000000000000.0`).
+`succinctly yq` matches both since #1129 for a bare decimal integer, signed with `-` or not.
+Three spellings still take the older rounded path and print the double where yq echoes the text,
+because the digits ride in a `NumberLiteral` whose text the reindex bridge parses as JSON, and
+none of the three is JSON number text (#954 records the same constraint for `+1.0` and `1.`):
+
+```bash
+$ printf 'a: +99999999999999999999\n' | yq '.a | tostring'
++99999999999999999999
+$ printf 'a: +99999999999999999999\n' | succinctly yq '.a | tostring'
+100000000000000000000.0
+```
+
+- a `+`-signed run (`+99999999999999999999`),
+- a run with a leading zero (`0099999999999999999999`), and
+- an explicitly tagged `!!float 99999999999999999999`, which goes through the tag-resolution path
+  (it keeps its `!!float` tag when emitted nested, which a literal's text would drop).
+
+A run past 309 digits is infinite as a double and resolves to a string, as in yq.
+
 ### Comma binds looser than pipe in real yq — the grouping is resolved (#2420), the evaluation model with it (#2451); one residual remains (#2452)
 
 Real yq's parser is a shunting-yard operator-precedence parser
