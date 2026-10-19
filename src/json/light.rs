@@ -3176,6 +3176,11 @@ impl<'a> JsonNumber<'a> {
     /// (`tostring`, interpolation, `join`; #4921). The one place both
     /// `DocumentValue::number_literal` and `OwnedValue::from_json_number` keep
     /// it, so the two cannot drift.
+    ///
+    /// Not gated on the mode: a jq-mode `load()` of a YAML file stores the same
+    /// literal, and the two readers must agree on a bridge number (#3069). jq
+    /// mode never prints the `+` -- `format_number_jq_compat` peels it -- which
+    /// `tests/jq_cli/i4921.rs` pins.
     #[inline]
     pub(crate) fn bridge_signed_overflowed_int(&self) -> Option<&'a str> {
         if !self.bridge {

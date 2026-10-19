@@ -7,10 +7,10 @@ use tempfile::NamedTempFile;
 
 use crate::run_jq_full;
 
-/// #4921: yq keeps `+99999999999999999999` verbatim and the yq-mode reindex bridge now keeps its `+`
-/// too, but `succinctly jq` follows jq, which stores `+X` as `X` (#2877) and a padded run as its
-/// value: every spelling `load()`s from YAML as the same literal, however the loaded value is
-/// walked, rebuilt or printed. Each row is the plain `99999999999999999999` jq 1.7.1 prints.
+/// #4921: yq keeps `+99999999999999999999` verbatim and the reindex bridge keeps its `+` (a
+/// `load()`ed value carries it in jq mode too), but `succinctly jq` follows jq, which prints `+X` as
+/// `X` (#2877) and a padded run as its value: every spelling `load()`s from YAML as the same
+/// number, however the loaded value is walked, rebuilt or printed. Each row is the plain `99999999999999999999` jq 1.7.1 prints.
 #[test]
 fn test_4921_jq_load_of_yaml_overflowed_int_spellings_prints_the_bare_digits() -> Result<()> {
     let mut file = NamedTempFile::new()?;

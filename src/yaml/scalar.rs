@@ -429,12 +429,14 @@ pub(crate) const MAX_OVERFLOWED_INT_LITERAL_LEN: usize = 309;
 /// the JSON writers never print it -- they print the double -- so being no
 /// valid JSON number text costs nothing there. The reindex bridge is the one
 /// reader that takes the text as number syntax; it reads the leading zeros
-/// the way it reads `007` and keeps a `+` for this shape in yq mode
-/// (`OwnedValue::from_number_bytes`).
+/// the way it reads `007` and keeps a `+` for this shape
+/// ([`JsonNumber::bridge_signed_overflowed_int`](crate::json::light::JsonNumber)).
 ///
 /// Does not check finiteness: a 400-digit run is also `[-]digits`, and the
-/// caller already holds the parsed `f64` to decide that. The bound is on the
-/// significant digits, so zero padding in front of a 309-digit value is kept.
+/// caller already holds the parsed `f64` to decide that. The 309-digit bound
+/// counts leading zeros too, so a longer padded run keeps the older rounded
+/// path: this runs on every literal a JSON writer prints, and the scan stays
+/// short.
 #[must_use]
 pub(crate) fn is_overflowed_int_literal(s: &str) -> bool {
     // `i64::MAX` is 19 digits, so nothing shorter overflows: the common numeric
@@ -442,10 +444,9 @@ pub(crate) fn is_overflowed_int_literal(s: &str) -> bool {
     if s.len() < 19 {
         return false;
     }
-    let body = s.strip_prefix(['-', '+']).unwrap_or(s);
-    let significant = body.trim_start_matches('0');
-    (19..=MAX_OVERFLOWED_INT_LITERAL_LEN).contains(&significant.len())
-        && body.bytes().all(|b| b.is_ascii_digit())
+    let digits = s.strip_prefix(['-', '+']).unwrap_or(s);
+    (19..=MAX_OVERFLOWED_INT_LITERAL_LEN).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit())
         && s.parse::<i64>().is_err()
 }
 
@@ -1028,7 +1029,6 @@ mod tests {
             "-0099999999999999999999",
             "+0099999999999999999999",
             "007777777777777777777777",
-            // Zero padding is not a digit: this is the 19-digit i64::MAX + 1.
             "009223372036854775808",
         ] {
             assert!(is_overflowed_int_literal(s), "expected kept: {s:?}");
@@ -1065,10 +1065,11 @@ mod tests {
         assert!(!is_overflowed_int_literal(&past_cap));
         // 309 ones is a finite double (1.1e308), the longest a scalar can be.
         assert!(overflowed_int_json_text(&at_cap).is_some());
-        // #4921: the bound is on the significant digits, not the zero padding.
-        assert!(is_overflowed_int_literal(&format!("00{at_cap}")));
+        // #4921: a sign is not a digit, but zero padding is one.
         assert!(is_overflowed_int_literal(&format!("+{at_cap}")));
-        assert!(!is_overflowed_int_literal(&format!("00{past_cap}")));
+        assert!(is_overflowed_int_literal(&format!("-{at_cap}")));
+        assert!(!is_overflowed_int_literal(&format!("0{at_cap}")));
+        assert!(is_overflowed_int_literal(&format!("00{}", &at_cap[2..])));
     }
 
     /// #1129: yq's JSON spelling is the rounded double, scientific past its
