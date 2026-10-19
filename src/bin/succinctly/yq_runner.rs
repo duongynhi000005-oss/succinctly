@@ -7147,7 +7147,7 @@ fn emit_yaml_value_at_depth(
         // #3576: yq's JSON decoder keeps no spelling for a float it reads, so a
         // JSON-sourced run prints the float the way a computed one is (`1e+20`).
         OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if config.json_sourced_floats => {
-            format_float_yq_yaml(*f)
+            output::json_sourced_float_display(*f)
         }
         OwnedValue::NumberLiteral(_, literal) => {
             // Echo the source spelling verbatim (#1008) rather than

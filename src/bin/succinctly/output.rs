@@ -552,7 +552,12 @@ fn escape_json_body(s: &str, opts: &JsonFormatOpts) -> String {
 /// identical class of problem (CLAUDE.md's #106 lesson) -- `format_json_impl`'s
 /// `Float` arm and its `NumberLiteral` arm (#1498, the same rule reached
 /// through a reconstructed literal) both need this exact formatter.
-fn json_sourced_float_display(f: f64) -> String {
+pub(crate) fn json_sourced_float_display(f: f64) -> String {
+    // A whole float inside `i64` is an integer to yq's JSON decoder
+    // (`whole_float_as_int`), whatever route handed it here as a float.
+    if f.is_finite() && (f as i64) as f64 == f {
+        return (f as i64).to_string();
+    }
     succinctly::yaml::format_float_yq(f)
 }
 
