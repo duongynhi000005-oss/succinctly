@@ -8,12 +8,13 @@
 //! so two lines added into the same gap keep both instead of conflicting.
 //!
 //! - A module reaches the binary's shared helpers through `crate::`
-//!   (`use crate::{run_yq_stdin, run_yq_stdin_with_stderr};`); they stay private to the
+//!   (`use crate::{run_yq_stdin, run_yq_stdin_with_stderr};`, or `use crate::run_yq_stdin;` for one); they stay private to the
 //!   binary, and every descendant module can see them.
 //! - This directory is not a test target (Cargo discovers `tests/*.rs` and
 //!   `tests/*/main.rs`, not `tests/*/mod.rs`), so it adds no binary and no link time.
 //! - Existing tests stay where they are; do not move them (a mass move conflicts with every
-//!   open PR). Extend an existing test in place when it already covers the same behaviour.
+//!   open PR; `i4136` is the one exception, moved here as this layout's first resident).
+//!   Extend an existing test in place when it already covers the same behaviour.
 //! - A test that belongs with a topical group already in `yq_cli_tests.rs` (a `mod ... {}`
 //!   block) may still go there, next to its siblings, but never at the end of the file.
 

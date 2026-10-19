@@ -8,7 +8,7 @@
 //! so two lines added into the same gap keep both instead of conflicting.
 //!
 //! - A module reaches the binary's shared helpers through `crate::`
-//!   (`use crate::{run_jq_stdin, run_jq_full};`); they stay private to the binary, and every
+//!   (`use crate::{run_jq_full, run_jq_stdin};`); they stay private to the binary, and every
 //!   descendant module can see them.
 //! - This directory is not a test target (Cargo discovers `tests/*.rs` and
 //!   `tests/*/main.rs`, not `tests/*/mod.rs`), so it adds no binary and no link time.
@@ -16,5 +16,6 @@
 //!   open PR). Extend an existing test in place when it already covers the same behaviour.
 //! - A test that belongs with a topical group already in `jq_cli_tests.rs` (a `mod ... {}`
 //!   block) may still go there, next to its siblings, but never at the end of the file.
-//! - `scripts/deep-recursion-tests.sh` names its tests by their path in this binary; a test
-//!   that script lists must stay where it is.
+//! - `scripts/deep-recursion-tests.sh` matches its tests by bare name with `--exact`, so a
+//!   test it lists must stay at the root of `jq_cli_tests.rs`: inside this module its name
+//!   would be `per_issue::iN::name` and neither the skip nor the run would find it.
