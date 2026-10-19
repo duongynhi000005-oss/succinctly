@@ -5621,7 +5621,11 @@ fn top_level_comma_branches(expr: &Expr) -> Option<Vec<&Expr>> {
     }
     fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
         match unwrap(expr) {
-            Expr::Comma(branches) => branches.iter().for_each(|b| flatten(b, out)),
+            Expr::Comma(branches) => {
+                for branch in branches {
+                    flatten(branch, out);
+                }
+            }
             other => out.push(other),
         }
     }
@@ -5629,7 +5633,9 @@ fn top_level_comma_branches(expr: &Expr) -> Option<Vec<&Expr>> {
         return None;
     };
     let mut out = Vec::with_capacity(branches.len());
-    branches.iter().for_each(|b| flatten(b, &mut out));
+    for branch in branches {
+        flatten(branch, &mut out);
+    }
     Some(out)
 }
 

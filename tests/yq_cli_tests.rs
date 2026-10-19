@@ -29494,7 +29494,8 @@ fn test_yaml_comma_scalar_and_empty_branches_match_iterate_1361() -> Result<()> 
         ("select(false), .a", "1\n"),
         ("select(false), select(false)", ""),
         (".a", "1\n"),
-        ("(.a, .b), .c", "1\n1\nnull\n"),
+        // `.c` is a node of the document, so it prints as written (`~`), as yq does (#4856).
+        ("(.a, .b), .c", "1\n1\n~\n"),
     ] {
         let (out, code) = run_yq_stdin(filter, input, &[])?;
         assert_eq!(code, 0, "{filter}");
@@ -29503,21 +29504,21 @@ fn test_yaml_comma_scalar_and_empty_branches_match_iterate_1361() -> Result<()> 
     Ok(())
 }
 
-/// The first branch that is not a node of the document (a literal, a computation, an absent key)
-/// turns the nodes before it into copies, and
-/// the comma runs as it always did: the comments on those nodes are gone (yq keeps them), pinned
-/// so a change is deliberate. A raise in a later branch loses the earlier outputs as before.
+/// A branch that is not a node of the document (a literal, a computation, an absent key) used to
+/// turn the nodes before it into copies, and the comments on those nodes were gone. Each branch is
+/// answered on its own since #4856, so the comment stays, as in yq (`tests/yq_cli/i4856.rs` has the
+/// rest). A raise in a later branch loses the earlier outputs, as before.
 #[test]
-fn test_yaml_comma_mixed_branch_falls_back_to_owned_1361() -> Result<()> {
+fn test_yaml_comma_mixed_branch_keeps_the_nodes_presentation_1361() -> Result<()> {
     let input = "x:\n  p: 1 # note\ny:\n  q: \"str\"\n";
     for (filter, expected) in [
-        (".x, (.y | length)", "p: 1\n1\n"),
-        (".x, 1", "p: 1\n1\n"),
-        ("1, .x", "1\np: 1\n"),
+        (".x, (.y | length)", "p: 1 # note\n1\n"),
+        (".x, 1", "p: 1 # note\n1\n"),
+        ("1, .x", "1\np: 1 # note\n"),
         // An absent key answers a computed null, not a node.
-        (".x, .zz", "p: 1\nnull\n"),
-        (".zz, .x", "null\np: 1\n"),
-        (".x, .y | length", "p: 1\n1\n"),
+        (".x, .zz", "p: 1 # note\nnull\n"),
+        (".zz, .x", "null\np: 1 # note\n"),
+        (".x, .y | length", "p: 1 # note\n1\n"),
         ("(.x, .y) | length", "1\n1\n"),
     ] {
         let (out, code) = run_yq_stdin(filter, input, &[])?;
