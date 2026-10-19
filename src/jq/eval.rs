@@ -81220,10 +81220,7 @@ fn contains_length_dependent_index(expr: &Expr) -> bool {
         }
         // A bracket key that is all string literals (`.["k"]`, kept as an `IndexExpr` in yq
         // mode since #2126) indexes an object by name: no array length can move it.
-        Expr::IndexExpr { target, key }
-            if static_bracket_keys(key)
-                .is_some_and(|keys| keys.iter().all(|k| matches!(k, BracketKey::Str(_)))) =>
-        {
+        Expr::IndexExpr { target, key } if is_literal_string_bracket_key(key) => {
             contains_length_dependent_index(target)
         }
         Expr::IndexExpr { .. } | Expr::SliceExpr { .. } => true,
@@ -81234,127 +81231,367 @@ fn contains_length_dependent_index(expr: &Expr) -> bool {
     }
 }
 
-/// One literal key of a bracket (`.["k0"]`, `.[0]`, `.[("k0","k1")]`): what
-/// [`vivify_del_null_bracket_targets`] needs to know about it.
-enum BracketKey<'a> {
-    Str(&'a str),
-    Int,
-}
-
-/// The literal keys a bracket expression names, in order, or `None` when any of them is
-/// computed (a variable, a path, arithmetic, a float or negative number).
-fn static_bracket_keys(key: &Expr) -> Option<Vec<BracketKey<'_>>> {
+/// Whether a bracket key is spelled with literals only (`"k"`, `0`, `("k0","k1")`): nothing to
+/// evaluate to know what it names.
+fn is_literal_bracket_key(key: &Expr) -> bool {
     match key {
-        Expr::Literal(Literal::String(s)) => Some(vec![BracketKey::Str(s.as_str())]),
-        Expr::Literal(Literal::Int(_)) => Some(vec![BracketKey::Int]),
-        Expr::Literal(Literal::NumberLiteral(NumberRepr::Int(_), _)) => Some(vec![BracketKey::Int]),
-        Expr::Paren(inner) => static_bracket_keys(inner),
-        Expr::Comma(parts) => {
-            let mut keys = Vec::new();
-            for part in parts {
-                keys.extend(static_bracket_keys(part)?);
-            }
-            Some(keys)
-        }
-        _ => None,
+        Expr::Literal(Literal::String(_) | Literal::Int(_)) => true,
+        Expr::Literal(Literal::NumberLiteral(NumberRepr::Int(_), _)) => true,
+        Expr::Paren(inner) => is_literal_bracket_key(inner),
+        Expr::Comma(parts) => parts.iter().all(is_literal_bracket_key),
+        _ => false,
     }
 }
 
-/// Where [`vivify_null_bracket_step`] stands after one step of a `del()` target.
-enum BracketWalk<'v> {
-    /// The node the step reached; keep walking.
-    At(&'v mut OwnedValue),
-    /// Nothing further to vivify along this branch.
+/// [`is_literal_bracket_key`] for string literals alone: a name, never a position.
+fn is_literal_string_bracket_key(key: &Expr) -> bool {
+    match key {
+        Expr::Literal(Literal::String(_)) => true,
+        Expr::Paren(inner) => is_literal_string_bracket_key(inner),
+        Expr::Comma(parts) => parts.iter().all(is_literal_string_bracket_key),
+        _ => false,
+    }
+}
+
+/// One step of a `del()` target as the vivify pre-pass walks it ([`vivify_apply`], #2126, #4922).
+#[derive(Clone)]
+enum VivifyStep<'e> {
+    /// `.k`: read-only in yq, so a `null` behind it stays `null`.
+    Field(&'e str),
+    /// `.[n]`.
+    Index(i64),
+    /// `.[]`.
+    Iterate,
+    /// `..`.
+    Recurse,
+    /// Saves the node a computed bracket key is read against: yq evaluates `E[key]`'s key relative
+    /// to the context `E` started from, so `.a[.n]` reads `.n` of the document and `.a | .[.n]`
+    /// reads it of `.a`.
+    Context(usize),
+    /// `E[key]`; `context` names the [`VivifyStep::Context`] a computed key is evaluated against.
+    Bracket {
+        key: &'e Expr,
+        context: Option<usize>,
+    },
+    /// A comma: each branch continues from the same node, then whatever follows the comma.
+    Branches(Vec<Vec<Self>>),
+    /// A step this pre-pass does not model; the branch ends here.
     Stop,
 }
 
-/// Walk `expr`, a static `del()` target, down from `node`, and turn the first `null` a bracket
-/// key indexes into the empty container the key implies (#2126).
-///
-/// yq evaluates `del()`'s argument read-only, where `.k0` leaves a `!!null` alone, but
-/// `.["k0"]`, `.[0]` and `.[("k0","k1")]` go through `traverseArrayIndices`, which rewrites the
-/// node's kind before looking anything up: `{}` when the first key is not an integer, `[]` when
-/// it is. So `null | del(.["k0"])` is `{}`, and `{"a": null} | del(.a["k0"])` is `{"a": {}}`.
-/// The key's value never matters: the node is replaced and the walk of that branch ends, since
-/// what lies below is absent and an absent step reads nothing.
-fn vivify_null_bracket_step<'v>(
-    expr: &Expr,
-    node: &'v mut OwnedValue,
-    changed: &mut bool,
-) -> BracketWalk<'v> {
+/// Whether a computed bracket key is plain navigation and literals, which evaluating twice (here and
+/// by the real `del()`) cannot make observable or expensive beyond the document's size.
+fn is_pure_navigation_key(key: &Expr) -> bool {
+    match key {
+        Expr::Identity | Expr::Field(_) | Expr::Index { .. } | Expr::Iterate | Expr::Literal(_) => {
+            true
+        }
+        Expr::Paren(inner) | Expr::Optional(inner) => is_pure_navigation_key(inner),
+        Expr::Pipe(parts) => parts.iter().all(is_pure_navigation_key),
+        Expr::Comma(parts) => parts.iter().all(is_pure_navigation_key),
+        _ => false,
+    }
+}
+
+/// Flatten a `del()` target into [`VivifyStep`]s.
+fn vivify_steps<'e>(expr: &'e Expr, next_context: &mut usize, out: &mut Vec<VivifyStep<'e>>) {
     match expr {
-        Expr::Identity => BracketWalk::At(node),
-        Expr::Paren(inner) | Expr::Optional(inner) => {
-            vivify_null_bracket_step(inner, node, changed)
-        }
-        Expr::Pipe(steps) => {
-            let mut at = node;
-            for step in steps {
-                match vivify_null_bracket_step(step, at, changed) {
-                    BracketWalk::At(next) => at = next,
-                    BracketWalk::Stop => return BracketWalk::Stop,
-                }
-            }
-            BracketWalk::At(at)
-        }
-        Expr::Field(name) => match node.as_object_mut().and_then(|m| m.get_mut(name)) {
-            Some(child) => BracketWalk::At(child),
-            None => BracketWalk::Stop,
-        },
-        Expr::Index { idx, .. } => {
-            // A `null` indexed by a position becomes an array padded out to it, the way
-            // `del(.a[0]["k"])` reaches the element a bracket key then vivifies. Committed only
-            // if a later bracket vivifies something (see `vivify_del_null_bracket_targets`).
-            if matches!(node, OwnedValue::Null) && (0..=BRACKET_PAD_LIMIT).contains(idx) {
-                *node = OwnedValue::array_from(vec![OwnedValue::Null; *idx as usize + 1]);
-            }
-            let Some(items) = node.as_array_mut() else {
-                return BracketWalk::Stop;
-            };
-            let resolved = if *idx < 0 {
-                items.len() as i64 + idx
-            } else {
-                *idx
-            };
-            match usize::try_from(resolved)
-                .ok()
-                .and_then(|i| items.get_mut(i))
-            {
-                Some(child) => BracketWalk::At(child),
-                None => BracketWalk::Stop,
+        Expr::Identity => {}
+        Expr::Paren(inner) | Expr::Optional(inner) => vivify_steps(inner, next_context, out),
+        Expr::Pipe(stages) => {
+            for stage in stages {
+                vivify_steps(stage, next_context, out);
             }
         }
-        Expr::IndexExpr { target, key } => {
-            let BracketWalk::At(at) = vivify_null_bracket_step(target, node, changed) else {
-                return BracketWalk::Stop;
-            };
-            let Some(keys) = static_bracket_keys(key) else {
-                return BracketWalk::Stop;
-            };
-            let Some(first) = keys.first() else {
-                return BracketWalk::Stop;
-            };
-            match (&*at, first) {
-                (OwnedValue::Null, BracketKey::Str(_)) => {
-                    *at = OwnedValue::object();
-                    *changed = true;
-                    BracketWalk::Stop
+        Expr::Comma(branches) => out.push(VivifyStep::Branches(
+            branches
+                .iter()
+                .map(|branch| {
+                    let mut steps = Vec::new();
+                    vivify_steps(branch, next_context, &mut steps);
+                    steps
+                })
+                .collect(),
+        )),
+        Expr::Field(name) => out.push(VivifyStep::Field(name)),
+        Expr::Index { idx, .. } => out.push(VivifyStep::Index(*idx)),
+        Expr::Iterate => out.push(VivifyStep::Iterate),
+        Expr::RecursiveDescent => out.push(VivifyStep::Recurse),
+        Expr::IndexExpr { target, key } if is_literal_bracket_key(key) => {
+            vivify_steps(target, next_context, out);
+            out.push(VivifyStep::Bracket { key, context: None });
+        }
+        Expr::IndexExpr { target, key } if is_pure_navigation_key(key) => {
+            let context = *next_context;
+            *next_context += 1;
+            out.push(VivifyStep::Context(context));
+            vivify_steps(target, next_context, out);
+            out.push(VivifyStep::Bracket {
+                key,
+                context: Some(context),
+            });
+        }
+        _ => out.push(VivifyStep::Stop),
+    }
+}
+
+/// A value a bracket key evaluates to, as far as yq's `traverseArrayIndices` tells them apart.
+enum VivifyKey {
+    Str(String),
+    Int(i64),
+    /// An absent key (`.a[.n]` with no `.n`): read as a position.
+    Null,
+    /// Anything else (a boolean, a float, a container): read as a name.
+    Other,
+}
+
+fn vivify_keys(key: &Expr, context: &OwnedValue) -> Vec<VivifyKey> {
+    let (outputs, control) =
+        eval_owned_expr_fork::<YqSemantics>(key, context, false, Reentry::REBUILT);
+    if control.is_some() {
+        return Vec::new();
+    }
+    outputs
+        .into_iter()
+        .map(|value| match value {
+            OwnedValue::String(text) => VivifyKey::Str(text.into_string()),
+            OwnedValue::Int(i) | OwnedValue::NumberLiteral(NumberRepr::Int(i), _) => {
+                VivifyKey::Int(i)
+            }
+            OwnedValue::Null => VivifyKey::Null,
+            _ => VivifyKey::Other,
+        })
+        .collect()
+}
+
+/// The steps that follow the one being applied, outermost last: what a comma's branch continues
+/// into once it is done.
+struct VivifyCont<'a, 'e> {
+    steps: &'a [VivifyStep<'e>],
+    next: Option<&'a Self>,
+}
+
+/// What a walk threads through: the saved context nodes and whether anything was vivified.
+struct VivifyState {
+    contexts: Vec<(usize, OwnedValue)>,
+    changed: bool,
+    /// How many `..` the walk is inside. A position or an iteration that makes an array under one
+    /// is left alone: the ordinary `del()` that follows walks `..` over what this pre-pass made,
+    /// and so over the padded elements too (`del(.. | .[(0,1)].x)` on `{"a":null}` is
+    /// `{"a":[null,null]}` in yq, whose `..` is lazy and never meets them).
+    recursing: usize,
+}
+
+/// How deep `..` descends in the pre-pass; a deeper node is left to the ordinary `del()`.
+const VIVIFY_RECURSE_DEPTH: usize = 256;
+
+fn vivify_more(rest: &[VivifyStep<'_>], then: Option<&VivifyCont<'_, '_>>) -> bool {
+    if !rest.is_empty() {
+        return true;
+    }
+    let mut at = then;
+    while let Some(cont) = at {
+        if !cont.steps.is_empty() {
+            return true;
+        }
+        at = cont.next;
+    }
+    false
+}
+
+/// The element `node[idx]` of a `del()` target's walk, padding a `null` or a too-short array out
+/// to it first. The padding is kept only if something later vivifies (the caller commits a scratch
+/// copy on `changed`); a negative position never pads.
+fn vivify_position(node: &mut OwnedValue, idx: i64) -> Option<&mut OwnedValue> {
+    if matches!(node, OwnedValue::Null) && (0..=BRACKET_PAD_LIMIT).contains(&idx) {
+        *node = OwnedValue::array_from(vec![OwnedValue::Null; idx as usize + 1]);
+    }
+    let items = node.as_array_mut()?;
+    if (0..=BRACKET_PAD_LIMIT).contains(&idx) {
+        // At most `BRACKET_PAD_LIMIT` elements, so a push loop (no infallible `resize`, #1670).
+        while items.len() <= idx as usize {
+            items.push(OwnedValue::Null);
+        }
+    }
+    let resolved = if idx < 0 {
+        items.len() as i64 + idx
+    } else {
+        idx
+    };
+    usize::try_from(resolved)
+        .ok()
+        .and_then(|i| items.get_mut(i))
+}
+
+/// Walk `steps` (then `then`), a `del()` target, from `node` and turn every `null` that a creating
+/// step indexes into the empty container the step implies (#2126, #4922).
+///
+/// yq evaluates `del()`'s argument against a tree it may grow: `.k0` leaves a `!!null` alone, but
+/// `.["k0"]`, `.[0]`, `.[("k0","k1")]`, a computed key and an iteration `.[]` go through
+/// `traverseArrayIndices` / the splat, which rewrite the node's kind before looking anything up:
+/// `{}` when the first key is not an integer, `[]` when it is (or is absent). So
+/// `null | del(.["k0"])` is `{}`, `{"a": null} | del(.a["k0"])` is `{"a": {}}`,
+/// `{"x": null} | del(.x[]["a"])` is `{"x": []}`. A step with several outputs (an iteration, `..`,
+/// a comma, a multi-key bracket) continues the rest of the target from each of them. What lies
+/// below a freshly made object is absent, so that branch ends; below a freshly made array,
+/// positions are padded out so the next step can vivify them.
+fn vivify_apply(
+    steps: &[VivifyStep<'_>],
+    then: Option<&VivifyCont<'_, '_>>,
+    node: &mut OwnedValue,
+    state: &mut VivifyState,
+) {
+    let Some((step, rest)) = steps.split_first() else {
+        if let Some(cont) = then {
+            vivify_apply(cont.steps, cont.next, node, state);
+        }
+        return;
+    };
+    let more = vivify_more(rest, then);
+    match step {
+        VivifyStep::Stop => {}
+        VivifyStep::Context(id) => {
+            state.contexts.push((*id, node.clone()));
+            vivify_apply(rest, then, node, state);
+            state.contexts.pop();
+        }
+        VivifyStep::Field(name) => {
+            if let Some(child) = node.as_object_mut().and_then(|m| m.get_mut(*name)) {
+                vivify_apply(rest, then, child, state);
+            }
+        }
+        VivifyStep::Index(idx) => {
+            if more {
+                if let Some(child) = vivify_position(node, *idx) {
+                    vivify_apply(rest, then, child, state);
                 }
-                (OwnedValue::Null, BracketKey::Int) => {
-                    *at = OwnedValue::array();
-                    *changed = true;
-                    BracketWalk::Stop
-                }
-                (OwnedValue::Object(_), BracketKey::Str(name)) if keys.len() == 1 => {
-                    match at.as_object_mut().and_then(|m| m.get_mut(*name)) {
-                        Some(child) => BracketWalk::At(child),
-                        None => BracketWalk::Stop,
+            }
+        }
+        VivifyStep::Iterate => {
+            if !more {
+                return;
+            }
+            match node {
+                OwnedValue::Null => {
+                    if state.recursing == 0 {
+                        *node = OwnedValue::array();
+                        state.changed = true;
                     }
                 }
-                _ => BracketWalk::Stop,
+                OwnedValue::Array(_) => {
+                    if let Some(items) = node.as_array_mut() {
+                        for child in items.iter_mut() {
+                            vivify_apply(rest, then, child, state);
+                        }
+                    }
+                }
+                OwnedValue::Object(_) => {
+                    if let Some(map) = node.as_object_mut() {
+                        for child in map.values_mut() {
+                            vivify_apply(rest, then, child, state);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        _ => BracketWalk::Stop,
+        VivifyStep::Recurse => {
+            if more {
+                state.recursing += 1;
+                vivify_recurse(rest, then, node, state, 0);
+                state.recursing -= 1;
+            }
+        }
+        VivifyStep::Bracket { key, context } => {
+            let keys = match context {
+                None => vivify_keys(key, &OwnedValue::Null),
+                Some(id) => match state.contexts.iter().rev().find(|(at, _)| at == id) {
+                    Some((_, context)) => vivify_keys(key, context),
+                    None => return,
+                },
+            };
+            let Some(first) = keys.first() else {
+                return;
+            };
+            if matches!(node, OwnedValue::Null) {
+                if state.recursing > 0 && matches!(first, VivifyKey::Int(_) | VivifyKey::Null) {
+                    return;
+                }
+                *node = match first {
+                    VivifyKey::Int(_) | VivifyKey::Null => OwnedValue::array(),
+                    VivifyKey::Str(_) | VivifyKey::Other => OwnedValue::object(),
+                };
+                state.changed = true;
+            }
+            if !more {
+                return;
+            }
+            match node {
+                OwnedValue::Object(_) => {
+                    for key in &keys {
+                        if let VivifyKey::Str(name) = key {
+                            if let Some(child) =
+                                node.as_object_mut().and_then(|m| m.get_mut(name.as_str()))
+                            {
+                                vivify_apply(rest, then, child, state);
+                            }
+                        }
+                    }
+                }
+                OwnedValue::Array(_) => {
+                    for key in &keys {
+                        if let VivifyKey::Int(idx) = key {
+                            if let Some(child) = vivify_position(node, *idx) {
+                                vivify_apply(rest, then, child, state);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        VivifyStep::Branches(branches) => {
+            let cont = VivifyCont {
+                steps: rest,
+                next: then,
+            };
+            for branch in branches {
+                vivify_apply(branch, Some(&cont), node, state);
+            }
+        }
+    }
+}
+
+/// `..` for [`vivify_apply`]: the rest of the target from `node`, then from each descendant that
+/// was there before it ran -- a container the target made on the way (a `null` turned into `[]`
+/// and padded out) is not walked into, which would grow without end (`.. | .[(0,1)].x`).
+fn vivify_recurse(
+    rest: &[VivifyStep<'_>],
+    then: Option<&VivifyCont<'_, '_>>,
+    node: &mut OwnedValue,
+    state: &mut VivifyState,
+    depth: usize,
+) {
+    let (positions, names): (usize, Vec<String>) = match node {
+        OwnedValue::Array(items) => (items.len(), Vec::new()),
+        OwnedValue::Object(map) => (0, map.keys().cloned().collect()),
+        _ => (0, Vec::new()),
+    };
+    vivify_apply(rest, then, node, state);
+    if depth >= VIVIFY_RECURSE_DEPTH {
+        return;
+    }
+    if let Some(items) = node.as_array_mut() {
+        for child in items.iter_mut().take(positions) {
+            vivify_recurse(rest, then, child, state, depth + 1);
+        }
+    }
+    if let Some(map) = node.as_object_mut() {
+        for name in &names {
+            if let Some(child) = map.get_mut(name) {
+                vivify_recurse(rest, then, child, state, depth + 1);
+            }
+        }
     }
 }
 
@@ -81400,10 +81637,16 @@ fn vivify_del_null_bracket_targets(path_expr: &Expr, result: &mut OwnedValue) {
                 walk(inner, root, changed);
             }
             other => {
-                let mut branch_changed = false;
+                let mut steps = Vec::new();
+                vivify_steps(other, &mut 0, &mut steps);
+                let mut state = VivifyState {
+                    contexts: Vec::new(),
+                    changed: false,
+                    recursing: 0,
+                };
                 let mut scratch = root.clone();
-                let _ = vivify_null_bracket_step(other, &mut scratch, &mut branch_changed);
-                if branch_changed {
+                vivify_apply(&steps, None, &mut scratch, &mut state);
+                if state.changed {
                     *root = scratch;
                     *changed = true;
                 }
@@ -81475,10 +81718,8 @@ fn builtin_del<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // `del()` looks anything up.
     let bracket_folded_path_expr: Expr;
     let path_expr: &Expr = if S::TAG == EvalTag::Yq
-        && any_subexpr(
-            path_expr,
-            &mut |e| matches!(e, Expr::IndexExpr { key, .. } if static_bracket_keys(key).is_some()),
-        ) {
+        && any_subexpr(path_expr, &mut |e| matches!(e, Expr::IndexExpr { .. }))
+    {
         vivify_del_null_bracket_targets(path_expr, &mut result);
         bracket_folded_path_expr = fold_literal_bracket_keys(path_expr);
         &bracket_folded_path_expr

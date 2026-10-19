@@ -32,3 +32,4 @@ mod i4899;
 mod i4903;
 mod i4905;
 mod i4916;
+mod i4922;

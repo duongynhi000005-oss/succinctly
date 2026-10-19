@@ -3947,21 +3947,26 @@ $ echo 'null' | yq -o=json 'del(.[(0,1)])'         # []
 $ echo '{"a":null}' | yq -o=json 'del(.a["k0"])'   # {"a":{}}
 ```
 
-`succinctly yq` matches, for literal keys: inside a `del()` argument (yq mode only; jq mode and an
-integer key fold as before) a string bracket key is parsed as the bracket it is rather than folded
-into the `.k0` field step, `del()` runs a pre-pass (`vivify_del_null_bracket_targets`) that vivifies
-the first `null` a literal bracket key indexes along each branch -- through field steps and
-non-negative positions, padding a `null` out to the position (`{"a":null} | del(.a[0]["k"])` is
-`{"a":[{}]}`) -- and the bracket form is folded back into `.k0` before the delete itself runs, so
-no other delete rule can tell the two spellings apart. Not vivified: a *computed* key
-(`{"a":null,"n":"x"} | del(.a[.n])` is `{"a":{}, ...}` in yq and unchanged here), a bracket behind a
-`.[]` fan-out (`[null] | del(.[]["k"])` is `[{}]` in yq), a multi-key bracket's descent into a
-`null` child (`del(.[("a","b")]["x"])`, `{"a":null} | del(.a[(0,1)]["k"])`), a bracket behind a
-negative position, behind `..`/`select(...)`/`first(...)`/`//` (the walk follows plain field,
-position and bracket steps only), a position past 1024 (the padding is capped), a float or
+`succinctly yq` matches: inside a `del()` argument (yq mode only; jq mode and an integer key fold as
+before) a string bracket key is parsed as the bracket it is rather than folded into the `.k0` field
+step, `del()` runs a pre-pass (`vivify_del_null_bracket_targets`, then `vivify_apply`) that walks each
+branch and vivifies a `null` that a bracket, a position or an iteration `.[]` indexes, and the bracket
+form is folded back into `.k0` before the delete itself runs, so no other delete rule can tell the
+two spellings apart. [#4922](https://github.com/rust-works/succinctly/issues/4922) made the walk
+multi-valued, as yq's is: `.[]` over arrays and objects (and over a `null`, which becomes `[]` when
+something follows), `..`, a comma ahead of a bracket (`(.a,.b)["k"]`), a multi-key bracket
+(`{"a":null} | del(.a[(0,1)]["k"])` is `{"a":[{},{}]}`), a computed key evaluated against the whole
+document (`{"a":null,"n":"x"} | del(.a[.n])` is `{"a":{},...}`, a number or an absent key makes an
+array), and a too-short array padded out to the position a later bracket vivifies
+(`{"a":[1,null]} | del(.a[5]["k"])`). A computed key is read against the node the bracket's target started from (`.a[.n]` reads the document's `.n`, `.a | .[.n]` reads `.a`'s) and only when it is plain navigation and literals (a key with a builtin call, `range(..)` or `input` is not evaluated by the pre-pass). Under `..` a step that would make an array from a `null` is left alone, because the delete that follows walks `..` over what the pre-pass made (`{"a":null} | del(.. | .[(0,1)].x)` is `{"a":[null,null]}` in yq, whose `..` is lazy), and `..` goes 256 levels down. Padding is kept only if something is vivified, so
+`del(.a[2])` on a `null` stays `{"a":[]}`. Not vivified: a computed key that is itself absent or an
+array when the bracket is the *last* step (`{"a":null} | del(.a[.n])` is `{"a":[]}` in yq and an
+error here, as before), a slice (`del(.a[1:2]["k"])` is a no-op in yq and an error here), a bracket
+behind `select(...)`/`first(...)`/`//`, a position past 1024 (the padding is capped), a float or
 exponent key (`null | del(.[1.5])` is `{}` in yq and `[null]` here, from the older `Index` fold),
-and sibling comma branches that disagree on a `null`'s kind (yq evaluates them in sequence and
-errors; each branch here starts from the original document).
+and sibling comma branches that disagree on a `null`'s kind: yq evaluates them in sequence, here
+the pre-pass has already made the container, so `del(.[].q, .[][.m])` on `{"a":null,...}` errors
+(`Cannot index array with string "q"`) where yq prints `{"a":[],...}`.
 
 Still different: the same mutation happens in yq on a plain read, because the node is rewritten
 in place. `echo null | yq -o=json '(.["k0"]) as $x | .'` and `select(.["k0"] == 2), .` print `{}`;
