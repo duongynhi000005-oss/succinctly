@@ -37217,8 +37217,8 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
-    // An `empty` spelled out: `select` of a literal `false`/`null`, `first` or `limit` of such an
-    // expression, or a `limit` of a literal `0`, which never runs its body.
+    // An `empty` spelled out: `select` of a literal `false`/`null`, `first` of such an expression, or a
+    // `limit` of a literal count that is `0` (it never runs its body) or whose body is such an expression.
     fn emits_nothing(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Builtin(Builtin::Empty) => true,
@@ -37227,16 +37227,11 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
                 Expr::Literal(Literal::Bool(false) | Literal::Null)
             ),
             Expr::FirstExpr(inner) => emits_nothing(inner),
-            Expr::Limit { n, expr } => {
-                emits_nothing(expr)
-                    || match unwrap_paren(n) {
-                        Expr::Literal(Literal::NumberLiteral(_, text)) => {
-                            text.parse::<f64>() == Ok(0.0)
-                        }
-                        Expr::Literal(Literal::Int(i)) => *i == 0,
-                        _ => false,
-                    }
-            }
+            // A literal count only: a computed one is evaluated first and may raise.
+            Expr::Limit { n, expr } => match limit_literal_count(n) {
+                Some(count) => count == 0.0 || emits_nothing(expr),
+                None => false,
+            },
             _ => false,
         }
     }
