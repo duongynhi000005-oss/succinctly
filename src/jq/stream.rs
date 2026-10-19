@@ -888,6 +888,52 @@ pub(crate) fn owned_value_to_yaml_format(value: &OwnedValue) -> String {
     out
 }
 
+/// [`owned_value_to_yaml_format`] with yq's `to_yaml(N)` indent (#4206). yq's encoder reads `0`
+/// as four spaces and `1` as two, then takes `N` as written.
+pub(crate) fn owned_value_to_yaml_format_indented(value: &OwnedValue, indent: usize) -> String {
+    let width = match indent {
+        0 => 4,
+        1 => 2,
+        n => n,
+    };
+    let mut out = String::new();
+    let written = match value {
+        OwnedValue::String(s) => stream_yaml_string(&mut out, s),
+        _ => stream_owned_value_yaml(value, &mut out, "", width, ' ', false),
+    };
+    // Writing to a `String` cannot fail.
+    written.expect("writing to a String cannot fail");
+    out.push('\n');
+    out
+}
+
+/// yq's `to_json(N)` (#4206): the value as JSON text with `indent` spaces per
+/// level and a trailing line break, or compact with none for `0`. The writer is the one the
+/// CLI prints `-o=json` with, so the number spellings (`1.50`, `100000000000000000000.0`) and
+/// the escapes agree with it.
+pub(crate) fn owned_value_to_yq_json_string(value: &OwnedValue, indent: usize) -> String {
+    let mut out = String::new();
+    // Writing to a `String` cannot fail.
+    stream_owned_value_json_with(
+        value,
+        &mut out,
+        0,
+        indent,
+        ' ',
+        false,
+        write_json_body_yq,
+        crate::yaml::format_float_yq,
+        real_output_infinite_float,
+        real_output_infinite_literal,
+        yq_json_finite_literal,
+    )
+    .expect("writing to a String cannot fail");
+    if indent > 0 {
+        out.push('\n');
+    }
+    out
+}
+
 /// The string yq's `tostring` makes of a container (#1130): the YAML the CLI would print for
 /// it, with the one trailing line break chomped. Block style, or flow (`[1, 2]`, `{a: 1}`) for
 /// a container whose source node was written in flow style.
