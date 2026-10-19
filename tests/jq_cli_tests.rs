@@ -162283,6 +162283,114 @@ fn test_foreach_extract_after_alternatives_in_a_pipe_is_read_per_branch_4843() -
     assert_path_rows_both_routes_3749(&rows)
 }
 
+/// #4853: a `//` behind an `if` in a `foreach` UPDATE is read per output like one a comma or a pipe
+/// stage holds (#4800, #4837, #4843), so a pipe that mixes it with a stage that loses the register no
+/// longer exempts the whole UPDATE from the refusal. On a `null` document the stage after the first
+/// `//` ran from the register it moved, the `if` branch that runs states what it did, and the
+/// root-path `$i` was accepted as the register's: `path` answered `[]` where jq answers `["a"]` /
+/// `["a","a"]`, and `|= 9` wrote the root where jq writes `{"a":9}` / `{"a":{"a":9}}`. Those rows
+/// refuse with `Invalid path expression with result null`, as the other `//` shapes do; a branch that
+/// moves the register without a `//` of its own (`1 | FE`) beside one that holds it is refused the
+/// same way. A document where no `foreach` runs the moving branch keeps the answer jq gives, which
+/// the `if` used to refuse. Captured from `/usr/bin/jq` 1.7.1.
+#[test]
+fn test_foreach_extract_after_an_alternative_behind_an_if_is_read_per_branch_4853() -> Result<()> {
+    let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
+    let moved = format!("(1 | {fe}) // 5");
+    let mut refused = Vec::new();
+    for update in [
+        format!("({moved}) | (if . then (1 | {fe}) // 5 else 4 end)"),
+        format!("(.a? // 1) | (if . then (1 | {fe}) // 5 else 4 end)"),
+        format!("({moved}) | (if . then 4 else (1 | {fe}) // 5 end)"),
+        format!("if . then 4 else ({moved}) end"),
+        format!("if not then ({moved}) else 4 end"),
+        format!("if . then ({moved}) else ({moved}) end"),
+        format!("if . then (1 | {fe}) else ({moved}) end"),
+        format!("if . then ({moved}) else (1 | {fe}) end"),
+        format!("if . then 4 elif not then ({moved}) else 5 end"),
+    ] {
+        for wrap in ["path(X)", "del(X)", "(X) |= 9", "path(X) | ."] {
+            let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+            let filter = wrap.replace('X', &inner);
+            // The row type holds `'static` text; a test process may leak what it builds.
+            refused.push((
+                "null",
+                &*Box::leak(filter.into_boxed_str()),
+                "",
+                "Invalid path expression with result null",
+                5,
+            ));
+        }
+    }
+    assert_path_rows_both_routes_3749(&refused)?;
+    let mut rows = Vec::new();
+    // The `if` branch that runs computes `4` and leaves the register where it entered, which the
+    // `if` used to refuse on these documents; and an `if` whose `//` never moves it (the left side
+    // is empty, or the alternate is a literal) behind a stage that restored it is `[]` as before.
+    for (documents, update) in [
+        (
+            vec!["0", r#"{"a":1}"#, r#"{"a":null}"#],
+            format!("if . then 4 else ({moved}) end"),
+        ),
+        (
+            vec!["0", r#"{"a":1}"#, r#"{"a":null}"#],
+            format!("if not then ({moved}) else 4 end"),
+        ),
+        (
+            vec!["0", r#"{"a":1}"#, r#"{"a":null}"#],
+            format!("if . then . else ({moved}) end"),
+        ),
+        (
+            vec!["null", "false"],
+            format!("(.a? // 1) | (if . then (select(false) | 1 | {fe}) // 5 else 4 end)"),
+        ),
+        (
+            vec!["null", "false"],
+            format!("(.a? // 1) | (if . then 5 // (1 | {fe}) else 4 end)"),
+        ),
+        // a literal stage ahead of the `if` leaves the register untracked: the `if` states it per branch
+        (
+            vec!["null", "true", "false"],
+            format!("4 | (if . then 4 else ({moved}) end)"),
+        ),
+    ] {
+        for document in documents {
+            for (wrap, expected) in [
+                ("path(X)", "[]\n"),
+                ("del(X)", "null\n"),
+                ("(X) |= 9", "9\n"),
+            ] {
+                let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+                let filter = wrap.replace('X', &inner);
+                // The row type holds `'static` text; a test process may leak what it builds.
+                rows.push((
+                    document,
+                    &*Box::leak(filter.into_boxed_str()),
+                    expected,
+                    "",
+                    0,
+                ));
+            }
+        }
+    }
+    // An `if` beside a comma sibling is not read per output (jq restores the register for the later
+    // sibling, which only the run can tell), so `del` and `|=` match as they did; `path` answers
+    // `["a"]` and `[]` in jq and `[]` and `[]` here, as on `main`.
+    for (wrap, expected) in [("del(X)", "null\n"), ("(X) |= 9", "9\n")] {
+        let update = format!("({moved}), (if . then 4 else ((select(false) | 1 | {fe}) // 5) end)");
+        let inner = format!(r". as $x | foreach . as $i (.; {update}; $i)");
+        let filter = wrap.replace('X', &inner);
+        rows.push((
+            "null",
+            &*Box::leak(filter.into_boxed_str()),
+            expected,
+            "",
+            0,
+        ));
+    }
+    assert_path_rows_both_routes_3749(&rows)
+}
+
 /// #4800: a `foreach` UPDATE made of single-pattern binds of `.` that hand `.` back
 /// (`. as {a:$q} | .`, `(. as {a:$q} | .) | .`) stores the register's own node as the state, so jq
 /// checks nothing at the UPDATE and the answer is the EXTRACT's: `$i` is `result 1`, `.a` is the index
