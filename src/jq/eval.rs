@@ -899,11 +899,20 @@ fn yq_recursive_node_equal<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue, dep
         (OwnedValue::Null, OwnedValue::Null) => true,
         (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x == y,
         (OwnedValue::String(x), OwnedValue::String(y)) => x == y,
-        // Two numbers are one tag (int or float) and one spelling.
+        // Two numbers are one tag (int or float) and one spelling. The spelling is
+        // formatted only for a pair that already agrees on tag and value (a NaN has no
+        // value to agree on, so two NaNs go on), so the O(n*m) subtraction loop does not
+        // allocate for the pairs that differ.
         _ => match (a.number_repr(), b.number_repr()) {
             (Some(x), Some(y)) => {
-                core::mem::discriminant(&x) == core::mem::discriminant(&y)
-                    && numeric_display_string::<S>(a) == numeric_display_string::<S>(b)
+                let same_value = match (x, y) {
+                    (NumberRepr::Int(x), NumberRepr::Int(y)) => x == y,
+                    (NumberRepr::Float(x), NumberRepr::Float(y)) => {
+                        x == y || (x.is_nan() && y.is_nan())
+                    }
+                    _ => false,
+                };
+                same_value && numeric_display_string::<S>(a) == numeric_display_string::<S>(b)
             }
             _ => false,
         },
