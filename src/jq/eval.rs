@@ -37295,7 +37295,8 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
 /// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
 /// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`, or computed from constants: `select(false | not | not)`,
-/// `limit(1 + 0; empty)`, `limit(1 / 2; empty)`) stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
+/// `limit(1 + 0; empty)`, `limit(1 / 2; empty)`) stores nothing, so it adds no state of its own, and a `first`/`limit` (constant nonzero count)/`nth(0; ..)`
+/// of `.` alone hands `.` on as the bare `.` does; every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
@@ -37319,17 +37320,38 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             _ => false,
         }
     }
+    // An expression whose every output is `.` itself, however often it emits (`first(.)`, `limit(2; .)`,
+    // `limit(5 / 2; .)`, `nth(0; .)`, `first(., .)`): a constant nonzero count takes the first outputs of a
+    // body that only hands `.` on, so it hands `.` on too, as the bare `.` does. A zero count is
+    // [`emits_nothing`]'s, and a body that stores a node of its own (`limit(1; .a)`, `limit(1; 7)`) is not.
+    fn emits_only_dot(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Identity => true,
+            Expr::Builtin(Builtin::Select(cond)) => {
+                matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
+            }
+            Expr::Comma(items) => items.iter().all(emits_only_dot),
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                emits_only_dot(inner)
+            }
+            // A finite count: `1e1000 - 1e1000` folds to NaN here, where jq's literals saturate and it is `0`.
+            Expr::Limit { n, expr } => {
+                constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
+                    && emits_only_dot(expr)
+            }
+            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
+                constant_number(n) == Some(0.0) && emits_only_dot(expr)
+            }
+            _ => false,
+        }
+    }
     // `labels` are the names of the `label`s the walk is inside, so a `break` to one bound outside the
     // UPDATE (which leaves the whole `foreach`) is not read.
     fn binds<'a>(e: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
         match e {
-            Expr::Identity => Some(false),
             _ if emits_nothing(e) => Some(false),
-            Expr::Builtin(Builtin::Select(cond))
-                if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
-            {
-                Some(false)
-            }
+            // `.` and `select(true)` are `emits_only_dot`'s, with the `first`/`limit`/`nth` of them.
+            _ if emits_only_dot(e) => Some(false),
             Expr::Paren(inner) => binds(inner, labels),
             // A handler-less `try`/`?` or a `label` hands its body's outputs on; no arm admits a
             // `catch` or a call that could raise past the binds' own pattern steps.

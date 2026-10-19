@@ -163285,7 +163285,7 @@ fn test_foreach_update_single_pattern_bind_beside_a_spelled_out_empty_4800() -> 
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(-1; .); null))",
-            "",
+            "[\"a\"]\n",
             "Invalid path expression with result",
             5,
         ),
@@ -163588,14 +163588,14 @@ fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Res
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1+0; .); null))",
-            "",
+            "[\"a\"]\n",
             "Invalid path expression with result",
             5,
         ),
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(-1+0; .); null))",
-            "",
+            "[\"a\"]\n",
             "Invalid path expression with result",
             5,
         ),
@@ -163615,9 +163615,10 @@ fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Res
 /// beside the single-pattern bind of `.` in a `foreach` UPDATE
 /// ([`test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800`]). The controls keep their
 /// refusal: a zero divisor raises (`1 / 0`, `0 / 0`, `1 % 0`, and `5 % 0.5`, whose divisor jq truncates to
-/// `0`; `5 | . % 0` too), a bare `.` count depends on the state, and `limit(1 / 2; .)` emits `.` rather than
-/// nothing; jq answers the first output and then raises there, so only the refusal's kind is pinned. Every
-/// other row captured from jq 1.7.1.
+/// `0`; `5 | . % 0` too) and a bare `.` count depends on the state; jq answers the first output and then
+/// raises there, so only the refusal's kind is pinned. `limit(1 / 2; .)` emits `.` rather than nothing and
+/// is read since `test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800`. Every other row
+/// captured from jq 1.7.1.
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_a_constant_division_count_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -163834,7 +163835,7 @@ fn test_foreach_update_single_pattern_bind_beside_a_constant_division_count_4800
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/2; .); null))",
-            "",
+            "[\"a\"]\n",
             "Invalid path expression with result",
             5,
         ),
