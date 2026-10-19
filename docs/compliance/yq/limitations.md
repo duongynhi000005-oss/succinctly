@@ -5592,7 +5592,10 @@ unchanged: it JSON-encodes. Not matched:
 - string interpolation (`"x\([1, 2])y"`) still JSON-encodes where yq interpolates the same
   YAML text, and a container rebuilt by `with_entries` or read under `--eval-all` takes the
   block style whatever its source;
-- quote style, comments and aliases the source carried do not survive into the text.
+- quote style, comments, anchors and aliases the source carried do not survive into the text
+  (`c: ["x: y", 'z']` gives `['x: y', z]`, `y: *a` gives the anchored sequence, not `*a`);
+- a string with a line break is double-quoted (`"l1\nl2\n"`) where yq writes a literal block
+  (`|`), the CLI writer's own rendering of a built value.
 
 `tojson` is unchanged and still renders compactly, without that trailing newline. Captured
 live (v4.53.3, `null` on stdin):

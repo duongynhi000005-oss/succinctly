@@ -891,6 +891,11 @@ pub(crate) fn owned_container_to_yaml_string(value: &OwnedValue, flow: bool) -> 
     };
     // Writing to a `String` cannot fail.
     written.expect("writing to a String cannot fail");
+    // yq chomps the one line break its encoder ends the text with; this writer ends none, so
+    // this only keeps that so if a node ever does (a block scalar).
+    if out.ends_with('\n') {
+        out.pop();
+    }
     out
 }
 
