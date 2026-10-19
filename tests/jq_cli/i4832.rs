@@ -959,3 +959,48 @@ fn test_4832_reduce_update_foreign_marker_controls_keep_matching() -> Result<()>
         ),
     ])
 }
+
+/// #4832: a foreign `$x` read by a fold nested in the `reduce` UPDATE keeps the persistent register's
+/// certification. A per-step register for these accepted what jq refuses (`path(...)` printed `[]`, `del`
+/// deleted the document, `|= 9` replaced it). The message still names the end of the path where jq names
+/// the step, which is why only the common prefix is pinned. Every row captured from `/usr/bin/jq` 1.7.1.
+#[test]
+fn test_4832_reduce_update_nested_fold_marker_still_refuses() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true}"#,
+            r"path(. as $x | reduce .a? as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | reduce .a? as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"(. as $x | reduce .a? as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .))) |= 9",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce (.a?, .) as $i (.; foreach (select($x) | $x as {a:$a} | .) as $y (.; .; .)))",
+            "",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce .a as $j (.; reduce .c[]? as $i (.; $x | .b)))",
+            "",
+            r#"Invalid path expression near attempt to access element "c" of {"a":{"b":1}}"#,
+            5,
+        ),
+    ])
+}
