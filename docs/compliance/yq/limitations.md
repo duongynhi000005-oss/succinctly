@@ -1862,9 +1862,30 @@ $ succinctly yq -n '"a1b" | sub("z"; error("boom"))'   # Error: boom  (matches)
 
 The 3-argument form is unchanged (#1122: the replacement is never evaluated). Non-string
 replacement values keep their #1052 coercion. Pinned by `tests/yq_cli/i4905.rs`. Still different,
-unrelated to this rule: yq's unknown-escape string literals (`"<\1>"` is the text `<\1>` in yq, a
-parse error here), its non-string-input error wording (`cannot substitute with !!int`), and its
+unrelated to this rule: yq's non-string-input error wording (`cannot substitute with !!int`) and its
 regex-compile error text.
+
+### String-literal escapes — yq keeps every backslash sequence it does not decode
+
+[#4916](https://github.com/rust-works/succinctly/issues/4916): real yq's filter lexer decodes only
+`\n \t \r \b \f \a \v \" \\` (and `\(` starts an interpolation) in a string literal, and keeps any other
+backslash sequence as written, backslash included. `succinctly yq` read the literal as jq does: it
+decoded `\u` and `\/` (a silently different value) and failed to parse every other escape, which broke
+the common `test("\d+")`. Now (jq mode keeps jq's table):
+
+```bash
+$ yq            -n '"a1" | test("\d")'      # true     (the regex engine sees \d)
+$ succinctly yq -n '"a1" | test("\d")'      # true     (was: parse error: invalid escape sequence '\d')
+$ yq            -n -o=json '"\u0041"'       # "\\u0041"   (six characters, not A)
+$ succinctly yq -n -o=json '"\u0041"'       # "\\u0041"   (was "A")
+```
+
+The same table applies to object keys, bracket steps (`.x["a\tb"]`) and every other string literal, with one exception: the quoted name of a *dotted* path step (`.x."a\tb"`) is read raw, escapes included, up to the next `"`, so it selects the key `a\tb` (a backslash and a `t`) and `.x."a\"` is the key `a\`. A document's own
+double-quoted scalars are a different lexer (YAML, see above) and are unchanged. Pinned by
+`tests/yq_cli/i4916.rs` (147 rows captured from yq v4.53.3). Still different: a run of backslashes ahead of `\(` (yq alternates between a literal `\(` and an interpolation as the run grows: `"x\\(1)y"` is the text `x\(1)y`, `"x\\\\(1)y"` is `x\1y`; here every pair decodes first), a `\(` that never closes
+(`"a\(b"` is the text `a\(b` in yq, a parse error here), a `\"` inside an interpolation's expression
+(`"\(\"a\")"`), the regex dialect (Go's RE2 rejects `\u0061` in a pattern, the Rust engine accepts it)
+and a string-literal `@format` (`@base64 "x\q"`, where both refuse with different wording).
 
 ### String interpolation with a multi-valued `\(...)` slot — yq takes the first value only
 

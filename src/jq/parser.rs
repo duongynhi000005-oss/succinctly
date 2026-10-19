@@ -348,6 +348,30 @@ pub(crate) fn join_expr_arity(expr: &Expr) -> Option<usize> {
     }
 }
 
+/// One backslash escape of a yq string literal, `c` being the character after the backslash (#4916).
+///
+/// Real yq's lexer decodes `\n \t \r \b \f \a \v \" \\` and keeps every other backslash sequence
+/// as written, the backslash included: `"\d"` is the two characters `\d`, which is what lets
+/// `test("\d+")` reach the regex engine, and `"\u0041"` is six characters, not `A` (live against
+/// the pinned v4.53.3). jq decodes `\u` and `\/` and rejects the rest.
+fn push_yq_string_escape(out: &mut String, c: char) {
+    match c {
+        'n' => out.push('\n'),
+        'r' => out.push('\r'),
+        't' => out.push('\t'),
+        'b' => out.push('\x08'),
+        'f' => out.push('\x0C'),
+        'a' => out.push('\x07'),
+        'v' => out.push('\x0B'),
+        '"' => out.push('"'),
+        '\\' => out.push('\\'),
+        other => {
+            out.push('\\');
+            out.push(other);
+        }
+    }
+}
+
 /// Whether `c` can be part of an unquoted path element in yq's lexer (#4237).
 ///
 /// yq's `PathElement` token is `\.[^ ;\}\{\:\[\],\|\.\[\(\)=\n!]+\??`
@@ -1658,6 +1682,14 @@ impl<'a> Parser<'a> {
                 }
                 Some('\\') => {
                     self.next();
+                    // #4916: yq reads a short list of escapes and keeps any other backslash as text.
+                    if self.mode == ParserMode::Yq {
+                        if let Some(c) = self.peek().filter(|&c| c != '(') {
+                            self.next();
+                            push_yq_string_escape(&mut current_literal, c);
+                            continue;
+                        }
+                    }
                     match self.peek() {
                         // String interpolation: \(expr)
                         Some('(') => {
@@ -1762,6 +1794,25 @@ impl<'a> Parser<'a> {
         Ok(Expr::StringInterpolation(parts))
     }
 
+    /// The quoted name of a dotted path step, `."key"` (#4916). In jq mode that is an ordinary string
+    /// literal. yq reads the text between the quotes **raw**, escapes included, up to the next `"`:
+    /// `.x."a\tb"` selects the key `a\tb` (a backslash and a `t`), where `.x["a\tb"]` selects the one
+    /// with a TAB, and `."a\"` is the key `a\` (live against the pinned v4.53.3).
+    fn parse_path_step_name(&mut self) -> Result<String, ParseError> {
+        if self.mode != ParserMode::Yq {
+            return self.parse_string_literal();
+        }
+        self.expect('"')?;
+        let mut name = String::new();
+        loop {
+            match self.next() {
+                None => return Err(ParseError::new("unterminated string", self.pos)),
+                Some('"') => return Ok(name),
+                Some(c) => name.push(c),
+            }
+        }
+    }
+
     /// Parse a simple string literal (for object keys, etc.)
     fn parse_string_literal(&mut self) -> Result<String, ParseError> {
         self.expect('"')?;
@@ -1778,6 +1829,14 @@ impl<'a> Parser<'a> {
                 }
                 Some('\\') => {
                     self.next();
+                    // #4916: see `parse_string_or_interpolation`.
+                    if self.mode == ParserMode::Yq {
+                        if let Some(c) = self.peek() {
+                            self.next();
+                            push_yq_string_escape(&mut result, c);
+                            continue;
+                        }
+                    }
                     match self.peek() {
                         Some('"') => {
                             self.next();
@@ -3202,7 +3261,7 @@ impl<'a> Parser<'a> {
 
                 // Check for quoted field access `."key"`
                 let mut expr = if self.peek() == Some('"') {
-                    let name = self.parse_string_literal()?;
+                    let name = self.parse_path_step_name()?;
                     self.field_or_wildcard(name)
                 } else {
                     // Field access `.foo`
@@ -7918,7 +7977,7 @@ impl<'a> Parser<'a> {
                         push_bracket(&mut chain, bracket);
                     } else {
                         let name = if self.peek() == Some('"') {
-                            self.parse_string_literal()?
+                            self.parse_path_step_name()?
                         } else {
                             self.parse_field_ident()?
                         };

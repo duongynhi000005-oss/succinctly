@@ -8843,7 +8843,7 @@ fn test_nul_output_rejects_embedded_nul_pretty_print_1709() -> Result<()> {
 #[test]
 fn test_nul_output_rejects_embedded_nul_null_input_1709() -> Result<()> {
     let (output, stderr, code) =
-        run_yq_stdin_with_stderr("\"x\" + \"\\u0000\" + \"y\"", "", &["-0", "-n"])?;
+        run_yq_stdin_with_stderr("\"x\" + (\"AA==\" | @base64d) + \"y\"", "", &["-0", "-n"])?;
     assert_eq!(code, 1);
     assert_eq!(output, "");
     assert!(stderr.contains("NUL"), "got: {stderr}");
@@ -41809,13 +41809,13 @@ fn test_pjson_invalid_utf8_keys_read_back_as_values_4741() -> Result<()> {
 fn test_pjson_invalid_utf8_key_is_addressable_by_its_substituted_name_4536() -> Result<()> {
     let input = b"{\"x\xe4y\":1,\"b\":2}";
     for (filter, expected) in [
-        (".[\"x\\ufffdy\"]", "1\n"),
-        (".[\"x\\ufffdy\"] | key", "x\u{fffd}y\n"),
-        ("has(\"x\\ufffdy\")", "true\n"),
-        ("del(.[\"x\\ufffdy\"])", "b: 2\n"),
-        (".[\"x\\ufffdy\"] = 7", "x\u{fffd}y: 7\nb: 2\n"),
+        (".[\"x\u{fffd}y\"]", "1\n"),
+        (".[\"x\u{fffd}y\"] | key", "x\u{fffd}y\n"),
+        ("has(\"x\u{fffd}y\")", "true\n"),
+        ("del(.[\"x\u{fffd}y\"])", "b: 2\n"),
+        (".[\"x\u{fffd}y\"] = 7", "x\u{fffd}y: 7\nb: 2\n"),
         (".a = 1", "x\u{fffd}y: 1\nb: 2\na: 1\n"),
-        ("pick([\"x\\ufffdy\"])", "x\u{fffd}y: 1\n"),
+        ("pick([\"x\u{fffd}y\"])", "x\u{fffd}y: 1\n"),
         ("sort_keys(.)", "b: 2\nx\u{fffd}y: 1\n"),
         ("map_values(. + 1)", "x\u{fffd}y: 2\nb: 3\n"),
     ] {
