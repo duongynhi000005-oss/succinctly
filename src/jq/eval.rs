@@ -37542,6 +37542,18 @@ fn emits_nothing(e: &Expr) -> bool {
     }
 }
 
+/// Whether a destructuring pattern has no computed key (`{(EXPR): $v}`): its steps are literal indexes, so
+/// matching it emits once or raises, where a key expression is a generator of its own that can emit nothing.
+fn pattern_is_plain(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Var(_) => true,
+        Pattern::Object(entries) => entries.iter().all(|entry| {
+            matches!(entry.key, ObjectKey::Literal(_)) && pattern_is_plain(&entry.pattern)
+        }),
+        Pattern::Array(items) => items.iter().all(pattern_is_plain),
+    }
+}
+
 /// Whether `e` can neither raise nor have an effect on any input, so that nothing observable depends on
 /// running it ([`resolve_foreach`]'s #4800 read of a `foreach` whose EXTRACT emits nothing): literals, `.`,
 /// `not`, `tostring`, `select` of a boolean literal, and the structure around them (pipe, comma, `//`,
@@ -37550,15 +37562,6 @@ fn emits_nothing(e: &Expr) -> bool {
 /// `caught`, inside a `try`/`?` that swallows the raise; a `$name` pattern never raises, and a pattern
 /// with a computed key is never read (its key is an expression of its own).
 fn expr_is_inert(e: &Expr, caught: bool) -> bool {
-    fn pattern_is_plain(pattern: &Pattern) -> bool {
-        match pattern {
-            Pattern::Var(_) => true,
-            Pattern::Object(entries) => entries.iter().all(|entry| {
-                matches!(entry.key, ObjectKey::Literal(_)) && pattern_is_plain(&entry.pattern)
-            }),
-            Pattern::Array(items) => items.iter().all(pattern_is_plain),
-        }
-    }
     fn patterns_are_inert(patterns: &[Pattern], caught: bool) -> bool {
         patterns.iter().all(|pattern| {
             matches!(pattern, Pattern::Var(_)) || caught && pattern_is_plain(pattern)
@@ -37655,6 +37658,7 @@ fn is_truthy_literal(cond: &Expr) -> bool {
 /// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`, or computed from constants: `select(false | not | not)`,
 /// `limit(1 + 0; empty)`, `limit(1 / 2; empty)`) stores nothing, so it adds no state of its own, and a `first`/`limit` (constant nonzero count)/`nth(0; ..)`
 /// of `.` alone hands `.` on as the bare `.` does, and so does one over a bind (`first(. as {a:$q} | .)`),
+/// or over a comma led by a bind that always emits (`first((. as {a:$q} | .), 7)`: the sibling is never run),
 /// an `if` whose condition cannot move the register and whose branches are each such a shape, and a `select`
 /// of a truthy literal (`select(1)`, `select("x")`); every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
@@ -37681,6 +37685,36 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             _ => false,
         }
     }
+    // A body whose first output is a single-pattern bind of `.` that hands `.` on (`. as {a:$q} | .`): the bind
+    // emits once or raises, never nothing (a computed key, `{(empty): $q}`, can, so it is not read), so a `first`/`limit(1; ..)`/`nth(0; ..)` over a comma led by it takes
+    // that output and stops, and whatever sibling follows is never run or stored. A leading item that can emit
+    // nothing (`empty`, `select(false)`, an `if` with an `empty` branch) leaves the sibling to supply the first
+    // output, and a sibling *ahead* of the bind stores a node of its own, so neither is read.
+    fn leads_with_emitting_bind(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Comma(items) => items.first().is_some_and(leads_with_emitting_bind),
+            Expr::AsPattern {
+                expr,
+                patterns,
+                body,
+            } => {
+                patterns.len() == 1
+                    && pattern_is_plain(&patterns[0])
+                    && matches!(unwrap_paren(expr), Expr::Identity)
+                    && emits_only_dot(body)
+            }
+            _ => false,
+        }
+    }
+    // What a body read for its first output stores: the bare bind when a bind that always emits leads it (the
+    // siblings behind it are never run), else whatever [`binds`] reads of the whole body.
+    fn takes_first<'a>(body: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
+        if leads_with_emitting_bind(body) {
+            Some(true)
+        } else {
+            binds(body, labels)
+        }
+    }
     // `labels` are the names of the `label`s the walk is inside, so a `break` to one bound outside the
     // UPDATE (which leaves the whole `foreach`) is not read.
     fn binds<'a>(e: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
@@ -37703,14 +37737,17 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             // it stores is the register's node as the body does. A count of a constant nonzero finite
             // number only (zero is [`emits_nothing`]'s, a count past the first needs the body's second
             // output to exist, and a computed one is evaluated first and may raise).
+            // A `first`/`limit(1; ..)`/`nth(0; ..)` stops at the body's first output, so a body led by a bind
+            // that always emits never runs the siblings behind it (`first((. as {a:$q} | .), 7)`).
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-                binds(inner, labels)
+                takes_first(inner, labels)
             }
+            Expr::Limit { n, expr } if limit_takes_one(n) => takes_first(expr, labels),
             Expr::Limit { n, expr } if takes_outputs(n) => binds(expr, labels),
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
                 if is_nth_zero(n) =>
             {
-                binds(expr, labels)
+                takes_first(expr, labels)
             }
             // Either branch stores the register's node, so the condition decides nothing the state
             // shows; one that cannot move the register runs as a value and leaves it where it was.

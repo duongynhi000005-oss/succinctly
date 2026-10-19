@@ -21,6 +21,7 @@
 //!   would be `per_issue::iN::name` and neither the skip nor the run would find it.
 
 mod i4800;
+mod i4800_first_bind_sibling;
 mod i4800_first_limit_if;
 mod i4832;
 mod i4886;
