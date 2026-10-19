@@ -37620,6 +37620,33 @@ fn expr_is_inert(e: &Expr, caught: bool) -> bool {
     }
 }
 
+/// A count that takes the first outputs of its body: a constant, finite and nonzero number (zero is
+/// [`emits_nothing`]'s; `-1` takes everything in jq 1.7.1). `1e1000 - 1e1000` folds to NaN here, where jq's
+/// literals saturate and it is `0`. One definition for [`update_is_single_bind_returning_input`]'s helpers and
+/// [`emits_only_the_accumulator`] (#4932).
+fn takes_outputs(n: &Expr) -> bool {
+    constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
+}
+
+/// `nth(0; ..)`: the first output, as `first(..)` takes it.
+fn is_nth_zero(n: &Expr) -> bool {
+    constant_number(n) == Some(0.0)
+}
+
+/// A literal that is truthy in jq (everything but `null` and `false`), so `select` of it hands `.` on.
+fn is_truthy_literal(cond: &Expr) -> bool {
+    matches!(
+        unwrap_paren(cond),
+        Expr::Literal(
+            Literal::Bool(true)
+                | Literal::NumberLiteral(..)
+                | Literal::Int(_)
+                | Literal::Float(_)
+                | Literal::String(_)
+        )
+    )
+}
+
 /// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
 /// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
@@ -37635,29 +37662,6 @@ fn expr_is_inert(e: &Expr, caught: bool) -> bool {
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
-    // A count that takes the first outputs of its body: a constant, finite and nonzero number (zero is
-    // [`emits_nothing`]'s; `-1` takes everything in jq 1.7.1). `1e1000 - 1e1000` folds to NaN here, where jq's
-    // literals saturate and it is `0`. One definition for [`emits_only_dot`] and [`binds`].
-    fn takes_outputs(n: &Expr) -> bool {
-        constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
-    }
-    // `nth(0; ..)`: the first output, as `first(..)` takes it.
-    fn is_nth_zero(n: &Expr) -> bool {
-        constant_number(n) == Some(0.0)
-    }
-    // A literal that is truthy in jq (everything but `null` and `false`), so `select` of it hands `.` on.
-    fn is_truthy_literal(cond: &Expr) -> bool {
-        matches!(
-            unwrap_paren(cond),
-            Expr::Literal(
-                Literal::Bool(true)
-                    | Literal::NumberLiteral(..)
-                    | Literal::Int(_)
-                    | Literal::Float(_)
-                    | Literal::String(_)
-            )
-        )
-    }
     // An expression whose every output is `.` itself, however often it emits (`first(.)`, `limit(2; .)`,
     // `limit(5 / 2; .)`, `nth(0; .)`, `first(., .)`): a constant nonzero count takes the first outputs of a
     // body that only hands `.` on, so it hands `.` on too, as the bare `.` does. A zero count is
@@ -37907,7 +37911,6 @@ fn update_returns_its_input(e: &Expr) -> bool {
 /// to (the marker-source counterpart of [`update_returns_its_input`]'s bind of `.`).
 fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
     match unwrap_paren(e) {
-        Expr::Identity => true,
         Expr::AsPattern {
             expr,
             patterns,
@@ -37922,6 +37925,52 @@ fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
             matches!(unwrap_paren(expr), Expr::TrackedVar(_))
                 && foreign_bind_chain_returning_dot(body)
         }
+        // #4932: a wrapper that hands its body's outputs on unchanged. Each of these takes a body that is
+        // itself a chain of binds ending in `.`, whose raise (a bind step jq path-checks) is the
+        // wrapper's raise too -- there is no `catch` and no `try`/`?` here, which would turn that raise
+        // into an empty UPDATE and a `null` state.
+        Expr::Comma(items) => items.iter().all(foreign_bind_chain_returning_dot),
+        Expr::Label { body, .. } => foreign_bind_chain_returning_dot(body),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            foreign_bind_chain_returning_dot(inner)
+        }
+        Expr::Limit { n, expr } if takes_outputs(n) => foreign_bind_chain_returning_dot(expr),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+            if is_nth_zero(n) =>
+        {
+            foreign_bind_chain_returning_dot(expr)
+        }
+        // Either branch hands the accumulator on whichever the condition picks.
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            cannot_move_register(cond)
+                && foreign_bind_chain_returning_dot(then_branch)
+                && foreign_bind_chain_returning_dot(else_branch)
+        }
+        other => emits_only_the_accumulator(other),
+    }
+}
+
+/// Whether `e` emits its input node and nothing else, and cannot raise (#4932): `.`, `select(true)`,
+/// and a `first`/`limit`/`nth(0; ..)`, a `try`/`?` (its body cannot raise, so a handler is never run) or a comma of such. A bind is not one
+/// (its pattern steps are path-checked), which is [`foreign_bind_chain_returning_dot`]'s.
+fn emits_only_the_accumulator(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity => true,
+        Expr::Builtin(Builtin::Select(cond)) => is_truthy_literal(cond),
+        Expr::Comma(items) => items.iter().all(emits_only_the_accumulator),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            emits_only_the_accumulator(inner)
+        }
+        Expr::Limit { n, expr } => takes_outputs(n) && emits_only_the_accumulator(expr),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
+            is_nth_zero(n) && emits_only_the_accumulator(expr)
+        }
+        // A body that cannot raise never reaches a handler.
+        Expr::Try { expr, .. } | Expr::Optional(expr) => emits_only_the_accumulator(expr),
         _ => false,
     }
 }
@@ -50712,6 +50761,34 @@ fn is_single_output_bind(expr: &Expr) -> bool {
         Expr::As {
             expr: source, body, ..
         } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
+        // #4932: the wrappers [`foreign_bind_chain_returning_dot`] reads through hand their body's outputs
+        // on, so a chain inside one is the same sequence of path-checked steps.
+        Expr::Label { body, .. } => is_single_output_bind(body),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            is_single_output_bind(inner)
+        }
+        Expr::Limit { n, expr } if takes_outputs(n) => is_single_output_bind(expr),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+            if is_nth_zero(n) =>
+        {
+            is_single_output_bind(expr)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            cannot_move_register(cond)
+                && (is_single_output_bind(then_branch) || emits_only_the_accumulator(then_branch))
+                && (is_single_output_bind(else_branch) || emits_only_the_accumulator(else_branch))
+                && (is_single_output_bind(then_branch) || is_single_output_bind(else_branch))
+        }
+        Expr::Comma(items) => {
+            items
+                .iter()
+                .all(|item| is_single_output_bind(item) || emits_only_the_accumulator(item))
+                && items.iter().any(is_single_output_bind)
+        }
         _ => false,
     }
 }
@@ -59050,7 +59127,11 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                 || fold_body::emissions_discarded_here()
                                 || fold_body::state_handed_on_here())
                             && !seed.trackable
-                            && body_performs_no_step(&substituted)
+                            && (body_performs_no_step(&substituted)
+                                // #4932: ...or a body that hands the accumulator on in a `reduce` UPDATE whose
+                                // state is handed on ([`emits_only_the_accumulator`]).
+                                || (fold_body::state_handed_on_here()
+                                    && emits_only_the_accumulator(&substituted)))
                         {
                             match sink(seed) {
                                 Demand::Continue => ResolveFlow::Exhausted,
@@ -61774,7 +61855,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && update_reads_foreign_marker
         && fold_body::depth() == 0
         && patterns_all_bare(patterns);
-    let update_tail_unchecked = foreign_bind_update && update_binds_only_in_tail(update);
+    let update_tail_unchecked = foreign_bind_update
+        && (update_binds_only_in_tail(update) || foreign_bind_chain_returning_dot(update));
     let update_hands_state_on = foreign_bind_update
         && cannot_move_register(init)
         && foreign_bind_chain_returning_dot(update);
