@@ -5126,6 +5126,16 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   key is refused** (`cannot sort a mapping with the repeated key "a"`) instead of answering
   with an entry gone, which a sort written back with `-i` would make permanent (the ADR-0018
   data-loss exception).
+- **An array's head comment** ([#4926](https://github.com/rust-works/succinctly/issues/4926)).
+  yq's `sort`, `sort_by`, `reverse`, `unique` and `unique_by` reorder the sequence node in
+  place, so the comment block above a document's sequence (a config file's banner) stays on
+  top. The items stream from their own cursors and the result has no node to read that block
+  from, so the runner prints the document's head (the verbatim header of the first document and
+  the comments above the sequence) before the items when the query *is* one of these builtins
+  over a document whose root is a sequence. Not covered: a sequence reached through a path
+  (`.a | sort`, which yq also keeps in flow style), the comment block above a later document,
+  which yq attaches to the item that ends up first, and the foot comment below the sequence,
+  which yq moves with its last item.
 
 Cost. Interleaved A/B against `main`, release builds, minimum of 9 runs, 1M-element arrays on
 5-10 MB documents (outputs identical; `sort_by` on 250k records):
