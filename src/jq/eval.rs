@@ -19113,6 +19113,18 @@ fn owned_contains_at_depth<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue, dep
                 .get(k)
                 .is_some_and(|a_val| owned_contains_at_depth::<S>(a_val, b_val, depth + 1))
         }),
+        // yq looks inside an array on its left for a right-hand side that is not an array
+        // (#4899, captured against v4.53.3): `[[1]] | contains([1])`, `[[{"a":1}]] |
+        // contains([{"a":1}])`, `{"a":[1]} | contains({"a":1})` and
+        // `[[["ab"]]] | contains(["a"])` are all `true`, while an object on the left never
+        // yields a scalar (`[{"a":1}] | contains([1])` is `false`). jq compares the pair as
+        // unequal kinds.
+        (OwnedValue::Array(a_arr), b) if S::TAG == EvalTag::Yq => {
+            // `b` is not an array: the (Array, Array) arm above took that pair.
+            a_arr
+                .iter()
+                .any(|a_elem| owned_contains_at_depth::<S>(a_elem, b, depth + 1))
+        }
         // Scalars: equality. yq's `contains` pairs two scalars with `recursiveNodeEqual`,
         // by tag and text (#4886), the rule array subtraction already follows
         // ([`array_subtract_elements_equal`]): `[1.5] | contains([1.50])` is `false` there,
