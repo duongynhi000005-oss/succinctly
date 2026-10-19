@@ -24,7 +24,8 @@ use std::string::ToString;
 
 use super::encode_style::{
     go_yaml_explicit_key_scalar, go_yaml_key_is_simple, go_yaml_multiline_scalar,
-    write_go_yaml_double_quoted, write_go_yaml_string,
+    has_unwritable_char, has_unwritable_char_in_block, write_go_yaml_double_quoted,
+    write_go_yaml_single_quoted, write_go_yaml_string,
 };
 use super::index::YamlIndex;
 use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
@@ -1989,12 +1990,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // (U+10000+, e.g. most emoji) rather than keep
                             // it block-styled (verified against the pinned
                             // oracle); the quoted form is spelled `\U` like
-                            // real yq's (#4850).
-                            let has_astral = decoded.chars().any(|c| c as u32 > 0xFFFF);
+                            // real yq's (#4850). So does any character the emitter will not
+                            // write raw (DEL, U+FEFF, a C1 control, ...), which an astral
+                            // character is one of (#4858).
+                            let unwritable = has_unwritable_char_in_block(&decoded);
                             let explicit_indent =
                                 block_scalar_indent_hint(&decoded, indent_spaces).ok();
                             if let Some(explicit_indent) = explicit_indent {
-                                if !decoded.is_empty() && !has_trailing_space && !has_astral {
+                                if !decoded.is_empty() && !has_trailing_space && !unwritable {
                                     return Ok(stream_yaml_block_scalar(
                                         out,
                                         &decoded,
@@ -9897,8 +9900,8 @@ fn stream_yaml_block_scalar<Out: core::fmt::Write>(
 /// scalar's already-decoded value, exactly like
 /// [`stream_yaml_string_value`]'s own `_` (block scalar) arm - shared
 /// so a block scalar disqualified from [`stream_yaml_block_scalar`]
-/// (empty, a trailing space, an astral character, or an unrepresentable
-/// explicit-indent digit) can reuse the decode `stream_yaml_value`'s
+/// (empty, a trailing space, a character the emitter will not write raw, or an
+/// unrepresentable explicit-indent digit) can reuse the decode `stream_yaml_value`'s
 /// `String` arm already performed rather than pay for a second one inside
 /// `stream_yaml_string_value` (#836 review).
 fn stream_yaml_block_scalar_quoted<Out: core::fmt::Write>(
@@ -10112,7 +10115,7 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
             }
         }
         YamlString::DoubleQuoted { .. } => Ok(write_go_yaml_double_quoted(out, &str_val)?),
-        YamlString::SingleQuoted { .. } => Ok(stream_yaml_single_quoted(out, &str_val)?),
+        YamlString::SingleQuoted { .. } => Ok(write_go_yaml_single_quoted(out, &str_val)?),
         YamlString::Unquoted { .. } => {
             // #996: checked before the verbatim-echo fallback below,
             // which is for genuine YAML source text only. A non-finite
@@ -10135,7 +10138,8 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
             // indicator — `- x` emitted bare under a `- ` would read back as a
             // nested sequence, #332).
             if str_val.is_empty()
-                || str_val.bytes().any(|b| b < 0x20)
+                || (!str_val.bytes().all(|b| (0x20..0x7F).contains(&b))
+                    && (str_val.bytes().any(|b| b < 0x20) || has_unwritable_char(&str_val)))
                 || starts_seq_entry(str_val.as_bytes(), 0)
             {
                 Ok(write_go_yaml_double_quoted(out, &str_val)?)
@@ -10213,7 +10217,9 @@ fn needs_yaml_quoting(s: &str) -> bool {
         }
     }
 
-    false
+    // ...and for one the emitter will not write raw (DEL, a C1 control, U+FEFF, an astral
+    // character), which only double quotes can spell (#4858).
+    has_unwritable_char(s)
 }
 
 /// Check if a string looks like a number.
@@ -10258,22 +10264,6 @@ fn looks_like_yaml_number(s: &str) -> bool {
     }
 
     true
-}
-
-/// Stream a single-quoted YAML string with proper escaping.
-fn stream_yaml_single_quoted<Out: core::fmt::Write>(out: &mut Out, s: &str) -> core::fmt::Result {
-    out.write_char('\'')?;
-
-    for ch in s.chars() {
-        if ch == '\'' {
-            // Single quotes are escaped by doubling
-            out.write_str("''")?;
-        } else {
-            out.write_char(ch)?;
-        }
-    }
-
-    out.write_char('\'')
 }
 
 #[cfg(test)]
@@ -12045,6 +12035,12 @@ mod tests {
         assert!(!needs_yaml_quoting("+5x")); // not a number: digits then non-digit
         assert!(!needs_yaml_quoting("+")); // `+` alone isn't a number and isn't a leading indicator (only `-` is)
         assert!(needs_yaml_quoting("-foo")); // leading `-` is a sequence indicator
+                                             // #4858: a character the emitter will not write raw needs double quotes.
+        assert!(needs_yaml_quoting("x\u{7f}y")); // DEL
+        assert!(needs_yaml_quoting("x\u{90}y")); // C1 control
+        assert!(needs_yaml_quoting("\u{feff}x")); // BOM
+        assert!(needs_yaml_quoting("x\u{1F600}")); // astral
+        assert!(!needs_yaml_quoting("x\u{e9}y")); // printable non-ASCII
 
         assert!(looks_like_yaml_number("123"));
         assert!(looks_like_yaml_number("-123"));

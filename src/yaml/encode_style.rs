@@ -496,12 +496,40 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
     out.write_char('"')
 }
 
+/// Whether `s` holds a character go-yaml's emitter will not write raw.
+///
+/// A tab, DEL, a C1 control, U+FEFF or a character outside the BMP keeps a string out of the plain
+/// and single-quoted styles whatever style its source had (#4858). A line break (`\n`, U+0085,
+/// U+2028, U+2029) is left to the line-break rules, which differ from this one.
+#[must_use]
+pub fn has_unwritable_char(s: &str) -> bool {
+    unwritable_char(s, false)
+}
+
+/// [`has_unwritable_char`] for the content of a block scalar, where a tab is written as it is
+/// (`|-` over `x<TAB>y` stays a literal block in yq).
+#[must_use]
+pub(crate) fn has_unwritable_char_in_block(s: &str) -> bool {
+    unwritable_char(s, true)
+}
+
+fn unwritable_char(s: &str, tab_ok: bool) -> bool {
+    !s.bytes().all(|b| (0x20..0x7F).contains(&b) || b == b'\n')
+        && s.chars()
+            .any(|c| !(is_break(c) || is_printable(c) || (tab_ok && c == '\t')))
+}
+
 /// `s` as go-yaml's emitter writes a single-quoted scalar, quotes included: `'`
-/// is doubled and everything else is raw.
+/// is doubled and everything else is raw. A string with a character the emitter will not write
+/// raw ([`has_unwritable_char`]) is double-quoted instead, as yq re-emits a single-quoted source
+/// scalar that holds one (#4858).
 pub(crate) fn write_go_yaml_single_quoted<Out: core::fmt::Write>(
     out: &mut Out,
     s: &str,
 ) -> core::fmt::Result {
+    if has_unwritable_char(s) {
+        return write_go_yaml_double_quoted(out, s);
+    }
     out.write_char('\'')?;
     for c in s.chars() {
         if c == '\'' {
@@ -1138,6 +1166,27 @@ mod tests {
         ] {
             assert_eq!(go_yaml_string_style(s, false), None, "{s:?}");
         }
+    }
+
+    #[test]
+    fn single_quoted_writer_falls_back_to_double_quotes_for_an_unwritable_character_4858() {
+        let single = |s: &str| {
+            let mut out = String::new();
+            write_go_yaml_single_quoted(&mut out, s).unwrap();
+            out
+        };
+        assert_eq!(single("it's"), "'it''s'");
+        assert_eq!(single("x\u{e9}y"), "'x\u{e9}y'");
+        assert_eq!(single("x\u{7f}y"), "\"x\\x7Fy\"");
+        assert_eq!(single("x\ty"), "\"x\\ty\"");
+        assert_eq!(single("x\u{90}y"), "\"x\\x90y\"");
+        assert_eq!(single("\u{feff}x"), "\"\\uFEFF\\x78\"");
+        assert_eq!(single("x\u{1F600}"), "\"x\\U0001F600\"");
+        // A line break is the line-break rules' business, not this predicate's.
+        assert_eq!(single("x\u{2028}y"), "'x\u{2028}y'");
+        assert!(has_unwritable_char("a\tb") && !has_unwritable_char_in_block("a\tb"));
+        assert!(has_unwritable_char_in_block("a\u{7f}b"));
+        assert!(!has_unwritable_char("plain text\nsecond line"));
     }
 
     #[test]

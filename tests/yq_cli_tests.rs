@@ -14152,6 +14152,67 @@ fn test_yq_write_into_an_empty_flow_container_is_block_4849() -> Result<()> {
     Ok(())
 }
 
+/// #4858: a plain or single-quoted source scalar, a flow element, a key or a one-line block scalar
+/// holding a character go-yaml's emitter will not write raw (a tab in single quotes, DEL, a C1
+/// control, U+FEFF, a character outside the BMP) is re-emitted double-quoted with the emitter's
+/// escapes, as the DOM route and yq do. Expected text captured from yq v4.53.3 (the line-break
+/// characters U+0085/U+2028/U+2029 follow the line-break rules and are not covered here).
+#[test]
+fn test_yq_streaming_scalar_with_an_unwritable_character_is_double_quoted_4858() -> Result<()> {
+    for (yaml, expected) in [
+        ("a: x\u{7f}y\n", "a: \"x\\x7Fy\"\n"),
+        ("a: 'x\u{7f}y'\n", "a: \"x\\x7Fy\"\n"),
+        ("a: [x\u{7f}y]\n", "a: [\"x\\x7Fy\"]\n"),
+        ("a: ['x\u{7f}y']\n", "a: [\"x\\x7Fy\"]\n"),
+        ("x\u{7f}y: 1\n", "\"x\\x7Fy\": 1\n"),
+        ("'x\u{7f}y': 1\n", "\"x\\x7Fy\": 1\n"),
+        ("a: 'x\u{9}y'\n", "a: \"x\\ty\"\n"),
+        ("a: ['x\u{9}y']\n", "a: [\"x\\ty\"]\n"),
+        ("'x\u{9}y': 1\n", "\"x\\ty\": 1\n"),
+        ("a: x\u{90}y\n", "a: \"x\\x90y\"\n"),
+        ("a: 'x\u{90}y'\n", "a: \"x\\x90y\"\n"),
+        ("a: [x\u{90}y]\n", "a: [\"x\\x90y\"]\n"),
+        ("a: ['x\u{90}y']\n", "a: [\"x\\x90y\"]\n"),
+        ("x\u{90}y: 1\n", "\"x\\x90y\": 1\n"),
+        ("'x\u{90}y': 1\n", "\"x\\x90y\": 1\n"),
+        ("a: x\u{feff}y\n", "a: \"x\\uFEFFy\"\n"),
+        ("a: 'x\u{feff}y'\n", "a: \"x\\uFEFFy\"\n"),
+        ("a: [x\u{feff}y]\n", "a: [\"x\\uFEFFy\"]\n"),
+        ("a: ['x\u{feff}y']\n", "a: [\"x\\uFEFFy\"]\n"),
+        ("x\u{feff}y: 1\n", "\"x\\uFEFFy\": 1\n"),
+        ("'x\u{feff}y': 1\n", "\"x\\uFEFFy\": 1\n"),
+        ("a: x\u{1f600}y\n", "a: \"x\\U0001F600y\"\n"),
+        ("a: 'x\u{1f600}y'\n", "a: \"x\\U0001F600y\"\n"),
+        ("a: [x\u{1f600}y]\n", "a: [\"x\\U0001F600y\"]\n"),
+        ("a: ['x\u{1f600}y']\n", "a: [\"x\\U0001F600y\"]\n"),
+        ("x\u{1f600}y: 1\n", "\"x\\U0001F600y\": 1\n"),
+        ("'x\u{1f600}y': 1\n", "\"x\\U0001F600y\": 1\n"),
+        ("a: |-\n  x\u{7f}y\n", "a: \"x\\x7Fy\"\n"),
+        ("a: |-\n  x\u{feff}y\n", "a: \"x\\uFEFFy\"\n"),
+        ("a: |-\n  x\u{1f600}y\n", "a: \"x\\U0001F600y\"\n"),
+        ("a: |-\n  x\u{9}y\n", "a: |-\n  x\u{9}y\n"),
+    ] {
+        let (out, code) = run_yq_stdin(".", yaml, &[])?;
+        assert_eq!(code, 0, "{yaml:?}");
+        assert_eq!(out, expected, "streaming route for {yaml:?}");
+    }
+    // The same characters through other filters, a write (the DOM route), a forced style, a
+    // multi-line block scalar and a key.
+    for (yaml, filter, expected) in [
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".", "a: \"x\\x7Fy\"\nb: \"p\\tq\"\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".a", "x\u{7f}y\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".b = 1", "a: \"x\\x7Fy\"\nb: 1\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", ".b style=\"single\"", "a: \"x\\x7Fy\"\nb: \"p\\tq\"\n\"k\\x7F\": \"m\\x7Fn\\nz\"\nc: \"p\\x7Fq\\nr\\n\"\nd: [\"x\\uFEFFy\", \"z\\U0001F600\"]\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", "keys", "- a\n- b\n- \"k\\x7F\"\n- c\n- d\n"),
+        ("a: x\u{7f}y\nb: 'p\u{9}q'\n'k\u{7f}': |-\n  m\u{7f}n\n  z\nc: >\n  p\u{7f}q\n\n  r\nd: [x\u{feff}y, 'z\u{1f600}']\n", "to_entries | .[0]", "key: a\nvalue: \"x\\x7Fy\"\n"),
+    ] {
+        let (out, code) = run_yq_stdin(filter, yaml, &[])?;
+        assert_eq!(code, 0, "{filter}");
+        assert_eq!(out, expected, "{filter} over {yaml:?}");
+    }
+    Ok(())
+}
+
 // ============================================================================
 // line / column builtins (#532) — position-based navigation on the default
 // (cursor-preserving) YAML CLI path. Before this fix, `line`/`column`
