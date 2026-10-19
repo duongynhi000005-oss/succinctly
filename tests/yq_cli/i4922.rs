@@ -181,6 +181,21 @@ fn test_4922_del_vivifies_null_along_multi_valued_steps_and_computed_keys() -> R
         ),
         (r#"{"a":"s"}"#, r#"del(.a[]["k"])"#, r#"{"a":"s"}"#),
         (r#"{"a":1}"#, r#"del(.a["k"])"#, r#"{"a":1}"#),
+        (
+            r#"{"a":null}"#,
+            r"del(.. | .[(0,1)].x)",
+            r#"{"a":[null,null]}"#,
+        ),
+        (
+            r#"{"a":{"n":0,"q":null},"n":"x"}"#,
+            r#"del(.a | .q[.n]["k"])"#,
+            r#"{"a":{"n":0,"q":[{}]},"n":"x"}"#,
+        ),
+        (
+            r#"{"a":null,"n":"x"}"#,
+            r"del(.n | .[.n])",
+            r#"{"a":null,"n":"x"}"#,
+        ),
     ];
     for (doc, filter, want) in rows {
         let (out, code) = run_yq_stdin(filter, doc, &["-p", "json", "-o=json", "-I=0"])?;

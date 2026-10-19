@@ -3958,7 +3958,7 @@ something follows), `..`, a comma ahead of a bracket (`(.a,.b)["k"]`), a multi-k
 (`{"a":null} | del(.a[(0,1)]["k"])` is `{"a":[{},{}]}`), a computed key evaluated against the whole
 document (`{"a":null,"n":"x"} | del(.a[.n])` is `{"a":{},...}`, a number or an absent key makes an
 array), and a too-short array padded out to the position a later bracket vivifies
-(`{"a":[1,null]} | del(.a[5]["k"])`). Padding is kept only if something is vivified, so
+(`{"a":[1,null]} | del(.a[5]["k"])`). A computed key is read against the node the bracket's target started from (`.a[.n]` reads the document's `.n`, `.a | .[.n]` reads `.a`'s) and only when it is plain navigation and literals (a key with a builtin call, `range(..)` or `input` is not evaluated by the pre-pass). Under `..` a step that would make an array from a `null` is left alone, because the delete that follows walks `..` over what the pre-pass made (`{"a":null} | del(.. | .[(0,1)].x)` is `{"a":[null,null]}` in yq, whose `..` is lazy), and `..` goes 256 levels down. Padding is kept only if something is vivified, so
 `del(.a[2])` on a `null` stays `{"a":[]}`. Not vivified: a computed key that is itself absent or an
 array when the bracket is the *last* step (`{"a":null} | del(.a[.n])` is `{"a":[]}` in yq and an
 error here, as before), a slice (`del(.a[1:2]["k"])` is a no-op in yq and an error here), a bracket
