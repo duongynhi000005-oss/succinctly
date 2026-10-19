@@ -18,5 +18,6 @@
 //! - A test that belongs with a topical group already in `yq_cli_tests.rs` (a `mod ... {}`
 //!   block) may still go there, next to its siblings, but never at the end of the file.
 
+mod i1128;
 mod i1129;
 mod i4136;
