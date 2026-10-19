@@ -37900,6 +37900,75 @@ fn update_returns_its_input(e: &Expr) -> bool {
     }
 }
 
+/// Whether a `reduce` UPDATE is a chain of binds of an outer `$x` that ends in `.` (#4901): each a
+/// single pattern with literal keys, or a plain `$name`, and nothing else (no pipe: a pipe headed by
+/// `$x` ends on `$x`'s node, not the accumulator). The binds' steps are path-checked as jq's are, and
+/// the `.` they end on is the accumulator, which a `reduce` hands back whatever the register was moved
+/// to (the marker-source counterpart of [`update_returns_its_input`]'s bind of `.`).
+fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity => true,
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } => {
+            matches!(unwrap_paren(expr), Expr::TrackedVar(_))
+                && patterns.len() == 1
+                && !pattern_has_computed_key(&patterns[0])
+                && foreign_bind_chain_returning_dot(body)
+        }
+        Expr::As { expr, body, .. } => {
+            matches!(unwrap_paren(expr), Expr::TrackedVar(_))
+                && foreign_bind_chain_returning_dot(body)
+        }
+        _ => false,
+    }
+}
+
+/// Whether every bind of a `reduce` UPDATE is in tail position, so the `.` a bind's body ends on is
+/// the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
+/// the final emission is judged on the accumulator's provenance. The spine is paren, pipe (any
+/// stage but the last holds no bind) and the body of a single-pattern bind with literal keys, or a
+/// plain `$name` one. A bind anywhere else (under a comma, `try`, `if`, `//`, a call or a fold)
+/// may feed a later step, which does check it.
+fn update_binds_only_in_tail(e: &Expr) -> bool {
+    fn bind_free(e: &Expr) -> bool {
+        !any_subexpr(e, &mut |inner| {
+            matches!(
+                inner,
+                Expr::As { .. }
+                    | Expr::AsPattern { .. }
+                    | Expr::Reduce { .. }
+                    | Expr::Foreach { .. }
+                    | Expr::FuncDef { .. }
+                    | Expr::FuncCall { .. }
+                    | Expr::DefCall { .. }
+                    | Expr::NamespacedCall { .. }
+                    | Expr::Label { .. }
+            )
+        })
+    }
+    match unwrap_paren(e) {
+        Expr::Pipe(stages) => match stages.split_last() {
+            Some((last, head)) => head.iter().all(bind_free) && update_binds_only_in_tail(last),
+            None => true,
+        },
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } => {
+            bind_free(expr)
+                && patterns.len() == 1
+                && !pattern_has_computed_key(&patterns[0])
+                && update_binds_only_in_tail(body)
+        }
+        Expr::As { expr, body, .. } => bind_free(expr) && update_binds_only_in_tail(body),
+        other => bind_free(other),
+    }
+}
+
 /// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one loop
 /// pattern, or for a `reduce` a `?//` chain the resolver may retry past a guessed refusal
 /// ([`reduce_alternative_is_immaterial`], #4506; any other chain leaves `null` when an alternative's
@@ -50615,6 +50684,38 @@ fn fans_out(expr: &Expr) -> bool {
     fans_out_with(expr, true)
 }
 
+/// Whether `expr` is a chain of binds that each run once (#4901): a bind of `.`, an outer `$x` or a
+/// `$var` to a single pattern with literal keys (or a bare `$name`), ending in a body that does not
+/// fan out itself. [`fans_out`] counts every destructuring bind, because a computed key, a `?//` chain
+/// or a comma source forks the walk into siblings that may see the register unevenly (#3145). None of
+/// those is here: the chain is one sequence of path-checked steps on the carried register, the shape
+/// a pipe of the same stages already is (a pipe is skipped by `fans_out`), so a body that is one
+/// refuses and answers exactly where the pipe does.
+fn is_single_output_bind(expr: &Expr) -> bool {
+    let plain_source = |source: &Expr| {
+        matches!(
+            unwrap_paren(source),
+            Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
+        )
+    };
+    match unwrap_paren(expr) {
+        Expr::AsPattern {
+            expr: source,
+            patterns,
+            body,
+        } => {
+            plain_source(source)
+                && patterns.len() == 1
+                && !pattern_has_computed_key(&patterns[0])
+                && (is_single_output_bind(body) || !fans_out(body))
+        }
+        Expr::As {
+            expr: source, body, ..
+        } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
+        _ => false,
+    }
+}
+
 /// [`fans_out`] with `patterns_fan_out` saying whether a destructuring `as` counts.
 ///
 /// #4354: `isempty(g)` hands every answer to its consumer itself, each at the register the
@@ -51589,7 +51690,13 @@ impl FoldRegister {
             // register still resolves register-less here.
             // #4499, #4779: `fans_out` skips a marker-mentioning fold only when it is marked as
             // reading the register ([`is_register_fold`]).
-            let carries = S::TAG == EvalTag::Jq && self.trackable && !tr && !fans_out(expr);
+            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE that marked it
+            // ([`fold_body::state_handed_on_here`]), which is one sequence of path-checked steps.
+            let carries = S::TAG == EvalTag::Jq
+                && self.trackable
+                && !tr
+                && (!fans_out(expr)
+                    || (fold_body::state_handed_on_here() && is_single_output_bind(expr)));
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)
@@ -58940,7 +59047,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
                                 || fold_body::fresh_source_here()
-                                || fold_body::emissions_discarded_here())
+                                || fold_body::emissions_discarded_here()
+                                || fold_body::state_handed_on_here())
                             && !seed.trackable
                             && body_performs_no_step(&substituted)
                         {
@@ -61654,6 +61762,22 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     let carries_dot = S::TAG == EvalTag::Jq
         && cannot_move_register(input)
         && matches!(unwrap_paren(init), Expr::Identity);
+    // #4901: an outermost `reduce` whose UPDATE reads a `$x` bound outside it, behind single-pattern
+    // binds. jq stores the UPDATE's output without a path check, and judges the final emission on the
+    // accumulator's provenance, so:
+    // - when every bind sits in tail position the `.` they end on is left unchecked
+    //   ([`update_binds_only_in_tail`]), whatever the source did to the register;
+    // - when the UPDATE is destructures of `$x` that end in `.` itself (no pipe in front: a pipe headed by
+    //   `$x` ends on `$x`'s node, not the accumulator) it also hands the accumulator back
+    //   ([`foreign_bind_chain_returning_dot`]), so its standing carries to the next step.
+    let foreign_bind_update = S::TAG == EvalTag::Jq
+        && update_reads_foreign_marker
+        && fold_body::depth() == 0
+        && patterns_all_bare(patterns);
+    let update_tail_unchecked = foreign_bind_update && update_binds_only_in_tail(update);
+    let update_hands_state_on = foreign_bind_update
+        && cannot_move_register(init)
+        && foreign_bind_chain_returning_dot(update);
     let try_update_on_register =
         first_step_on_register && matches!(unwrap_paren(update), Expr::Try { .. });
     // #4484: an UPDATE that is itself a `foreach` runs its INIT and SOURCE with `.` on the
@@ -62021,6 +62145,10 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && update_at_register
                             && live_step_reg.is_none())
                         .then(fold_body::acc_is_register);
+                        // #4901: ...and an UPDATE of foreign-`$x` destructures ending in `.` hands the
+                        // accumulator on, whether or not the source moved the register off it.
+                        let _state_handed_on =
+                            update_tail_unchecked.then(fold_body::state_handed_on);
                         // #4550: the converse -- an accumulator the walk does not place at the
                         // register (a computed container, not INIT `.`) is off it, so a pattern
                         // step on it is refused by `path_intact` whatever the register is.
@@ -62118,7 +62246,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 let input_at_register = acc_at_register;
                                 (acc_at_register, acc_snapshot) =
                                     reg.fold_branch_provenance::<S>(last.as_ref(), frame, slice_ok);
-                                if (keeps_accumulator || alt_chain_keeps_accumulator)
+                                if (keeps_accumulator
+                                    || alt_chain_keeps_accumulator
+                                    || update_hands_state_on)
                                     && last.is_some()
                                 {
                                     acc_at_register = acc_at_register || input_at_register;
@@ -72297,6 +72427,9 @@ mod fold_body {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known to be jq's register (#3953), 0 for none.
         static ACC_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth whose UPDATE hands the accumulator on untouched behind destructures of a
+        /// foreign `$x` (#4901), 0 for none.
+        static HANDED_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known NOT to be jq's register (#4550), 0 for none.
         static OFF_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
@@ -72558,6 +72691,32 @@ mod fold_body {
     /// Whether the body being resolved is the one [`acc_is_register`] marked.
     pub(crate) fn acc_is_register_here() -> bool {
         depth() > 0 && ACC_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`state_handed_on`] mark.
+    pub(crate) struct HandedGuard(u32);
+
+    /// Marks the body about to be entered (one level deeper than now) as a `reduce` UPDATE that is a
+    /// chain of single-pattern destructures of an outer `$x` ending in `.` (#4901,
+    /// [`foreign_bind_chain_returning_dot`]). The `.` it ends on is the accumulator handed on
+    /// unchanged: jq backtracks the UPDATE, so no step checks it and the final emission is judged on
+    /// the accumulator's provenance, whatever the destructures moved the register to. Unlike
+    /// [`acc_is_register`] it does not say `.` is the register, which a moving source made untrue.
+    pub(crate) fn state_handed_on() -> HandedGuard {
+        let previous = HANDED_DEPTH.with(Cell::get);
+        HANDED_DEPTH.with(|a| a.set(depth() + 1));
+        HandedGuard(previous)
+    }
+
+    impl Drop for HandedGuard {
+        fn drop(&mut self) {
+            HANDED_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`state_handed_on`] marked.
+    pub(crate) fn state_handed_on_here() -> bool {
+        depth() > 0 && HANDED_DEPTH.with(Cell::get) == depth()
     }
 
     /// Restores the previous [`acc_off_register`] mark.
@@ -72824,6 +72983,16 @@ mod fold_body {
     }
 
     pub(crate) fn acc_is_register_here() -> bool {
+        false
+    }
+
+    pub(crate) struct HandedGuard;
+
+    pub(crate) fn state_handed_on() -> HandedGuard {
+        HandedGuard
+    }
+
+    pub(crate) fn state_handed_on_here() -> bool {
         false
     }
 
