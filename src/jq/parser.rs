@@ -348,6 +348,30 @@ pub(crate) fn join_expr_arity(expr: &Expr) -> Option<usize> {
     }
 }
 
+/// One backslash escape of a yq string literal, `c` being the character after the backslash (#4916).
+///
+/// Real yq's lexer decodes `\n \t \r \b \f \a \v \" \\` and keeps every other backslash sequence
+/// as written, the backslash included: `"\d"` is the two characters `\d`, which is what lets
+/// `test("\d+")` reach the regex engine, and `"\u0041"` is six characters, not `A` (live against
+/// the pinned v4.53.3). jq decodes `\u` and `\/` and rejects the rest.
+fn push_yq_string_escape(out: &mut String, c: char) {
+    match c {
+        'n' => out.push('\n'),
+        'r' => out.push('\r'),
+        't' => out.push('\t'),
+        'b' => out.push('\x08'),
+        'f' => out.push('\x0C'),
+        'a' => out.push('\x07'),
+        'v' => out.push('\x0B'),
+        '"' => out.push('"'),
+        '\\' => out.push('\\'),
+        other => {
+            out.push('\\');
+            out.push(other);
+        }
+    }
+}
+
 /// Whether `c` can be part of an unquoted path element in yq's lexer (#4237).
 ///
 /// yq's `PathElement` token is `\.[^ ;\}\{\:\[\],\|\.\[\(\)=\n!]+\??`
@@ -1658,6 +1682,14 @@ impl<'a> Parser<'a> {
                 }
                 Some('\\') => {
                     self.next();
+                    // #4916: yq reads a short list of escapes and keeps any other backslash as text.
+                    if self.mode == ParserMode::Yq {
+                        if let Some(c) = self.peek().filter(|&c| c != '(') {
+                            self.next();
+                            push_yq_string_escape(&mut current_literal, c);
+                            continue;
+                        }
+                    }
                     match self.peek() {
                         // String interpolation: \(expr)
                         Some('(') => {
@@ -1778,6 +1810,14 @@ impl<'a> Parser<'a> {
                 }
                 Some('\\') => {
                     self.next();
+                    // #4916: see `parse_string_or_interpolation`.
+                    if self.mode == ParserMode::Yq {
+                        if let Some(c) = self.peek() {
+                            self.next();
+                            push_yq_string_escape(&mut result, c);
+                            continue;
+                        }
+                    }
                     match self.peek() {
                         Some('"') => {
                             self.next();
