@@ -874,6 +874,26 @@ pub(crate) fn owned_value_to_yaml_format(value: &OwnedValue) -> String {
     out
 }
 
+/// The string yq's `tostring` makes of a container (#1130): the YAML the CLI would print for
+/// it, with the one trailing line break chomped. Block style, or flow (`[1, 2]`, `{a: 1}`) for
+/// a container whose source node was written in flow style.
+///
+/// Both renderings are [`stream_owned_value_yaml`], the CLI's own writer, so `tostring` cannot
+/// drift from the output the way a copy would. Only the *top* node's style is known (an
+/// [`OwnedValue`] carries no per-node style, #739, #865): a block container holding a flow one
+/// prints the inner one in block, where yq keeps its flow.
+pub(crate) fn owned_container_to_yaml_string(value: &OwnedValue, flow: bool) -> String {
+    let mut out = String::new();
+    let written = if flow {
+        stream_owned_value_yaml(value, &mut out, "", 0, ' ', false)
+    } else {
+        stream_owned_value_yaml(value, &mut out, "", 2, ' ', false)
+    };
+    // Writing to a `String` cannot fail.
+    written.expect("writing to a String cannot fail");
+    out
+}
+
 /// Panics past [`MAX_VALUE_TREE_DEPTH`](super::value::MAX_VALUE_TREE_DEPTH)
 /// levels of nesting (#1021, following #1005's precedent).
 fn stream_owned_value_yaml_at_depth<W: core::fmt::Write>(
