@@ -2741,9 +2741,13 @@ is the revert that established what the other one costs.
    refuses what jq answers), and a destructure behind an `empty`, a `select(false)`, a `limit(0; ..)` or an `if`
    (`may_skip_or_branch`), which may never run or hand a value on. On the `--deep` grid, `fe3-fe-src` wrong accepts go
    from 4,101 to 236 and `rd3-fe-src` from 1,617 to 236, with no match lost outside the nine rows above. What is left
-   of the `--deep` grid's wrong accepts (about 100 `bare-catch-error-*` rows per outer fold, the conditional and
+   of the `--deep` grid's wrong accepts (the conditional and
    empty-body destructures above, and the `?//` chains) is the same family as the two-fold residual and stays open;
    `--deep` is therefore still judged against `--base` and is not a gate.
+   A `reduce` source `try error(FRESH) catch (. as PATTERN | ..)` (or `FRESH | error`) runs its handler on a freshly built payload, so the
+   pattern's step raises as jq's does and the source is routed to the resolver ([#4877](https://github.com/rust-works/succinctly/issues/4877),
+   `raises_a_fresh_payload`, pinned by `test_reduce_source_caught_error_payload_destructure_4877`); that closed all 168 wrong accepts the
+   `fe-lit` and `fe-nava` outers had, with no match lost.
    `scripts/jq-fold-body-register-grid-sweep.py` is the gate for the whole family (`--deep` adds the three-fold nests of
    [#4648](https://github.com/rust-works/succinctly/issues/4648), judged against a `main` build; `--dump FILE` writes every
    row's class for a gain/loss breakdown by source). Outside a fold body, a bound expression

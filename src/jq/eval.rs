@@ -54393,31 +54393,31 @@ impl<'e> RegisterSpine<'e> {
             // (`is_fold_source_destructuring` looks inside it). Only the question "does it destructure
             // a fresh value" is asked, and only by the `fresh_only` walk: the register walks read a
             // `try` as opaque (the retry rules of #4575/#4585).
-            // #4877: ...and the handler of a `try error(FRESH) catch H` runs on that fresh payload, which
-            // is no node of the register: a destructure of `.` there raises its own error, uncaught.
-            Expr::Try {
-                expr,
-                catch: Some(handler),
-            } if self.fresh_only
-                && matches!(unwrap_paren(expr), Expr::Error(Some(payload))
-                    if yields_exactly_one_value(payload)
-                        && yields_only_fresh_values(payload, self.known)) =>
-            {
-                let entry = self.dot_fresh;
-                self.dot_fresh = true;
-                let reach = self.reach(handler);
-                self.dot_fresh = entry;
-                match reach {
-                    Reach::Destructures => Reach::Destructures,
+            Expr::Try { expr, catch } if self.fresh_only => {
+                if self.reach(expr) == Reach::Destructures {
+                    return Reach::Destructures;
+                }
+                // #4877: the handler of a `try error(FRESH) catch H` runs on that fresh payload, which is
+                // no node of the register: a destructure of `.` there raises its own error, uncaught.
+                // The payload is generated before anything can cut it short.
+                match catch {
+                    Some(handler) if raises_a_fresh_payload(expr, self.known) => {
+                        let entry = (self.dot_fresh, self.fresh_cut_free);
+                        (self.dot_fresh, self.fresh_cut_free) = (true, true);
+                        let reach = self.reach(handler);
+                        (self.dot_fresh, self.fresh_cut_free) = entry;
+                        match reach {
+                            Reach::Destructures => Reach::Destructures,
+                            _ => Reach::Opaque,
+                        }
+                    }
                     _ => Reach::Opaque,
                 }
             }
-            Expr::Try { expr, .. } | Expr::Optional(expr) if self.fresh_only => {
-                match self.reach(expr) {
-                    Reach::Destructures => Reach::Destructures,
-                    _ => Reach::Opaque,
-                }
-            }
+            Expr::Optional(expr) if self.fresh_only => match self.reach(expr) {
+                Reach::Destructures => Reach::Destructures,
+                _ => Reach::Opaque,
+            },
             // #4278: a variable the spine bound to the register hands it on as `.` does.
             Expr::Var(name) if !self.fresh_only && self.holds_register(name) => Reach::HandsOn,
             // #4756: on a `null` register a `null` literal is `jv_identical` to it by kind, and so is a
@@ -55405,6 +55405,24 @@ impl NotRegister {
             false_: !matches!(ambient.value, OwnedValue::Bool(false)),
             at_null: matches!(ambient.value, OwnedValue::Null),
         }
+    }
+}
+
+/// Whether `body` certainly raises one freshly built payload (#4877): `error(FRESH)`, or `FRESH | error` for a
+/// `FRESH` that yields one value ([`yields_only_fresh_values`]). The handler of a `try` around it runs on that
+/// payload, which is no node of jq's register. Not `error` alone (its payload is `.`, the register) nor a payload
+/// that may be the register (`null` or a boolean of the register's kind, see `known`).
+fn raises_a_fresh_payload(body: &Expr, known: NotRegister) -> bool {
+    let fresh = |payload: &Expr| {
+        yields_exactly_one_value(payload) && yields_only_fresh_values(payload, known)
+    };
+    match unwrap_paren(body) {
+        Expr::Error(Some(payload)) => fresh(payload),
+        Expr::Pipe(stages) => match stages.as_slice() {
+            [payload, last] => matches!(unwrap_paren(last), Expr::Error(None)) && fresh(payload),
+            _ => false,
+        },
+        _ => false,
     }
 }
 

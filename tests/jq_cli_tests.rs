@@ -167736,6 +167736,37 @@ fn test_reduce_source_caught_error_payload_destructure_4877() -> Result<()> {
             OBJ_B,
             5,
         ),
+        // the pipe spelling of the same raise, `null` as the payload on a document that is not `null` (a fresh
+        // value there), and a handler that destructures behind `isempty`
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try ({a:1} | error) catch (. as {b:$b} | .)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try error(null) catch (. as {b:$b} | .)) as $y (.; .))",
+            "",
+            r#"Invalid path expression near attempt to access element "b" of null"#,
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce (try error({a:1}) catch isempty(. as {b:$b} | .)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        // a `foreach` source of the same shape was already routed
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
         // an outer `try` still catches the raise
         (
             r#"{"a":1}"#,
