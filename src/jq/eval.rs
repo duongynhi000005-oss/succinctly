@@ -37283,8 +37283,8 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
-    // An `empty` spelled out: `select` of a literal `false`/`null`, `first` of such an expression, or a
-    // `limit` of a literal count that is `0` (it never runs its body) or whose body is such an expression.
+    // An `empty` spelled out: `select` of a constant that is never truthy, `first` of such an expression, or
+    // a `limit` of a constant count that is `0` (it never runs its body) or whose body is such an expression.
     fn emits_nothing(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Builtin(Builtin::Empty) => true,
@@ -53261,8 +53261,9 @@ fn constant_number(e: &Expr) -> Option<f64> {
             match op {
                 ArithOp::Add => Some(left + right),
                 ArithOp::Sub => Some(left - right),
-                ArithOp::Mul(_) => Some(left * right),
-                ArithOp::Div | ArithOp::Mod => None,
+                // yq's merge flags (`*+`, `*?`, ..) are not plain multiplication.
+                ArithOp::Mul(flags) if *flags == MergeFlags::default() => Some(left * right),
+                ArithOp::Mul(_) | ArithOp::Div | ArithOp::Mod => None,
             }
         }
         _ => None,
@@ -55873,7 +55874,9 @@ fn is_constant_construction(e: &Expr) -> bool {
 }
 
 /// Whether `e` is a constant that yields no truthy output: `null`, `false`, `empty`, or a
-/// constant run through `not` (`false | not | not`).
+/// constant run through `not` (`false | not | not`). Every arm is a constant that cannot raise, which
+/// [`update_is_single_bind_returning_input`] relies on to read `select` of one as an `empty`; widen it
+/// only to shapes that cannot raise either.
 fn never_truthy(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Literal(Literal::Null | Literal::Bool(false)) => true,
