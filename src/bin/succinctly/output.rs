@@ -722,7 +722,11 @@ fn format_json_impl(value: &OwnedValue, opts: &JsonFormatOpts, level: usize) -> 
                         // preservation regardless of finiteness (confirmed live:
                         // a genuine document `1e999` literal echoes verbatim in
                         // real yq too).
-                        _ => literal.to_string(),
+                        // #1129: but an integer past `i64` is encoded as the
+                        // double yq parsed, where its text is what `tostring`
+                        // and YAML output echo.
+                        _ => succinctly::yaml::overflowed_int_json_text(literal)
+                            .unwrap_or_else(|| literal.to_string()),
                     },
                     // jq's default: `format_number_jq_compat`'s reformatting,
                     // which itself already reformats a non-finite literal's

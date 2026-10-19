@@ -13574,21 +13574,18 @@ fn test_yq_tostring_computed_nan_uses_yaml_spelling_1060() -> Result<()> {
     Ok(())
 }
 
-/// #2419, narrowed by #2438: real yq v4.53.3 preserves a float scalar's
-/// source spelling everywhere, including through `tostring`. succinctly's
-/// value route used to re-spell *every* such scalar through the shortest
-/// `f64` rendering (`1e+19`, `1e+20`); #2438's
-/// `OwnedValue::from_document_float` now bakes the decimal spelling in at
-/// the document boundary instead, which closes the `.0`-suffixed case
-/// outright and leaves only the integer-shaped one divergent (`...0.0`
-/// against real yq's bare `...0`). See "An integer-shaped
-/// overflow float gains a trailing `.0` on the value route (#2419)" in
-/// [`docs/compliance/yq/limitations.md`](../docs/compliance/yq/limitations.md).
+/// #2419, narrowed by #2438 and closed by #1129: real yq v4.53.3 preserves a float
+/// scalar's source spelling everywhere, including through `tostring`. succinctly's
+/// value route used to re-spell *every* such scalar through the shortest `f64`
+/// rendering (`1e+19`, `1e+20`); #2438's `OwnedValue::from_document_float` baked the
+/// decimal spelling in at the document boundary instead, which closed the
+/// `.0`-suffixed case and left the integer-shaped one answering `...0.0` against real
+/// yq's bare `...0`. #1129 keeps that scalar's digits as its literal text and has the
+/// JSON writers print the rounded double, so all five rows now agree.
 ///
 /// The value route and the path-context bridge route (`| parent | .big |
-/// tostring`) now agree with each other on all five rows, where they used to
-/// print three different spellings between them. Every expectation here was
-/// captured live from the pinned binaries:
+/// tostring`) agree with each other and with yq on every row. Every expectation here
+/// was captured live from the pinned binaries:
 ///
 /// ```console
 /// $ printf 'outer:\n  big: 10000000000000000000.0\n' | yq -r '.outer.big | tostring'
@@ -13602,7 +13599,8 @@ fn test_yq_float_value_route_respelling_2419() -> Result<()> {
     // (`is_preservable_float_literal` keeps their source text); the fourth is
     // #2438's own fix -- 20 significant digits exceed that predicate's cap,
     // so it reaches `OwnedValue` with no literal left and used to answer
-    // `1e+19`.
+    // `1e+19`. The fifth, an integer-shaped overflow scalar with no decimal point
+    // of its own, answered `100000000000000000000.0` until #1129.
     let agreed = [
         ("outer:\n  big: 1.50\n", "1.50"),
         ("outer:\n  big: 1e3\n", "1e3"),
@@ -13611,18 +13609,13 @@ fn test_yq_float_value_route_respelling_2419() -> Result<()> {
             "outer:\n  big: 10000000000000000000.0\n",
             "10000000000000000000.0",
         ),
+        (
+            "outer:\n  big: 100000000000000000000\n",
+            "100000000000000000000",
+        ),
     ];
-    // Still divergent: an integer-shaped overflow scalar has no decimal
-    // point of its own to keep, and the spelling #2438 bakes in is the one
-    // real yq itself uses on `-o json` for the same value
-    // (`100000000000000000000.0`), so the `.0` real yq drops on YAML-side
-    // `tostring` cannot come back off here.
-    let divergent = [(
-        "outer:\n  big: 100000000000000000000\n",
-        "100000000000000000000.0",
-    )];
 
-    for (input, want) in agreed.iter().chain(divergent.iter()) {
+    for (input, want) in &agreed {
         // Value route.
         let (stdout, code) = run_yq_stdin(".outer.big | tostring", input, &["-r"])?;
         assert_eq!(code, 0, "for {input:?}: {stdout:?}");

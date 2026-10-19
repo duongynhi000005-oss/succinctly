@@ -1174,7 +1174,7 @@ fn yaml_scalar_in_one_resolve<W: AsRef<[u64]> + Clone>(
             if !s.is_unquoted() {
                 return Some(OwnedValue::String(text.into_owned().into()));
             }
-            Some(s.resolve_plain_scalar(&text).to_owned_value(text))
+            Some(s.resolve_plain_scalar(&text).to_owned_value_plain(text))
         }
         _ => None,
     }

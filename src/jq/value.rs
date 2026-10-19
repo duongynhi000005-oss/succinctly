@@ -4118,7 +4118,7 @@ impl OwnedValue {
     pub(crate) fn to_json_yq(&self) -> String {
         self.to_json_at_depth(
             0,
-            crate::jq::stream::real_output_finite_literal,
+            crate::jq::stream::yq_json_finite_literal,
             crate::yaml::format_float_yq,
             yq_infinite_float_json_text,
             printed_nan,

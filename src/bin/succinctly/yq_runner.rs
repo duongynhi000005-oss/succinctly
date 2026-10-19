@@ -6651,6 +6651,19 @@ fn output_value<W: Write>(
             write_terminator(writer, config)?;
             return Ok(());
         }
+        // #1129: `-r` writes a scalar's own text, not its JSON encoding, so an
+        // integer too big for `i64` prints its digits (`-r -o=json '.a'` is
+        // `99999999999999999999`) where the JSON writer would round it.
+        if config.output_format == OutputFormat::Json {
+            if let OwnedValue::NumberLiteral(_, literal) = value {
+                if succinctly::yaml::overflowed_int_json_text(literal).is_some() {
+                    write_pending_separator(writer, separator, terminator_from_config(config))?;
+                    write!(writer, "{literal}")?;
+                    write_terminator(writer, config)?;
+                    return Ok(());
+                }
+            }
+        }
     }
 
     // For YAML output format (default)

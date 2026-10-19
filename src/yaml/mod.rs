@@ -291,6 +291,8 @@ pub use light::{
     YamlCursor, YamlElements, YamlField, YamlFields, YamlNumber, YamlString, YamlValue,
 };
 pub use locate::{locate_offset, locate_offset_detailed, LocateResult};
+#[doc(hidden)]
+pub use scalar::overflowed_int_json_text;
 pub(crate) use scalar::whole_float_as_int;
 pub use scalar::{resolve_plain, resolve_plain_sourced, resolve_tagged, ResolvedScalar};
 
