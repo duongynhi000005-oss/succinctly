@@ -61,9 +61,30 @@ fn test_4206_to_json_indent_must_be_a_literal() -> Result<()> {
         "{\"a\":1}|to_yaml(1.5)",
         "{\"a\":1}|to_json(\"x\")",
         "{\"a\":1} | to_json (2)",
+        "{\"a\":1} | to_json( 2 )",
+        "{\"a\":1} | to_json(0x2)",
     ] {
         let (out, code) = run_yq_stdin(filter, "null", &["-n", "-o=json", "-I=0"])?;
         assert_ne!(code, 0, "filter {filter:?} should be rejected: {out:?}");
     }
+    Ok(())
+}
+
+/// #4206: an indent past the cap is refused up front (yq would try to build it): `to_json(4000000000)`
+/// must be a parse error, not an allocation.
+#[test]
+fn test_4206_to_json_indent_is_capped() -> Result<()> {
+    for filter in [
+        "to_json(100001)",
+        "to_yaml(4000000000)",
+        "to_json(99999999999999999999999)",
+    ] {
+        let (out, code) = run_yq_stdin(filter, "null", &["-n", "-o=json", "-I=0"])?;
+        assert_ne!(code, 0, "filter {filter:?} should be refused: {out:?}");
+    }
+    // The cap itself still works.
+    let (out, code) = run_yq_stdin("[1] | to_json(100000) | length", "null", &["-n"])?;
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "100006");
     Ok(())
 }

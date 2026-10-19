@@ -690,6 +690,10 @@ pub(crate) fn floor_char_boundary(s: &str, mut idx: usize, floor: usize) -> usiz
     idx
 }
 
+/// The largest literal indent `to_json(N)` / `to_yaml(N)` accepts (#4206). Nothing real indents
+/// by more than a few; the cap keeps `to_json(4000000000)` from becoming an allocation per level.
+const MAX_TO_TEXT_INDENT: usize = 100_000;
+
 /// Parser state.
 struct Parser<'a> {
     input: &'a str,
@@ -3372,7 +3376,10 @@ impl<'a> Parser<'a> {
                         Self::parse_collect_expr,
                     )
                 } else if self.mode == ParserMode::Yq
-                    && (self.matches_keyword("to_json") || self.matches_keyword("to_yaml"))
+                    && ((self.matches_keyword("to_json")
+                        && !self.shadowable_defs.contains("to_json"))
+                        || (self.matches_keyword("to_yaml")
+                            && !self.shadowable_defs.contains("to_yaml")))
                 {
                     // #4206: yq's `to_json` / `to_yaml`, each with an optional literal indent.
                     self.parse_yq_to_text_operator()
@@ -3946,13 +3953,12 @@ impl<'a> Parser<'a> {
         // parenthesised `2`, and rejects it.
         let indent = if self.peek() == Some('(') {
             self.next();
-            self.skip_ws();
+            // No whitespace inside the parentheses either: `to_json( 2 )` is `bad expression`.
             let digits_start = self.pos;
             while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.next();
             }
             let digits = &self.input[digits_start..self.pos];
-            self.skip_ws();
             let bad = || {
                 ParseError::new(
                     "bad expression, please check expression syntax".to_string(),
@@ -3963,7 +3969,16 @@ impl<'a> Parser<'a> {
                 return Err(bad());
             }
             self.next();
-            Some(digits.parse::<usize>().map_err(|_| bad())?)
+            let n = digits.parse::<usize>().map_err(|_| bad())?;
+            // An indent is written once per nesting level; an absurd one is an allocation, not a
+            // request (yq itself would exhaust memory on it).
+            if n > MAX_TO_TEXT_INDENT {
+                return Err(ParseError::new(
+                    format!("the indent {n} is past the limit of {MAX_TO_TEXT_INDENT}"),
+                    digits_start,
+                ));
+            }
+            Some(n)
         } else {
             None
         };
