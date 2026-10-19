@@ -293,7 +293,7 @@ pub(crate) fn stream_owned_value_json<W: core::fmt::Write>(
         format_float_with_fraction,
         real_output_infinite_float,
         real_output_infinite_literal,
-        real_output_finite_literal,
+        yq_json_finite_literal,
     )
 }
 
@@ -306,6 +306,20 @@ pub(crate) fn stream_owned_value_json<W: core::fmt::Write>(
 /// `Box<str>`), so the lossy path here is unreachable in practice.
 pub(crate) fn real_output_finite_literal(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
+}
+
+/// [`real_output_finite_literal`] for a place yq writes *JSON* (#1129).
+///
+/// Identical except for one literal: an integer too big for `i64`
+/// (`99999999999999999999`) keeps its digits wherever yq echoes a scalar's text
+/// (`tostring`, YAML output) but is encoded as the double it parsed
+/// (`100000000000000000000.0`) by its JSON encoder, which is the spelling the
+/// bare `Float` printed before the digits were kept.
+pub(crate) fn yq_json_finite_literal(raw: &[u8]) -> String {
+    core::str::from_utf8(raw)
+        .ok()
+        .and_then(crate::yaml::overflowed_int_json_text)
+        .unwrap_or_else(|| real_output_finite_literal(raw))
 }
 
 /// The `yq`/real-output convention for an infinite `Float` (NaN is handled

@@ -30,8 +30,9 @@ use super::encode_style::{
 use super::index::YamlIndex;
 use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
 use super::scalar::{
-    could_be_null_or_bool, is_preservable_float_literal, preservable_float_literal_text,
-    resolve_plain, resolve_plain_sourced, resolve_tagged, whole_float_as_int, ResolvedScalar,
+    could_be_null_or_bool, is_overflowed_int_literal, is_preservable_float_literal,
+    preservable_float_literal_text, resolve_plain, resolve_plain_sourced, resolve_tagged,
+    whole_float_as_int, ResolvedScalar,
 };
 use super::{starts_inline_seq_entry, starts_seq_entry};
 
@@ -8237,11 +8238,12 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
     /// their text. See `is_preservable_float_literal`'s doc comment for
     /// why a `Float` needs more than just finiteness gating: an earlier
     /// version of this override fired for every finite float unconditionally,
-    /// which broke `tag` on a bare `.5` (invalid JSON number syntax) and
-    /// silently overstated precision on an `i64`-overflow integer that only
-    /// resolves to `Float` as a fallback. Anything that predicate rejects
-    /// falls through to `as_f64` below instead, unchanged from before this
-    /// override existed.
+    /// which broke `tag` on a bare `.5` (invalid JSON number syntax).
+    /// An integer too big for `i64` is the one exception to "needs a `.` or
+    /// an exponent": yq keeps its digits, so they are the literal too
+    /// (#1129, `is_overflowed_int_literal`). Anything else that predicate
+    /// rejects falls through to `as_f64` below instead, unchanged from before
+    /// this override existed.
     ///
     /// Without this override, `to_owned`'s short-circuiting chain
     /// (`number_literal` -> `as_i64` -> `as_f64`) skips straight to
@@ -8259,6 +8261,13 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
                 let str_val = s.as_str().ok()?;
                 match s.resolve_plain_scalar(&str_val) {
                     ResolvedScalar::Float(_) if is_preservable_float_literal(&str_val) => {
+                        Some(str_val)
+                    }
+                    // #1129: an integer past `i64` is still the text the
+                    // document spelled; see `is_overflowed_int_literal`.
+                    ResolvedScalar::Float(f)
+                        if f.is_finite() && is_overflowed_int_literal(&str_val) =>
+                    {
                         Some(str_val)
                     }
                     ResolvedScalar::Float(_) => {
