@@ -4191,29 +4191,33 @@ got 0 instead` for it wherever the slice is read or written (`.b[select(false):]
 v4.53.3). A bound with two or more values raises the same error with its count (#2056, above).
 jq mode keeps its own rule (an empty bound is "no slice").
 
-### An integer past `i64` echoes its digits only for a plain `[-]digits` spelling (#1129)
+### An integer past `i64` echoes its digits; an explicit `!!float` tag is not printed on a nested one (#1129, #4921)
 
 Real yq keeps a scalar's text as its value, so `a: 99999999999999999999` answers
 `99999999999999999999` through `tostring`, string interpolation, `join`, `length` and a YAML
 re-emit, while its JSON encoder prints the double it parsed (`100000000000000000000.0`).
-`succinctly yq` matches both since #1129 for a bare decimal integer, signed with `-` or not.
-Three spellings still take the older rounded path and print the double where yq echoes the text,
-because the digits ride in a `NumberLiteral` whose text the reindex bridge parses as JSON, and
-none of the three is JSON number text (#954 records the same constraint for `+1.0` and `1.`):
+`succinctly yq` matches both for every spelling of the integer: signed with `-` or `+`, with
+leading zeros (`0099999999999999999999`), and forced by a tag (`!!float 99999999999999999999`):
 
 ```bash
 $ printf 'a: +99999999999999999999\n' | yq '.a | tostring'
 +99999999999999999999
 $ printf 'a: +99999999999999999999\n' | succinctly yq '.a | tostring'
-100000000000000000000.0
++99999999999999999999
 ```
 
-- a `+`-signed run (`+99999999999999999999`),
-- a run with a leading zero (`0099999999999999999999`), and
-- an explicitly tagged `!!float 99999999999999999999`, which goes through the tag-resolution path
-  (it keeps its `!!float` tag when emitted nested, which a literal's text would drop).
+The digits ride in a `NumberLiteral` whose text the reindex bridge reads as number syntax, and
+neither `+9...` nor `0099...` is JSON number text (#954 records the same constraint for `+1.0` and
+`1.`). The bridge reads the leading zeros as it reads `007` (#1149) and keeps a `+` on this one shape
+when a bridge number is read in yq mode (`JsonNumber::bridge_signed_overflowed_int`); jq mode never
+holds such a spelling, since jq stores `+X` as `X` (#2877). A run past 309 significant digits is
+infinite as a double and resolves to a string, as in yq.
 
-A run past 309 digits is infinite as a double and resolves to a string, as in yq.
+One difference remains, and it is not about the digits. yq keeps an explicit tag on the node, so a
+`!!float` scalar prints it when it is nested or copied (`[.a]` is `- !!float 99999999999999999999`,
+`.b = .a` writes `b: !!float 99999999999999999999`); a bare `.a` and `tostring` do not. `succinctly
+yq` drops the tag there for every tagged float whose literal it keeps (`!!float 5.0` is `5.0`,
+`!!float 1e3` is `1e3`), now the overflowed integer too. The scalar's value and text are right.
 
 ### Comma binds looser than pipe in real yq — the grouping is resolved (#2420), the evaluation model with it (#2451); one residual remains (#2452)
 

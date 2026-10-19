@@ -3166,6 +3166,30 @@ impl<'a> JsonNumber<'a> {
         Some(self.raw_bytes().as_ptr() as usize)
     }
 
+    /// The text of a bridge number that is a `+`-signed integer past `i64`
+    /// (`+99999999999999999999`); `None` for anything else.
+    ///
+    /// Reading a document, jq stores `+X` as the unsigned `X` (#2877), so
+    /// every reader peels the `+`. A reindex bridge never holds a spelling
+    /// jq made: it holds a `NumberLiteral`'s stored text, and a YAML document's
+    /// `a: +99999999999999999999` is stored with its `+` because yq echoes it
+    /// (`tostring`, interpolation, `join`; #4921). The one place both
+    /// `DocumentValue::number_literal` and `OwnedValue::from_json_number` keep
+    /// it, so the two cannot drift.
+    #[inline]
+    pub(crate) fn bridge_signed_overflowed_int(&self) -> Option<&'a str> {
+        if !self.bridge {
+            return None;
+        }
+        let bytes = self.raw_bytes();
+        if bytes.first() != Some(&b'+') {
+            return None;
+        }
+        core::str::from_utf8(bytes)
+            .ok()
+            .filter(|text| crate::yaml::is_overflowed_int_literal(text))
+    }
+
     /// [`bridge_value`](Self::bridge_value) restricted to the NaN/infinity
     /// tokens (#472/#1083): `None` for the computed-float token and for
     /// everything read outside the bridge. For the cursor builtins that
@@ -4539,6 +4563,9 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for StandardJson<'a, W> {
                 // here: they have no JSON spelling to preserve, so the
                 // caller's `as_f64` fallback hands back the bare value
                 // instead, exactly as `from_number_bytes` does.
+                if let Some(text) = n.bridge_signed_overflowed_int() {
+                    return Some(Cow::Borrowed(text));
+                }
                 if let Some(unsigned) = crate::json::validate::strip_leading_plus(bytes) {
                     if crate::json::validate::is_preservable_number_literal(unsigned) {
                         return core::str::from_utf8(unsigned).ok().map(Cow::Borrowed);

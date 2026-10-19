@@ -3448,6 +3448,9 @@ impl OwnedValue {
         if let Some(f) = n.bridge_value() {
             return Self::from_bridge_float(f);
         }
+        if let Some(text) = n.bridge_signed_overflowed_int() {
+            return Self::from_number_literal::<S>(text);
+        }
         match Self::from_number_bytes::<S>(n.raw_bytes()) {
             // `token_address` is `None` only for a bridge token, which
             // returned above.
