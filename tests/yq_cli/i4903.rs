@@ -31,6 +31,19 @@ fn test_4903_yq_argument_with_no_output_is_the_empty_string() -> Result<()> {
         (r#""a1b" | test(.foo; "g")"#, "true\n"),
         (r#""a1b" | test(("a","b"); .foo)"#, "true\n"),
         (r#""a1b" | capture(.foo; "g")"#, "{}\n{}\n{}\n{}\n"),
+        // Two-argument forms: an empty outer slot still evaluates the inner one, whose first
+        // output (or escape) decides the rest.
+        (r#""a1b" | test(select(false); ("g","i"))"#, "true\n"),
+        (r#""a1b" | test(.foo; .foo)"#, "true\n"),
+        (r#""a1b" | test(("a","b"); select(false))"#, "true\n"),
+        (
+            r#""a1b" | [match(select(false); ("g","i"))] | length"#,
+            "4\n",
+        ),
+        (
+            r#""a1b" | sub(select(false); "X"; error("e"))"#,
+            "\"a1b\"\n",
+        ),
         // sub/3 reads its pattern only, so an empty pattern replaces nothing with nothing.
         (r#""a1b" | sub(.foo; "X"; "g")"#, "\"a1b\"\n"),
         (r#""a1b" | sub(.foo; "X"; .foo)"#, "\"a1b\"\n"),

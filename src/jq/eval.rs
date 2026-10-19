@@ -5373,6 +5373,12 @@ enum ArgFanout {
     /// against the pinned v4.53.3, #4903. jq's own `f(empty)` is `empty`, so
     /// this stays yq-only. `has` reaches the same answer by its own route
     /// (#4139) and keeps [`Self::yq_native`].
+    ///
+    /// Honoured by the two eager paths only -- [`fanout_arg`] and
+    /// [`fanout_two_args`], through [`blank_when_argument_empty`] -- and
+    /// never by the lazy ones, which serve [`Self::All`] alone. A builtin
+    /// that routed this gate anywhere else would silently get
+    /// [`Self::FirstOnly`].
     FirstOrBlank,
     /// A multi-output argument is refused outright rather than fanned out or
     /// truncated.
