@@ -1194,17 +1194,34 @@ pub fn jq_bare_float_display(f: f64) -> String {
 /// risking an incorrect correction -- correctness over completeness, since
 /// an uncorrected rare tie is a far smaller divergence than a newly *wrong*
 /// answer would be.
-#[allow(clippy::many_single_char_names)] // `f`/`s`/`m`/`e`/`n` match this function's own doc comment's `m * 2^e` notation
 pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: i64) -> String {
-    let Some(&last_byte) = s.as_bytes().last() else {
+    if !shortest_decimal_is_wrong_tie(f, &s, extra_exp10) {
         return s;
+    }
+    // Genuine tie: `s`'s last (odd) digit decrements by exactly one with no borrow, since an odd
+    // digit minus one never underflows a single digit.
+    let mut corrected = s.into_bytes();
+    if let Some(last) = corrected.last_mut() {
+        *last -= 1;
+    }
+    String::from_utf8(corrected).expect("ASCII digit substitution stays valid UTF-8")
+}
+
+/// Whether `s`, the shortest round-tripping decimal of `f`, is the away-from-zero side of an
+/// exact tie -- the one case [`correct_shortest_decimal_tiebreak`] rewrites, by decrementing its
+/// last digit. Split out so a writer can ask without owning a `String` (#4923): everything this
+/// reads is `s`'s digits and `f`'s bits.
+#[allow(clippy::many_single_char_names)] // `f`/`s`/`m`/`e`/`n` match `correct_shortest_decimal_tiebreak`'s doc comment's `m * 2^e` notation
+pub(crate) fn shortest_decimal_is_wrong_tie(f: f64, s: &str, extra_exp10: i64) -> bool {
+    let Some(&last_byte) = s.as_bytes().last() else {
+        return false;
     };
     if !last_byte.is_ascii_digit() || (last_byte - b'0') % 2 == 0 {
-        return s;
+        return false;
     }
 
     // The sign never affects the tie check below (magnitude-only).
-    let (_, magnitude) = strip_leading_sign(&s);
+    let (_, magnitude) = strip_leading_sign(s);
     let (int_part, frac_part) = magnitude.split_once('.').unwrap_or((magnitude, ""));
     let Some(n) = int_part
         .bytes()
@@ -1213,7 +1230,7 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
             acc.checked_mul(10)?.checked_add(u128::from(b - b'0'))
         })
     else {
-        return s;
+        return false;
     };
     let q = extra_exp10 - frac_part.len() as i64;
 
@@ -1242,7 +1259,7 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
                 .map(|(p5, twice_less_one)| twice_less_one % p5),
         };
         if remainder != Some(0) {
-            return s;
+            return false;
         }
     }
 
@@ -1256,23 +1273,13 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
         // every one only ever formats a value already past its own
         // scientific-notation threshold, far above the subnormal range --
         // but excluded explicitly rather than assumed away.
-        return s;
+        return false;
     }
     let m = u128::from((bits & 0xF_FFFF_FFFF_FFFF) | (1u64 << 52));
     // `exp_bits` is an 11-bit field (<= 0x7FF), always representable as `i64`.
     let e = i64::try_from(exp_bits).expect("11-bit exponent field always fits i64") - 1023 - 52;
 
-    match is_exact_midpoint(m, e, q, n) {
-        Some(true) => {
-            // Genuine tie: `s`'s last (odd) digit decrements by exactly one
-            // with no borrow, since an odd digit minus one never underflows
-            // a single digit.
-            let mut corrected = s.into_bytes();
-            *corrected.last_mut().expect("checked non-empty above") = last_byte - 1;
-            String::from_utf8(corrected).expect("ASCII digit substitution stays valid UTF-8")
-        }
-        Some(false) | None => s,
-    }
+    is_exact_midpoint(m, e, q, n) == Some(true)
 }
 
 /// Exactly (never approximately) decides whether `m * 2^e == (2n - 1) / 2 * 10^q`

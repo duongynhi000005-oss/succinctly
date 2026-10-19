@@ -171,4 +171,4 @@ pub(crate) use value::{is_jq_canonical_number, jq_canonical_number_prefix};
 // were independently confirmed to break the same Rust-formatter tie the
 // same way, so this is one shared implementation, not a public API
 // surface either mode's callers reach directly.
-pub(crate) use value::correct_shortest_decimal_tiebreak;
+pub(crate) use value::{correct_shortest_decimal_tiebreak, shortest_decimal_is_wrong_tie};
