@@ -24,6 +24,7 @@ mod i2126;
 mod i3576;
 mod i4136;
 mod i4206;
+mod i4856;
 mod i4865;
 mod i4886;
 mod i4899;

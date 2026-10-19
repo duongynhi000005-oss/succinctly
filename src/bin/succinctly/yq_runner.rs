@@ -5606,6 +5606,33 @@ fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
     Ok(out)
 }
 
+/// The branches of a query that is itself a `,`, flattened through parentheses and nested commas
+/// (`.x, (.y, .z)` is three), or `None` for any other query (#4856).
+///
+/// A comma is associative, so the outputs are the same in the same order, but each branch is then
+/// a query of its own and can answer a node of the document (which carries comments, style and
+/// anchors) or a computed value (which carries none) without the one erasing the other.
+fn top_level_comma_branches(expr: &Expr) -> Option<Vec<&Expr>> {
+    fn unwrap(mut expr: &Expr) -> &Expr {
+        while let Expr::Paren(inner) = expr {
+            expr = inner;
+        }
+        expr
+    }
+    fn flatten<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match unwrap(expr) {
+            Expr::Comma(branches) => branches.iter().for_each(|b| flatten(b, out)),
+            other => out.push(other),
+        }
+    }
+    let Expr::Comma(branches) = unwrap(expr) else {
+        return None;
+    };
+    let mut out = Vec::with_capacity(branches.len());
+    branches.iter().for_each(|b| flatten(b, &mut out));
+    Some(out)
+}
+
 /// Evaluate a jq expression directly on a YAML cursor.
 ///
 /// This uses the generic evaluator to preserve position metadata (line/column).
@@ -5753,11 +5780,19 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // an alias (`.b.p = 9` on `b: *x`) lands on the anchor's node and every
     // alias slot follows -- see `jq::alias_identity`. Same gate as the sync
     // context above: nothing is installed for a read or an alias-free document.
-    let alias_identity_guard = alias_sync_ctx.as_ref().map(|(_, groups)| {
+    let mut alias_identity_guard = alias_sync_ctx.as_ref().map(|(_, groups)| {
         alias_identity::enter(alias_identity::AliasTable::from_groups(groups.clone()))
     });
-    let result = eval_with_cursor_using::<YqSemantics, _>(expr, cursor);
-    drop(alias_identity_guard);
+    // #4856: a query that is itself a `,` is answered branch by branch (see
+    // `top_level_comma_branches`), so a node among computed values keeps its presentation.
+    let comma_branches = top_level_comma_branches(expr);
+    let result = match comma_branches {
+        Some(_) => GenericResult::None,
+        None => eval_with_cursor_using::<YqSemantics, _>(expr, cursor),
+    };
+    if comma_branches.is_none() {
+        drop(alias_identity_guard.take());
+    }
     // A value with no live cursor of its own (an assignment/`del()`
     // result, a computed value, ...) has no comment/style to read directly
     // - but if it came from a shape-preserving write, `presentation_sync_ctx`
@@ -5807,146 +5842,176 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // starts `eval_with_cursor_using` from a real `cursor`, so these two
     // arms are defensive/unreachable here today, kept for exhaustiveness
     // over the shared `GenericResult` enum.
-    let mut docs = match result {
-        GenericResult::One(v) => {
-            let Some(v) = sink.materialize(
-                DiagStyle::Yq,
-                generic_to_owned::<YqSemantics, _>(&v),
-                &no_location(),
-            ) else {
-                return Ok(Vec::new());
-            };
-            Ok(vec![no_comments(v)])
-        }
-        GenericResult::OneCursor(c) => {
-            let Some(v) = sink.materialize(DiagStyle::Yq, owned_with_comments(&c), &no_location())
-            else {
-                return Ok(Vec::new());
-            };
-            Ok(vec![v])
-        }
-        GenericResult::Many(vs) => {
-            let Some(vs) = sink.materialize(
-                DiagStyle::Yq,
-                vs.iter()
-                    .map(generic_to_owned::<YqSemantics, _>)
-                    .collect::<core::result::Result<Vec<_>, _>>(),
-                &no_location(),
-            ) else {
-                return Ok(Vec::new());
-            };
-            Ok(vs.into_iter().map(&no_comments).collect())
-        }
-        GenericResult::ManyCursor(cs) => {
-            let Some(vs) = sink.materialize(
-                DiagStyle::Yq,
-                cs.iter()
-                    .map(owned_with_comments)
-                    .collect::<core::result::Result<Vec<_>, _>>(),
-                &no_location(),
-            ) else {
-                return Ok(Vec::new());
-            };
-            Ok(vs)
-        }
-        // This is the DOM/slow path (`evaluate_yaml_direct_filtered`'s
-        // fallback), reached only when `can_use_m2_streaming` rejects the
-        // expression or a flag (`--sort-keys`, color, `--tab`, `--slurp`,
-        // `--null-input`, named vars, ...) forces DOM output for every query
-        // shape, not just `keys_unsorted`. `syq 'keys_unsorted'` under
-        // default flags takes the M2 fast path instead, which streams each
-        // key from `fields` without materializing (#685); this arm stays a
-        // plain materializing fallback since the DOM path materializes
-        // everything else here too. Sort iff `sorted` (#683) -- though in
-        // practice `sorted` is always `false` here: `run_yq` always parses
-        // in `ParserMode::Yq`, where the `keys` keyword itself resolves to
-        // `Builtin::KeysUnsorted` (matching real yq's document-order
-        // semantics, see `parser.rs`'s `keys`/`keys_unsorted` handling), so
-        // `Builtin::Keys` can never reach this arm through the `yq` CLI.
-        // Handled anyway for exhaustiveness and because the generic
-        // evaluator is shared with `jq` (#140's `Pipe` dispatch is generic
-        // over `V: DocumentValue`).
-        GenericResult::LazyKeys {
-            fields,
-            sorted,
-            collapse,
-        } => {
-            let Some(mut keys) = sink.materialize(
-                DiagStyle::Yq,
-                effective_keys(&fields, collapse),
-                &no_location(),
-            ) else {
-                return Ok(Vec::new());
-            };
-            if sorted {
-                keys.sort();
+    let convert = |sink: &mut ErrorSink,
+                   result: GenericResult<_>|
+     -> Result<Vec<ResultWithComments>> {
+        match result {
+            GenericResult::One(v) => {
+                let Some(v) = sink.materialize(
+                    DiagStyle::Yq,
+                    generic_to_owned::<YqSemantics, _>(&v),
+                    &no_location(),
+                ) else {
+                    return Ok(Vec::new());
+                };
+                Ok(vec![no_comments(v)])
             }
-            Ok(vec![no_comments(OwnedValue::Array(
-                keys.into_iter().map(OwnedValue::string).collect(),
-            ))])
-        }
-        // Same reasoning as `LazyKeys` above, for array `keys`/
-        // `keys_unsorted` (#684).
-        GenericResult::LazyIndexRange(len) => Ok(vec![no_comments(OwnedValue::Array(
-            (0..len).map(|i| OwnedValue::Int(i as i64)).collect(),
-        ))]),
-        // Same reasoning as `LazyKeys`/`LazyIndexRange` above, for a
-        // composed `map` chain (#724, #725) that never resolved into a
-        // narrower shape before reaching this materializing DOM boundary.
-        GenericResult::LazySeq(seq) => match seq.materialize_atomic::<YqSemantics>() {
-            Ok(v) => Ok(vec![no_comments(v)]),
-            Err(jq::Control::Error(e)) => {
+            GenericResult::OneCursor(c) => {
+                let Some(v) =
+                    sink.materialize(DiagStyle::Yq, owned_with_comments(&c), &no_location())
+                else {
+                    return Ok(Vec::new());
+                };
+                Ok(vec![v])
+            }
+            GenericResult::Many(vs) => {
+                let Some(vs) = sink.materialize(
+                    DiagStyle::Yq,
+                    vs.iter()
+                        .map(generic_to_owned::<YqSemantics, _>)
+                        .collect::<core::result::Result<Vec<_>, _>>(),
+                    &no_location(),
+                ) else {
+                    return Ok(Vec::new());
+                };
+                Ok(vs.into_iter().map(&no_comments).collect())
+            }
+            GenericResult::ManyCursor(cs) => {
+                let Some(vs) = sink.materialize(
+                    DiagStyle::Yq,
+                    cs.iter()
+                        .map(owned_with_comments)
+                        .collect::<core::result::Result<Vec<_>, _>>(),
+                    &no_location(),
+                ) else {
+                    return Ok(Vec::new());
+                };
+                Ok(vs)
+            }
+            // This is the DOM/slow path (`evaluate_yaml_direct_filtered`'s
+            // fallback), reached only when `can_use_m2_streaming` rejects the
+            // expression or a flag (`--sort-keys`, color, `--tab`, `--slurp`,
+            // `--null-input`, named vars, ...) forces DOM output for every query
+            // shape, not just `keys_unsorted`. `syq 'keys_unsorted'` under
+            // default flags takes the M2 fast path instead, which streams each
+            // key from `fields` without materializing (#685); this arm stays a
+            // plain materializing fallback since the DOM path materializes
+            // everything else here too. Sort iff `sorted` (#683) -- though in
+            // practice `sorted` is always `false` here: `run_yq` always parses
+            // in `ParserMode::Yq`, where the `keys` keyword itself resolves to
+            // `Builtin::KeysUnsorted` (matching real yq's document-order
+            // semantics, see `parser.rs`'s `keys`/`keys_unsorted` handling), so
+            // `Builtin::Keys` can never reach this arm through the `yq` CLI.
+            // Handled anyway for exhaustiveness and because the generic
+            // evaluator is shared with `jq` (#140's `Pipe` dispatch is generic
+            // over `V: DocumentValue`).
+            GenericResult::LazyKeys {
+                fields,
+                sorted,
+                collapse,
+            } => {
+                let Some(mut keys) = sink.materialize(
+                    DiagStyle::Yq,
+                    effective_keys(&fields, collapse),
+                    &no_location(),
+                ) else {
+                    return Ok(Vec::new());
+                };
+                if sorted {
+                    keys.sort();
+                }
+                Ok(vec![no_comments(OwnedValue::Array(
+                    keys.into_iter().map(OwnedValue::string).collect(),
+                ))])
+            }
+            // Same reasoning as `LazyKeys` above, for array `keys`/
+            // `keys_unsorted` (#684).
+            GenericResult::LazyIndexRange(len) => Ok(vec![no_comments(OwnedValue::Array(
+                (0..len).map(|i| OwnedValue::Int(i as i64)).collect(),
+            ))]),
+            // Same reasoning as `LazyKeys`/`LazyIndexRange` above, for a
+            // composed `map` chain (#724, #725) that never resolved into a
+            // narrower shape before reaching this materializing DOM boundary.
+            GenericResult::LazySeq(seq) => match seq.materialize_atomic::<YqSemantics>() {
+                Ok(v) => Ok(vec![no_comments(v)]),
+                Err(jq::Control::Error(e)) => {
+                    sink.report(DiagStyle::Yq, &e, &no_location());
+                    Ok(vec![])
+                }
+                Err(jq::Control::Break(label)) => {
+                    sink.report_break(DiagStyle::Yq, &label, &no_location());
+                    Ok(vec![])
+                }
+                Err(jq::Control::Halt(code)) => {
+                    sink.request_halt(code);
+                    Ok(vec![])
+                }
+            },
+            // jq mode builds this; yq never does, but the DOM boundary answers it
+            // as the owned object it stands for (#4044).
+            GenericResult::LazyObject(obj) => {
+                let object = sink.materialize(
+                    DiagStyle::Yq,
+                    obj.materialize_atomic::<YqSemantics>(),
+                    &no_location(),
+                );
+                Ok(object.map(no_comments).into_iter().collect()) // patchcov: coverage tolerate-line reason="unreachable: only jq mode builds a LazyObject; this arm is the exhaustiveness answer for the shared enum (#4044)"
+            }
+            GenericResult::None => Ok(vec![]),
+            // Real yq streams nothing before a top-level error/break — a
+            // `Partial`'s already-produced prefix is discarded the same way an
+            // outright `Error`/`Break` already is (#2392). `Halt` is the one
+            // control that keeps its prefix (jq's own `halt` contract, #791/
+            // #1897), so it stays its own arm below.
+            GenericResult::Error(e) | GenericResult::Partial(_, jq::Control::Error(e)) => {
                 sink.report(DiagStyle::Yq, &e, &no_location());
                 Ok(vec![])
             }
-            Err(jq::Control::Break(label)) => {
+            GenericResult::Owned(v) => Ok(vec![no_comments(v)]),
+            GenericResult::ManyOwned(vs) => Ok(vs.into_iter().map(no_comments).collect()),
+            GenericResult::Break(label) | GenericResult::Partial(_, jq::Control::Break(label)) => {
                 sink.report_break(DiagStyle::Yq, &label, &no_location());
                 Ok(vec![])
             }
-            Err(jq::Control::Halt(code)) => {
+            // `halt`/`halt_error` (#791): not a diagnostic, so no `sink.report*`
+            // call — `request_halt` records the exit code for the caller's loop
+            // to short-circuit on, without touching `hit`/`report_count`.
+            GenericResult::Halt(code) => {
                 sink.request_halt(code);
                 Ok(vec![])
             }
-        },
-        // jq mode builds this; yq never does, but the DOM boundary answers it
-        // as the owned object it stands for (#4044).
-        GenericResult::LazyObject(obj) => {
-            let object = sink.materialize(
-                DiagStyle::Yq,
-                obj.materialize_atomic::<YqSemantics>(),
-                &no_location(),
-            );
-            Ok(object.map(no_comments).into_iter().collect()) // patchcov: coverage tolerate-line reason="unreachable: only jq mode builds a LazyObject; this arm is the exhaustiveness answer for the shared enum (#4044)"
+            // The outputs already produced no longer vanish behind the failure
+            // (#400, #494) — but only for `Halt`; see the merged `Error`/`Break`
+            // arms above (#2392).
+            GenericResult::Partial(vs, jq::Control::Halt(code)) => {
+                sink.request_halt(code);
+                Ok(vs.into_iter().map(no_comments).collect())
+            }
         }
-        GenericResult::None => Ok(vec![]),
-        // Real yq streams nothing before a top-level error/break — a
-        // `Partial`'s already-produced prefix is discarded the same way an
-        // outright `Error`/`Break` already is (#2392). `Halt` is the one
-        // control that keeps its prefix (jq's own `halt` contract, #791/
-        // #1897), so it stays its own arm below.
-        GenericResult::Error(e) | GenericResult::Partial(_, jq::Control::Error(e)) => {
-            sink.report(DiagStyle::Yq, &e, &no_location());
-            Ok(vec![])
-        }
-        GenericResult::Owned(v) => Ok(vec![no_comments(v)]),
-        GenericResult::ManyOwned(vs) => Ok(vs.into_iter().map(no_comments).collect()),
-        GenericResult::Break(label) | GenericResult::Partial(_, jq::Control::Break(label)) => {
-            sink.report_break(DiagStyle::Yq, &label, &no_location());
-            Ok(vec![])
-        }
-        // `halt`/`halt_error` (#791): not a diagnostic, so no `sink.report*`
-        // call — `request_halt` records the exit code for the caller's loop
-        // to short-circuit on, without touching `hit`/`report_count`.
-        GenericResult::Halt(code) => {
-            sink.request_halt(code);
-            Ok(vec![])
-        }
-        // The outputs already produced no longer vanish behind the failure
-        // (#400, #494) — but only for `Halt`; see the merged `Error`/`Break`
-        // arms above (#2392).
-        GenericResult::Partial(vs, jq::Control::Halt(code)) => {
-            sink.request_halt(code);
-            Ok(vs.into_iter().map(no_comments).collect())
+    };
+    let mut docs = match comma_branches {
+        None => convert(sink, result),
+        Some(branches) => {
+            // Each branch is evaluated and converted on its own: a node keeps the comments, style
+            // and anchors its cursor carries, a computed value has none (#4856). An error anywhere
+            // prints nothing, as for the whole query (#2392), and a `halt` keeps what came before.
+            let mut all: Vec<ResultWithComments> = Vec::new();
+            let mut failed = false;
+            for branch in branches {
+                let reports = sink.report_count();
+                let branch_result = eval_with_cursor_using::<YqSemantics, _>(branch, cursor);
+                let converted = convert(sink, branch_result)?;
+                if sink.report_count() != reports {
+                    failed = true;
+                    break;
+                }
+                all.extend(converted);
+                if sink.halted().is_some() {
+                    break;
+                }
+            }
+            drop(alias_identity_guard.take());
+            Ok(if failed { Vec::new() } else { all })
         }
     };
 
