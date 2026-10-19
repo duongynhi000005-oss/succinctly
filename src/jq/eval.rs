@@ -37349,14 +37349,9 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     // UPDATE (which leaves the whole `foreach`) is not read.
     fn binds<'a>(e: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
         match e {
-            Expr::Identity => Some(false),
             _ if emits_nothing(e) => Some(false),
+            // `.` and `select(true)` are `emits_only_dot`'s, with the `first`/`limit`/`nth` of them.
             _ if emits_only_dot(e) => Some(false),
-            Expr::Builtin(Builtin::Select(cond))
-                if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
-            {
-                Some(false)
-            }
             Expr::Paren(inner) => binds(inner, labels),
             // A handler-less `try`/`?` or a `label` hands its body's outputs on; no arm admits a
             // `catch` or a call that could raise past the binds' own pattern steps.
