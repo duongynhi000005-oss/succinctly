@@ -5085,16 +5085,24 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   `sort_family_array_generic`). The gated `min_by`/`max_by` extensions follow jq and read the absent key as `null`.
 - **Spellings `OwnedValue` cannot keep** ([#2802](https://github.com/rust-works/succinctly/issues/2802)):
   a leading-zero, hex or underscored integer sorts by its resolved value here.
-- **A mapping** (#2064). yq's `sort` and `sort_by(f)` reorder a mapping's entries by their
+- **A mapping** (#2064, #4386). yq's `sort` and `sort_by(f)` reorder a mapping's entries by their
   values and answer a mapping, as `sort_by` does an array; so does this build, with the same
-  comparator and the same stable sort. The result is an owned mapping, so a YAML output
-  loses what yq keeps: comments, flow style (`k: {z: 1}` prints as a block mapping), anchors
-  and aliases (expanded, like `map_values`), and a key's type (`2: a` prints as `"2": a`; an
-  array's per-item comments do survive, being reordered as cursors). An owned map also holds
-  a key once, where yq lists every occurrence, so **a mapping with a repeated key is refused**
-  (`cannot sort a mapping with the repeated key "a"`) instead of answering with an entry gone,
-  which a sort written back with `-i` would make permanent (the ADR-0018 data-loss exception).
-  Tracked as [#4386](https://github.com/rust-works/succinctly/issues/4386).
+  comparator and the same stable sort. The result is an owned mapping, which carries no
+  comments, style, anchors or tags of its own, so a YAML output of a *mapping* sort takes the DOM
+  route (the per-file fallback `--sort-keys` already uses over aliases) instead of the streamers,
+  and `reshape_presentation` carries each entry's comments, flow style, anchor, alias, tag and
+  key style to its new place: `# top`, `a: 1 # one`, `k: {z: 1}`, `b: &x 2` / `a: *x`,
+  `b: !!str 2` and a numeric key all print as yq prints them
+  ([#4386](https://github.com/rust-works/succinctly/issues/4386)). The route is chosen per file, by
+  evaluating the path in front of the `sort` on each document and looking for a mapping, so an
+  array sort keeps streaming its elements as cursors (an array's per-item comments survive).
+  Only a query that *ends* in the sort is recognized (`sort`, `sort_by(f)`, `.a.b | sort`):
+  a mapping sort that another stage reads (`sort | .a`, `.a | sort | keys`), one behind an
+  iteration (`.[] | sort`) or inside `map`/`with_entries`/`if` keeps the owned route's loss.
+  An owned map holds a key once, where yq lists every occurrence, so **a mapping with a repeated
+  key is refused** (`cannot sort a mapping with the repeated key "a"`) instead of answering
+  with an entry gone, which a sort written back with `-i` would make permanent (the ADR-0018
+  data-loss exception).
 
 Cost. Interleaved A/B against `main`, release builds, minimum of 9 runs, 1M-element arrays on
 5-10 MB documents (outputs identical; `sort_by` on 250k records):

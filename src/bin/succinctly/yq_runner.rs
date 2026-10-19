@@ -1920,8 +1920,71 @@ fn evaluate_yaml_direct_filtered(
 /// limit `FallbackStreamState` alone had already been introduced to clear).
 struct FallbackStreamState<'a> {
     strip_style: bool,
+    /// `--sort-keys`: always on for the alias fallback, the real flag for the mapping-sort one.
+    sort_keys: bool,
     doc_streamed: &'a mut bool,
     any_truthy: &'a mut bool,
+}
+
+/// Whether a YAML output takes the DOM route for the whole input instead of the M2 streamers:
+/// `--sort-keys` over aliases (#1350, #2486), whose sort can invert an anchor and its alias, and a
+/// sort of a mapping, which the streamers write without its entries' presentation (#4386). The
+/// one definition both the stdin and the per-file site read.
+fn needs_dom_fallback(
+    sort_keys: bool,
+    output_format: OutputFormat,
+    index: &YamlIndex,
+    expr: &Expr,
+    bytes: &[u8],
+) -> bool {
+    output_format == OutputFormat::Yaml
+        && ((sort_keys && index.has_aliases()) || sorts_a_mapping(expr, index, bytes))
+}
+
+/// Whether `expr` is a `sort`/`sort_by` of a mapping in some document of `bytes`, which the M2
+/// streamers answer as an owned object with no comments, style, anchors or tags (#4386). The
+/// DOM route traces them through ([`reshape_presentation`]), so those inputs take it, as the
+/// `--sort-keys` alias fallback does. A sorted *array* streams its elements' own cursors and
+/// keeps them, which is why only a mapping is sent: the target is found by evaluating the
+/// path in front of the sort on each document (a path that is not a single node answers no).
+fn sorts_a_mapping(expr: &Expr, index: &YamlIndex, bytes: &[u8]) -> bool {
+    fn unwrap(mut expr: &Expr) -> &Expr {
+        while let Expr::Paren(inner) = expr {
+            expr = inner;
+        }
+        expr
+    }
+    let (prefix, last) = match unwrap(expr) {
+        Expr::Pipe(stages) => match stages.split_last() {
+            Some((last, prefix)) => (Some(prefix), unwrap(last)),
+            None => return false,
+        },
+        other => (None, other),
+    };
+    if !matches!(last, Expr::Builtin(Builtin::Sort | Builtin::SortBy(_))) {
+        return false;
+    }
+    let prefix = prefix
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| Expr::Pipe(prefix.to_vec().into()));
+    let root = index.root(bytes);
+    let YamlValue::Sequence(mut docs) = root.value() else {
+        return false;
+    };
+    while let Some((doc, rest)) = docs.uncons_cursor() {
+        let target = match &prefix {
+            None => Some(doc),
+            Some(path) => match eval_with_cursor_using::<YqSemantics, _>(path, doc) {
+                GenericResult::OneCursor(cursor) => Some(cursor),
+                _ => None,
+            },
+        };
+        if target.is_some_and(|cursor| matches!(cursor.value(), YamlValue::Mapping(_))) {
+            return true;
+        }
+        docs = rest;
+    }
+    false
 }
 
 fn stream_yaml_sort_keys_alias_fallback<W: Write>(
@@ -1935,6 +1998,7 @@ fn stream_yaml_sort_keys_alias_fallback<W: Write>(
 ) -> Result<usize> {
     let FallbackStreamState {
         strip_style,
+        sort_keys,
         doc_streamed,
         any_truthy,
     } = state;
@@ -1952,7 +2016,7 @@ fn stream_yaml_sort_keys_alias_fallback<W: Write>(
         DirectEvalOptions {
             need_comments: true,
             strip_style,
-            sort_keys: true,
+            sort_keys,
             mark_json_sourced: false,
         },
     );
@@ -9673,8 +9737,13 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             // input, which already gets it right. `index` is already built
             // (this check costs nothing extra); the fallback itself is a
             // second parse of `yaml_bytes`, paid only here.
-            if sort_keys && output_config.output_format == OutputFormat::Yaml && index.has_aliases()
-            {
+            if needs_dom_fallback(
+                sort_keys,
+                output_config.output_format,
+                &index,
+                &program.expr,
+                &yaml_bytes,
+            ) {
                 let doc_filter = args.document.map(|target| (target, global_doc_index));
                 // Single stdin input, no further reads to filter -- unlike
                 // the per-file loop's identical call below, `global_doc_index`
@@ -9688,6 +9757,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     &output_config,
                     FallbackStreamState {
                         strip_style: args.pretty_print,
+                        sort_keys,
                         doc_streamed: &mut yaml_doc_streamed,
                         any_truthy: &mut any_truthy,
                     },
@@ -9701,8 +9771,9 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 // `stream_yaml_sort_keys_alias_fallback` calls per result,
                 // already writes its own terminator after each one -- an
                 // extra call here double-terminated every result (caught by
-                // this fix's own tests).
-                return Ok(i32::from(args.exit_status && !any_truthy));
+                // this fix's own tests). A sort of a mapping reports its refusal (a repeated
+                // key) through the sink, which the exit code has to see (#4386).
+                return Ok(run_exit_code(&sink, args.exit_status, any_truthy));
             }
 
             let root = index.root(&yaml_bytes);
@@ -9872,10 +9943,13 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
 
                 // #1350/#2486: see the stdin branch's identical check above
                 // for the full rationale.
-                if sort_keys
-                    && output_config.output_format == OutputFormat::Yaml
-                    && index.has_aliases()
-                {
+                if needs_dom_fallback(
+                    sort_keys,
+                    output_config.output_format,
+                    &index,
+                    &program.expr,
+                    &yaml_bytes,
+                ) {
                     let doc_filter = args.document.map(|target| (target, global_doc_index));
                     let num_docs = stream_yaml_sort_keys_alias_fallback(
                         &mut writer,
@@ -9886,6 +9960,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                         &output_config,
                         FallbackStreamState {
                             strip_style: args.pretty_print,
+                            sort_keys,
                             doc_streamed: &mut yaml_doc_streamed,
                             any_truthy: &mut any_truthy,
                         },
@@ -11338,22 +11413,26 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         return Ok(code);
     }
 
-    // Determine exit code. An uncaught error outranks -e: the filter failed,
-    // which is not the same as it succeeding with a falsy result (#355 vs #178).
-    // yq collapses both to 1, but the diagnostic already went to stderr, so
-    // reporting "no matches found" on top of it would be misleading.
+    Ok(run_exit_code(&sink, args.exit_status, any_truthy))
+}
+
+/// The exit code of a run that was not halted. An uncaught error outranks -e: the filter failed,
+/// which is not the same as it succeeding with a falsy result (#355 vs #178). yq collapses both
+/// to 1, but the diagnostic already went to stderr, so reporting "no matches found" on top of it
+/// would be misleading.
+fn run_exit_code(sink: &ErrorSink, exit_status: bool, any_truthy: bool) -> i32 {
     if sink.hit() {
-        return Ok(DiagStyle::Yq.error_exit_code());
+        return DiagStyle::Yq.error_exit_code();
     }
 
     // yq compat: empty output and all-falsy output are the same failure,
     // reported on stderr with a fixed message and exit 1.
-    if args.exit_status && !any_truthy {
+    if exit_status && !any_truthy {
         eprintln!("Error: no matches found");
-        return Ok(exit_codes::FALSE_OR_NULL);
+        return exit_codes::FALSE_OR_NULL;
     }
 
-    Ok(exit_codes::SUCCESS)
+    exit_codes::SUCCESS
 }
 
 #[cfg(test)]
