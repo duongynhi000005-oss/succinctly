@@ -32,7 +32,10 @@ pub(super) fn supported(expr: &Expr) -> bool {
         Expr::Builtin(
             Builtin::Keys | Builtin::KeysUnsorted | Builtin::ToEntries | Builtin::FromEntries,
         ) => true,
-        Expr::Builtin(Builtin::WithEntries(f) | Builtin::Map(f)) => supported(f),
+        Expr::Builtin(Builtin::WithEntries(f) | Builtin::Map(f) | Builtin::SortBy(f)) => {
+            supported(f)
+        }
+        Expr::Builtin(Builtin::Sort) => true,
         Expr::Assign { path, value } => static_path(path) && supported(value),
         Expr::Update { path, filter } => static_path(path) && supported(filter),
         _ => false,
@@ -196,6 +199,36 @@ fn trace_at_depth(
                 }
             }
             Some((result, CommentTree::Object(NodeMeta::empty(), fields, keys)))
+        }
+        // #4386: a sorted mapping is the same entries in another order, each keeping the comments,
+        // style, anchor and tag of its own node and its key. A sorted array already keeps its
+        // items' (the value alignment of #870), so only a mapping is replayed here.
+        Expr::Builtin(Builtin::Sort | Builtin::SortBy(_)) => {
+            let OwnedValue::Object(_) = value else {
+                return None;
+            };
+            let result = evaluated(expr, value)?;
+            let OwnedValue::Object(sorted) = &result else {
+                return None;
+            };
+            let mut fields = IndexMap::new();
+            let mut keys = IndexMap::new();
+            for key in sorted.keys() {
+                fields.insert(key.clone(), tree.field(key).clone());
+                if let Some(meta) = KeyMeta::with_properties(
+                    None,
+                    false,
+                    tree.key_style(key),
+                    tree.key_anchor(key).map(str::to_string),
+                    tree.key_tag(key).map(str::to_string),
+                ) {
+                    keys.insert(key.clone(), meta);
+                }
+            }
+            Some((
+                result,
+                CommentTree::Object(tree.meta().clone(), fields, keys),
+            ))
         }
         Expr::Builtin(Builtin::WithEntries(f)) => {
             let entries = next(&Expr::Builtin(Builtin::ToEntries), input)?;
