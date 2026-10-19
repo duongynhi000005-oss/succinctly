@@ -20093,6 +20093,192 @@ mod standalone_comment_attribution_2811_review {
     // `invalid_utf8_comment_line_sandwiched_by_real_ones_inserts_no_blank_2811_review`.
 }
 
+/// #1130: yq's `tostring` of a container is the YAML for it, not jq's JSON text: block style,
+/// or flow for a node the source wrote in flow style, with the trailing line break chomped.
+/// Every expected string was captured from pinned yq v4.53.3 on the same input and arguments.
+mod tostring_container_1130 {
+    use super::run_yq_stdin;
+    use anyhow::Result;
+
+    const SOURCE: &str = "a:\n  - 1\n  - x: 2\nb: [1, 2]\nc:\n  d: 1\n";
+
+    fn yq(filter: &str, input: &str, args: &[&str]) -> Result<String> {
+        let (out, code) = run_yq_stdin(filter, input, args)?;
+        assert_eq!(code, 0, "{out}");
+        Ok(out)
+    }
+
+    #[test]
+    fn a_constructed_array_is_a_block_sequence_1130() -> Result<()> {
+        assert_eq!(
+            yq("[1, 2] | tostring", SOURCE, &["-o=json"])?,
+            "\"- 1\\n- 2\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_constructed_object_is_a_block_mapping_1130() -> Result<()> {
+        assert_eq!(
+            yq("{\"a\": [1, 2]} | tostring", SOURCE, &["-o=json"])?,
+            "\"a:\\n  - 1\\n  - 2\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_deeply_nested_construction_indents_two_spaces_1130() -> Result<()> {
+        assert_eq!(
+            yq(
+                "{\"a\": {\"b\": [1, {\"c\": 2}]}} | tostring",
+                SOURCE,
+                &["-o=json"]
+            )?,
+            "\"a:\\n  b:\\n    - 1\\n    - c: 2\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_array_is_flow_1130() -> Result<()> {
+        assert_eq!(yq("[] | tostring", SOURCE, &["-o=json"])?, "\"[]\"\n");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_object_is_flow_1130() -> Result<()> {
+        assert_eq!(yq("{} | tostring", SOURCE, &["-o=json"])?, "\"{}\"\n");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_containers_inside_a_sequence_stay_flow_1130() -> Result<()> {
+        assert_eq!(
+            yq("[[], {}] | tostring", SOURCE, &["-o=json"])?,
+            "\"- []\\n- {}\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_map_stringifies_each_container_element_1130() -> Result<()> {
+        assert_eq!(
+            yq("[[1, 2]] | map(tostring)", SOURCE, &["-o=json"])?,
+            "[\n  \"- 1\\n- 2\"\n]\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_computed_float_keeps_its_exponent_1130() -> Result<()> {
+        assert_eq!(
+            yq("[1e10 * 2] | tostring", SOURCE, &["-o=json"])?,
+            "\"- 2e+10\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_computed_whole_float_is_tagged_1130() -> Result<()> {
+        assert_eq!(
+            yq("[1.0 * 3] | tostring", SOURCE, &["-o=json"])?,
+            "\"- !!float 3\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_string_that_needs_quoting_is_quoted_1130() -> Result<()> {
+        assert_eq!(
+            yq("{\"a\": \"x: y\"} | tostring", SOURCE, &["-o=json"])?,
+            "\"a: 'x: y'\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_string_that_reads_as_a_number_is_quoted_1130() -> Result<()> {
+        assert_eq!(
+            yq("[\"a b\", \"1\"] | tostring", SOURCE, &["-o=json"])?,
+            "\"- a b\\n- \\\"1\\\"\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn null_and_bool_elements_print_bare_1130() -> Result<()> {
+        assert_eq!(
+            yq("[null, true] | tostring", SOURCE, &["-o=json"])?,
+            "\"- null\\n- true\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_result_is_the_text_not_the_container_1130() -> Result<()> {
+        assert_eq!(
+            yq("[1, 2] | tostring | length", SOURCE, &["-o=json"])?,
+            "7\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_block_sourced_sequence_stays_block_1130() -> Result<()> {
+        assert_eq!(
+            yq(".a | tostring", SOURCE, &["-o=json"])?,
+            "\"- 1\\n- x: 2\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_flow_sourced_sequence_stays_flow_1130() -> Result<()> {
+        assert_eq!(yq(".b | tostring", SOURCE, &["-o=json"])?, "\"[1, 2]\"\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_block_sourced_mapping_stays_block_1130() -> Result<()> {
+        assert_eq!(yq(".c | tostring", SOURCE, &["-o=json"])?, "\"d: 1\"\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_mapping_inside_a_sequence_is_block_1130() -> Result<()> {
+        assert_eq!(yq(".a[1] | tostring", SOURCE, &["-o=json"])?, "\"x: 2\"\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_scalar_is_unchanged_1130() -> Result<()> {
+        assert_eq!(yq(".c.d | tostring", SOURCE, &["-o=json"])?, "\"1\"\n");
+        Ok(())
+    }
+
+    /// Known gap, pinned so a change is deliberate: nested flow style needs per-node style data (#739, #865).
+    /// yq prints "\"a:\\n  - 1\\n  - x: 2\\nb: [1, 2]\\nc:\\n  d: 1\"" here.
+    #[test]
+    fn a_flow_mapping_nested_in_a_block_one_prints_block_gap_1130() -> Result<()> {
+        assert_eq!(
+            yq(".|tostring", SOURCE, &["-o=json"])?,
+            "\"a:\\n  - 1\\n  - x: 2\\nb:\\n  - 1\\n  - 2\\nc:\\n  d: 1\"\n"
+        );
+        Ok(())
+    }
+
+    /// Known gap, pinned so a change is deliberate: yq interpolates the YAML text as it does for tostring.
+    /// yq prints "\"x- 1\\n- 2y\"" here.
+    #[test]
+    fn string_interpolation_of_a_container_is_still_json_gap_1130() -> Result<()> {
+        assert_eq!(
+            yq("\"x\\([1, 2])y\"", SOURCE, &["-o=json"])?,
+            "\"x[1,2]y\"\n"
+        );
+        Ok(())
+    }
+}
+
 /// #2875: a scalar the source wrote as nothing (`a:`), `~`, `True` or `0x1F` keeps that text
 /// where the DOM route (`-P`, a write) prints it back, and a document with no content prints
 /// only its header. Every expected string was captured from pinned yq v4.53.3 on the same
@@ -56076,7 +56262,7 @@ fn test_owned_identity_pipe_carries_control_and_prefix_2495() -> Result<()> {
     )?;
     assert_eq!(code, 1, "stdout={stdout:?} stderr={stderr:?}");
     assert_eq!(stdout, "");
-    assert_eq!(stderr.trim_end(), r#"{"b":1}"#);
+    assert_eq!(stderr.trim_end(), "b: 1");
 
     let (stdout, stderr, code) = run_yq_stdin_with_stderr(
         ".arr | sort | .[(0,\"a\")] | key",

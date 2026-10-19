@@ -5573,24 +5573,40 @@ output is unaffected, since neither appears in JSON
 for the feature-level gaps (position builtins after DOM conversion; `file_index`/`key`/
 `document_index` inside object literals or `any`/`all`).
 
-## `tostring`/`tojson` render a container compactly ([#2902](https://github.com/rust-works/succinctly/issues/2902), found while verifying)
+## `tostring` of a container is YAML since #1130; `tojson` still renders compactly ([#2902](https://github.com/rust-works/succinctly/issues/2902), [#1130](https://github.com/rust-works/succinctly/issues/1130))
 
 Real yq's `tostring` on a container is its YAML encoder (block style, `!!float` tags
-where the spelling needs one), and its `tojson` is its indented JSON encoder, which ends
-every string it produces -- scalar or container -- with a newline of its own. succinctly
-renders both compactly and without that trailing newline. Captured live (v4.53.3, `null`
-on stdin):
+where the spelling needs one, a node written in flow style kept in flow), and its `tojson`
+is its indented JSON encoder, which ends every string it produces -- scalar or container --
+with a newline of its own.
+
+`tostring` now matches (#1130): a container becomes the YAML the CLI would print for it, with
+the one trailing line break chomped (`[1, 2] | tostring` is `"- 1\n- 2"`, `[1.0 * 3]` is
+`"- !!float 3"`), through the CLI's own writer, so the two cannot drift. A container read from
+a node the source wrote in flow style (`b: [1, 2]`) stays flow (`"[1, 2]"`). jq mode is
+unchanged: it JSON-encodes. Not matched:
+
+- a flow container *nested* in a block one prints block (`.` on `a: ...\nb: [1, 2]`): an
+  `OwnedValue` carries no per-node style (#739, #865);
+- `-I4` is ignored (yq indents the text by the flag; ours is always two spaces);
+- string interpolation (`"x\([1, 2])y"`) still JSON-encodes where yq interpolates the same
+  YAML text, and a container rebuilt by `with_entries` or read under `--eval-all` takes the
+  block style whatever its source;
+- quote style, comments, anchors and aliases the source carried do not survive into the text
+  (`c: ["x: y", 'z']` gives `['x: y', z]`, `y: *a` gives the anchored sequence, not `*a`);
+- a string with a line break is double-quoted (`"l1\nl2\n"`) where yq writes a literal block
+  (`|`), the CLI writer's own rendering of a built value.
+
+`tojson` is unchanged and still renders compactly, without that trailing newline. Captured
+live (v4.53.3, `null` on stdin):
 
 | filter                   | real yq                | succinctly yq |
 |--------------------------|------------------------|---------------|
-| `[1.0] \| tostring`      | `- 1.0`                | `[1.0]`       |
-| `[0.5+0.5] \| tostring`  | `- !!float 1`          | `[1.0]`       |
 | `[1] \| tojson`          | `[\n  1\n]\n` + `\n`   | `[1]`         |
 | `"x" \| tojson`          | `"x"\n` + `\n`         | `"x"`         |
 | `(0.5+0.5) \| tojson`    | `1.0\n` + `\n`         | `1.0`         |
 
-Scalar `tostring` agrees in both (the #2902 fix above); the container spellings and the
-trailing newline are pre-existing and not attempted there. The `tojson` tests in
+Scalar `tostring` agrees in both (the #2902 fix). The `tojson` tests in
 `tests/yq_cli_tests.rs` compare trimmed output for this reason.
 
 ## `succinctly yq -o=json -C` colorizes with jq's own scheme, not real yq's (pre-existing, recorded while verifying #3413)

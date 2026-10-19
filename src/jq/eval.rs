@@ -10397,7 +10397,7 @@ fn eval_owned_door_arm<S: EvalSemantics>(
         },
         Builtin::ToString => match input {
             OwnedValue::String(_) => input.clone(),
-            _ => OwnedValue::String(owned_to_string::<S>(input).into()),
+            _ => OwnedValue::String(tostring_text::<S>(input, false).into()),
         },
         _ => return None,
     };
@@ -21971,10 +21971,28 @@ fn builtin_tostring<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// `[]` in jq, #3191). Every other value is rendered into a fresh string.
 /// One definition for both evaluators' arms.
 pub(crate) fn tostring_owned<S: EvalSemantics>(owned: OwnedValue) -> OwnedValue {
+    tostring_owned_styled::<S>(owned, false)
+}
+
+/// [`tostring_owned`], told whether the value is a container its source wrote in flow style
+/// (`a: [1, 2]`). yq's `tostring` of a container is the YAML for it, in the style the node was
+/// written in (block when it was built by the filter), not jq's JSON text (#1130); jq mode keeps
+/// the JSON. `flow` means nothing to a scalar.
+pub(crate) fn tostring_owned_styled<S: EvalSemantics>(owned: OwnedValue, flow: bool) -> OwnedValue {
     if let OwnedValue::String(_) = owned {
         return owned;
     }
-    OwnedValue::String(owned_to_string::<S>(&owned).into())
+    OwnedValue::String(tostring_text::<S>(&owned, flow).into())
+}
+
+/// The text `tostring` makes of a value that is not a string: the one definition the generic
+/// evaluator's arm and the owned fast paths (which borrow their input, so cannot hand it to
+/// [`tostring_owned_styled`]) share.
+pub(crate) fn tostring_text<S: EvalSemantics>(value: &OwnedValue, flow: bool) -> String {
+    if S::TAG == EvalTag::Yq && matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_)) {
+        return super::stream::owned_container_to_yaml_string(value, flow);
+    }
+    owned_to_string::<S>(value)
 }
 
 /// Builtin: tonumber - convert string to number
@@ -70509,7 +70527,7 @@ pub(crate) fn eval_owned_fast_path<S: EvalSemantics>(
         // here, so only a string is cloned, never a container to render.
         Expr::Builtin(Builtin::ToString) => Some(Ok(Some(match input {
             OwnedValue::String(_) => input.clone(),
-            _ => OwnedValue::String(owned_to_string::<S>(input).into()),
+            _ => OwnedValue::String(tostring_text::<S>(input, false).into()),
         }))),
         // #2086: `. + <literal>` (the common string/number-accumulator
         // shape a `reduce`/`foreach`/`until`/`while` UPDATE body takes,
