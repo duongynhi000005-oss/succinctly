@@ -542,17 +542,18 @@ fn escape_json_body(s: &str, opts: &JsonFormatOpts) -> String {
     }
 }
 
-/// A JSON-sourced float's yq-mode display: a plain, bare `f64::to_string()`
-/// with no forced decimal point and no scientific-notation threshold --
-/// real yq's own JSON-input convention (#978/#1398), distinct from
-/// `format_float_yq`'s own (non-JSON-sourced) threshold/fraction rules.
+/// A JSON-sourced float's yq-mode display: `format_float_yq` -- shortest digits,
+/// scientific notation past yq's magnitude threshold (`1e+20`, `-1e-07`,
+/// #3576). A whole float within `i64` is an integer for JSON input (#978/#1398,
+/// `whole_float_as_int`), so none reaches here, and the forced decimal point
+/// that formatter adds to a computed whole float never applies.
 /// Named and shared rather than a hand-copied `f.to_string()` at each call
 /// site, matching `jq_bare_float_display`'s own precedent for the
 /// identical class of problem (CLAUDE.md's #106 lesson) -- `format_json_impl`'s
 /// `Float` arm and its `NumberLiteral` arm (#1498, the same rule reached
 /// through a reconstructed literal) both need this exact formatter.
 fn json_sourced_float_display(f: f64) -> String {
-    f.to_string()
+    succinctly::yaml::format_float_yq(f)
 }
 
 /// Format a value as JSON text (compact or pretty, per `opts`).

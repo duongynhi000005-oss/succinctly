@@ -1,0 +1,41 @@
+//! #3576: a float yq decodes from JSON prints the way yq's float formatter prints it --
+//! shortest digits, scientific notation past its magnitude threshold -- not as a bare
+//! `f64` `Display`.
+
+use anyhow::Result;
+
+use crate::run_yq_stdin;
+
+/// #3576: `1e20` was `100000000000000000000`, `-1e-7` was `-0.0000001` and `1234567.5` was
+/// `1234567.5` where yq prints `1e+20`, `-1e-07` and `1.2345675e+06`; whole floats inside `i64`
+/// are integers to yq's JSON decoder (#3577), so `1e15` stays `1000000000000000`. Every row is
+/// captured from yq v4.53.3 over one document, through the streaming JSON and YAML printers and
+/// the `-P` DOM route.
+#[test]
+fn test_3576_json_sourced_floats_print_through_yqs_float_formatter() -> Result<()> {
+    let input = "{\"a\":1.10,\"b\":1234567.5,\"c\":1000000.5,\"d\":999999.5,\"e\":1e15,\"g\":1e21,\"h\":1.5e21,\"i\":0.0001,\"j\":0.00012,\"k\":0.00001,\"l\":12345678.9,\"m\":1.0e-3,\"q\":2.5e-10,\"r\":123456789012345678901.5,\"s\":100000.5,\"t\":0.30000000000000004,\"u\":-1234567.5,\"v\":-0.00001,\"w\":[1e-7,{\"x\":2.5e7}]}";
+    #[allow(clippy::type_complexity)]
+    let rows: &[(&[&str], &str, &str)] = &[
+        (&["-p=json", "-o=json", "-I=0"], ".", "{\"a\":1.1,\"b\":1.2345675e+06,\"c\":1.0000005e+06,\"d\":999999.5,\"e\":1000000000000000,\"g\":1e+21,\"h\":1.5e+21,\"i\":0.0001,\"j\":0.00012,\"k\":1e-05,\"l\":1.23456789e+07,\"m\":0.001,\"q\":2.5e-10,\"r\":1.2345678901234568e+20,\"s\":100000.5,\"t\":0.30000000000000004,\"u\":-1.2345675e+06,\"v\":-1e-05,\"w\":[1e-07,{\"x\":25000000}]}\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".b", "1.2345675e+06\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".k", "1e-05\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".g", "1e+21\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".r", "1.2345678901234568e+20\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".u", "-1.2345675e+06\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".w", "[1e-07,{\"x\":25000000}]\n"),
+        (&["-p=json", "-o=json", "-I=0"], "[.b, .k]", "[1.2345675e+06,1e-05]\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".b | @json", "\"1.2345675e+06\"\n"),
+        (&["-p=json", "-o=json", "-I=0"], ".k | tostring", "\"1e-05\"\n"),
+        (&["-p=json", "-o=yaml"], ".", "a: 1.1\nb: 1.2345675e+06\nc: 1.0000005e+06\nd: 999999.5\ne: 1000000000000000\ng: 1e+21\nh: 1.5e+21\ni: 0.0001\nj: 0.00012\nk: 1e-05\nl: 1.23456789e+07\nm: 0.001\nq: 2.5e-10\nr: 1.2345678901234568e+20\ns: 100000.5\nt: 0.30000000000000004\nu: -1.2345675e+06\nv: -1e-05\nw:\n  - 1e-07\n  - x: 25000000\n"),
+        (&["-p=json", "-o=yaml"], ".q", "2.5e-10\n"),
+        (&["-p=json", "-o=yaml", "-P"], ".", "a: 1.1\nb: 1.2345675e+06\nc: 1.0000005e+06\nd: 999999.5\ne: 1000000000000000\ng: 1e+21\nh: 1.5e+21\ni: 0.0001\nj: 0.00012\nk: 1e-05\nl: 1.23456789e+07\nm: 0.001\nq: 2.5e-10\nr: 1.2345678901234568e+20\ns: 100000.5\nt: 0.30000000000000004\nu: -1.2345675e+06\nv: -1e-05\nw:\n  - 1e-07\n  - x: 25000000\n"),
+        (&["-p=json", "-o=yaml", "-P"], ".w", "- 1e-07\n- x: 25000000\n"),
+        (&["-p=json", "-o=json", "-I=0", "-P"], ".", "{\"a\":1.1,\"b\":1.2345675e+06,\"c\":1.0000005e+06,\"d\":999999.5,\"e\":1000000000000000,\"g\":1e+21,\"h\":1.5e+21,\"i\":0.0001,\"j\":0.00012,\"k\":1e-05,\"l\":1.23456789e+07,\"m\":0.001,\"q\":2.5e-10,\"r\":1.2345678901234568e+20,\"s\":100000.5,\"t\":0.30000000000000004,\"u\":-1.2345675e+06,\"v\":-1e-05,\"w\":[1e-07,{\"x\":25000000}]}\n"),
+    ];
+    for (args, filter, want) in rows {
+        let (out, code) = run_yq_stdin(filter, input, args)?;
+        assert_eq!(code, 0, "args {args:?} filter {filter:?}: {out:?}");
+        assert_eq!(out, *want, "args {args:?} filter {filter:?}");
+    }
+    Ok(())
+}
