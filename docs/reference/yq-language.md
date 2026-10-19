@@ -468,6 +468,14 @@ echo '"aaa"' | succinctly yq --jq-extensions 'gsub("a"; "X")'
 # "XXX" — same result for a non-zero-width pattern like this one
 ```
 
+Real yq also evaluates the replacement **once, against the input** (not per match against a
+capture object) and expands it as a Go template (`$1`, `${name}`, `$$`) — #4905:
+
+```bash
+echo '"a1b"' | succinctly yq 'sub("a"; .)'                 # "a1b1b" (. is the input; succinctly jq reads a capture object there)
+echo '"abab"' | succinctly yq 'sub("(b)"; "<$1>")'         # "a<b>a<b>"
+```
+
 `gsub` (any arity), `scan`, and `splits` are not real yq builtins at all — real yq's own
 lexer rejects them outright (confirmed live against yq v4.53.3, #1436). succinctly's `gsub`
 support in yq mode is therefore a succinctly-only convenience, gated behind
