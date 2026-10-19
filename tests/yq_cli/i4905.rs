@@ -64,6 +64,17 @@ fn test_4905_yq_sub_replacement_is_read_once_against_the_input() -> Result<()> {
         (r#""a1b" | sub("a"; sub("1"; "ZZ"))"#, r#""aZZb1b""#),
         (r#""a1b" | sub("a"; sub("1"; .))"#, r#""aa1bb1b""#),
         (r#""a1b" | sub("a"; split("1") | .[0])"#, r#""a1b""#),
+        // A name is letters (category L), digits (Nd) and `_`: `²` and a Roman numeral end it.
+        (r#""ab" | sub("(a)"; "$1²")"#, r#""a²b""#),
+        (r#""xbx" | sub("b"; "$ⅷ")"#, r#""x$ⅷx""#),
+        (r#""abab" | sub("(b)"; "$é")"#, r#""aa""#),
+        (r#""abab" | sub("(b)"; "${é}")"#, r#""aa""#),
+        (r#""abab" | sub("(b)"; "$1é")"#, r#""aa""#),
+        (r#""abab" | sub("(b)"; "$2")"#, r#""aa""#),
+        (r#""abab" | sub("(b)(c)?"; "[$2]")"#, r#""a[]a[]""#),
+        (r#""abab" | sub("(b)"; "$٣")"#, r#""aa""#),
+        (r#""abab" | sub("(?P<n>b)"; "$nⅧ")"#, r#""abⅧabⅧ""#),
+        (r#""abab" | sub("(?P<n>b)"; "${n}²")"#, r#""ab²ab²""#),
     ];
     for (filter, want) in rows {
         let (out, code) = run_yq_stdin(filter, "null", &["-o=json", "-I=0"])?;
