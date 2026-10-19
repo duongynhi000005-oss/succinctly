@@ -162894,6 +162894,109 @@ fn test_foreach_update_single_pattern_bind_beside_a_label_break_4800() -> Result
     ])
 }
 
+/// #4800: a comma beside the single-pattern bind of `.` in a `foreach` UPDATE
+/// ([`test_foreach_update_single_pattern_bind_behind_wrappers_4800`]) that holds an `empty` (ahead of the
+/// bind, behind it, between two, or as the tail of a pipe the bind feeds) stores exactly the outputs the bind
+/// does, so the answer is the EXTRACT's as it is without the `empty`. Each of those was refused naming the
+/// UPDATE's own state (or, under a `?`, answered `[]`). A sibling that is no bind (`7`, `.a`, `null`) stores
+/// a node of its own and is not read. Every row captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_single_pattern_bind_beside_an_empty_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), empty; null))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; empty, (. as {a:$q} | .); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(foreach (1,2) as $i (.; (. as {a:$q} | .), empty; null))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (1) as $i (.; (. as {a:$q} | .), empty; null)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; (. as {a:$q} | .), empty, (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"],[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; (. as {a:$q} | .) | empty; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; ((. as {a:$q} | .), empty) | .; null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; ((. as {a:$q} | .) | empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), empty; empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(foreach (1,2) as $i (.; empty, (. as {a:$q} | .); empty))",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), empty; $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), empty; null))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), empty; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's
