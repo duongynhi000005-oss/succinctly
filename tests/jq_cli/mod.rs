@@ -1,0 +1,20 @@
+//! Per-issue jq CLI tests (#4329), compiled into the `jq_cli_tests` binary.
+//!
+//! `tests/jq_cli_tests.rs` is 160k+ lines and every new test used to be appended at its end,
+//! so any two PRs in flight conflicted there. **Put a new test for issue `N` in
+//! `tests/jq_cli/iN.rs` and add one `mod iN;` line to the list below, in numeric order.**
+//! Two PRs for different issues then touch different files, and their `mod` lines land in
+//! different gaps of the sorted list. `.gitattributes` also marks this file `merge=union`,
+//! so two lines added into the same gap keep both instead of conflicting.
+//!
+//! - A module reaches the binary's shared helpers through `crate::`
+//!   (`use crate::{run_jq_stdin, run_jq_full};`); they stay private to the binary, and every
+//!   descendant module can see them.
+//! - This directory is not a test target (Cargo discovers `tests/*.rs` and
+//!   `tests/*/main.rs`, not `tests/*/mod.rs`), so it adds no binary and no link time.
+//! - Existing tests stay where they are; do not move them (a mass move conflicts with every
+//!   open PR). Extend an existing test in place when it already covers the same behaviour.
+//! - A test that belongs with a topical group already in `jq_cli_tests.rs` (a `mod ... {}`
+//!   block) may still go there, next to its siblings, but never at the end of the file.
+//! - `scripts/deep-recursion-tests.sh` names its tests by their path in this binary; a test
+//!   that script lists must stay where it is.

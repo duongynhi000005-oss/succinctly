@@ -224,6 +224,11 @@ use cargo_run_exit::{
     write_stdin_then_wait, MAX_CARGO_RETRIES,
 };
 
+// New tests go in `tests/jq_cli/` (one `iNNNN.rs` per issue), not at the end of this file:
+// see the header of `tests/jq_cli/mod.rs`. #4329.
+#[path = "jq_cli/mod.rs"]
+mod per_issue;
+
 /// Captured from /usr/bin/jq 1.7.1-apple. Exercise the CLI's generic
 /// evaluator as well as its output and exit-status handling.
 #[test]
