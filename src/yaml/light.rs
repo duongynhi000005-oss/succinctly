@@ -4224,23 +4224,53 @@ impl core::fmt::Write for StackText {
 /// correction ([`crate::jq::correct_shortest_decimal_tiebreak`]) can only rewrite such a number
 /// when its last digit is `3` -- it needs the last digit odd, and a tie at `k` fractional digits
 /// needs `5^k | 2n - 1`, hence `n % 5 == 3`, hence a last digit of `3` -- so every other number is
-/// printed as formatted. Everything else (a scientific magnitude, a whole number) takes
-/// [`format_float_yq`] itself, so the two cannot disagree.
+/// printed as formatted. A scientific magnitude is written by [`write_float_yq_scientific`] (#4923)
+/// and a whole number takes [`format_float_yq`] itself, so the two cannot disagree.
 fn write_float_yq<W: core::fmt::Write>(out: &mut W, f: f64) -> core::fmt::Result {
-    if !yq_float_is_scientific(f) {
-        let mut text = StackText::new();
-        if core::fmt::write(&mut text, format_args!("{f}")).is_ok() {
-            let s = text.as_str();
-            if s.as_bytes().contains(&b'.') {
-                return if s.as_bytes().last() == Some(&b'3') {
-                    out.write_str(&crate::jq::correct_shortest_decimal_tiebreak(
-                        f,
-                        s.to_string(),
-                        0,
-                    ))
-                } else {
-                    out.write_str(s)
-                };
+    if yq_float_is_scientific(f) {
+        return write_float_yq_scientific(out, f);
+    }
+    let mut text = StackText::new();
+    if core::fmt::write(&mut text, format_args!("{f}")).is_ok() {
+        let s = text.as_str();
+        if s.as_bytes().contains(&b'.') {
+            return if s.as_bytes().last() == Some(&b'3') {
+                out.write_str(&crate::jq::correct_shortest_decimal_tiebreak(
+                    f,
+                    s.to_string(),
+                    0,
+                ))
+            } else {
+                out.write_str(s)
+            };
+        }
+    }
+    out.write_str(&format_float_yq(f))
+}
+
+/// [`format_float_yq`]'s scientific branch, written straight into `out` (#4923): the shortest
+/// digits and exponent come from `{f:e}` into a stack buffer, the tie-break correction is asked
+/// as a question about those digits ([`crate::jq::shortest_decimal_is_wrong_tie`]) rather than
+/// run on an owned `String`, and the `e+NN` spelling is written piece by piece. A value the stack
+/// buffer cannot hold (none: `{f:e}` is at most 24 bytes) takes [`format_float_yq`] itself.
+fn write_float_yq_scientific<W: core::fmt::Write>(out: &mut W, f: f64) -> core::fmt::Result {
+    let mut text = StackText::new();
+    if core::fmt::write(&mut text, format_args!("{f:e}")).is_ok() {
+        if let Some((mantissa, exp_str)) = text.as_str().split_once('e') {
+            if let Ok(exp) = exp_str.parse::<i32>() {
+                let digits = mantissa.as_bytes();
+                match digits.split_last() {
+                    Some((&last, head))
+                        if crate::jq::shortest_decimal_is_wrong_tie(f, mantissa, exp.into()) =>
+                    {
+                        // `mantissa` is ASCII, so `head` is a whole `str`.
+                        out.write_str(core::str::from_utf8(head).unwrap_or(""))?;
+                        out.write_char(char::from(last - 1))?;
+                    }
+                    _ => out.write_str(mantissa)?,
+                }
+                let sign = if exp < 0 { '-' } else { '+' };
+                return write!(out, "e{sign}{:02}", exp.unsigned_abs());
             }
         }
     }
@@ -10450,6 +10480,43 @@ mod tests {
         // The existing prefix is kept (a compact step is literal spaces even under `--tab`).
         assert_eq!(deeper_yaml_indent("  ", 1, '\t'), "  \t");
         assert_eq!(deeper_yaml_indent("", 1, '\t'), "\t");
+    }
+
+    /// #4923: the scientific writer asks the tie-break question about the mantissa's digits
+    /// instead of rewriting an owned `String`, so it has to hit exactly the doubles the rewrite
+    /// would: dyadic values past yq's `1e6` threshold, where `{f:e}` can land on the
+    /// away-from-zero side of an exact decimal tie, in both signs and over a wide exponent range.
+    #[test]
+    fn write_float_yq_scientific_agrees_on_exact_ties_4923() {
+        let mut ties = 0;
+        let mut checked = 0;
+        for k in -1000..1000 {
+            for odd in [1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 33.0, 99.0] {
+                for sign in [1.0, -1.0] {
+                    let f = sign * odd * (2.0f64).powi(k);
+                    if !f.is_finite() {
+                        continue;
+                    }
+                    let mut written = alloc::string::String::new();
+                    write_float_yq(&mut written, f).unwrap();
+                    assert_eq!(written, format_float_yq(f), "{f:e}");
+                    checked += 1;
+                    let sci = alloc::format!("{f:e}");
+                    let (mantissa, exp) = sci.split_once('e').unwrap();
+                    if crate::jq::shortest_decimal_is_wrong_tie(f, mantissa, exp.parse().unwrap()) {
+                        ties += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+        // A tie `jq_bare_float_display`'s own tests pin (#2542): one ULP off `2^-25`'s exact
+        // `...3125e-8` midpoint, where Rust prints the odd digit and yq the even one.
+        let mut written = alloc::string::String::new();
+        write_float_yq(&mut written, 2.9802322387695313e-8).unwrap();
+        assert_eq!(written, "2.9802322387695312e-08");
+        // The question is not vacuous: some of these values really are the wrong side of a tie.
+        assert!(ties > 0, "no exact tie among {checked} values");
     }
 
     /// #4915: the allocation-free float printer must spell every float exactly as
