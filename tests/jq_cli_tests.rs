@@ -163207,6 +163207,295 @@ fn test_foreach_update_single_pattern_bind_beside_a_spelled_out_empty_4800() -> 
     ])
 }
 
+/// #4800: an `empty` that is one only by evaluation -- a `select` whose condition is a constant that is never
+/// truthy (`false | not | not`, `false, null`, `empty`, `false // null`) or a `limit` whose count is built
+/// from numeric literals (`1 + 0`, `-1 + 0`, `0 * 1`) -- stores nothing beside the single-pattern bind of `.`
+/// in a `foreach` UPDATE, as the literal spellings do
+/// ([`test_foreach_update_single_pattern_bind_beside_a_spelled_out_empty_4800`]). The controls keep their
+/// refusal: a condition or count that can raise (`select(error)`, `limit(error("x"); ..)`, `1 / 0`, `1 % 0`)
+/// or depends on the state (`select(.a)`), a `select` that is truthy for some output (`true | not | not`,
+/// `false, true`), and a `limit` that emits (`limit(1 + 0; .)`, `limit(-1 + 0; .)`); jq answers the first
+/// output(s) and then raises there, so only the refusal's kind is pinned. Every other row captured from
+/// jq 1.7.1.
+#[test]
+fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(false|not|not); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; select(false|not|not), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(null|not|not); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; select(null|not|not), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(false,null); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; select(false,null), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; select(empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(false // null); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; select(false // null), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1+0; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(1+0; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0+0; .); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(0+0; .), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0*1; .); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(0*1; .), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(-1+0; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(-1+0; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(2-1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(2-1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), first(select(false|not|not)); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; first(select(false|not|not)), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(foreach (1,2) as $i (.; (. as {a:$q} | .), select(false|not|not); null))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1+0; empty); null)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; ((. as {a:$q} | .), select(false|not|not)) | .; null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; select(false|not|not) | (. as {a:$q} | .); null))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1+0; empty); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), select(false|not|not); $i))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1) as $i (.; (. as {a:$q} | .), limit(1+0; empty); .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(error); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(.a); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(true|not|not); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), select(false,true); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(error("x"); empty); null))"#,
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(.a.b; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1+0; .); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(-1+0; .); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1%0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's

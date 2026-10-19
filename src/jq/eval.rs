@@ -37276,8 +37276,8 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
 /// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
 /// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
-/// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`) stores nothing, so it adds
-/// no state of its own; every item of a comma must itself be such a shape,
+/// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`, or computed from constants: `select(false | not | not)`,
+/// `limit(1 + 0; empty)`) stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
@@ -37288,13 +37288,12 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     fn emits_nothing(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Builtin(Builtin::Empty) => true,
-            Expr::Builtin(Builtin::Select(cond)) => matches!(
-                unwrap_paren(cond),
-                Expr::Literal(Literal::Bool(false) | Literal::Null)
-            ),
+            // A condition that is constant and never truthy (`false | not | not`, `false // null`): it
+            // cannot raise, so nothing depends on the state.
+            Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
             Expr::FirstExpr(inner) => emits_nothing(inner),
-            // A literal count only: a computed one is evaluated first and may raise.
-            Expr::Limit { n, expr } => match limit_literal_count(n) {
+            // A count of numeric literals only: any other is evaluated first and may raise.
+            Expr::Limit { n, expr } => match constant_number(n) {
                 Some(count) => count == 0.0 || emits_nothing(expr),
                 None => false,
             },
@@ -53244,6 +53243,28 @@ fn wrapped_marker(e: &Expr) -> Option<&Rc<Tracked>> {
 fn limit_literal_count(n: &Expr) -> Option<f64> {
     match unwrap_paren(n) {
         Expr::Literal(lit) => literal_to_owned(lit).as_f64(),
+        _ => None,
+    }
+}
+
+/// A number built from numeric literals under `+`, `-`, `*` and unary minus (`1 + 0`, `-1 + 1`), which
+/// cannot raise, so a `limit` count of it is as fixed as a literal one (#4800). Not `/` or `%`, which
+/// raise on a zero divisor.
+fn constant_number(e: &Expr) -> Option<f64> {
+    match unwrap_paren(e) {
+        Expr::Literal(_) => limit_literal_count(e),
+        Expr::Negate(inner) => constant_number(inner).map(|n| -n),
+        Expr::Arithmetic {
+            op, left, right, ..
+        } => {
+            let (left, right) = (constant_number(left)?, constant_number(right)?);
+            match op {
+                ArithOp::Add => Some(left + right),
+                ArithOp::Sub => Some(left - right),
+                ArithOp::Mul(_) => Some(left * right),
+                ArithOp::Div | ArithOp::Mod => None,
+            }
+        }
         _ => None,
     }
 }
