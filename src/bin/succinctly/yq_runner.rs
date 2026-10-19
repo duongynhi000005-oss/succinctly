@@ -9753,8 +9753,9 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 // `stream_yaml_sort_keys_alias_fallback` calls per result,
                 // already writes its own terminator after each one -- an
                 // extra call here double-terminated every result (caught by
-                // this fix's own tests).
-                return Ok(i32::from(args.exit_status && !any_truthy));
+                // this fix's own tests). A sort of a mapping reports its refusal (a repeated
+                // key) through the sink, which the exit code has to see (#4386).
+                return Ok(run_exit_code(&sink, args.exit_status, any_truthy));
             }
 
             let root = index.root(&yaml_bytes);
@@ -11391,22 +11392,26 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         return Ok(code);
     }
 
-    // Determine exit code. An uncaught error outranks -e: the filter failed,
-    // which is not the same as it succeeding with a falsy result (#355 vs #178).
-    // yq collapses both to 1, but the diagnostic already went to stderr, so
-    // reporting "no matches found" on top of it would be misleading.
+    Ok(run_exit_code(&sink, args.exit_status, any_truthy))
+}
+
+/// The exit code of a run that was not halted. An uncaught error outranks -e: the filter failed,
+/// which is not the same as it succeeding with a falsy result (#355 vs #178). yq collapses both
+/// to 1, but the diagnostic already went to stderr, so reporting "no matches found" on top of it
+/// would be misleading.
+fn run_exit_code(sink: &ErrorSink, exit_status: bool, any_truthy: bool) -> i32 {
     if sink.hit() {
-        return Ok(DiagStyle::Yq.error_exit_code());
+        return DiagStyle::Yq.error_exit_code();
     }
 
     // yq compat: empty output and all-falsy output are the same failure,
     // reported on stderr with a fixed message and exit 1.
-    if args.exit_status && !any_truthy {
+    if exit_status && !any_truthy {
         eprintln!("Error: no matches found");
-        return Ok(exit_codes::FALSE_OR_NULL);
+        return exit_codes::FALSE_OR_NULL;
     }
 
-    Ok(exit_codes::SUCCESS)
+    exit_codes::SUCCESS
 }
 
 #[cfg(test)]
