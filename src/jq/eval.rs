@@ -37640,9 +37640,16 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     fn emits_only_dot(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Identity => true,
-            Expr::Builtin(Builtin::Select(cond)) => {
-                matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
-            }
+            Expr::Builtin(Builtin::Select(cond)) => matches!(
+                unwrap_paren(cond),
+                Expr::Literal(
+                    Literal::Bool(true)
+                        | Literal::NumberLiteral(..)
+                        | Literal::Int(_)
+                        | Literal::Float(_)
+                        | Literal::String(_)
+                )
+            ),
             Expr::Comma(items) => items.iter().all(emits_only_dot),
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 emits_only_dot(inner)
@@ -37676,6 +37683,33 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
                 found
             }
             Expr::Break(name) if labels.contains(&name.as_str()) => Some(false),
+            // A `first`/`limit`/`nth(0; ..)` takes outputs of a body that already hands `.` on, so what
+            // it stores is the register's node as the body does. A count of a constant nonzero finite
+            // number only (zero is [`emits_nothing`]'s, a count past the first needs the body's second
+            // output to exist, and a computed one is evaluated first and may raise).
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                binds(inner, labels)
+            }
+            Expr::Limit { n, expr }
+                if constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0) =>
+            {
+                binds(expr, labels)
+            }
+            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+                if constant_number(n) == Some(0.0) =>
+            {
+                binds(expr, labels)
+            }
+            // Either branch stores the register's node, so the condition decides nothing the state
+            // shows; one that cannot move the register runs as a value and leaves it where it was.
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } if cannot_move_register(cond) => {
+                let then_binds = binds(then_branch, labels)?;
+                Some(binds(else_branch, labels)? || then_binds)
+            }
             Expr::Comma(items) => items
                 .iter()
                 .try_fold(false, |any, item| Some(binds(item, labels)? || any)),
