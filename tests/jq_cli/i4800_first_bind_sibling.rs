@@ -350,7 +350,9 @@ fn test_foreach_update_single_pattern_bind_led_first_over_a_non_bind_sibling_480
 /// keep their refusal, since the sibling is stored or supplies the first output: `limit(2; B, 7)` stores `7`
 /// as the state, a sibling or an item that can emit nothing ahead of the bind (`first(7, B)`,
 /// `first(empty, B, 7)`) leaves the first output to something else, `nth(1; ..)` takes the second, a count
-/// that depends on the state is evaluated first, and an `if` that navigates decides by the state. Only the
+/// that depends on the state is evaluated first, an `if` that navigates decides by the state, and a bind
+/// whose pattern computes a key (`{(empty): $q}`) emits nothing, so the sibling supplies the first output and
+/// stores a node of its own. Only the
 /// refusal's kind is pinned here, as the sibling tests do.
 #[test]
 fn test_foreach_update_first_over_a_non_bind_sibling_controls_stay_refused_4800() -> Result<()> {
@@ -403,6 +405,41 @@ fn test_foreach_update_first_over_a_non_bind_sibling_controls_stay_refused_4800(
             "",
             "Invalid path expression with result",
             5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.; first((. as {(empty):$q} | .), .a); .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.; limit(1; (. as {(empty):$q} | .), .a); .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.; nth(0; (. as {(empty):$q} | .), .a); .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $i (.; first((. as {(select(false)):$q} | .), .a); .))",
+            "[\"a\"]\n",
+            "Invalid path expression",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(foreach (1,2) as $i (.; first((. as {(empty):$q} | .), .a); .))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
         ),
     ])
 }
