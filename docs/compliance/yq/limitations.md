@@ -1865,9 +1865,9 @@ $ yq            -n -o=json '"\u0041"'       # "\\u0041"   (six characters, not A
 $ succinctly yq -n -o=json '"\u0041"'       # "\\u0041"   (was "A")
 ```
 
-The same table applies to object keys, path steps and every other string literal; a document's own
+The same table applies to object keys, bracket steps (`.x["a\tb"]`) and every other string literal, with one exception: the quoted name of a *dotted* path step (`.x."a\tb"`) is read raw, escapes included, up to the next `"`, so it selects the key `a\tb` (a backslash and a `t`) and `.x."a\"` is the key `a\`. A document's own
 double-quoted scalars are a different lexer (YAML, see above) and are unchanged. Pinned by
-`tests/yq_cli/i4916.rs` (123 rows captured from yq v4.53.3). Still different: a `\(` that never closes
+`tests/yq_cli/i4916.rs` (147 rows captured from yq v4.53.3). Still different: a run of backslashes ahead of `\(` (yq alternates between a literal `\(` and an interpolation as the run grows: `"x\\(1)y"` is the text `x\(1)y`, `"x\\\\(1)y"` is `x\1y`; here every pair decodes first), a `\(` that never closes
 (`"a\(b"` is the text `a\(b` in yq, a parse error here), a `\"` inside an interpolation's expression
 (`"\(\"a\")"`), the regex dialect (Go's RE2 rejects `\u0061` in a pattern, the Rust engine accepts it)
 and a string-literal `@format` (`@base64 "x\q"`, where both refuse with different wording).

@@ -1794,6 +1794,25 @@ impl<'a> Parser<'a> {
         Ok(Expr::StringInterpolation(parts))
     }
 
+    /// The quoted name of a dotted path step, `."key"` (#4916). In jq mode that is an ordinary string
+    /// literal. yq reads the text between the quotes **raw**, escapes included, up to the next `"`:
+    /// `.x."a\tb"` selects the key `a\tb` (a backslash and a `t`), where `.x["a\tb"]` selects the one
+    /// with a TAB, and `."a\"` is the key `a\` (live against the pinned v4.53.3).
+    fn parse_path_step_name(&mut self) -> Result<String, ParseError> {
+        if self.mode != ParserMode::Yq {
+            return self.parse_string_literal();
+        }
+        self.expect('"')?;
+        let mut name = String::new();
+        loop {
+            match self.next() {
+                None => return Err(ParseError::new("unterminated string", self.pos)),
+                Some('"') => return Ok(name),
+                Some(c) => name.push(c),
+            }
+        }
+    }
+
     /// Parse a simple string literal (for object keys, etc.)
     fn parse_string_literal(&mut self) -> Result<String, ParseError> {
         self.expect('"')?;
@@ -3242,7 +3261,7 @@ impl<'a> Parser<'a> {
 
                 // Check for quoted field access `."key"`
                 let mut expr = if self.peek() == Some('"') {
-                    let name = self.parse_string_literal()?;
+                    let name = self.parse_path_step_name()?;
                     self.field_or_wildcard(name)
                 } else {
                     // Field access `.foo`
@@ -7958,7 +7977,7 @@ impl<'a> Parser<'a> {
                         push_bracket(&mut chain, bracket);
                     } else {
                         let name = if self.peek() == Some('"') {
-                            self.parse_string_literal()?
+                            self.parse_path_step_name()?
                         } else {
                             self.parse_field_ident()?
                         };

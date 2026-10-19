@@ -158,3 +158,62 @@ fn test_4916_jq_string_literal_escapes_are_unchanged() -> Result<()> {
     assert_ne!(code, 0, "{out:?}");
     Ok(())
 }
+
+/// #4916: a dotted path step `.x."key"` is read **raw** by yq (no escape is decoded, and the next `"` ends
+/// it), where `.x["key"]` and every other string literal use the escape table. The document holds the
+/// colliding keys `a\q`, `a\\q`, `a<TAB>b`, `a\tb` and `a<LF>b`, so a step that decodes where yq does not (or
+/// the reverse) selects, writes or deletes a different key. Every row captured from yq v4.53.3.
+#[test]
+fn test_4916_yq_dotted_path_step_name_is_read_raw() -> Result<()> {
+    let doc = r#"{"x": {"a\\q": 1, "a\\\\q": 2, "a\tb": 6, "a\\tb": 5, "a\\nb": 7, "a\nb": 8, "a\"b": 9, "k": 3}}"#;
+    let rows: &[(&str, &str)] = &[
+        (r#".x."a\q""#, r"1"),
+        (r#".x."a\\q""#, r"2"),
+        (r#".x."a\tb""#, r"5"),
+        (r#".x."a\nb""#, r"7"),
+        (r#".x["a\tb"]"#, r"6"),
+        (r#".x["a\\q"]"#, r"1"),
+        (r#".x["a\nb"]"#, r"8"),
+        (r#".x["a\q"]"#, r"1"),
+        (r#".x | ."a\tb""#, r"5"),
+        (r#".x."a\""#, r"null"),
+        (r#".x."k""#, r"3"),
+        (r#".x."k"?"#, r"3"),
+        (r#".x.k."a\q"?"#, r""),
+        (
+            r#".x."a\tb" = 10"#,
+            r#"{"x":{"a\\q":1,"a\\\\q":2,"a\tb":6,"a\\tb":10,"a\\nb":7,"a\nb":8,"a\"b":9,"k":3}}"#,
+        ),
+        (
+            r#"del(.x."a\tb")"#,
+            r#"{"x":{"a\\q":1,"a\\\\q":2,"a\tb":6,"a\\nb":7,"a\nb":8,"a\"b":9,"k":3}}"#,
+        ),
+        (
+            r#"del(.x["a\tb"])"#,
+            r#"{"x":{"a\\q":1,"a\\\\q":2,"a\\tb":5,"a\\nb":7,"a\nb":8,"a\"b":9,"k":3}}"#,
+        ),
+        (
+            r#".x["a\tb"] = 10"#,
+            r#"{"x":{"a\\q":1,"a\\\\q":2,"a\tb":10,"a\\tb":5,"a\\nb":7,"a\nb":8,"a\"b":9,"k":3}}"#,
+        ),
+        (
+            r".x | keys",
+            r#"["a\\q","a\\\\q","a\tb","a\\tb","a\\nb","a\nb","a\"b","k"]"#,
+        ),
+        (r#"has("x")"#, r"true"),
+        (r#".x | has("a\tb")"#, r"true"),
+        (r#".x | has("a\\tb")"#, r"true"),
+        (r#".["x"]."a\q""#, r"1"),
+        (
+            r#".x."a\q" = 11"#,
+            r#"{"x":{"a\\q":11,"a\\\\q":2,"a\tb":6,"a\\tb":5,"a\\nb":7,"a\nb":8,"a\"b":9,"k":3}}"#,
+        ),
+        (r".x | to_entries | map(.key) | length", r"8"),
+    ];
+    for (filter, want) in rows {
+        let (out, code) = run_yq_stdin(filter, doc, &["-p", "json", "-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "filter {filter:?}: {out:?}");
+        assert_eq!(out.trim(), *want, "filter {filter:?}");
+    }
+    Ok(())
+}
