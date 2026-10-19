@@ -706,6 +706,12 @@ struct Parser<'a> {
     pattern_computed_keys: usize,
     /// Current `Expr` recursion depth; see [`MAX_EXPR_DEPTH`].
     expr_depth: usize,
+    /// Whether a string bracket key (`.["k"]`) stays an [`Expr::IndexExpr`] rather than folding
+    /// into [`Expr::Field`]: set only while yq mode parses a `del(...)` argument (#2126), the one
+    /// place the bracket and dotted spellings part ways (`del()` vivifies a `null` behind the
+    /// bracket form and not the dotted one). Everywhere else the two stay one AST, so no other
+    /// analysis of a program sees a different shape for `.["k"]`.
+    keep_bracket_keys: bool,
     /// Every ordinary `Expr::FuncCall` site this parse has built, with the
     /// byte offset of its own identifier (#2085).
     ///
@@ -1163,6 +1169,7 @@ impl<'a> Parser<'a> {
             pattern_depth: 0,
             pattern_computed_keys: 0,
             expr_depth: 0,
+            keep_bracket_keys: false,
             call_sites: Vec::new(),
             var_sites: Vec::new(),
             break_sites: Vec::new(),
@@ -1916,6 +1923,16 @@ impl<'a> Parser<'a> {
                             optional: false,
                         }
                     }
+                    // #2126: yq reads `.["k0"]` through `traverseArrayOperator`, not the
+                    // `.k0` field traversal, and the two part ways on `null` -- the array
+                    // operator turns a `!!null` it indexes into the empty container the key
+                    // implies (`{}` for a string key), the field traversal leaves it alone.
+                    // Folding the bracket form into `Expr::Field` erases the difference, so a
+                    // `del()` argument keeps a string key as the computed key it is.
+                    Some(Expr::Field(_)) if self.keep_bracket_keys => Bracket::Dynamic {
+                        key,
+                        optional: false,
+                    },
                     Some(folded) => Bracket::Static(folded),
                     None => Bracket::Dynamic {
                         key,
@@ -6837,9 +6854,11 @@ impl<'a> Parser<'a> {
         if self.matches_keyword("del") {
             let keyword_start = self.pos;
             self.consume_keyword("del");
-            return Ok(self
-                .parse_required_single_arg(keyword_start)?
-                .map(|path| Builtin::Del(Box::new(path))));
+            let outer = self.keep_bracket_keys;
+            self.keep_bracket_keys = self.mode == ParserMode::Yq;
+            let arg = self.parse_required_single_arg(keyword_start);
+            self.keep_bracket_keys = outer;
+            return Ok(arg?.map(|path| Builtin::Del(Box::new(path))));
         }
 
         // Phase 10: Math Functions
@@ -9479,6 +9498,35 @@ mod tests {
         assert!(
             !matches!(longer, Expr::Builtin(Builtin::Filename)),
             "{longer:?}"
+        );
+    }
+
+    /// #2126: a `del()` argument in yq mode keeps a string bracket key (`.["k"]`, `.[("k")]`) as the
+    /// computed key it is, where it folds into the `.k` field step everywhere else; jq mode, and an
+    /// integer key, always fold.
+    #[test]
+    fn a_string_bracket_key_stays_computed_only_in_a_yq_del_argument_2126() {
+        let has_bracket =
+            |expr: &Expr| any_subexpr(expr, &mut |e| matches!(e, Expr::IndexExpr { .. }));
+        for src in [r#".["k"]"#, r#".[("k")]"#, r#".a["k"]"#] {
+            let del = format!("del({src})");
+            let yq = parse_with_mode(&del, ParserMode::Yq).unwrap();
+            assert!(has_bracket(&yq), "{del}: {yq:?}");
+            let jq = parse_with_mode(&del, ParserMode::Jq).unwrap();
+            assert!(!has_bracket(&jq), "{del}: {jq:?}");
+            // Outside `del()` the two spellings are one AST, as before.
+            let read = parse_with_mode(src, ParserMode::Yq).unwrap();
+            assert!(!has_bracket(&read), "{src}: {read:?}");
+        }
+        // The flag ends with the argument.
+        let after = parse_with_mode(r#"del(.a) | .["k"]"#, ParserMode::Yq).unwrap();
+        assert!(!has_bracket(&after), "{after:?}");
+        // An integer key keeps folding to a static index inside `del()` too.
+        let yq = parse_with_mode("del(.[0])", ParserMode::Yq).unwrap();
+        assert!(!has_bracket(&yq), "{yq:?}");
+        assert_eq!(
+            parse_with_mode(".k", ParserMode::Yq).unwrap(),
+            Expr::Field("k".into())
         );
     }
 

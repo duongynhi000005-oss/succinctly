@@ -2345,6 +2345,16 @@ fn static_path_steps(expr: &Expr, out: &mut Vec<PathStep>) -> bool {
             out.push(PathStep::Index(*idx));
             true
         }
+        // #2126: `del(.["a"][0])` keeps the bracket form; it is `del(.a[0])` to the reconcile.
+        Expr::IndexExpr { target, .. } => match expr.literal_bracket_key() {
+            Some((_, name)) => {
+                static_path_steps(target, out) && {
+                    out.push(PathStep::Key(name.into()));
+                    true
+                }
+            }
+            None => false,
+        },
         // #3551: bare `first` is yq's path step to a sequence's element 0
         // (`del(first)` on `[1,2]` is `[2]`), so a delete through it shifts
         // the same positions `del(.[0])` does. Without this arm the
@@ -3591,6 +3601,20 @@ fn static_nav_steps(expr: &Expr) -> Option<Vec<TreeStep<'_>>> {
     match expr {
         Expr::Field(name) => Some(vec![TreeStep::Key(name.as_str())]),
         Expr::Index { idx, .. } if *idx >= 0 => Some(vec![TreeStep::Index(*idx as usize)]),
+        // #2126: a `del()` argument keeps `.["b"]` as a bracket on its target; the same
+        // navigation as `.b`.
+        Expr::IndexExpr { .. } => {
+            let (target, name) = expr.literal_bracket_key()?;
+            // `.["b"]` is a bracket on the root node (`Identity`), which has no steps of its
+            // own: the bare-root case this function otherwise declines.
+            let mut steps = if matches!(target, Expr::Identity) {
+                Vec::new()
+            } else {
+                static_nav_steps(target)?
+            };
+            steps.push(TreeStep::Key(name));
+            Some(steps)
+        }
         Expr::Paren(inner) | Expr::Optional(inner) => static_nav_steps(inner),
         Expr::Pipe(stages) => {
             let mut steps = Vec::new();
