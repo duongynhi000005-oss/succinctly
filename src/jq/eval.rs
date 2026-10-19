@@ -25574,6 +25574,120 @@ fn stitch_replacement_rows<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         .collect())
 }
 
+/// How real yq reads a non-string replacement value as text (#1052): the coercion
+/// [`combine_sub_gap`] applies per match, and [`yq_sub_replacement_once`] to the one
+/// replacement of a bare yq `sub` (#4905) -- one definition, so the two cannot drift.
+#[cfg(feature = "regex")]
+fn yq_non_string_replacement_text<S: EvalSemantics>(replacement: &OwnedValue) -> Cow<'_, str> {
+    match replacement {
+        OwnedValue::Array(_) => Cow::Borrowed(""),
+        OwnedValue::Object(map) if map.is_empty() => Cow::Borrowed("{}"),
+        OwnedValue::Object(_) => Cow::Borrowed(""),
+        OwnedValue::Null
+        | OwnedValue::Bool(_)
+        | OwnedValue::Int(_)
+        | OwnedValue::Float(_)
+        | OwnedValue::NumberLiteral(..) => Cow::Owned(owned_to_string::<S>(replacement)),
+        OwnedValue::String(_) => unreachable!("a String replacement is used as it is"),
+    }
+}
+
+/// yq's `sub(re; replacement)` evaluates `replacement` **once, against `sub`'s own input**, before
+/// the input is type-checked or the pattern compiled, and whether or not anything matches (#4905,
+/// live against the pinned v4.53.3): `"a1b" | sub("a"; .)` is `"a1b1b"`, `sub("z"; error("boom"))`
+/// raises, and `sub("a"; .foo)` is `"1b"` (an absent key is the empty string). It reads no capture
+/// object, takes the first output of a generator (an escape anywhere in it raises with no output,
+/// as for every yq-native argument, [`ArgFanout::FirstOnly`]), and reads a stream with no output as
+/// the empty string. A non-string output is coerced as [`yq_non_string_replacement_text`] does.
+///
+/// jq's own `sub` evaluates the replacement per match against the capture object and keeps that
+/// model (ADR-0018: the mode decides).
+#[cfg(feature = "regex")]
+fn yq_sub_replacement_once<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    replacement_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> Result<String, QueryResult<'a, W>> {
+    let (outputs, trailing) =
+        stream_outputs::<_, S>(eval_single::<W, S>(replacement_expr, value, optional));
+    if let Some(control) = trailing {
+        return Err(partial(Vec::new(), control));
+    }
+    Ok(match outputs.into_iter().next() {
+        None => String::new(),
+        Some(OwnedValue::String(text)) => text.into_string(),
+        Some(other) => yq_non_string_replacement_text::<S>(&other).into_owned(),
+    })
+}
+
+/// Go's `Regexp.Expand` template: what yq's `sub` does with the replacement string at each match
+/// (`ReplaceAllString`, #4905). `$1`, `${1}`, `$name` and `${name}` insert a group (an absent or
+/// unmatched one is empty), `$$` is a literal `$`, and a `$` that starts no valid reference is
+/// kept as text. A name is the longest run of letters, digits and `_`; `$1x` is therefore the
+/// group *named* `1x` (empty), and a reference with a leading zero (`$01`) is a name too.
+#[cfg(feature = "regex")]
+fn go_expand_template(template: &str, re: &JqRegex, caps: &regex::Captures, dst: &mut String) {
+    let mut rest = template;
+    while let Some(dollar) = rest.find('$') {
+        dst.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 1..];
+        if let Some(after) = rest.strip_prefix('$') {
+            dst.push('$');
+            rest = after;
+            continue;
+        }
+        let Some((name, after)) = go_template_reference(rest) else {
+            dst.push('$');
+            continue;
+        };
+        rest = after;
+        let bytes = name.as_bytes();
+        let numbered = bytes.iter().all(u8::is_ascii_digit)
+            && !(bytes[0] == b'0' && bytes.len() > 1)
+            && name.parse::<u32>().is_ok_and(|n| n < 100_000_000);
+        if numbered {
+            let group = name.parse::<usize>().expect("digits below 1e8");
+            if let Some(m) = caps.get(group) {
+                dst.push_str(m.as_str());
+            }
+        } else {
+            for (index, group_name) in re.capture_names().enumerate() {
+                if group_name == Some(name) {
+                    if let Some(m) = caps.get(index) {
+                        dst.push_str(m.as_str());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    dst.push_str(rest);
+}
+
+/// The reference after a `$` in [`go_expand_template`]: `name` or `{name}`, with the text after it.
+/// `None` for an empty name or a brace left open.
+#[cfg(feature = "regex")]
+fn go_template_reference(text: &str) -> Option<(&str, &str)> {
+    let (braced, body) = match text.strip_prefix('{') {
+        Some(body) => (true, body),
+        None => (false, text),
+    };
+    let end = body
+        .char_indices()
+        .find(|&(_, c)| !(c.is_alphanumeric() || c == '_'))
+        .map_or(body.len(), |(index, _)| index);
+    if end == 0 {
+        return None;
+    }
+    let (name, after) = body.split_at(end);
+    let after = if braced {
+        after.strip_prefix('}')?
+    } else {
+        after
+    };
+    Some((name, after))
+}
+
 /// Combine a `sub`/`gsub` match's preceding gap text with its (already
 /// evaluated) replacement value -- the `$gap + $inserts[$ix]` step of jq's
 /// real `sub`/`gsub` (`src/builtin.jq`, #1034).
@@ -25625,17 +25739,9 @@ fn combine_sub_gap<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ) -> Result<String, QueryResult<'a, W>> {
     let replacement_text: Cow<'_, str> = match replacement {
         OwnedValue::String(s) => Cow::Owned(s.into_string()),
-        replacement if S::TAG == EvalTag::Yq => match &replacement {
-            OwnedValue::Array(_) => Cow::Borrowed(""),
-            OwnedValue::Object(map) if map.is_empty() => Cow::Borrowed("{}"),
-            OwnedValue::Object(_) => Cow::Borrowed(""),
-            OwnedValue::Null
-            | OwnedValue::Bool(_)
-            | OwnedValue::Int(_)
-            | OwnedValue::Float(_)
-            | OwnedValue::NumberLiteral(..) => Cow::Owned(owned_to_string::<S>(&replacement)),
-            OwnedValue::String(_) => unreachable!("String already matched above"),
-        },
+        replacement if S::TAG == EvalTag::Yq => {
+            Cow::Owned(yq_non_string_replacement_text::<S>(&replacement).into_owned())
+        }
         replacement => {
             return match arith_add::<S>(OwnedValue::String(gap.to_string().into()), replacement) {
                 Ok(OwnedValue::String(combined)) => Ok(combined.into_string()),
@@ -26073,6 +26179,17 @@ fn sub_with_resolved_pattern<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    // #4905: a bare yq `sub` evaluates its replacement once, up front, ahead of the input check and
+    // the regex build ([`yq_sub_replacement_once`]).
+    let yq_template = if S::TAG == EvalTag::Yq && flags.is_none() {
+        match yq_sub_replacement_once::<W, S>(replacement_expr, value.clone(), optional) {
+            Ok(template) => Some(template),
+            Err(qr) => return qr,
+        }
+    } else {
+        None
+    };
+
     // Get the input string
     let input = match &value {
         StandardJson::String(s) => match s.as_str() {
@@ -26140,6 +26257,22 @@ fn sub_with_resolved_pattern<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     } else {
         re.captures(&input).into_iter().collect()
     };
+
+    if let Some(template) = yq_template {
+        // `ReplaceAllString`: the one replacement is a template, expanded at each match.
+        let mut out = string_with_capacity(input.len());
+        let mut last_end = 0;
+        for caps in &matches {
+            let m = caps
+                .get(0)
+                .expect("capture group 0 is always present on a match");
+            out.push_str(&input[last_end..m.start()]);
+            go_expand_template(&template, &re, caps, &mut out);
+            last_end = m.end();
+        }
+        out.push_str(&input[last_end..]);
+        return QueryResult::Owned(OwnedValue::string(out));
+    }
 
     match stitch_replacement_rows::<W, S>(replacement_expr, &re, &input, &matches, optional) {
         Ok(rows) => owned_vec_to_result(rows.into_iter().map(OwnedValue::string).collect()),

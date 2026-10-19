@@ -1823,6 +1823,34 @@ separate, still-unresolved mystery, #1439 above — #1255's fix alone wouldn't m
 oracle-correct given that deeper algorithm mismatch, so the two are deliberately decoupled
 rather than guessed at together).
 
+### Bare 2-arg `sub(re; s)` — the replacement is read once, against the input, as a Go template
+
+[#4905](https://github.com/rust-works/succinctly/issues/4905): real yq evaluates the replacement of
+a bare `sub` **once, against `sub`'s own input**, ahead of the input's type check and the regex
+compile and whether or not anything matches. It takes the first output (an empty stream is `""`, an
+escape anywhere in it raises with no output), reads no capture object, and then runs Go's
+`ReplaceAllString` with that text as the *template*, so `$1`, `${name}` and `$$` expand
+(`Regexp.Expand`). `succinctly yq` had followed jq's `def sub`, evaluating the replacement per match
+against the capture object; the two agree only for a literal replacement. Now (jq mode, and yq's
+`gsub` extension behind `--jq-extensions`, keep the per-match model):
+
+```bash
+$ yq            -n '"a1b" | sub("a"; .)'               # "a1b1b"   (. is the input, not a capture object)
+$ succinctly yq -n '"a1b" | sub("a"; .)'               # "a1b1b"   (matches)
+$ yq            -n '"a1b" | sub("(?<x>a)"; .x)'        # "1b"      (.x is absent on the string: "")
+$ succinctly yq -n '"a1b" | sub("(?<x>a)"; .x)'        # "1b"      (matches)
+$ yq            -n '"abab" | sub("(b)"; "<$1$1>")'     # "a<bb>a<bb>"
+$ succinctly yq -n '"abab" | sub("(b)"; "<$1$1>")'     # "a<bb>a<bb>"  (matches; was "a<$1$1>a<$1$1>")
+$ yq            -n '"a1b" | sub("z"; error("boom"))'   # Error: boom  (evaluated with no match)
+$ succinctly yq -n '"a1b" | sub("z"; error("boom"))'   # Error: boom  (matches)
+```
+
+The 3-argument form is unchanged (#1122: the replacement is never evaluated). Non-string
+replacement values keep their #1052 coercion. Pinned by `tests/yq_cli/i4905.rs`. Still different,
+unrelated to this rule: yq's unknown-escape string literals (`"<\1>"` is the text `<\1>` in yq, a
+parse error here), its non-string-input error wording (`cannot substitute with !!int`), and its
+regex-compile error text.
+
 ### String interpolation with a multi-valued `\(...)` slot — yq takes the first value only
 
 [#1403](https://github.com/rust-works/succinctly/issues/1403) fixed jq mode's `"\(...)"` string
