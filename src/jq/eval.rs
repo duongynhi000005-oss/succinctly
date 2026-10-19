@@ -61345,11 +61345,15 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // persistent register (`foreign_register_markers_with`), which a per-step one would move out from
     // under: the fold-body grid (`scripts/jq-fold-body-register-grid-sweep.py`) gained 300+ wrong accepts
     // when it was not excluded. Syntactic, so decided once, not per source element.
-    let update_reads_foreign_marker = S::TAG == EvalTag::Jq
-        && any_subexpr(update, &mut |e| matches!(e, Expr::TrackedVar(_)))
-        && !any_subexpr(update, &mut |e| {
-            matches!(e, Expr::Reduce { .. } | Expr::Foreach { .. })
+    let update_reads_foreign_marker = S::TAG == EvalTag::Jq && {
+        let (mut marker, mut fold) = (false, false);
+        any_subexpr(update, &mut |e| {
+            marker |= matches!(e, Expr::TrackedVar(_));
+            fold |= matches!(e, Expr::Reduce { .. } | Expr::Foreach { .. });
+            fold
         });
+        marker && !fold
+    };
     // #4486: whether some comma item of UPDATE is a caught pure navigation, which emits nothing on
     // an accumulator it raises on ([`silence_failing_caught_navs`]).
     let update_has_caught_nav = update_navigates && comma_with_caught_navigation(update);
@@ -61714,6 +61718,27 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             &acc_snapshot,
                             acc_at_register || live_step_reg.is_some(),
                         );
+                        // #4832: a `$x` bound elsewhere than jq's register and read directly in UPDATE is
+                        // checked against the register where this step's source left it, as
+                        // `foreach`'s is ([`foreach_step_register`]), so a navigation or pattern step on it
+                        // raises at the step rather than leaving the final emission to refuse. Narrows
+                        // `update_at_register` here, ahead of every mark derived from it below.
+                        let moved_reg = (update_reads_foreign_marker
+                            && !(live_step_reg.is_some() && update_at_register))
+                            .then(|| {
+                                foreach_step_register::<S>(
+                                    walked.as_ref(),
+                                    &elem,
+                                    &reg,
+                                    frame,
+                                    acc_effective,
+                                    &acc_snapshot,
+                                    acc_at_register,
+                                    None,
+                                )
+                            });
+                        let update_at_register =
+                            update_at_register && moved_reg.as_ref().map_or(true, |(_, at)| *at);
                         let acc_input = acc.take().unwrap_or(OwnedValue::Null);
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "reduce")
@@ -61785,26 +61810,6 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             .then(|| fold_body::register_folds(register_fold_items(&substituted)));
                         let step_reg = live_step_reg.filter(|_| update_at_register);
                         navigated_live_register = step_reg.is_some();
-                        // #4832: a `$x` bound elsewhere than jq's register and read directly in UPDATE is
-                        // checked against the register where this step's source left it, as
-                        // `foreach`'s is ([`foreach_step_register`]), so a navigation or pattern step on it
-                        // raises at the step rather than leaving the final emission to refuse.
-                        let moved_reg = update_reads_foreign_marker
-                            .then(|| {
-                                foreach_step_register::<S>(
-                                    walked.as_ref(),
-                                    &elem,
-                                    &reg,
-                                    frame,
-                                    &acc_input,
-                                    &acc_snapshot,
-                                    acc_at_register,
-                                    None,
-                                )
-                            })
-                            .filter(|_| step_reg.is_none());
-                        let update_at_register =
-                            update_at_register && moved_reg.as_ref().map_or(true, |(_, at)| *at);
                         match step_reg
                             .or_else(|| moved_reg.as_ref().map(|(moved, _)| moved))
                             .unwrap_or(&reg)
