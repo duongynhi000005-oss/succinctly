@@ -4378,13 +4378,16 @@ enum CanonicalNumber {
 }
 
 impl CanonicalNumber {
-    /// Print the number: an integer exactly, a float through bare `f64`
-    /// `Display`.
+    /// Print the number: an integer exactly, a float the way yq prints a
+    /// float it decoded from JSON (#3576): shortest digits, scientific past
+    /// its magnitude threshold (`1e+20`, `-1e-07`). A float reaching here is
+    /// never whole inside `i64`'s range -- that is an integer, above -- so
+    /// [`format_float_yq`]'s forced decimal point never applies.
     #[inline]
     fn write<W: core::fmt::Write>(self, out: &mut W) -> core::fmt::Result {
         match self {
             Self::Int(i) => write_i64(out, i),
-            Self::Float(f) => write!(out, "{f}"),
+            Self::Float(f) => out.write_str(&format_float_yq(f)),
         }
     }
 }
@@ -4392,9 +4395,8 @@ impl CanonicalNumber {
 /// If `canonicalize` and `resolved` is a finite `Float`, the number to print
 /// instead of the scalar's own source-text spelling -- matching the DOM path's
 /// `to_owned_canonicalizing_numbers`/`OwnedValue::from_number_literal_plain`
-/// baseline for JSON-sourced input (#996), not real yq's own threshold-switching
-/// convention for *computed* floats ([`format_float_yq`], a different,
-/// unrelated case -- see that function's own doc comment). `None`
+/// baseline for JSON-sourced input (#996); a float that stays a float prints
+/// through [`format_float_yq`] (#3576). `None`
 /// otherwise: the caller falls back to its own literal-preserving logic
 /// unchanged, which covers every non-JSON-sourced case (`canonicalize`
 /// false), every non-`Float` scalar, and non-finite floats (JSON has no
