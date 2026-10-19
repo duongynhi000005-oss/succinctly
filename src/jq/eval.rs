@@ -20954,6 +20954,12 @@ pub(crate) fn format_owned<S: EvalSemantics>(
         FormatType::Urid => format_urid::<S>(owned, optional),
         FormatType::Yaml => format_yaml(owned),
         FormatType::Props => format_props(owned),
+        FormatType::YqJson(indent) => {
+            Ok(super::stream::owned_value_to_yq_json_string(owned, *indent))
+        }
+        FormatType::YqYaml(indent) => Ok(super::stream::owned_value_to_yaml_format_indented(
+            owned, *indent,
+        )),
         // #3357: matches builtin_format_named's own not_a_valid_format
         // call for the identical dynamic-name case (#3046) -- an ordinary
         // catchable error, not a decode failure, so `?`/optional suppress

@@ -5542,6 +5542,13 @@ stage: `with(.[]; . + 1)` over a million-element array, a no-op in yq too, takes
 `mapping values are not allowed in this context` since #4463) (the general
 minimal-validation trade-off of semi-indexing, not specific to the builtin).
 
+`to_yaml` is the `@yaml` encoder, so it has `@yaml`'s gaps (a multi-line string is double-quoted,
+not a literal block; a flow-sourced container is block; see the `@yaml` table below), and
+`to_json` of a string holding a backslash-`u` escape in a filter literal differs because filter
+literals are unescaped here (`"\u0001"`) where yq keeps the backslash. `to_json`/`to_yaml` print
+the same bytes as `@json`/`@yaml` plus yq's indent and trailing line break; `tojson` is
+unchanged (see the `tojson` entry).
+
 `from_json`/`from_yaml` decode through the same scalar resolution as input documents, so an
 implicit-tag scalar yq types specially keeps succinctly's type: `"2020-01-01" | from_json | tag`
 is `!!timestamp` in yq and `!!str` here (a date in a *document* has the same gap).

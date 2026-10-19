@@ -3371,6 +3371,11 @@ impl<'a> Parser<'a> {
                         "collect",
                         Self::parse_collect_expr,
                     )
+                } else if self.mode == ParserMode::Yq
+                    && (self.matches_keyword("to_json") || self.matches_keyword("to_yaml"))
+                {
+                    // #4206: yq's `to_json` / `to_yaml`, each with an optional literal indent.
+                    self.parse_yq_to_text_operator()
                 } else if self.mode == ParserMode::Yq && self.matches_keyword("with") {
                     // #4206: yq's `with(path; update)`; not a jq form.
                     self.parse_shadowable_special_form(keyword_start, "with", Self::parse_with_expr)
@@ -3929,6 +3934,44 @@ impl<'a> Parser<'a> {
             return Err(ParseError::new("collect expects one argument", start_pos));
         };
         Ok(Expr::Array(Box::new(body)))
+    }
+
+    /// yq's `to_json` / `to_json(N)` and `to_yaml` / `to_yaml(N)` (#4206). `N` must be a
+    /// non-negative integer literal: yq's parser rejects any other argument (`to_json(.a)`,
+    /// `to_json(2+2)`, `to_json(-1)`) as `bad expression`.
+    fn parse_yq_to_text_operator(&mut self) -> Result<Expr, ParseError> {
+        let json = self.matches_keyword("to_json");
+        self.consume_keyword(if json { "to_json" } else { "to_yaml" });
+        // The `(` must follow the name directly: yq reads `to_json (2)` as `to_json` and a stray
+        // parenthesised `2`, and rejects it.
+        let indent = if self.peek() == Some('(') {
+            self.next();
+            self.skip_ws();
+            let digits_start = self.pos;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.next();
+            }
+            let digits = &self.input[digits_start..self.pos];
+            self.skip_ws();
+            let bad = || {
+                ParseError::new(
+                    "bad expression, please check expression syntax".to_string(),
+                    digits_start,
+                )
+            };
+            if digits.is_empty() || self.peek() != Some(')') {
+                return Err(bad());
+            }
+            self.next();
+            Some(digits.parse::<usize>().map_err(|_| bad())?)
+        } else {
+            None
+        };
+        Ok(Expr::Format(match (json, indent) {
+            (true, n) => FormatType::YqJson(n.unwrap_or(2)),
+            (false, None) => FormatType::Yaml,
+            (false, Some(n)) => FormatType::YqYaml(n),
+        }))
     }
 
     /// Parse yq's `with(path; update)` (#4206): `path` is the nodes to work on and `update` runs
@@ -13583,9 +13626,11 @@ mod tests {
             "tag",
             "test",
             "to_entries",
+            "to_json",
             "to_number",
             "to_string",
             "to_unix",
+            "to_yaml",
             "tojson",
             "tonumber",
             "tostring",

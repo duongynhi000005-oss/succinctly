@@ -2123,6 +2123,12 @@ pub enum FormatType {
     Yaml,
     /// @props - Java properties format (yq)
     Props,
+    /// yq's `to_json` / `to_json(N)` (#4206): the value as a JSON string with `N` spaces of
+    /// indent and a trailing line break; `0` is compact with no line break. Not an `@name` (the parser builds it from the call form), yq mode only.
+    YqJson(usize),
+    /// yq's `to_yaml(N)` (#4206): `@yaml` with `N` as the indent. `to_yaml` itself is plain
+    /// [`FormatType::Yaml`].
+    YqYaml(usize),
     /// #3357: a format name the parser didn't recognize, jq mode only.
     /// jq's own grammar accepts any `@name` token at parse time and defers
     /// the "is this a real format" check to when the format is actually
