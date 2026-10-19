@@ -853,6 +853,63 @@ pub(crate) fn yq_scalar_text<S: EvalSemantics>(value: &OwnedValue) -> Option<Cow
     })
 }
 
+/// Whether array subtraction (`-`) treats two elements as the same one.
+///
+/// jq compares with `==` ([`owned_value_eq`]). yq's `subtractArray` does not: it
+/// asks `recursiveNodeEqual`, which pairs two scalars by tag *and* text -- so a
+/// number keeps the spelling it was written with, and `[1.50] - [1.5]` removes
+/// nothing (`[1.50]`) where `1.50 == 1.5` by value. Captured live against yq
+/// v4.53.3, with `1.50 - 1.5`, `1.0 - 1.00`, `1e3 - 1E3`, `-0.0 - 0.0`,
+/// `1.0000000000000000000001 - (that * 1)`, the same inside a nested array and
+/// object, and the controls that still remove (`1.50 - 1.50`, `3/2 - 1.5`,
+/// `.nan - .nan`); a float and an int never match (`1.0 - 1`, #950), and a string
+/// never matches a number (`"1.5" - 1.5`).
+///
+/// The text is [`yq_scalar_text`]'s -- what `tostring` and `==` already read -- so
+/// a document or filter literal keeps its spelling through `NumberLiteral` and a
+/// computed number is spelled as yq formats it. Containers recurse as
+/// [`owned_value_eq`] does (an array element by element, an object key by key),
+/// which `recursiveNodeEqual` matches (`[{"a":1,"b":2}] - [{"b":2,"a":1}]` is `[]`,
+/// `[[1,2]] - [[2,1]]` is `[[1,2]]`). Spellings `OwnedValue` cannot keep
+/// (`0x10`, `01`, `1_000`) are the recorded #2802 residual.
+fn array_subtract_elements_equal<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue) -> bool {
+    if S::TAG != EvalTag::Yq {
+        return owned_value_eq::<S>(a, b);
+    }
+    yq_recursive_node_equal::<S>(a, b, 0)
+}
+
+/// yq's `recursiveNodeEqual` over owned values; see [`array_subtract_elements_equal`].
+fn yq_recursive_node_equal<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue, depth: usize) -> bool {
+    assert_value_tree_depth(depth);
+    match (a, b) {
+        (OwnedValue::Array(a), OwnedValue::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| yq_recursive_node_equal::<S>(x, y, depth + 1))
+        }
+        (OwnedValue::Object(a), OwnedValue::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(k, v)| {
+                    b.get(k)
+                        .is_some_and(|bv| yq_recursive_node_equal::<S>(v, bv, depth + 1))
+                })
+        }
+        (OwnedValue::Null, OwnedValue::Null) => true,
+        (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x == y,
+        (OwnedValue::String(x), OwnedValue::String(y)) => x == y,
+        // Two numbers are one tag (int or float) and one spelling.
+        _ => match (a.number_repr(), b.number_repr()) {
+            (Some(x), Some(y)) => {
+                core::mem::discriminant(&x) == core::mem::discriminant(&y)
+                    && numeric_display_string::<S>(a) == numeric_display_string::<S>(b)
+            }
+            _ => false,
+        },
+    }
+}
+
 /// **The one definition of yq's read-only evaluation context** (#2470),
 /// consulted by both evaluators and by every navigation site that has to
 /// decide what a key lookup that found nothing evaluates to.
@@ -14080,7 +14137,7 @@ fn arith_sub<S: EvalSemantics>(
         (OwnedValue::Array(a), OwnedValue::Array(b)) => {
             let result: Vec<_> = a
                 .into_iter()
-                .filter(|x| !b.iter().any(|y| owned_value_eq::<S>(x, y)))
+                .filter(|x| !b.iter().any(|y| array_subtract_elements_equal::<S>(x, y)))
                 .collect();
             Ok(OwnedValue::array_from(result))
         }
