@@ -37627,12 +37627,37 @@ fn expr_is_inert(e: &Expr, caught: bool) -> bool {
 /// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
 /// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`, or computed from constants: `select(false | not | not)`,
 /// `limit(1 + 0; empty)`, `limit(1 / 2; empty)`) stores nothing, so it adds no state of its own, and a `first`/`limit` (constant nonzero count)/`nth(0; ..)`
-/// of `.` alone hands `.` on as the bare `.` does; every item of a comma must itself be such a shape,
+/// of `.` alone hands `.` on as the bare `.` does, and so does one over a bind (`first(. as {a:$q} | .)`),
+/// an `if` whose condition cannot move the register and whose branches are each such a shape, and a `select`
+/// of a truthy literal (`select(1)`, `select("x")`); every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
+    // A count that takes the first outputs of its body: a constant, finite and nonzero number (zero is
+    // [`emits_nothing`]'s; `-1` takes everything in jq 1.7.1). `1e1000 - 1e1000` folds to NaN here, where jq's
+    // literals saturate and it is `0`. One definition for [`emits_only_dot`] and [`binds`].
+    fn takes_outputs(n: &Expr) -> bool {
+        constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
+    }
+    // `nth(0; ..)`: the first output, as `first(..)` takes it.
+    fn is_nth_zero(n: &Expr) -> bool {
+        constant_number(n) == Some(0.0)
+    }
+    // A literal that is truthy in jq (everything but `null` and `false`), so `select` of it hands `.` on.
+    fn is_truthy_literal(cond: &Expr) -> bool {
+        matches!(
+            unwrap_paren(cond),
+            Expr::Literal(
+                Literal::Bool(true)
+                    | Literal::NumberLiteral(..)
+                    | Literal::Int(_)
+                    | Literal::Float(_)
+                    | Literal::String(_)
+            )
+        )
+    }
     // An expression whose every output is `.` itself, however often it emits (`first(.)`, `limit(2; .)`,
     // `limit(5 / 2; .)`, `nth(0; .)`, `first(., .)`): a constant nonzero count takes the first outputs of a
     // body that only hands `.` on, so it hands `.` on too, as the bare `.` does. A zero count is
@@ -37640,27 +37665,14 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     fn emits_only_dot(e: &Expr) -> bool {
         match unwrap_paren(e) {
             Expr::Identity => true,
-            Expr::Builtin(Builtin::Select(cond)) => matches!(
-                unwrap_paren(cond),
-                Expr::Literal(
-                    Literal::Bool(true)
-                        | Literal::NumberLiteral(..)
-                        | Literal::Int(_)
-                        | Literal::Float(_)
-                        | Literal::String(_)
-                )
-            ),
+            Expr::Builtin(Builtin::Select(cond)) => is_truthy_literal(cond),
             Expr::Comma(items) => items.iter().all(emits_only_dot),
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 emits_only_dot(inner)
             }
-            // A finite count: `1e1000 - 1e1000` folds to NaN here, where jq's literals saturate and it is `0`.
-            Expr::Limit { n, expr } => {
-                constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
-                    && emits_only_dot(expr)
-            }
+            Expr::Limit { n, expr } => takes_outputs(n) && emits_only_dot(expr),
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
-                constant_number(n) == Some(0.0) && emits_only_dot(expr)
+                is_nth_zero(n) && emits_only_dot(expr)
             }
             _ => false,
         }
@@ -37690,13 +37702,9 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 binds(inner, labels)
             }
-            Expr::Limit { n, expr }
-                if constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0) =>
-            {
-                binds(expr, labels)
-            }
+            Expr::Limit { n, expr } if takes_outputs(n) => binds(expr, labels),
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
-                if constant_number(n) == Some(0.0) =>
+                if is_nth_zero(n) =>
             {
                 binds(expr, labels)
             }
