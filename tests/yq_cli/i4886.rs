@@ -31,6 +31,13 @@ fn test_4886_contains_compares_numbers_by_tag_and_text() -> Result<()> {
         ("[1.5, 2] | contains([1.5])", "true\n"),
         ("[\"a1\"] | contains([\"1\"])", "true\n"),
         ("[1] | contains([\"1\"])", "false\n"),
+        ("[1+0.5] | contains([1.5])", "true\n"),
+        ("[1.5] | contains([1+0.5])", "true\n"),
+        ("[3/2] | contains([1.5])", "true\n"),
+        ("[2.0*1] | contains([2])", "false\n"),
+        ("[{\"a\":1}] | contains([[1]])", "false\n"),
+        ("[1] | contains([[1]])", "false\n"),
+        ("{\"a\":1.5} | contains({\"b\":1.5})", "false\n"),
         ("[true] | contains([true])", "true\n"),
         ("[null] | contains([null])", "true\n"),
     ];
