@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 
-use crate::run_yq_stdin;
+use crate::{run_yq_stdin, run_yq_stdin_with_stderr};
 
 /// Every row is captured from yq v4.53.3 (`yq -n -o=json -I0`). `.nan`/`.inf` are field accesses
 /// on a string, so they yield nothing too (#4374). The controls at the end keep their answer: a
@@ -51,6 +51,28 @@ fn test_4903_an_argument_with_no_output_is_the_empty_string() -> Result<()> {
         let (out, code) = run_yq_stdin(filter, "null", &["-n", "-o=json", "-I=0"])?;
         assert_eq!(code, 0, "{filter}");
         assert_eq!(out, *want, "{filter}");
+    }
+    Ok(())
+}
+
+/// An argument that raises is not an argument with no output: the error is reported alone, and
+/// the builtin does not run on `""` (captured from yq v4.53.3, each prints the error and nothing
+/// else).
+#[test]
+fn test_4903_an_argument_that_raises_still_raises() -> Result<()> {
+    for filter in [
+        "\"a1b\" | split(error(\"x\"))",
+        "\"a1b\" | split((.foo, error(\"x\")))",
+        "\"a1b\" | sub(error(\"x\"); \"X\")",
+        "\"a1b\" | sub(\"a\"; error(\"x\"))",
+        "\"a1b\" | test(error(\"x\"))",
+        "\"a1b\" | test(\"a\"; error(\"x\"))",
+    ] {
+        let (out, err, code) =
+            run_yq_stdin_with_stderr(filter, "null", &["-n", "-o=json", "-I=0"])?;
+        assert_eq!(code, 1, "{filter}: {err}");
+        assert_eq!(out, "", "{filter}");
+        assert!(err.contains('x'), "{filter}: {err}");
     }
     Ok(())
 }

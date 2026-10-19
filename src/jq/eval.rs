@@ -5514,6 +5514,15 @@ fn clear_values_when_yq_argument_escaped(
     true
 }
 
+/// [`ArgFanout::FirstOrEmptyText`]'s other half (#4903): an argument that produced no value and
+/// did not escape stands for `""`. Run after [`apply_arg_fanout`]; `escaped` is whether the
+/// argument ended in a control (an error, `break`), which is reported as it is, not defaulted.
+fn default_empty_text_argument(fanout: ArgFanout, args: &mut Vec<OwnedValue>, escaped: bool) {
+    if matches!(fanout, ArgFanout::FirstOrEmptyText) && args.is_empty() && !escaped {
+        args.push(OwnedValue::String(String::new().into()));
+    }
+}
+
 /// Apply `fanout`'s gate to one argument's materialized output list.
 ///
 /// One definition for the three places that need it — [`fanout_arg`], and
@@ -5531,15 +5540,6 @@ fn clear_values_when_yq_argument_escaped(
 /// it narrower, only when this function's own count check is what's about
 /// to fail (#1533's other half) -- see that function's doc comment for why
 /// the wider rule doesn't apply there.
-/// [`ArgFanout::FirstOrEmptyText`]'s other half (#4903): an argument that produced no value and
-/// did not escape stands for `""`. Run after [`apply_arg_fanout`]; `escaped` is whether the
-/// argument ended in a control (an error, `break`), which is reported as it is, not defaulted.
-fn default_empty_text_argument(fanout: ArgFanout, args: &mut Vec<OwnedValue>, escaped: bool) {
-    if matches!(fanout, ArgFanout::FirstOrEmptyText) && args.is_empty() && !escaped {
-        args.push(OwnedValue::String(String::new().into()));
-    }
-}
-
 fn apply_arg_fanout(fanout: ArgFanout, args: &mut Vec<OwnedValue>) -> Result<(), EvalError> {
     match fanout {
         // jq's rule 1: every value is used, and the argument's own control
@@ -26264,7 +26264,7 @@ fn fanout_regex_pattern_with_collected_flags<'a, W: Clone + AsRef<[u64]>, S: Eva
         optional,
         // Real yq has `split/2` but not `splits`; neither fans its pattern
         // out, so both are gated together.
-        ArgFanout::yq_text_arg::<S>(),
+        ArgFanout::yq_native::<S>(),
         |raw_pattern| {
             // Re-evaluated per pattern, matching jq: the array construction
             // holding `flags` sits inside `$re`'s own binding.
@@ -26406,7 +26406,7 @@ fn builtin_gsub_with_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // Real yq *has* `sub` and does not fan it out (live-verified against
         // the pinned v4.53.3); `gsub` it rejects at the lexer entirely, so
         // this arm is unopposed either way. Gated with `sub` for consistency.
-        ArgFanout::yq_text_arg::<S>(),
+        ArgFanout::yq_native::<S>(),
         |raw_pattern| {
             let OwnedValue::String(pattern) = raw_pattern else {
                 return QueryResult::Error(EvalError::is_not_a_string(&raw_pattern));
