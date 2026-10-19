@@ -19088,7 +19088,8 @@ fn containment_kind_mismatch_should_error<S: EvalSemantics>(
 /// Generic over `S` (#950 review): the scalar leaf case delegates to
 /// [`owned_value_eq`], so `contains`/`inside` agree with `==`'s own
 /// yq-mode strict Int/Float distinction instead of silently using the
-/// always-widening `PartialEq`.
+/// always-widening `PartialEq`. In yq mode the leaf is
+/// [`yq_recursive_node_equal`] instead (#4886), which also keeps a number's spelling.
 fn owned_contains<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue) -> bool {
     owned_contains_at_depth::<S>(a, b, 0)
 }
@@ -19112,7 +19113,11 @@ fn owned_contains_at_depth<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue, dep
                 .get(k)
                 .is_some_and(|a_val| owned_contains_at_depth::<S>(a_val, b_val, depth + 1))
         }),
-        // Scalars: equality
+        // Scalars: equality. yq's `contains` pairs two scalars with `recursiveNodeEqual`,
+        // by tag and text (#4886), the rule array subtraction already follows
+        // ([`array_subtract_elements_equal`]): `[1.5] | contains([1.50])` is `false` there,
+        // where it is `true` by value here and in jq.
+        _ if S::TAG == EvalTag::Yq => yq_recursive_node_equal::<S>(a, b, depth),
         _ => owned_value_eq::<S>(a, b),
     }
 }
