@@ -163609,6 +163609,245 @@ fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Res
     ])
 }
 
+/// #4800: a `limit` count that is constant but not a sum, difference or product of literals -- a quotient or
+/// remainder by a divisor that is not zero (`0 / 1`, `1 / 2`, `7 % 2`, `3 % -3`), or a literal piped into
+/// arithmetic on `.` (`1 | . - 1`) -- is as fixed as a literal one, so `limit(COUNT; empty)` stores nothing
+/// beside the single-pattern bind of `.` in a `foreach` UPDATE
+/// ([`test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800`]). The controls keep their
+/// refusal: a zero divisor raises (`1 / 0`, `0 / 0`, `1 % 0`, and `5 % 0.5`, whose divisor jq truncates to
+/// `0`; `5 | . % 0` too), a bare `.` count depends on the state, and `limit(1 / 2; .)` emits `.` rather than
+/// nothing; jq answers the first output and then raises there, so only the refusal's kind is pinned. Every
+/// other row captured from jq 1.7.1.
+#[test]
+fn test_foreach_update_single_pattern_bind_beside_a_constant_division_count_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0/1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(0/1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/2; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(1/2; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(-1/1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(-1/1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(7%2; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(7%2; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(5%1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(5%1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0%5; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(0%5; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(3%-3; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(3%-3; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0|.; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(0|.; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1|.-1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(1|.-1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit((1|.-1)/1; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit((1|.-1)/1; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(2|.%2; empty); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; limit(2|.%2; empty), (. as {a:$q} | .); null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0/-1; .); null))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0/1; empty); null))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1|.-1; .); null)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(5%0.5; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0/0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(5|.%0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1%0; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/2; .); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(.; empty); null))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
+    ])
+}
+
 /// #4800: a caught foreign-`$x` `foreach` that is the UPDATE of a *`foreach`* (whose source moves the
 /// register) is empty on the steps whose element is another node than `$x`'s, and runs on the step whose
 /// element is `$x`'s own: a root `. as $x` over `(.a,.)` answers on the second step, where the pattern's

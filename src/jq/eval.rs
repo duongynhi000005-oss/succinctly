@@ -37295,7 +37295,7 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
 /// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
 /// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`, or computed from constants: `select(false | not | not)`,
-/// `limit(1 + 0; empty)`) stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
+/// `limit(1 + 0; empty)`, `limit(1 / 2; empty)`) stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
@@ -37310,7 +37310,8 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             // cannot raise, so nothing depends on the state.
             Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
             Expr::FirstExpr(inner) => emits_nothing(inner),
-            // A count of numeric literals only: any other is evaluated first and may raise.
+            // A count of numeric literals only (under arithmetic that cannot raise): any other is evaluated
+            // first and may raise.
             Expr::Limit { n, expr } => match constant_number(n) {
                 Some(count) => count == 0.0 || emits_nothing(expr),
                 None => false,
@@ -53296,23 +53297,46 @@ fn limit_literal_count(n: &Expr) -> Option<f64> {
     }
 }
 
-/// A number built from numeric literals under `+`, `-`, `*` and unary minus (`1 + 0`, `-1 + 1`), which
-/// cannot raise, so a `limit` count of it is as fixed as a literal one (#4800). Not `/` or `%`, which
-/// raise on a zero divisor.
+/// A number built from numeric literals under `+`, `-`, `*`, `/`, `%` and unary minus (`1 + 0`, `0 / 1`,
+/// `5 % 2`), or piped through `.` (`1 | . - 1`), which cannot raise, so a `limit` count of it is as fixed as
+/// a literal one (#4800). A `/` or `%` whose divisor is zero raises and is not folded; `%` is folded for
+/// whole operands only (jq truncates both to integers, so `5 % 0.5` raises there, where yq's float modulo does not).
 fn constant_number(e: &Expr) -> Option<f64> {
+    constant_number_at(e, None)
+}
+
+/// [`constant_number`] with `dot` the number `.` holds, which a pipe's head sets for its tail.
+fn constant_number_at(e: &Expr, dot: Option<f64>) -> Option<f64> {
     match unwrap_paren(e) {
         Expr::Literal(_) => limit_literal_count(e),
-        Expr::Negate(inner) => constant_number(inner).map(|n| -n),
+        Expr::Identity => dot,
+        Expr::Pipe(stages) => stages
+            .iter()
+            .try_fold(dot, |dot, stage| constant_number_at(stage, dot).map(Some))
+            .flatten(),
+        Expr::Negate(inner) => constant_number_at(inner, dot).map(|n| -n),
         Expr::Arithmetic {
             op, left, right, ..
         } => {
-            let (left, right) = (constant_number(left)?, constant_number(right)?);
+            let (left, right) = (
+                constant_number_at(left, dot)?,
+                constant_number_at(right, dot)?,
+            );
             match op {
                 ArithOp::Add => Some(left + right),
                 ArithOp::Sub => Some(left - right),
                 // yq's merge flags (`*+`, `*?`, ..) are not plain multiplication.
                 ArithOp::Mul(flags) if *flags == MergeFlags::default() => Some(left * right),
-                ArithOp::Mul(_) | ArithOp::Div | ArithOp::Mod => None,
+                ArithOp::Div if right != 0.0 => Some(left / right),
+                ArithOp::Mod => {
+                    // Whole operands only, where jq's integer `%` and yq's float one agree on whether the
+                    // divisor is zero; a divisor of `-1` answers `0` rather than overflowing on the
+                    // minimum dividend. Magnitudes stay below 2^53 so the casts are exact.
+                    let whole = |n: f64| n.fract() == 0.0 && n.abs() < 9e15;
+                    (whole(left) && whole(right) && right != 0.0)
+                        .then(|| (left as i64).wrapping_rem(right as i64) as f64)
+                }
+                ArithOp::Mul(_) | ArithOp::Div => None,
             }
         }
         _ => None,
