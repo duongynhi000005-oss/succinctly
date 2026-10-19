@@ -5096,6 +5096,9 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   ([#4386](https://github.com/rust-works/succinctly/issues/4386)). The route is chosen per file, by
   evaluating the path in front of the `sort` on each document and looking for a mapping, so an
   array sort keeps streaming its elements as cursors (an array's per-item comments survive).
+  Only a query that *ends* in the sort is recognized (`sort`, `sort_by(f)`, `.a.b | sort`):
+  a mapping sort that another stage reads (`sort | .a`, `.a | sort | keys`), one behind an
+  iteration (`.[] | sort`) or inside `map`/`with_entries`/`if` keeps the owned route's loss.
   An owned map holds a key once, where yq lists every occurrence, so **a mapping with a repeated
   key is refused** (`cannot sort a mapping with the repeated key "a"`) instead of answering
   with an entry gone, which a sort written back with `-i` would make permanent (the ADR-0018

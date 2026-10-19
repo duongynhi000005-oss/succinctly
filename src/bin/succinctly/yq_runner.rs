@@ -1926,6 +1926,21 @@ struct FallbackStreamState<'a> {
     any_truthy: &'a mut bool,
 }
 
+/// Whether a YAML output takes the DOM route for the whole input instead of the M2 streamers:
+/// `--sort-keys` over aliases (#1350, #2486), whose sort can invert an anchor and its alias, and a
+/// sort of a mapping, which the streamers write without its entries' presentation (#4386). The
+/// one definition both the stdin and the per-file site read.
+fn needs_dom_fallback(
+    sort_keys: bool,
+    output_format: OutputFormat,
+    index: &YamlIndex,
+    expr: &Expr,
+    bytes: &[u8],
+) -> bool {
+    output_format == OutputFormat::Yaml
+        && ((sort_keys && index.has_aliases()) || sorts_a_mapping(expr, index, bytes))
+}
+
 /// Whether `expr` is a `sort`/`sort_by` of a mapping in some document of `bytes`, which the M2
 /// streamers answer as an owned object with no comments, style, anchors or tags (#4386). The
 /// DOM route traces them through ([`reshape_presentation`]), so those inputs take it, as the
@@ -9722,10 +9737,13 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             // input, which already gets it right. `index` is already built
             // (this check costs nothing extra); the fallback itself is a
             // second parse of `yaml_bytes`, paid only here.
-            if output_config.output_format == OutputFormat::Yaml
-                && ((sort_keys && index.has_aliases())
-                    || sorts_a_mapping(&program.expr, &index, &yaml_bytes))
-            {
+            if needs_dom_fallback(
+                sort_keys,
+                output_config.output_format,
+                &index,
+                &program.expr,
+                &yaml_bytes,
+            ) {
                 let doc_filter = args.document.map(|target| (target, global_doc_index));
                 // Single stdin input, no further reads to filter -- unlike
                 // the per-file loop's identical call below, `global_doc_index`
@@ -9925,10 +9943,13 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
 
                 // #1350/#2486: see the stdin branch's identical check above
                 // for the full rationale.
-                if output_config.output_format == OutputFormat::Yaml
-                    && ((sort_keys && index.has_aliases())
-                        || sorts_a_mapping(&program.expr, &index, &yaml_bytes))
-                {
+                if needs_dom_fallback(
+                    sort_keys,
+                    output_config.output_format,
+                    &index,
+                    &program.expr,
+                    &yaml_bytes,
+                ) {
                     let doc_filter = args.document.map(|target| (target, global_doc_index));
                     let num_docs = stream_yaml_sort_keys_alias_fallback(
                         &mut writer,
