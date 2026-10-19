@@ -19119,9 +19119,8 @@ fn owned_contains_at_depth<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue, dep
         // `[[["ab"]]] | contains(["a"])` are all `true`, while an object on the left never
         // yields a scalar (`[{"a":1}] | contains([1])` is `false`). jq compares the pair as
         // unequal kinds.
-        (OwnedValue::Array(a_arr), b)
-            if S::TAG == EvalTag::Yq && !matches!(b, OwnedValue::Array(_)) =>
-        {
+        (OwnedValue::Array(a_arr), b) if S::TAG == EvalTag::Yq => {
+            // `b` is not an array: the (Array, Array) arm above took that pair.
             a_arr
                 .iter()
                 .any(|a_elem| owned_contains_at_depth::<S>(a_elem, b, depth + 1))

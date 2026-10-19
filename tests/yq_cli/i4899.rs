@@ -207,6 +207,13 @@ fn test_4899_contains_looks_inside_a_nested_array() -> Result<()> {
             "false
 ",
         ),
+        ("[[[[[[1]]]]]] | contains([1])", "true\n"),
+        ("[[[[[[1]]]]]] | contains([2])", "false\n"),
+        (
+            "{\"x\":[[{\"a\":1}]]} | contains({\"x\":{\"a\":1}})",
+            "true\n",
+        ),
+        ("[[[{\"a\":[2]}]]] | contains([{\"a\":2}])", "true\n"),
     ];
     for (filter, want) in rows {
         let (out, code) = run_yq_stdin(filter, "null", &["-n", "-o=json", "-I=0"])?;
