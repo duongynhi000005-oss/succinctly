@@ -4157,11 +4157,82 @@ pub fn format_float_with_fraction(f: f64) -> String {
     // (Go's `strconv.FormatFloat`) can disagree on the rare exact decimal
     // tie -- see `crate::jq::correct_shortest_decimal_tiebreak`'s own doc
     // comment, which this and every other yq float formatter below share.
-    let mut buf = crate::jq::correct_shortest_decimal_tiebreak(f, f.to_string(), 0);
+    let mut buf = crate::jq::correct_shortest_decimal_tiebreak(f, float_display_string(f), 0);
     if !buf.as_bytes().contains(&b'.') {
         buf.push_str(".0");
     }
     buf
+}
+
+/// `f`'s shortest round-trip digits as a `String` sized for them up front (#4915): `f.to_string()`
+/// starts at 8 bytes and grows to 16 and 32 for a 17-digit float, two reallocations per number.
+fn float_display_string(f: f64) -> String {
+    use core::fmt::Write;
+    let mut out = String::with_capacity(32);
+    // Writing to a `String` cannot fail.
+    let _ = write!(out, "{f}");
+    out
+}
+
+/// A fixed buffer for the text of one ordinary-magnitude float, so printing it allocates nothing
+/// (#4915). 40 bytes holds the longest `f64` `Display` text below yq's scientific threshold.
+struct StackText {
+    buf: [u8; 40],
+    len: usize,
+}
+
+impl StackText {
+    fn new() -> Self {
+        Self {
+            buf: [0; 40],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // Only `write_str` fills it, and only with whole `&str`s.
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for StackText {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len + s.len();
+        if end > self.buf.len() {
+            return Err(core::fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Write `f` the way [`format_float_yq`] spells it, without building a `String` for the common
+/// case (#4915): an ordinary magnitude whose shortest digits contain a point. The tie-break
+/// correction ([`crate::jq::correct_shortest_decimal_tiebreak`]) can only rewrite such a number
+/// when its last digit is `3` -- it needs the last digit odd, and a tie at `k` fractional digits
+/// needs `5^k | 2n - 1`, hence `n % 5 == 3`, hence a last digit of `3` -- so every other number is
+/// printed as formatted. Everything else (a scientific magnitude, a whole number) takes
+/// [`format_float_yq`] itself, so the two cannot disagree.
+fn write_float_yq<W: core::fmt::Write>(out: &mut W, f: f64) -> core::fmt::Result {
+    if !yq_float_is_scientific(f) {
+        let mut text = StackText::new();
+        if core::fmt::write(&mut text, format_args!("{f}")).is_ok() {
+            let s = text.as_str();
+            if s.as_bytes().contains(&b'.') {
+                return if s.as_bytes().last() == Some(&b'3') {
+                    out.write_str(&crate::jq::correct_shortest_decimal_tiebreak(
+                        f,
+                        s.to_string(),
+                        0,
+                    ))
+                } else {
+                    out.write_str(s)
+                };
+            }
+        }
+    }
+    out.write_str(&format_float_yq(f))
 }
 
 /// Renders a computed (non-literal-preserved) `f64` the way real yq does:
@@ -4387,7 +4458,7 @@ impl CanonicalNumber {
     fn write<W: core::fmt::Write>(self, out: &mut W) -> core::fmt::Result {
         match self {
             Self::Int(i) => write_i64(out, i),
-            Self::Float(f) => out.write_str(&format_float_yq(f)),
+            Self::Float(f) => write_float_yq(out, f),
         }
     }
 }
@@ -10326,6 +10397,59 @@ mod tests {
     /// patterns, which spread over the whole exponent range, and half as
     /// mantissa-times-power-of-ten values clustered around the boundaries,
     /// which raw bits essentially never land near.
+    /// #4915: the allocation-free float printer must spell every float exactly as
+    /// `format_float_yq` does -- ordinary magnitudes with an even or odd last digit, the exact
+    /// decimal ties the correction rewrites, the scientific range, and both signs.
+    #[test]
+    fn write_float_yq_agrees_with_format_float_yq_4915() {
+        let mut cases: alloc::vec::Vec<f64> = alloc::vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            2.5,
+            0.1,
+            0.30000000000000004,
+            123456.789,
+            999999.5,
+            1000000.5,
+            1e-4,
+            9.9999e-5,
+            1e-5,
+            1e20,
+            -1e20,
+            1.2345675e6,
+            5e-324,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ];
+        // Exact ties: halves and quarters at several magnitudes.
+        for k in 0..64 {
+            cases.push(f64::from(k) + 0.5);
+            cases.push(f64::from(k) / 4.0);
+            cases.push((2.0f64).powi(k - 20) * 1.5);
+        }
+        // A deterministic spread of bit patterns and decimal-looking values.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..20_000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let f = f64::from_bits(state);
+            if f.is_finite() {
+                cases.push(f);
+            }
+            let digits = (state >> 40) as f64;
+            cases.push(digits / 10f64.powi(((state >> 8) % 12) as i32));
+        }
+        for f in cases {
+            let mut fast = String::new();
+            write_float_yq(&mut fast, f).unwrap();
+            assert_eq!(fast, format_float_yq(f), "{f:e}");
+        }
+    }
+
     #[test]
     fn yq_float_is_scientific_agrees_with_the_exponent_it_replaces() {
         /// The rule as originally written: read the exponent back out of

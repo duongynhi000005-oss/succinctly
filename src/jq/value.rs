@@ -1217,6 +1217,34 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
     };
     let q = extra_exp10 - frac_part.len() as i64;
 
+    // Cheap necessary condition for a tie (#4915). The midpoint is `(2n - 1) / 2 * 10^q`; for a
+    // negative `q` that is `(2n - 1) / (2^(1-q) * 5^-q)`, and a double is a dyadic rational, so
+    // `5^-q` must divide `2n - 1`. One `u128` remainder settles it for all but the genuine ties,
+    // where the exact check below (a run of `checked_pow`s, about a hundred nanoseconds) would
+    // otherwise run on every odd-ended float. A divisor or product too wide for `u128` is the
+    // exact check's own `None`, which returns `s` as well.
+    if q < 0 {
+        let k = u32::try_from(-q).ok();
+        // `u64` remainders are several times cheaper than `u128` ones, and every float's
+        // shortest digits (at most 17) fit; the wide path is for what does not.
+        if let (Some(k), Ok(n64)) = (k, u64::try_from(n)) {
+            if let (Some(p5), Some(t)) = (5u64.checked_pow(k), n64.checked_mul(2)) {
+                if (t - 1) % p5 != 0 {
+                    return s;
+                }
+            }
+        }
+        let Some(p5) = k.and_then(|k| 5u128.checked_pow(k)) else {
+            return s;
+        };
+        let Some(twice_n_less_one) = n.checked_mul(2).and_then(|t| t.checked_sub(1)) else {
+            return s;
+        };
+        if twice_n_less_one % p5 != 0 {
+            return s;
+        }
+    }
+
     // Magnitude bits via a mask (the sign is the top bit of an IEEE-754
     // double) rather than `f.abs().to_bits()`, so this never runs a
     // floating-point op just to discard the sign.
@@ -8577,6 +8605,92 @@ mod tests {
     /// here (bypassing those real-world guarantees on purpose) so the
     /// defensive branches are covered as the safety net they are, not left
     /// as dead code.
+    /// #4915: the `n % 5 == 3` shortcut only skips the exact-midpoint check where no tie is
+    /// possible, so the correction answers exactly what the unfiltered check does -- over the
+    /// non-scientific and scientific spellings, genuine ties included.
+    #[test]
+    fn test_tiebreak_shortcut_agrees_with_the_exact_check_4915() {
+        #[allow(clippy::many_single_char_names)] // the notation of `correct_shortest_decimal_tiebreak`, copied unfiltered
+        fn reference(f: f64, s: String, extra_exp10: i64) -> String {
+            let Some(&last_byte) = s.as_bytes().last() else {
+                return s;
+            };
+            if !last_byte.is_ascii_digit() || (last_byte - b'0') % 2 == 0 {
+                return s;
+            }
+            let (_, magnitude) = strip_leading_sign(&s);
+            let (int_part, frac_part) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+            let Some(n) = int_part
+                .bytes()
+                .chain(frac_part.bytes())
+                .try_fold(0u128, |acc, b| {
+                    acc.checked_mul(10)?.checked_add(u128::from(b - b'0'))
+                })
+            else {
+                return s;
+            };
+            let q = extra_exp10 - frac_part.len() as i64;
+            let bits = f.to_bits() & 0x7FFF_FFFF_FFFF_FFFF;
+            let exp_bits = (bits >> 52) & 0x7FF;
+            if exp_bits == 0 {
+                return s;
+            }
+            let m = u128::from((bits & 0xF_FFFF_FFFF_FFFF) | (1u64 << 52));
+            let e = i64::try_from(exp_bits).unwrap() - 1023 - 52;
+            match is_exact_midpoint(m, e, q, n) {
+                Some(true) => {
+                    let mut corrected = s.into_bytes();
+                    *corrected.last_mut().unwrap() = last_byte - 1;
+                    String::from_utf8(corrected).unwrap()
+                }
+                _ => s,
+            }
+        }
+        let mut values: Vec<f64> = Vec::new();
+        for k in 0..200 {
+            let k = f64::from(k);
+            values.push(k + 0.5);
+            values.push(k / 8.0);
+            values.push(k * 1e-3 + 0.0005);
+            values.push((2.0f64).powi(k as i32 - 60) * 3.0);
+        }
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+        for _ in 0..30_000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let f = f64::from_bits(state);
+            if f.is_finite() {
+                values.push(f);
+            }
+            values.push(((state >> 40) as f64) / 10f64.powi(((state >> 8) % 10) as i32));
+        }
+        let mut ties = 0;
+        for f in values {
+            if !f.is_finite() {
+                continue;
+            }
+            let plain = f.to_string();
+            let fast = correct_shortest_decimal_tiebreak(f, plain.clone(), 0);
+            let slow = reference(f, plain.clone(), 0);
+            assert_eq!(fast, slow, "{f:e}");
+            ties += usize::from(fast != plain);
+            let sci = format!("{f:e}");
+            if let Some((mantissa, exp)) = sci.split_once('e') {
+                let exp: i64 = exp.parse().unwrap();
+                assert_eq!(
+                    correct_shortest_decimal_tiebreak(f, mantissa.to_string(), exp),
+                    reference(f, mantissa.to_string(), exp),
+                    "{f:e}"
+                );
+            }
+        }
+        assert!(
+            ties > 0,
+            "the sample must contain genuine ties to mean anything"
+        );
+    }
+
     #[test]
     fn test_correct_shortest_decimal_tiebreak_defensive_bailouts_2542() {
         // Empty `s`: nothing to look at, return it unchanged.
