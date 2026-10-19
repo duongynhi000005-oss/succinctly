@@ -9139,7 +9139,7 @@ fn write_yaml_child_inline<W: AsRef<[u64]>, Out: core::fmt::Write>(
                     let container_indent = if indent.is_empty() {
                         deeper_yaml_indent(indent, step, unit)
                     } else {
-                        indent.to_owned()
+                        String::from(indent)
                     };
                     let scalar_indent = deeper_yaml_indent(&container_indent, step, unit);
                     if let Some(scalar) = go_yaml_multiline_scalar(&text, &scalar_indent, step) {

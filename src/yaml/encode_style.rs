@@ -496,9 +496,10 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
     out.write_char('"')
 }
 
-/// Whether `s` holds U+2028 or U+2029, the two line breaks that are neither `\n` nor `\r`
-/// nor U+0085 (#4865): go-yaml's scanner keeps them as characters in a folded scalar and its
-/// emitter writes them followed by the indent, inside single quotes.
+/// Whether `s` holds U+2028 or U+2029 (#4865).
+///
+/// Of go-yaml's line breaks these are the two its scanner keeps as characters in a folded scalar,
+/// and its emitter writes them followed by the indent, inside single quotes.
 #[must_use]
 pub fn has_unicode_line_separator(s: &str) -> bool {
     !s.is_ascii() && s.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
