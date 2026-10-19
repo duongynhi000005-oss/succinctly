@@ -3889,12 +3889,18 @@ non-negative positions, padding a `null` out to the position (`{"a":null} | del(
 no other delete rule can tell the two spellings apart. Not vivified: a *computed* key
 (`{"a":null,"n":"x"} | del(.a[.n])` is `{"a":{}, ...}` in yq and unchanged here), a bracket behind a
 `.[]` fan-out (`[null] | del(.[]["k"])` is `[{}]` in yq), a multi-key bracket's descent into a
-`null` child (`del(.[("a","b")]["x"])`), and a bracket behind a negative position.
+`null` child (`del(.[("a","b")]["x"])`, `{"a":null} | del(.a[(0,1)]["k"])`), a bracket behind a
+negative position, behind `..`/`select(...)`/`first(...)`/`//` (the walk follows plain field,
+position and bracket steps only), a position past 1024 (the padding is capped), a float or
+exponent key (`null | del(.[1.5])` is `{}` in yq and `[null]` here, from the older `Index` fold),
+and sibling comma branches that disagree on a `null`'s kind (yq evaluates them in sequence and
+errors; each branch here starts from the original document).
 
 Still different: the same mutation happens in yq on a plain read, because the node is rewritten
 in place. `echo null | yq -o=json '(.["k0"]) as $x | .'` and `select(.["k0"] == 2), .` print `{}`;
 `succinctly yq` prints `null`, since reproducing it would need a read to mutate the streamed
-document.
+document. The same mutation is visible through an assignment: `{"x":null} | .y = (.x | del(.["k"]))`
+is `{"x":{},"y":{}}` in yq and `{"x":null,"y":{}}` here.
 
 ### `del()`'s trailing `.[]` no-ops through a *tolerated* (not just a genuinely found) `null`
 

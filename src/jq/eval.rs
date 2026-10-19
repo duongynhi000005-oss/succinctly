@@ -81100,31 +81100,19 @@ fn vivify_null_bracket_step<'v>(
 /// exactly the AST `del()` has always been given, so no other delete rule can tell the spellings
 /// apart (an absent key then a trailing `.[]`, the comma pre-pass, the trie, the slice rewrites).
 fn fold_literal_bracket_keys(expr: &Expr) -> Expr {
-    match expr {
-        Expr::IndexExpr { target, key } => match expr.literal_bracket_key() {
-            Some((_, name)) => {
-                let field = Expr::Field(name.into());
-                match fold_literal_bracket_keys(target) {
-                    Expr::Identity => field,
-                    Expr::Pipe(mut stages) => {
-                        stages.push(field);
-                        Expr::Pipe(stages)
-                    }
-                    other => Expr::Pipe(vec![other, field].into()),
-                }
-            }
-            None => Expr::IndexExpr {
-                target: Box::new(fold_literal_bracket_keys(target)),
-                key: key.clone(),
-            },
-        },
-        Expr::Pipe(stages) => Expr::Pipe(stages.iter().map(fold_literal_bracket_keys).collect()),
-        Expr::Comma(branches) => {
-            Expr::Comma(branches.iter().map(fold_literal_bracket_keys).collect())
+    let folded = crate::jq::walk::map_subexprs(expr, &mut |child| fold_literal_bracket_keys(child));
+    let Some((target, name)) = folded.literal_bracket_key() else {
+        return folded;
+    };
+    let field = Expr::Field(name.into());
+    match target {
+        Expr::Identity => field,
+        Expr::Pipe(stages) => {
+            let mut stages = stages.clone();
+            stages.push(field);
+            Expr::Pipe(stages)
         }
-        Expr::Paren(inner) => Expr::Paren(Box::new(fold_literal_bracket_keys(inner))),
-        Expr::Optional(inner) => Expr::Optional(Box::new(fold_literal_bracket_keys(inner))),
-        other => other.clone(),
+        other => Expr::Pipe(vec![other.clone(), field].into()),
     }
 }
 
@@ -81223,8 +81211,10 @@ fn builtin_del<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // `del()` looks anything up.
     let bracket_folded_path_expr: Expr;
     let path_expr: &Expr = if S::TAG == EvalTag::Yq
-        && any_subexpr(path_expr, &mut |e| matches!(e, Expr::IndexExpr { .. }))
-    {
+        && any_subexpr(
+            path_expr,
+            &mut |e| matches!(e, Expr::IndexExpr { key, .. } if static_bracket_keys(key).is_some()),
+        ) {
         vivify_del_null_bracket_targets(path_expr, &mut result);
         bracket_folded_path_expr = fold_literal_bracket_keys(path_expr);
         &bracket_folded_path_expr
