@@ -4862,8 +4862,13 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
   - arithmetic on a hex or octal integer keeps its base in yq (`0xff + 1` is `0x100`, #3027);
   - the spelling belongs to the *position*, not the node, so equal-valued scalars that a write
     moves (`[~, Null] | reverse`) swap spellings, where yq carries each node's own;
-  - a node a write copies from elsewhere (`.b = .a`) carries none, and a bare document scalar
-    (`--- 0x1F`) loses its spelling;
+  - a node copied by a plain `=` from a static read of it (`.b = .a`, `.c.d = .a.x`) and a bare
+    result (`-P '.a'`, a comment-only or bare `---` document) carry the spelling since #2875
+    (`a:` copies as `c:`, not `c: null`; `-P '.a'` is an empty line, not `null`); a copy made by
+    anything else does not: a construction (`[.a]`, `{"x": .a}`, #865), `map(.)` over a mapping,
+    and a source a later stage rewrites (`.c = .a | .a = 5`) all print the plain value where yq
+    keeps the text. yq copies the whole node, so quoting, flow style and a trailing comment ride
+    along there (`.c = .a` on `a: "x" # n` is `c: "x" # n`), which is still dropped here;
   - an empty value inside a flow collection (`{x: , y: 1}`) prints `null` where yq prints `''`.
 - **Spellings `OwnedValue` cannot keep** ([#2802](https://github.com/rust-works/succinctly/issues/2802)):
   `True == "true"` and `!!bool "yes" == true` are `true` here (yq `false`, its text is
