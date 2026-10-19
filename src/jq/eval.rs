@@ -37209,9 +37209,9 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
 /// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
-/// and `select(true)` around the binds hand their outputs on unchanged and are read through; every item
-/// of a comma must itself be such a shape, and no arm admits a `catch` or a call that computes. A
-/// `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
+/// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
+/// stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
+/// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
@@ -37220,7 +37220,7 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     // UPDATE (which leaves the whole `foreach`) is not read.
     fn binds<'a>(e: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
         match e {
-            Expr::Identity => Some(false),
+            Expr::Identity | Expr::Builtin(Builtin::Empty) => Some(false),
             Expr::Builtin(Builtin::Select(cond))
                 if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
             {
