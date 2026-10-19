@@ -4425,6 +4425,24 @@ Four related divergences are **not** covered and stay open:
   `["a","x"]`), while `(.a, .b) | .c | (key, path)` keeps jq's interleaving. Every
   multi-valued shape the oracle sweep exercises has either an empty prefix or an iterating
   one (`.a[]`), neither of which can yield an absent node, so the sweep is clean.
+- **A comma-fed or `//`-fed stage in front of a union (#2831).** A stage that produces several
+  nodes through a comma (`.x | (.a, .b)`) or through `//` (`.x | ((.a, .b) // 9)`) hands the
+  union that follows an element-major context, so `(key, key)` and `(path, path)` after it come
+  out as `"a"` `"a"` `"b"` `"b"` where yq prints the whole context twice (`"a"` `"b"` `"a"` `"b"`).
+  Captured on `x: {a: 1, b: 2}`:
+
+  | filter                                 | yq v4.53.3                          | `succinctly yq`                     |
+  |----------------------------------------|-------------------------------------|-------------------------------------|
+  | `.x \| (.a, .b) \| (key, key)`         | `"a"` `"b"` `"a"` `"b"`             | `"a"` `"a"` `"b"` `"b"`             |
+  | `.x \| ((.a, .b) // 9) \| (key, key)`  | `"a"` `"b"` `"a"` `"b"`             | `"a"` `"a"` `"b"` `"b"`             |
+  | `.x \| ((.a, .b) // 9) \| (key, path)` | `"a"` `"b"` `["x","a"]` `["x","b"]` | `"a"` `["x","a"]` `"b"` `["x","b"]` |
+
+  The same union after a navigated source is right (`(.x.a, .x.b) | (key, key)`, `.x[] | (key, key)`,
+  `.x | (.a // 9, .b // 9) | (key, key)`), and a value-only union agrees on the same shape
+  (`.x | (.a, .b) | (., .)` is `1` `2` in both: yq's union drops a right operand that is the very same
+  list, #4183). Only the path-tracked builtins (`key`, `path`) show the order, because only they read
+  where a node stands. The `//` case is #2817's per-left-output rule composed with a multi-output
+  rest, which its sweep's `alt_l`/`alt_r` wrappers did not generate.
 
 ### `from_entries`/`with_entries` want exact `key` and `value` fields — resolved ([#4399](https://github.com/rust-works/succinctly/issues/4399)); a container key and duplicate entries remain
 
