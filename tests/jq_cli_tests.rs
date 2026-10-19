@@ -167651,3 +167651,128 @@ fn test_foreach_source_isempty_of_alt_chain_behind_null_folds_and_defs_counts_ev
         ),
     ])
 }
+
+/// #4877: a `reduce` source `try error(FRESH) catch (. as PATTERN | ..)` runs the handler on the error's
+/// payload, a freshly built value that is no node of jq's register, so the pattern's step raises its own
+/// `near attempt to access element` error, uncaught. The source was driven by value, so `path` answered
+/// `[]`, `|= 9` wrote the root and `del` deleted it, alone and as the source of a `reduce` in a `foreach`
+/// UPDATE (a `foreach` source of the same shape was already routed). Not read: the payload `error(.)`
+/// hands on, which is the register itself, and a handler that does not destructure `.` (`catch .`,
+/// `catch empty`), which answer as jq does. Every row is a live jq 1.7.1 capture.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)]
+fn test_reduce_source_caught_error_payload_destructure_4877() -> Result<()> {
+    const OBJ_B: &str = r#"Invalid path expression near attempt to access element "b" of {"a":1}"#;
+    assert_path_rows_both_routes_3749(&[
+        (
+            "null",
+            r"path(reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"del(reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .)) |= 9",
+            "",
+            OBJ_B,
+            5,
+        ),
+        // the issue's rows: the reduce is the source of a `foreach` UPDATE's
+        (
+            "null",
+            r"path(. as $x | foreach (1,2) as $i (.; reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .); .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            "true",
+            r"del(. as $x | foreach (1,2) as $i (.; reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .); .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"(. as $x | foreach (1,2) as $i (.; reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .); .)) |= 9",
+            "",
+            OBJ_B,
+            5,
+        ),
+        // an `reduce` UPDATE around it, an array pattern, a string payload and a body that is no hand-on
+        (
+            "null",
+            r"path(reduce (1,2) as $i (.; reduce (try error([1]) catch (. as [$b] | .)) as $y (.; .)))",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1]",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"path(reduce (try error("s") catch (. as {b:$b} | .)) as $y (.; .))"#,
+            "",
+            r#"Invalid path expression near attempt to access element "b" of "s""#,
+            5,
+        ),
+        (
+            "null",
+            r"path(reduce (try error({a:1}) catch (. as {b:$b} | 5)) as $y (.; .))",
+            "",
+            OBJ_B,
+            5,
+        ),
+        // an outer `try` still catches the raise
+        (
+            r#"{"a":1}"#,
+            r#"try path(reduce (try error({a:1}) catch (. as {b:$b} | .)) as $y (.; .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        // not read: `error(.)` hands the register on as the payload, `null` is the register's kind on a
+        // `null` document, and a handler that destructures nothing
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try error(.) catch (. as {b:$b} | .)) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(reduce (try error(null) catch (. as {b:$b} | .)) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try error({a:1}) catch .) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (try error({a:1}) catch empty) as $y (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}

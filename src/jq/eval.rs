@@ -54393,6 +54393,25 @@ impl<'e> RegisterSpine<'e> {
             // (`is_fold_source_destructuring` looks inside it). Only the question "does it destructure
             // a fresh value" is asked, and only by the `fresh_only` walk: the register walks read a
             // `try` as opaque (the retry rules of #4575/#4585).
+            // #4877: ...and the handler of a `try error(FRESH) catch H` runs on that fresh payload, which
+            // is no node of the register: a destructure of `.` there raises its own error, uncaught.
+            Expr::Try {
+                expr,
+                catch: Some(handler),
+            } if self.fresh_only
+                && matches!(unwrap_paren(expr), Expr::Error(Some(payload))
+                    if yields_exactly_one_value(payload)
+                        && yields_only_fresh_values(payload, self.known)) =>
+            {
+                let entry = self.dot_fresh;
+                self.dot_fresh = true;
+                let reach = self.reach(handler);
+                self.dot_fresh = entry;
+                match reach {
+                    Reach::Destructures => Reach::Destructures,
+                    _ => Reach::Opaque,
+                }
+            }
             Expr::Try { expr, .. } | Expr::Optional(expr) if self.fresh_only => {
                 match self.reach(expr) {
                     Reach::Destructures => Reach::Destructures,
