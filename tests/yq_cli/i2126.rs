@@ -57,3 +57,45 @@ fn test_2126_del_vivifies_a_null_behind_a_bracket_key() -> Result<()> {
     }
     Ok(())
 }
+
+/// #2126: the bracket spelling must change nothing but the `null` vivify. Each pair runs the same
+/// `del()` spelled with brackets and with dots over a document with anchors, aliases and comments, and
+/// the two must print the same bytes (the `*a` of the first row is dropped by both: its anchor is the
+/// item deleted, the documented never-emit-unreadable-YAML rule). The last rows are captured from yq
+/// v4.53.3: a trailing `.[]` behind an absent bracket key is still the no-op it makes of it.
+#[test]
+fn test_2126_bracket_spelling_keeps_presentation_and_absent_key_rules() -> Result<()> {
+    let seq = "s:\n  - &a 1 # one\n  - &b 2 # two\n  - *a # three\n";
+    let map = "m: &mm\n  k: v # kc\n  j: [1, 2] # jc\nn: *mm\n";
+    let pairs: &[(&str, &str, &str)] = &[
+        (seq, r#"del(.["s"][0])"#, "del(.s[0])"),
+        (seq, r#"del(.["s"][1])"#, "del(.s[1])"),
+        (seq, r#"del(.["s"][0], .["s"][1])"#, "del(.s[0], .s[1])"),
+        (map, r#"del(.["m"]["k"])"#, "del(.m.k)"),
+        (map, r#"del(.m["j"][0])"#, "del(.m.j[0])"),
+        (map, r#"del(.["n"]["k"])"#, "del(.n.k)"),
+    ];
+    for (input, bracket, dotted) in pairs {
+        let (b, bc) = run_yq_stdin(bracket, input, &[])?;
+        let (d, dc) = run_yq_stdin(dotted, input, &[])?;
+        assert_eq!((bc, dc), (0, 0), "input {input:?} {bracket} / {dotted}");
+        assert_eq!(b, d, "input {input:?}: {bracket} vs {dotted}");
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("a: 1\n", r#"del(.["s"][])"#, "a: 1\n"),
+        ("a: 1\n", r#"del(.["a"])"#, "{}\n"),
+        (
+            "u: null # c\nw:\n  x: null\n",
+            r#"del(.["w"]["x"]["y"])"#,
+            "u: null # c\nw:\n  x: {}\n",
+        ),
+        ("u: null\n", r#"del(.["u"][0]["z"])"#, "u:\n  - {}\n"),
+        ("u: null\n", r#"del(.["u"]["z"])"#, "u: {}\n"),
+    ];
+    for (input, filter, want) in rows {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(code, 0, "input {input:?} filter {filter:?}: {out:?}");
+        assert_eq!(out, *want, "input {input:?} filter {filter:?}");
+    }
+    Ok(())
+}

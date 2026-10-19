@@ -3213,6 +3213,24 @@ impl Expr {
         Self::Iterate
     }
 
+    /// For a bracket on a single string literal (`E["k"]`, `E[("k")]`), the indexed target `E` and
+    /// the key: the form a yq `del()` argument keeps instead of folding it into `E.k` (#2126).
+    /// Every analysis that treats `Field` as plain navigation must treat this the same way.
+    #[must_use]
+    pub fn literal_bracket_key(&self) -> Option<(&Self, &str)> {
+        let Self::IndexExpr { target, key } = self else {
+            return None;
+        };
+        let mut key = key.as_ref();
+        while let Self::Paren(inner) = key {
+            key = inner;
+        }
+        match key {
+            Self::Literal(Literal::String(name)) => Some((target.as_ref(), name.as_str())),
+            _ => None,
+        }
+    }
+
     /// Whether a yq mapping key names a *pattern*: real yq treats `*` and `?`
     /// in a traversal key as wildcards (`pkg/yqlib` `matchKey`, #3374).
     #[must_use]

@@ -230,6 +230,10 @@ fn navigates_only(expr: &Expr) -> bool {
         | Expr::RecursiveDescent => true,
         Expr::Optional(inner) | Expr::Paren(inner) => navigates_only(inner),
         Expr::Pipe(stages) => stages.iter().all(navigates_only),
+        // #2126: a `del()` argument keeps `.["a"]` as a bracket on its target: navigation too.
+        Expr::IndexExpr { .. } => expr
+            .literal_bracket_key()
+            .is_some_and(|(target, _)| navigates_only(target)),
         _ => false,
     }
 }

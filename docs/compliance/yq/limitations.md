@@ -3880,11 +3880,16 @@ $ echo 'null' | yq -o=json 'del(.[(0,1)])'         # []
 $ echo '{"a":null}' | yq -o=json 'del(.a["k0"])'   # {"a":{}}
 ```
 
-`succinctly yq` matches, for literal keys: yq mode no longer folds a string bracket key into the
-`.k0` field step (`ParserMode::Yq` only; jq mode and an integer key fold as before), and
-`del()` runs a pre-pass (`vivify_del_null_bracket_targets`) that vivifies the first `null` a
-literal bracket key indexes along each branch. A *computed* key (`.[$k]`, `.[.n]`) is not
-vivified.
+`succinctly yq` matches, for literal keys: inside a `del()` argument (yq mode only; jq mode and an
+integer key fold as before) a string bracket key is parsed as the bracket it is rather than folded
+into the `.k0` field step, `del()` runs a pre-pass (`vivify_del_null_bracket_targets`) that vivifies
+the first `null` a literal bracket key indexes along each branch -- through field steps and
+non-negative positions, padding a `null` out to the position (`{"a":null} | del(.a[0]["k"])` is
+`{"a":[{}]}`) -- and the bracket form is folded back into `.k0` before the delete itself runs, so
+no other delete rule can tell the two spellings apart. Not vivified: a *computed* key
+(`{"a":null,"n":"x"} | del(.a[.n])` is `{"a":{}, ...}` in yq and unchanged here), a bracket behind a
+`.[]` fan-out (`[null] | del(.[]["k"])` is `[{}]` in yq), a multi-key bracket's descent into a
+`null` child (`del(.[("a","b")]["x"])`), and a bracket behind a negative position.
 
 Still different: the same mutation happens in yq on a plain read, because the node is rewritten
 in place. `echo null | yq -o=json '(.["k0"]) as $x | .'` and `select(.["k0"] == 2), .` print `{}`;

@@ -81013,14 +81013,20 @@ enum BracketWalk<'v> {
 /// it is. So `null | del(.["k0"])` is `{}`, and `{"a": null} | del(.a["k0"])` is `{"a": {}}`.
 /// The key's value never matters: the node is replaced and the walk of that branch ends, since
 /// what lies below is absent and an absent step reads nothing.
-fn vivify_null_bracket_step<'v>(expr: &Expr, node: &'v mut OwnedValue) -> BracketWalk<'v> {
+fn vivify_null_bracket_step<'v>(
+    expr: &Expr,
+    node: &'v mut OwnedValue,
+    changed: &mut bool,
+) -> BracketWalk<'v> {
     match expr {
         Expr::Identity => BracketWalk::At(node),
-        Expr::Paren(inner) | Expr::Optional(inner) => vivify_null_bracket_step(inner, node),
+        Expr::Paren(inner) | Expr::Optional(inner) => {
+            vivify_null_bracket_step(inner, node, changed)
+        }
         Expr::Pipe(steps) => {
             let mut at = node;
             for step in steps {
-                match vivify_null_bracket_step(step, at) {
+                match vivify_null_bracket_step(step, at, changed) {
                     BracketWalk::At(next) => at = next,
                     BracketWalk::Stop => return BracketWalk::Stop,
                 }
@@ -81032,6 +81038,12 @@ fn vivify_null_bracket_step<'v>(expr: &Expr, node: &'v mut OwnedValue) -> Bracke
             None => BracketWalk::Stop,
         },
         Expr::Index { idx, .. } => {
+            // A `null` indexed by a position becomes an array padded out to it, the way
+            // `del(.a[0]["k"])` reaches the element a bracket key then vivifies. Committed only
+            // if a later bracket vivifies something (see `vivify_del_null_bracket_targets`).
+            if matches!(node, OwnedValue::Null) && (0..=BRACKET_PAD_LIMIT).contains(idx) {
+                *node = OwnedValue::array_from(vec![OwnedValue::Null; *idx as usize + 1]);
+            }
             let Some(items) = node.as_array_mut() else {
                 return BracketWalk::Stop;
             };
@@ -81049,7 +81061,7 @@ fn vivify_null_bracket_step<'v>(expr: &Expr, node: &'v mut OwnedValue) -> Bracke
             }
         }
         Expr::IndexExpr { target, key } => {
-            let BracketWalk::At(at) = vivify_null_bracket_step(target, node) else {
+            let BracketWalk::At(at) = vivify_null_bracket_step(target, node, changed) else {
                 return BracketWalk::Stop;
             };
             let Some(keys) = static_bracket_keys(key) else {
@@ -81061,10 +81073,12 @@ fn vivify_null_bracket_step<'v>(expr: &Expr, node: &'v mut OwnedValue) -> Bracke
             match (&*at, first) {
                 (OwnedValue::Null, BracketKey::Str(_)) => {
                     *at = OwnedValue::object();
+                    *changed = true;
                     BracketWalk::Stop
                 }
                 (OwnedValue::Null, BracketKey::Int) => {
                     *at = OwnedValue::array();
+                    *changed = true;
                     BracketWalk::Stop
                 }
                 (OwnedValue::Object(_), BracketKey::Str(name)) if keys.len() == 1 => {
@@ -81080,22 +81094,72 @@ fn vivify_null_bracket_step<'v>(expr: &Expr, node: &'v mut OwnedValue) -> Bracke
     }
 }
 
-/// yq mode's `del()` pre-pass for #2126: see [`vivify_null_bracket_step`]. Applied to every
-/// branch of a comma group (through any `Paren`/`Optional`), each from the document root.
-fn vivify_del_null_bracket_targets(path_expr: &Expr, result: &mut OwnedValue) {
-    match path_expr {
+/// Fold every literal-string bracket key in a `del()` target back into the `.k` field step it
+/// would have been had the parser folded it (#2126): `E["k"]` becomes `E | .k`, `.["k"]` becomes
+/// `.k`. The vivify pre-pass is the only consumer of the bracket form; everything after it sees
+/// exactly the AST `del()` has always been given, so no other delete rule can tell the spellings
+/// apart (an absent key then a trailing `.[]`, the comma pre-pass, the trie, the slice rewrites).
+fn fold_literal_bracket_keys(expr: &Expr) -> Expr {
+    match expr {
+        Expr::IndexExpr { target, key } => match expr.literal_bracket_key() {
+            Some((_, name)) => {
+                let field = Expr::Field(name.into());
+                match fold_literal_bracket_keys(target) {
+                    Expr::Identity => field,
+                    Expr::Pipe(mut stages) => {
+                        stages.push(field);
+                        Expr::Pipe(stages)
+                    }
+                    other => Expr::Pipe(vec![other, field].into()),
+                }
+            }
+            None => Expr::IndexExpr {
+                target: Box::new(fold_literal_bracket_keys(target)),
+                key: key.clone(),
+            },
+        },
+        Expr::Pipe(stages) => Expr::Pipe(stages.iter().map(fold_literal_bracket_keys).collect()),
         Expr::Comma(branches) => {
-            for branch in branches {
-                vivify_del_null_bracket_targets(branch, result);
+            Expr::Comma(branches.iter().map(fold_literal_bracket_keys).collect())
+        }
+        Expr::Paren(inner) => Expr::Paren(Box::new(fold_literal_bracket_keys(inner))),
+        Expr::Optional(inner) => Expr::Optional(Box::new(fold_literal_bracket_keys(inner))),
+        other => other.clone(),
+    }
+}
+
+/// The longest array a `null` is padded out to while a bracket walk looks for something to
+/// vivify (`del(.a[0]["k"])`); a larger position is left to the ordinary `del()`.
+const BRACKET_PAD_LIMIT: i64 = 1024;
+
+/// yq mode's `del()` pre-pass for #2126: see [`vivify_null_bracket_step`]. Applied to every
+/// branch of a comma group (through any `Paren`/`Optional`), each from the document root, on a
+/// scratch copy that replaces `result` only if some bracket key actually vivified a `null` --
+/// the padding a position step adds on the way is not kept for a walk that finds nothing.
+fn vivify_del_null_bracket_targets(path_expr: &Expr, result: &mut OwnedValue) {
+    fn walk(path_expr: &Expr, root: &mut OwnedValue, changed: &mut bool) {
+        match path_expr {
+            Expr::Comma(branches) => {
+                for branch in branches {
+                    walk(branch, root, changed);
+                }
+            }
+            Expr::Paren(inner) | Expr::Optional(inner) if matches!(&**inner, Expr::Comma(_)) => {
+                walk(inner, root, changed);
+            }
+            other => {
+                let mut branch_changed = false;
+                let mut scratch = root.clone();
+                let _ = vivify_null_bracket_step(other, &mut scratch, &mut branch_changed);
+                if branch_changed {
+                    *root = scratch;
+                    *changed = true;
+                }
             }
         }
-        Expr::Paren(inner) | Expr::Optional(inner) if matches!(&**inner, Expr::Comma(_)) => {
-            vivify_del_null_bracket_targets(inner, result);
-        }
-        other => {
-            let _ = vivify_null_bracket_step(other, result);
-        }
     }
+    let mut changed = false;
+    walk(path_expr, result, &mut changed);
 }
 
 /// Builtin: del(path) - delete a single path
@@ -81157,9 +81221,16 @@ fn builtin_del<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
     // #2126: a bracket key on a `null` turns it into the container the key implies before
     // `del()` looks anything up.
-    if S::TAG == EvalTag::Yq {
+    let bracket_folded_path_expr: Expr;
+    let path_expr: &Expr = if S::TAG == EvalTag::Yq
+        && any_subexpr(path_expr, &mut |e| matches!(e, Expr::IndexExpr { .. }))
+    {
         vivify_del_null_bracket_targets(path_expr, &mut result);
-    }
+        bracket_folded_path_expr = fold_literal_bracket_keys(path_expr);
+        &bracket_folded_path_expr
+    } else {
+        path_expr
+    };
 
     // #2324: peel off every comma branch shaped as a static `Field`/`Index`
     // prefix plus a bare trailing `.[]` whose prefix currently reads `null`
