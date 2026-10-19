@@ -5134,8 +5134,9 @@ position and then by length, as `sort_by(.a, .b)` is in yq. jq mode is untouched
   the comments above the sequence) before the items when the query *is* one of these builtins
   over a document whose root is a sequence. Not covered: a sequence reached through a path
   (`.a | sort`, which yq also keeps in flow style), the comment block above a later document,
-  which yq attaches to the item that ends up first, and the foot comment below the sequence,
-  which yq moves with its last item.
+  which yq attaches to the item that ends up first, the foot comment below the sequence,
+  which yq moves with its last item, and a sequence whose items include an alias (reordered as
+  owned values, so it keeps neither the head nor the `&anchor`/`*alias` marks).
 
 Cost. Interleaved A/B against `main`, release builds, minimum of 9 runs, 1M-element arrays on
 5-10 MB documents (outputs identical; `sort_by` on 250k records):
