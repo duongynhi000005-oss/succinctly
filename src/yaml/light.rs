@@ -10383,20 +10383,6 @@ mod tests {
         assert_eq!(deeper_yaml_indent("", 1, '\t'), "\t");
     }
 
-    /// #2438: [`yq_float_is_scientific`] is stated arithmetically because it
-    /// runs once per document float on the DOM decode path, but the rule it
-    /// encodes is "`format!("{f:e}")`'s exponent is outside `-4..6`". This
-    /// keeps that string form as the *oracle* and asserts the two agree.
-    ///
-    /// The grid is boundary-first, because that is the only place the two
-    /// could disagree: both boundaries, the double immediately below each,
-    /// and the extremes at either end of the range. `999999.9999999999` is
-    /// the decimal spelling of the double below `1e6`, kept as a literal so
-    /// the row is readable next to the computed one. The pseudorandom tail
-    /// (a plain LCG, no dev-dependency) covers the interior: half as raw bit
-    /// patterns, which spread over the whole exponent range, and half as
-    /// mantissa-times-power-of-ten values clustered around the boundaries,
-    /// which raw bits essentially never land near.
     /// #4915: the allocation-free float printer must spell every float exactly as
     /// `format_float_yq` does -- ordinary magnitudes with an even or odd last digit, the exact
     /// decimal ties the correction rewrites, the scientific range, and both signs.
@@ -10450,6 +10436,20 @@ mod tests {
         }
     }
 
+    /// #2438: [`yq_float_is_scientific`] is stated arithmetically because it
+    /// runs once per document float on the DOM decode path, but the rule it
+    /// encodes is "`format!("{f:e}")`'s exponent is outside `-4..6`". This
+    /// keeps that string form as the *oracle* and asserts the two agree.
+    ///
+    /// The grid is boundary-first, because that is the only place the two
+    /// could disagree: both boundaries, the double immediately below each,
+    /// and the extremes at either end of the range. `999999.9999999999` is
+    /// the decimal spelling of the double below `1e6`, kept as a literal so
+    /// the row is readable next to the computed one. The pseudorandom tail
+    /// (a plain LCG, no dev-dependency) covers the interior: half as raw bit
+    /// patterns, which spread over the whole exponent range, and half as
+    /// mantissa-times-power-of-ten values clustered around the boundaries,
+    /// which raw bits essentially never land near.
     #[test]
     fn yq_float_is_scientific_agrees_with_the_exponent_it_replaces() {
         /// The rule as originally written: read the exponent back out of

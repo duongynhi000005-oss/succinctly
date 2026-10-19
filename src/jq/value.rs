@@ -1219,28 +1219,29 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
 
     // Cheap necessary condition for a tie (#4915). The midpoint is `(2n - 1) / 2 * 10^q`; for a
     // negative `q` that is `(2n - 1) / (2^(1-q) * 5^-q)`, and a double is a dyadic rational, so
-    // `5^-q` must divide `2n - 1`. One `u128` remainder settles it for all but the genuine ties,
-    // where the exact check below (a run of `checked_pow`s, about a hundred nanoseconds) would
-    // otherwise run on every odd-ended float. A divisor or product too wide for `u128` is the
-    // exact check's own `None`, which returns `s` as well.
+    // `5^-q` must divide `2n - 1`. One remainder settles it for all but the genuine ties, where
+    // the exact check below (a run of `checked_pow`s, about a hundred nanoseconds) would
+    // otherwise run on every odd-ended float. A `u64` remainder is several times cheaper than a
+    // `u128` one and covers every float's shortest digits; the wide path is for what does not
+    // fit. A divisor or product too wide for `u128` is the exact check's own `None`, which
+    // returns `s` as well.
     if q < 0 {
         let k = u32::try_from(-q).ok();
-        // `u64` remainders are several times cheaper than `u128` ones, and every float's
-        // shortest digits (at most 17) fit; the wide path is for what does not.
-        if let (Some(k), Ok(n64)) = (k, u64::try_from(n)) {
-            if let (Some(p5), Some(t)) = (5u64.checked_pow(k), n64.checked_mul(2)) {
-                if (t - 1) % p5 != 0 {
-                    return s;
-                }
-            }
-        }
-        let Some(p5) = k.and_then(|k| 5u128.checked_pow(k)) else {
-            return s;
+        let narrow = match (k, u64::try_from(n)) {
+            (Some(k), Ok(n64)) => 5u64
+                .checked_pow(k)
+                .zip(n64.checked_mul(2))
+                .map(|(p5, twice)| (twice - 1) % p5),
+            _ => None,
         };
-        let Some(twice_n_less_one) = n.checked_mul(2).and_then(|t| t.checked_sub(1)) else {
-            return s;
+        let remainder = match narrow {
+            Some(r) => Some(u128::from(r)),
+            None => k
+                .and_then(|k| 5u128.checked_pow(k))
+                .zip(n.checked_mul(2).and_then(|t| t.checked_sub(1)))
+                .map(|(p5, twice_less_one)| twice_less_one % p5),
         };
-        if twice_n_less_one % p5 != 0 {
+        if remainder != Some(0) {
             return s;
         }
     }
@@ -8594,18 +8595,7 @@ mod tests {
         );
     }
 
-    /// #2542: `correct_shortest_decimal_tiebreak`'s three early bail-outs
-    /// (empty `s`, an `n` too wide for `u128`, and a subnormal `f`) are all
-    /// unreachable from its one real call site in `jq_bare_float_display` --
-    /// `f.to_string()` never returns an empty string, the digit string it
-    /// produces always parses back as `u128` (its own shortest round-trip
-    /// length is far below `u128::MAX`'s ~39 digits), and the caller only
-    /// ever reaches this function on the non-scientific branch, whose own
-    /// threshold keeps `f` far above the subnormal range. Called directly
-    /// here (bypassing those real-world guarantees on purpose) so the
-    /// defensive branches are covered as the safety net they are, not left
-    /// as dead code.
-    /// #4915: the `n % 5 == 3` shortcut only skips the exact-midpoint check where no tie is
+    /// #4915: the `5^k | 2n - 1` prefilter only skips the exact-midpoint check where no tie is
     /// possible, so the correction answers exactly what the unfiltered check does -- over the
     /// non-scientific and scientific spellings, genuine ties included.
     #[test]
@@ -8691,6 +8681,17 @@ mod tests {
         );
     }
 
+    /// #2542: `correct_shortest_decimal_tiebreak`'s three early bail-outs
+    /// (empty `s`, an `n` too wide for `u128`, and a subnormal `f`) are all
+    /// unreachable from its one real call site in `jq_bare_float_display` --
+    /// `f.to_string()` never returns an empty string, the digit string it
+    /// produces always parses back as `u128` (its own shortest round-trip
+    /// length is far below `u128::MAX`'s ~39 digits), and the caller only
+    /// ever reaches this function on the non-scientific branch, whose own
+    /// threshold keeps `f` far above the subnormal range. Called directly
+    /// here (bypassing those real-world guarantees on purpose) so the
+    /// defensive branches are covered as the safety net they are, not left
+    /// as dead code.
     #[test]
     fn test_correct_shortest_decimal_tiebreak_defensive_bailouts_2542() {
         // Empty `s`: nothing to look at, return it unchanged.
