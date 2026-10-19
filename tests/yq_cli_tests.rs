@@ -20150,6 +20150,15 @@ mod source_spelling_2875 {
     }
 
     #[test]
+    fn a_second_copy_over_the_target_takes_the_new_source_text_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c = .a | .c = .b", "a: ~\nb: null\n", &[])?,
+            "a: ~\nb: null\nc: null\n"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_copy_of_a_copy_keeps_it_2875() -> Result<()> {
         assert_eq!(
             yq(".c = .a | .d = .c", "a: ~\nb: 1\n", &[])?,

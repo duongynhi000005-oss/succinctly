@@ -3744,6 +3744,11 @@ fn propagate_assign_alias_marks(expr: &Expr, tree: &mut CommentTree) {
 /// the finished tree, so a source a *later* stage rewrites (`.c = .a | .a = 5`) has no spelling
 /// left to copy and its target prints the plain value.
 fn propagate_assign_spellings(expr: &Expr, value: &OwnedValue, tree: &mut CommentTree) {
+    // Every step below reads from and writes to the document root, so a stage that navigates
+    // first (`.x | .c = .a`) or filters (`select(..)`) would copy from the wrong node.
+    if !is_plain_assign_chain(expr) {
+        return;
+    }
     let Some(stages) = collect_assign_chain(expr) else {
         return;
     };
@@ -3753,25 +3758,38 @@ fn propagate_assign_spellings(expr: &Expr, value: &OwnedValue, tree: &mut Commen
         else {
             continue;
         };
+        // The target is a copy of the source node, so it takes the source's spelling or, when the
+        // source has none, none at all: `.c = .a | .c = .b` leaves `c` as `b` was written.
         let Some(spelling) = comment_tree_at_path_mut(tree, &value_steps)
-            .and_then(|node| node.meta().spelling().map(str::to_string))
+            .map(|node| node.meta().spelling().map(str::to_string))
         else {
             continue;
         };
         let Some(written) = owned_value_at(value, &meta_path_of(&path_steps)) else {
             continue;
         };
-        if !spelling_names_value(&spelling, written) {
-            continue;
-        }
+        let spelling = spelling.filter(|spelling| spelling_names_value(spelling, written));
         // The value is there (checked above), so a tree that stops short of it (a key the
         // write created under a new mapping) is grown to reach it.
         if let Some(node @ CommentTree::Leaf(_)) =
             comment_tree_at_path_or_create_mut(tree, &path_steps)
         {
-            let meta = node.meta().with_spelling(Some(spelling));
+            let meta = node.meta().with_spelling(spelling);
             *node.meta_mut() = meta;
         }
+    }
+}
+
+/// Whether `expr` is nothing but plain `=` assignments run at the document root: assignments
+/// piped into one another, optionally parenthesised or ended by an identity.
+fn is_plain_assign_chain(expr: &Expr) -> bool {
+    match expr {
+        Expr::Assign { .. } => true,
+        Expr::Paren(inner) | Expr::Optional(inner) => is_plain_assign_chain(inner),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .all(|stage| matches!(stage, Expr::Identity) || is_plain_assign_chain(stage)),
+        _ => false,
     }
 }
 
