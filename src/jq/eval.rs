@@ -5362,6 +5362,12 @@ enum ArgFanout {
     All,
     /// Only the argument's first output is used; later ones are discarded.
     FirstOnly,
+    /// [`Self::FirstOnly`], and an argument that produces *no* output at all is read as the
+    /// empty string (#4903): real yq's text-argument builtins run on `""` for an absent
+    /// key or `select(false)` (`"a1b" | split(.foo)` is `["a","1","b"]`, `test(.foo)` is
+    /// `true`, `sub(.foo; "X")` is `"XaX1XbX"`), where jq's fan-out gives no output. An
+    /// argument that escaped is not empty, it raised, so it still reports its escape alone.
+    FirstOrEmptyText,
     /// A multi-output argument is refused outright rather than fanned out or
     /// truncated.
     ///
@@ -5411,6 +5417,16 @@ impl ArgFanout {
     fn yq_native<S: EvalSemantics>() -> Self {
         if S::TAG == EvalTag::Yq {
             Self::FirstOnly
+        } else {
+            Self::All
+        }
+    }
+
+    /// [`Self::yq_native`] for a builtin whose argument is text in yq (`split`, `test`,
+    /// `match`, `capture`, `sub`): an argument with no output reads as `""` (#4903).
+    fn yq_text_arg<S: EvalSemantics>() -> Self {
+        if S::TAG == EvalTag::Yq {
+            Self::FirstOrEmptyText
         } else {
             Self::All
         }
@@ -5498,6 +5514,15 @@ fn clear_values_when_yq_argument_escaped(
     true
 }
 
+/// [`ArgFanout::FirstOrEmptyText`]'s other half (#4903): an argument that produced no value and
+/// did not escape stands for `""`. Run after [`apply_arg_fanout`]; `escaped` is whether the
+/// argument ended in a control (an error, `break`), which is reported as it is, not defaulted.
+fn default_empty_text_argument(fanout: ArgFanout, args: &mut Vec<OwnedValue>, escaped: bool) {
+    if matches!(fanout, ArgFanout::FirstOrEmptyText) && args.is_empty() && !escaped {
+        args.push(OwnedValue::String(String::new().into()));
+    }
+}
+
 /// Apply `fanout`'s gate to one argument's materialized output list.
 ///
 /// One definition for the three places that need it — [`fanout_arg`], and
@@ -5531,7 +5556,7 @@ fn apply_arg_fanout(fanout: ArgFanout, args: &mut Vec<OwnedValue>) -> Result<(),
         // is a count error. (succinctly's wording for that count error differs
         // from yq's own `SETPATH: expected single path but found 2 results
         // instead`; that gap predates #1279 and is out of scope here.)
-        ArgFanout::FirstOnly => {
+        ArgFanout::FirstOnly | ArgFanout::FirstOrEmptyText => {
             args.truncate(1);
             Ok(())
         }
@@ -5633,6 +5658,7 @@ where
         } else if let Err(e) = apply_arg_fanout(fanout, &mut args) {
             return QueryResult::Error(e);
         }
+        default_empty_text_argument(fanout, &mut args, trailing.is_some());
         if trailing.is_none() && args.len() == 1 {
             return body(args.pop().expect("len() == 1 guarantees an element"));
         }
@@ -5870,6 +5896,7 @@ fn fanout_two_args<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         };
     }
 
+    default_empty_text_argument(fanout, &mut outers, outer_trailing.is_some());
     let mut out: Vec<OwnedValue> = Vec::new();
     for o in outers {
         let (mut inners, inner_trailing) =
@@ -5882,6 +5909,7 @@ fn fanout_two_args<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             };
         }
 
+        default_empty_text_argument(fanout, &mut inners, inner_trailing.is_some());
         for i in inners {
             if let Some(control) = push_owned_values::<_, S>(body(o.clone(), i), &mut out) {
                 return partial(out, control);
@@ -18513,7 +18541,7 @@ fn builtin_split<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // Real yq *has* `split` and does not fan it out: live-verified against
         // the pinned v4.53.3, `[.x | split((",","b"))]` on `a,b` is
         // `[["a","b"]]`, where jq gives two results. Bug-for-bug (ADR-0018).
-        ArgFanout::yq_native::<S>(),
+        ArgFanout::yq_text_arg::<S>(),
         |sep_owned| {
             // #4236 (yq): `null | split(..)` is nothing whatever the separator is.
             if S::NULL_ENTRIES_AND_SPLIT_YIELD_NOTHING && matches!(value, StandardJson::Null) {
@@ -23385,7 +23413,7 @@ fn builtin_test<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // where jq gives `[true,false]`), so yq mode keeps the first pattern
         // only. Kept in step with the `regex`-enabled twin, which gates the
         // same way through `eval_regex_pattern_and_flags`.
-        ArgFanout::yq_native::<S>(),
+        ArgFanout::yq_text_arg::<S>(),
         |raw_pattern| {
             // #956 (#943 follow-up): the bare form additionally unpacks a non-empty
             // array pattern via the shared `unpack_bare_array_pattern` helper -- see
@@ -24776,7 +24804,7 @@ fn fanout_regex_pattern_and_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     // them: live-verified against the pinned v4.53.3, `[.x | test(("a","z"))]`
     // on `abc` is `[true]` where jq gives `[true,false]`. Bug-for-bug per
     // ADR-0018.
-    let fanout = ArgFanout::yq_native::<S>();
+    let fanout = ArgFanout::yq_text_arg::<S>();
     let flags_present = flags_expr.is_some();
     let mut run =
         |raw_pattern: OwnedValue, raw_flags: Option<OwnedValue>| match resolve_regex_args::<S>(
@@ -25416,9 +25444,14 @@ fn eval_sub_replacement<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     let materialized =
         eval_owned_input::<W, S>(replacement_expr, &captures, optional, Reentry::REBUILT)
             .materialize_cursor();
-    let (values, trailing) = stream_outputs_lossy::<_, S>(materialized);
+    let (mut values, trailing) = stream_outputs_lossy::<_, S>(materialized);
     if let Some(control) = trailing {
         return Err(partial(Vec::new(), control));
+    }
+    // yq reads a replacement with no output as `""` (#4903, `"a1b" | sub("a"; select(false))` is
+    // `"1b"`), where jq's #840 rule drops the match's text and its gap.
+    if S::TAG == EvalTag::Yq && values.is_empty() {
+        values.push(OwnedValue::String(String::new().into()));
     }
     Ok(values)
 }
@@ -25958,7 +25991,7 @@ fn yq_sub_arity3_empty_replace<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         re_expr,
         value.clone(),
         optional,
-        ArgFanout::yq_native::<S>(),
+        ArgFanout::yq_text_arg::<S>(),
         move |raw_pattern| {
             // #1443: reuses `resolve_regex_args`'s own yq-mode scalar-pattern
             // coercion (RegexArgFamily::Sub gives the identical
