@@ -37873,7 +37873,7 @@ fn update_returns_its_input(e: &Expr) -> bool {
             body,
         } => {
             patterns.len() == 1
-                && matches!(unwrap_paren(expr), Expr::Identity | Expr::TrackedVar(_))
+                && matches!(unwrap_paren(expr), Expr::Identity)
                 && update_returns_its_input(body)
         }
         Expr::Foreach {
@@ -37900,11 +37900,11 @@ fn update_returns_its_input(e: &Expr) -> bool {
     }
 }
 
-/// Whether a `reduce` UPDATE is destructures of an outer `$x` that end in `.` (#4901): each a single
-/// pattern with literal keys, or a bare `$name`, behind a chain of such binds and nothing else. The
-/// binds' steps are path-checked as jq's are, and the `.` they end on is the accumulator, which a
-/// `reduce` hands back whatever the register was moved to ([`update_returns_its_input`], whose
-/// `Identity` bind this extends to a marker source).
+/// Whether a `reduce` UPDATE is a chain of binds of an outer `$x` that ends in `.` (#4901): each a
+/// single pattern with literal keys, or a plain `$name`, and nothing else (no pipe: a pipe headed by
+/// `$x` ends on `$x`'s node, not the accumulator). The binds' steps are path-checked as jq's are, and
+/// the `.` they end on is the accumulator, which a `reduce` hands back whatever the register was moved
+/// to (the marker-source counterpart of [`update_returns_its_input`]'s bind of `.`).
 fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity => true,
@@ -51690,10 +51690,13 @@ impl FoldRegister {
             // register still resolves register-less here.
             // #4499, #4779: `fans_out` skips a marker-mentioning fold only when it is marked as
             // reading the register ([`is_register_fold`]).
+            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE that marked it
+            // ([`fold_body::state_handed_on_here`]), which is one sequence of path-checked steps.
             let carries = S::TAG == EvalTag::Jq
                 && self.trackable
                 && !tr
-                && (!fans_out(expr) || is_single_output_bind(expr));
+                && (!fans_out(expr)
+                    || (fold_body::state_handed_on_here() && is_single_output_bind(expr)));
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)
@@ -61759,19 +61762,20 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     let carries_dot = S::TAG == EvalTag::Jq
         && cannot_move_register(input)
         && matches!(unwrap_paren(init), Expr::Identity);
-    // #4901: ...and one that is destructures of a foreign `$x` ending in `.` hands the accumulator
-    // back whatever its source did to the register ([`foreign_bind_chain_returning_dot`]).
-    // #4901: ...and any UPDATE whose binds all sit in tail position leaves the `.` they end on
-    // unchecked ([`update_binds_only_in_tail`]).
-    let update_tail_unchecked = S::TAG == EvalTag::Jq
+    // #4901: an outermost `reduce` whose UPDATE reads a `$x` bound outside it, behind single-pattern
+    // binds. jq stores the UPDATE's output without a path check, and judges the final emission on the
+    // accumulator's provenance, so:
+    // - when every bind sits in tail position the `.` they end on is left unchecked
+    //   ([`update_binds_only_in_tail`]), whatever the source did to the register;
+    // - when the UPDATE is destructures of `$x` that end in `.` itself (no pipe in front: a pipe headed by
+    //   `$x` ends on `$x`'s node, not the accumulator) it also hands the accumulator back
+    //   ([`foreign_bind_chain_returning_dot`]), so its standing carries to the next step.
+    let foreign_bind_update = S::TAG == EvalTag::Jq
         && update_reads_foreign_marker
         && fold_body::depth() == 0
-        && patterns_all_bare(patterns)
-        && update_binds_only_in_tail(update);
-    let update_hands_state_on = S::TAG == EvalTag::Jq
-        && update_reads_foreign_marker
-        && fold_body::depth() == 0
-        && patterns_all_bare(patterns)
+        && patterns_all_bare(patterns);
+    let update_tail_unchecked = foreign_bind_update && update_binds_only_in_tail(update);
+    let update_hands_state_on = foreign_bind_update
         && cannot_move_register(init)
         && foreign_bind_chain_returning_dot(update);
     let try_update_on_register =
