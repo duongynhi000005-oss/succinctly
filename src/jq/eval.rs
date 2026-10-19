@@ -37208,14 +37208,28 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
 /// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
-/// bind's `.` is a hand-on rather than a path check (#3853). Narrower than
-/// [`update_returns_its_input`] on purpose: a nested fold or a `label` has marks and statements of its
+/// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
+/// and `select(true)` around the binds hand their outputs on unchanged and are read through; every item
+/// of a comma must itself be such a shape, and no arm admits a `break`, a `catch` or a call that computes.
+/// Narrower than [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its
 /// own that this relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     fn binds(e: &Expr) -> Option<bool> {
         match e {
             Expr::Identity => Some(false),
+            Expr::Builtin(Builtin::Select(cond))
+                if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
+            {
+                Some(false)
+            }
             Expr::Paren(inner) => binds(inner),
+            // A handler-less `try`/`?` or a `label` hands its body's outputs on; no arm admits a
+            // `break`, a `catch` or a call that could raise past the binds' own pattern steps.
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => binds(expr),
+            Expr::Label { body, .. } => binds(body),
+            Expr::Comma(items) => items
+                .iter()
+                .try_fold(false, |any, item| Some(binds(item)? || any)),
             Expr::Pipe(stages) => stages
                 .iter()
                 .try_fold(false, |any, stage| Some(binds(stage)? || any)),
