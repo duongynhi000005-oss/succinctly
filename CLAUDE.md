@@ -556,6 +556,12 @@ above.
 - **Unit tests**: In each module's `#[cfg(test)] mod tests`
 - **Property tests**: `tests/property_tests.rs`, `tests/bp_properties.rs`
 - **Integration tests**: `tests/json_indexing_tests.rs`, `tests/simd_level_tests.rs`
+- **New yq/jq CLI tests**: never append to the end of `tests/yq_cli_tests.rs` or
+  `tests/jq_cli_tests.rs` (every PR that did conflicted with every other, #4329). A new test for
+  issue `N` goes in `tests/yq_cli/iN.rs` (`tests/jq_cli/iN.rs`) plus one `mod iN;` line in that
+  directory's `mod.rs`, in numeric order; the module reaches the binary's helpers through
+  `crate::` (`use crate::run_yq_stdin;`). It is still the same test binary. See the header of
+  `tests/yq_cli/mod.rs`.
 
 ## `no_std` Support
 

@@ -7,6 +7,17 @@ description: Testing patterns and anti-patterns for this codebase. Use when writ
 
 Guidelines for writing effective tests that actually verify correctness.
 
+## Where a new yq/jq CLI test goes (#4329)
+
+Do not append to the end of `tests/yq_cli_tests.rs` or `tests/jq_cli_tests.rs`: they are 70k and
+160k lines, and an append at EOF conflicts with every other PR that does the same (about nine
+a day). Put the test for issue `N` in `tests/yq_cli/iN.rs` (or `tests/jq_cli/iN.rs`), add one
+`mod iN;` line to that directory's `mod.rs` in numeric order, and reach the shared helpers with
+`use crate::{run_yq_stdin, ...};`. The directory is compiled into the existing test binary (no new
+target, no extra link time), and `.gitattributes` marks the two `mod.rs` files `merge=union` so
+two lines added into the same gap both survive a rebase. A test for a behaviour an existing test
+already pins is better extended in place; do not move existing tests.
+
 ## Critical Anti-Pattern: Success-Only Tests
 
 **Never write tests that only check for successful execution without verifying output.**
