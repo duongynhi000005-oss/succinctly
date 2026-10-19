@@ -163852,7 +163852,7 @@ fn test_foreach_update_single_pattern_bind_beside_a_constant_division_count_4800
 /// #4800: a `foreach` whose EXTRACT emits nothing (`empty`, `select(false)`, `first(empty)`, `limit(0; ..)`) has
 /// no output to path-check, so an UPDATE that can neither raise nor have an effect (`expr_is_inert`: `.`,
 /// literals, `not`, `tostring`, `select(true)`, and a pipe, comma, `//`, `if`, `try`/`?` or nested `foreach`
-/// of such, a destructuring pattern only inside a `try`/`?`) is read as one that hands the state on. A nested
+/// of such, `$var` and a bind of `.` or `$var`, a destructuring pattern only inside a `try`/`?`) is read as one that hands the state on. A nested
 /// `foreach` in it whose source destructures a `$x` marker (`try ($x as {a:$a} | .)`) was refused for an
 /// emission that is never made, where jq answers nothing. The controls keep their refusal: an uncaught
 /// destructure raises or not by the state (`foreach ($x as {a:$a} | .) ...` raises on `[1]`), and an EXTRACT that
@@ -163961,6 +163961,76 @@ fn test_foreach_with_an_emitting_nothing_extract_ignores_an_inert_update_4800() 
         (
             r#"{"a":1}"#,
             r"path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); limit(0; .)))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | foreach . as $i (.; try (. as {a:{b:$c}} | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; try (. as [$p,$q] | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; try (. as {a:$q} ?// [$q] | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .))?; empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | foreach . as $i (.; (. as {a:$q} | foreach (try ($x as {a:$a} | .)) as $y (.; .; .))?; empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; $x | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; foreach (1,2) as [$u] (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .); empty))",
+            "",
+            "Invalid path expression near attempt to access element 0 of 1",
+            5,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | foreach . as $i (.; try (foreach (1,2) as [$u] (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .)); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | not; empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(. as $x | foreach . as $i (.; foreach . as $y (.; $x; .); empty))",
             "",
             "",
             0,

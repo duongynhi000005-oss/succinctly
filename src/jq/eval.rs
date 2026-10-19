@@ -37291,6 +37291,9 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 
 /// An `empty` spelled out: `select` of a constant that is never truthy, `first` of such an expression, or
 /// a `limit` of a constant count that is `0` (it never runs its body) or whose body is such an expression.
+/// Every spelling is a constant that cannot raise and never reads the state, so a caller may drop the rest of the
+/// fold that holds it (`update_is_single_bind_returning_input` reads it as an item that stores nothing; `resolve_foreach`
+/// skips an inert UPDATE beside such an EXTRACT, #4800): widen it only with a spelling that keeps both properties.
 fn emits_nothing(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Builtin(Builtin::Empty) => true,
