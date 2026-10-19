@@ -4234,18 +4234,30 @@ fn write_float_yq<W: core::fmt::Write>(out: &mut W, f: f64) -> core::fmt::Result
     if core::fmt::write(&mut text, format_args!("{f}")).is_ok() {
         let s = text.as_str();
         if s.as_bytes().contains(&b'.') {
-            return if s.as_bytes().last() == Some(&b'3') {
-                out.write_str(&crate::jq::correct_shortest_decimal_tiebreak(
-                    f,
-                    s.to_string(),
-                    0,
-                ))
-            } else {
-                out.write_str(s)
-            };
+            let tie = s.as_bytes().last() == Some(&b'3')
+                && crate::jq::shortest_decimal_is_wrong_tie(f, s, 0);
+            return write_decimal_digits(out, s, tie);
         }
     }
     out.write_str(&format_float_yq(f))
+}
+
+/// `digits` (ASCII, non-empty when `tie`), with its last digit one lower when it is the wrong side
+/// of a tie ([`crate::jq::shortest_decimal_is_wrong_tie`]): what
+/// [`crate::jq::correct_shortest_decimal_tiebreak`] does to an owned `String`, written without one.
+fn write_decimal_digits<W: core::fmt::Write>(
+    out: &mut W,
+    digits: &str,
+    tie: bool,
+) -> core::fmt::Result {
+    match digits.as_bytes().split_last() {
+        Some((&last, _)) if tie => {
+            let (head, _) = digits.split_at(digits.len() - 1);
+            out.write_str(head)?;
+            out.write_char(char::from(last - 1))
+        }
+        _ => out.write_str(digits),
+    }
 }
 
 /// [`format_float_yq`]'s scientific branch, written straight into `out` (#4923): the shortest
@@ -4258,17 +4270,10 @@ fn write_float_yq_scientific<W: core::fmt::Write>(out: &mut W, f: f64) -> core::
     if core::fmt::write(&mut text, format_args!("{f:e}")).is_ok() {
         if let Some((mantissa, exp_str)) = text.as_str().split_once('e') {
             if let Ok(exp) = exp_str.parse::<i32>() {
-                let digits = mantissa.as_bytes();
-                match digits.split_last() {
-                    Some((&last, head))
-                        if crate::jq::shortest_decimal_is_wrong_tie(f, mantissa, exp.into()) =>
-                    {
-                        // `mantissa` is ASCII, so `head` is a whole `str`.
-                        out.write_str(core::str::from_utf8(head).unwrap_or(""))?;
-                        out.write_char(char::from(last - 1))?;
-                    }
-                    _ => out.write_str(mantissa)?,
-                }
+                let tie = crate::jq::shortest_decimal_is_wrong_tie(f, mantissa, exp.into());
+                write_decimal_digits(out, mantissa, tie)?;
+                // The spelling `format_float_yq_with` gives the exponent: a sign, then at least
+                // two digits.
                 let sign = if exp < 0 { '-' } else { '+' };
                 return write!(out, "e{sign}{:02}", exp.unsigned_abs());
             }
@@ -10484,8 +10489,9 @@ mod tests {
 
     /// #4923: the scientific writer asks the tie-break question about the mantissa's digits
     /// instead of rewriting an owned `String`, so it has to hit exactly the doubles the rewrite
-    /// would: dyadic values past yq's `1e6` threshold, where `{f:e}` can land on the
-    /// away-from-zero side of an exact decimal tie, in both signs and over a wide exponent range.
+    /// would: dyadic values on both sides of yq's `1e6`/`1e-4` thresholds and over a wide exponent
+    /// range, in both signs, where `{f:e}` can land on the away-from-zero side of an exact decimal
+    /// tie. Every tie found must come out one digit lower than the uncorrected `{f:e}` spelling.
     #[test]
     fn write_float_yq_scientific_agrees_on_exact_ties_4923() {
         let mut ties = 0;
@@ -10494,7 +10500,7 @@ mod tests {
             for odd in [1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 33.0, 99.0] {
                 for sign in [1.0, -1.0] {
                     let f = sign * odd * (2.0f64).powi(k);
-                    if !f.is_finite() {
+                    if !f.is_finite() || !yq_float_is_scientific(f) {
                         continue;
                     }
                     let mut written = alloc::string::String::new();
@@ -10505,6 +10511,12 @@ mod tests {
                     let (mantissa, exp) = sci.split_once('e').unwrap();
                     if crate::jq::shortest_decimal_is_wrong_tie(f, mantissa, exp.parse().unwrap()) {
                         ties += 1;
+                        let uncorrected = alloc::format!(
+                            "{mantissa}e{}{:02}",
+                            if f.abs() < 1.0 { '-' } else { '+' },
+                            exp.parse::<i32>().unwrap().unsigned_abs()
+                        );
+                        assert_ne!(written, uncorrected, "{f:e} is a tie and was not corrected");
                     }
                 }
             }
@@ -10515,7 +10527,6 @@ mod tests {
         let mut written = alloc::string::String::new();
         write_float_yq(&mut written, 2.9802322387695313e-8).unwrap();
         assert_eq!(written, "2.9802322387695312e-08");
-        // The question is not vacuous: some of these values really are the wrong side of a tie.
         assert!(ties > 0, "no exact tie among {checked} values");
     }
 

@@ -1201,10 +1201,9 @@ pub(crate) fn correct_shortest_decimal_tiebreak(f: f64, s: String, extra_exp10: 
     // Genuine tie: `s`'s last (odd) digit decrements by exactly one with no borrow, since an odd
     // digit minus one never underflows a single digit.
     let mut corrected = s.into_bytes();
-    let last = corrected
-        .last_mut()
-        .expect("a tie is only reported for a non-empty `s`");
-    *last -= 1;
+    if let Some(last) = corrected.last_mut() {
+        *last -= 1;
+    }
     String::from_utf8(corrected).expect("ASCII digit substitution stays valid UTF-8")
 }
 
