@@ -44317,12 +44317,16 @@ fn carry_frame_register<'a>(
 /// Whether `expr` is, as a whole, a `//` or a comma of them and of siblings that leave jq's
 /// register alone ([`sibling_leaves_register`]), or such shapes between pipe stages that move
 /// nothing (#4837), however many of them the pipe holds (#4843, each stage states the register it
-/// ran from): the UPDATE shapes whose `foreach` EXTRACT is judged per output (#4800). With `states`, each `//` must also have an operand that leaves the
+/// ran from), or an `if` whose branches are such shapes, siblings that move nothing, or move the
+/// register without a `//` of their own (#4853): the UPDATE shapes whose `foreach` EXTRACT is judged
+/// per output (#4800). With `states`, each `//` must also have an operand that leaves the
 /// register alone, so that its outputs state the register they entered with
 /// ([`carry_frame_register`]) whatever the other operand does; the outputs of the operand that
 /// moved it state what it did, and the EXTRACT behind them is judged on that.
 fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
-    fn shape<S: EvalSemantics>(expr: &Expr, states: bool) -> Option<bool> {
+    /// `branching`: inside a comma, whose later siblings jq runs from the register restored after
+    /// the earlier ones, which only the run can tell (#4853).
+    fn shape<S: EvalSemantics>(expr: &Expr, states: bool, branching: bool) -> Option<bool> {
         match peel_register_transparent(expr) {
             Expr::Alternative(left, right) => {
                 (!states || operand_leaves_register(left) || operand_leaves_register(right))
@@ -44331,7 +44335,7 @@ fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
             Expr::Comma(items) => {
                 items
                     .iter()
-                    .try_fold(false, |seen, item| match shape::<S>(item, states) {
+                    .try_fold(false, |seen, item| match shape::<S>(item, states, true) {
                         Some(alternate) => Some(seen || alternate),
                         None => sibling_leaves_register(item).then_some(seen),
                     })
@@ -44346,17 +44350,46 @@ fn alternate_update_shape<S: EvalSemantics>(expr: &Expr, states: bool) -> bool {
                     {
                         continue;
                     }
-                    if !shape::<S>(stage, states)? {
+                    if !shape::<S>(stage, states, branching)? {
                         return None;
                     }
                     seen = true;
                 }
                 seen.then_some(true)
             }
+            // #4853: the branch an `if` runs starts from the register the `if` was entered with
+            // (the condition is a subexp) and states it as an alternate does
+            // ([`carry_frame_register`], #3914), so a `//` behind an `if` is read per output like
+            // one a comma holds. The other branch is a shape, a sibling that moves nothing, or one
+            // that moves the register without a `//` of its own (`1 | FE`), whose outputs state
+            // the loss themselves; one with a `//` this does not read, or a `//` in the condition,
+            // keeps the whole UPDATE exempt. Not beside a comma sibling, which a register-moving
+            // branch would turn into a read of the comma.
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } if !branching && !holds_unread_alternate(cond) => [then_branch, else_branch]
+                .into_iter()
+                .try_fold(false, |seen, arm| match shape::<S>(arm, states, false) {
+                    Some(alternate) => Some(seen || alternate),
+                    None => (neutral_leaves_register(arm)
+                        || stage_keeps_register_statically::<S>(arm)
+                        || !holds_unread_alternate(arm))
+                    .then_some(seen),
+                }),
             _ => None,
         }
     }
-    shape::<S>(expr, states) == Some(true)
+    shape::<S>(expr, states, false) == Some(true)
+}
+
+/// Whether `expr` holds a `//` that moves something: one a foreach UPDATE is not known to read
+/// per output unless [`alternate_update_shape`] says so (#4837, #4853).
+fn holds_unread_alternate(expr: &Expr) -> bool {
+    any_subexpr(expr, &mut |e| {
+        matches!(e, Expr::Alternative(..)) && !neutral_leaves_register(e)
+    })
 }
 
 /// Whether every `//` in a foreach UPDATE that moves something is one the UPDATE reads per output
@@ -44373,9 +44406,7 @@ fn alternates_read_per_output<S: EvalSemantics>(expr: &Expr) -> bool {
             alternate_update_shape::<S>(other, false)
                 // #4837: a `//` that moves nothing on either side (`. // 5` after the stage that
                 // lost the register) restores nothing.
-                || !any_subexpr(other, &mut |e| {
-                    matches!(e, Expr::Alternative(..)) && !neutral_leaves_register(e)
-                })
+                || !holds_unread_alternate(other)
         }
     }
 }
@@ -51113,7 +51144,7 @@ impl FoldRegister {
         // (`live_register`), which the alternate of a `//` states when it leaves the register
         // alone ([`carry_frame_register`]): jq runs it after backtracking out of everything the
         // left operand navigated, so that is the register at the entry. Read for a `//` UPDATE
-        // alone, or between stages that move nothing ([`alternate_update_shape`]); a branch that came through the left operand
+        // alone, between stages that move nothing, or behind an `if` ([`alternate_update_shape`]); a branch that came through the left operand
         // states what it did and is judged on its own.
         let mut alternate: Option<bool> = None;
         let mut deliver = |branch: PathBranch<'_>| {
@@ -62537,9 +62568,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && !extract_reg.trackable
                                     && extract_reg.path.depth() == 0
                                     && extract_reg.frame.register_loss.is_lost()
-                                    // A `//` nested deeper (behind an `if`, or a pipe stage that
-                                    // moves something) is not read per output and keeps the
-                                    // exemption it had.
+                                    // A `//` nested deeper than the shapes
+                                    // [`alternate_update_shape`] reads (in an `if` condition, or
+                                    // beside a comma sibling behind an `if`) is not read per output
+                                    // and keeps the exemption it had.
                                     && alternates_read_per_output::<S>(&bound_update);
                                 let update_has_comma =
                                     register_lost_at_the_root && has_branching_comma(&bound_update);
@@ -67581,10 +67613,14 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         || (branch_trackable && compound_states_register_per_result::<S>(element))
         || (!branch_trackable && foreach_states_register_on_untracked_entry::<S>(element))
         || (!branch_trackable && reduce_states_register_on_untracked_entry::<S>(element));
-    // #4843: ...and an alternative stage on an untracked entry states it per result as well.
+    // #4843: ...and an alternative stage on an untracked entry states it per result as well,
+    // #4853: as does an `if`, whose branch that runs starts from the register it was entered with.
     let alternate_stage_untracked = S::TAG == EvalTag::Jq
         && !branch_trackable
-        && matches!(peel_register_through_calls(element), Expr::Alternative(..));
+        && matches!(
+            peel_register_through_calls(element),
+            Expr::Alternative(..) | Expr::If { .. }
+        );
     let mut place_step = |step: PathBranch<'a>| -> Demand {
         // #3293: only a `?//` retry re-invokes this after a stop.
         downstream.begin();
