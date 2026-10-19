@@ -3591,6 +3591,26 @@ fn static_nav_steps(expr: &Expr) -> Option<Vec<TreeStep<'_>>> {
     match expr {
         Expr::Field(name) => Some(vec![TreeStep::Key(name.as_str())]),
         Expr::Index { idx, .. } if *idx >= 0 => Some(vec![TreeStep::Index(*idx as usize)]),
+        // #2126: yq mode keeps `.["b"]` as a bracket key on its target rather than folding it
+        // into `.b`; a lone string literal key is the same navigation.
+        Expr::IndexExpr { target, key } => {
+            let mut inner = key.as_ref();
+            while let Expr::Paren(next) = inner {
+                inner = next;
+            }
+            let Expr::Literal(Literal::String(name)) = inner else {
+                return None;
+            };
+            // `.["b"]` is a bracket on the root node (`Identity`), which has no steps of
+            // its own: the bare-root case this function otherwise declines.
+            let mut steps = if matches!(**target, Expr::Identity) {
+                Vec::new()
+            } else {
+                static_nav_steps(target)?
+            };
+            steps.push(TreeStep::Key(name.as_str()));
+            Some(steps)
+        }
         Expr::Paren(inner) | Expr::Optional(inner) => static_nav_steps(inner),
         Expr::Pipe(stages) => {
             let mut steps = Vec::new();

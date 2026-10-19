@@ -3865,6 +3865,32 @@ This fix does not reach the comma-grouped **`.[]` fan-out** gap #2324 tracks sep
 that one fails earlier, in the read-based validation that builds the trie in the first
 place, before `delete_trie_array` is ever called.
 
+### A bracket key turns a `null` into a container in `del()` — but not in a plain read (#2126)
+
+Real yq reads `.["k0"]`, `.[0]` and `.[("k0","k1")]` through `traverseArrayIndices`, which
+rewrites a `!!null` node it indexes into the empty container the key implies (`{}` for a
+non-integer first key, `[]` for an integer) *before* looking anything up, while the dotted `.k0`
+(`traverse()`, which honours `DontAutoCreate`) leaves the `null` alone. `del()` evaluates its
+argument read-only, so only the bracket forms show it:
+
+```bash
+$ echo 'null' | yq -o=json 'del(.k0)'              # null
+$ echo 'null' | yq -o=json 'del(.["k0"])'          # {}
+$ echo 'null' | yq -o=json 'del(.[(0,1)])'         # []
+$ echo '{"a":null}' | yq -o=json 'del(.a["k0"])'   # {"a":{}}
+```
+
+`succinctly yq` matches, for literal keys: yq mode no longer folds a string bracket key into the
+`.k0` field step (`ParserMode::Yq` only; jq mode and an integer key fold as before), and
+`del()` runs a pre-pass (`vivify_del_null_bracket_targets`) that vivifies the first `null` a
+literal bracket key indexes along each branch. A *computed* key (`.[$k]`, `.[.n]`) is not
+vivified.
+
+Still different: the same mutation happens in yq on a plain read, because the node is rewritten
+in place. `echo null | yq -o=json '(.["k0"]) as $x | .'` and `select(.["k0"] == 2), .` print `{}`;
+`succinctly yq` prints `null`, since reproducing it would need a read to mutate the streamed
+document.
+
 ### `del()`'s trailing `.[]` no-ops through a *tolerated* (not just a genuinely found) `null`
 
 [#2347](https://github.com/rust-works/succinctly/issues/2347), found during #2324's own

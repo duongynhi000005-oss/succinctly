@@ -1916,6 +1916,16 @@ impl<'a> Parser<'a> {
                             optional: false,
                         }
                     }
+                    // #2126: yq reads `.["k0"]` through `traverseArrayOperator`, not the
+                    // `.k0` field traversal, and the two part ways on `null` -- the array
+                    // operator turns a `!!null` it indexes into the empty container the key
+                    // implies (`{}` for a string key), the field traversal leaves it alone.
+                    // Folding the bracket form into `Expr::Field` erased the difference, so
+                    // yq mode keeps a string key as the computed key it is.
+                    Some(Expr::Field(_)) if self.mode == ParserMode::Yq => Bracket::Dynamic {
+                        key,
+                        optional: false,
+                    },
                     Some(folded) => Bracket::Static(folded),
                     None => Bracket::Dynamic {
                         key,
@@ -9479,6 +9489,34 @@ mod tests {
         assert!(
             !matches!(longer, Expr::Builtin(Builtin::Filename)),
             "{longer:?}"
+        );
+    }
+
+    /// #2126: yq mode keeps a string bracket key (`.["k"]`, `.[("k")]`) as the computed key it is,
+    /// where it used to fold into the `.k` field step; jq mode, and an integer key, still fold.
+    #[test]
+    fn a_string_bracket_key_is_not_folded_in_yq_mode_2126() {
+        for src in [r#".["k"]"#, r#".[("k")]"#, r#".a["k"]"#] {
+            let yq = parse_with_mode(src, ParserMode::Yq).unwrap();
+            let mut keeps_bracket = false;
+            let _ = any_subexpr(&yq, &mut |e| {
+                keeps_bracket |= matches!(e, Expr::IndexExpr { .. });
+                false
+            });
+            assert!(keeps_bracket, "{src}: {yq:?}");
+            let jq = parse_with_mode(src, ParserMode::Jq).unwrap();
+            assert!(
+                !any_subexpr(&jq, &mut |e| matches!(e, Expr::IndexExpr { .. })),
+                "{src}: {jq:?}"
+            );
+        }
+        // An integer key keeps folding to a static index in both modes.
+        let yq = parse_with_mode(".[0]", ParserMode::Yq).unwrap();
+        assert!(matches!(yq, Expr::Index { idx: 0, .. }), "{yq:?}");
+        // And the dotted spelling stays a field step.
+        assert_eq!(
+            parse_with_mode(".k", ParserMode::Yq).unwrap(),
+            Expr::Field("k".into())
         );
     }
 
