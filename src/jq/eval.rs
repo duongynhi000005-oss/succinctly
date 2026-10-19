@@ -37904,13 +37904,51 @@ fn update_returns_its_input(e: &Expr) -> bool {
     }
 }
 
-/// Whether a `reduce` UPDATE is a chain of binds of an outer `$x` that ends in `.` (#4901): each a
-/// single pattern with literal keys, or a plain `$name`, and nothing else (no pipe: a pipe headed by
-/// `$x` ends on `$x`'s node, not the accumulator). The binds' steps are path-checked as jq's are, and
-/// the `.` they end on is the accumulator, which a `reduce` hands back whatever the register was moved
-/// to (the marker-source counterpart of [`update_returns_its_input`]'s bind of `.`).
-fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
+/// Whether `e` hands its outputs on unchanged through the wrappers a `reduce` UPDATE's bind chain may sit
+/// in (#4932), judging each leaf with `leaf`: a comma, a `label`, a `first`/`limit` (constant nonzero
+/// count)/`nth(0; ..)`, and an `if` whose condition cannot move the register and whose branches are each
+/// such a shape. None of them catches anything, so a raise in a leaf is the wrapper's raise too. One
+/// walk for [`foreign_bind_chain_returning_dot`] and [`is_single_output_bind`], so the wrappers they
+/// read through cannot drift apart.
+fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
     match unwrap_paren(e) {
+        Expr::Comma(items) => items.iter().all(|item| hands_outputs_on(item, leaf)),
+        Expr::Label { body, .. } => hands_outputs_on(body, leaf),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            hands_outputs_on(inner, leaf)
+        }
+        Expr::Limit { n, expr } if takes_outputs(n) => hands_outputs_on(expr, leaf),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+            if is_nth_zero(n) =>
+        {
+            hands_outputs_on(expr, leaf)
+        }
+        // Either branch hands the accumulator on whichever the condition picks. A condition that
+        // navigates (`if .a then ..`) is not read: jq answers it, and it stays a refusal here.
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            cannot_move_register(cond)
+                && hands_outputs_on(then_branch, leaf)
+                && hands_outputs_on(else_branch, leaf)
+        }
+        other => leaf(other),
+    }
+}
+
+/// Whether a `reduce` UPDATE hands the accumulator back after destructures of an outer `$x` (#4901,
+/// #4932): a chain of binds, each a single pattern with literal keys or a plain `$name` of the marker
+/// and nothing else (no pipe: a pipe headed by `$x` ends on `$x`'s node, not the accumulator), ending in
+/// `.` or any other shape [`emits_only_the_accumulator`] accepts -- and, since #4932, the same inside the
+/// wrappers [`hands_outputs_on`] reads through. A bind-free UPDATE of those shapes satisfies it too; the
+/// caller's `foreign_bind_update` is what says a foreign `$x` is read. The binds' steps are
+/// path-checked as jq's are, and the `.` they end on is the accumulator, which a `reduce` hands back
+/// whatever the register was moved to (the marker-source counterpart of
+/// [`update_returns_its_input`]'s bind of `.`).
+fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
+    hands_outputs_on(e, &|leaf| match leaf {
         Expr::AsPattern {
             expr,
             patterns,
@@ -37925,38 +37963,17 @@ fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
             matches!(unwrap_paren(expr), Expr::TrackedVar(_))
                 && foreign_bind_chain_returning_dot(body)
         }
-        // #4932: a wrapper that hands its body's outputs on unchanged. Each of these takes a body that is
-        // itself a chain of binds ending in `.`, whose raise (a bind step jq path-checks) is the
-        // wrapper's raise too -- there is no `catch` and no `try`/`?` here, which would turn that raise
-        // into an empty UPDATE and a `null` state.
-        Expr::Comma(items) => items.iter().all(foreign_bind_chain_returning_dot),
-        Expr::Label { body, .. } => foreign_bind_chain_returning_dot(body),
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-            foreign_bind_chain_returning_dot(inner)
-        }
-        Expr::Limit { n, expr } if takes_outputs(n) => foreign_bind_chain_returning_dot(expr),
-        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
-            if is_nth_zero(n) =>
-        {
-            foreign_bind_chain_returning_dot(expr)
-        }
-        // Either branch hands the accumulator on whichever the condition picks.
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            cannot_move_register(cond)
-                && foreign_bind_chain_returning_dot(then_branch)
-                && foreign_bind_chain_returning_dot(else_branch)
-        }
         other => emits_only_the_accumulator(other),
-    }
+    })
 }
 
-/// Whether `e` emits its input node and nothing else, and cannot raise (#4932): `.`, `select(true)`,
-/// and a `first`/`limit`/`nth(0; ..)`, a `try`/`?` (its body cannot raise, so a handler is never run) or a comma of such. A bind is not one
-/// (its pattern steps are path-checked), which is [`foreign_bind_chain_returning_dot`]'s.
+/// Whether `e` emits its input node and nothing else, and **cannot raise** (#4932): `.`, `select(true)`,
+/// a `first`/`limit`/`nth(0; ..)`, a `try`/`?` or a comma of such. A bind is not one (its pattern steps
+/// are path-checked), which is [`foreign_bind_chain_returning_dot`]'s.
+///
+/// The `try` arm discards its handler, which is sound only while every arm here cannot raise (so a handler
+/// never runs); an arm that can (a `select` of a non-literal condition) must not be added without
+/// reading that arm again.
 fn emits_only_the_accumulator(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity => true,
@@ -37969,7 +37986,6 @@ fn emits_only_the_accumulator(e: &Expr) -> bool {
         Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
             is_nth_zero(n) && emits_only_the_accumulator(expr)
         }
-        // A body that cannot raise never reaches a handler.
         Expr::Try { expr, .. } | Expr::Optional(expr) => emits_only_the_accumulator(expr),
         _ => false,
     }
@@ -50747,50 +50763,31 @@ fn is_single_output_bind(expr: &Expr) -> bool {
             Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
         )
     };
-    match unwrap_paren(expr) {
-        Expr::AsPattern {
-            expr: source,
-            patterns,
-            body,
-        } => {
-            plain_source(source)
-                && patterns.len() == 1
-                && !pattern_has_computed_key(&patterns[0])
-                && (is_single_output_bind(body) || !fans_out(body))
+    // #4932: the wrappers [`hands_outputs_on`] reads through hand their body's outputs on, so a chain inside
+    // one is the same sequence of path-checked steps; a leaf is a bind or an accumulator-only shape, and
+    // at least one bind has to be there (a bind-free body keeps the `fans_out` verdict it always had).
+    fn leaves(expr: &Expr, plain_source: &dyn Fn(&Expr) -> bool) -> bool {
+        match expr {
+            Expr::AsPattern {
+                expr: source,
+                patterns,
+                body,
+            } => {
+                plain_source(source)
+                    && patterns.len() == 1
+                    && !pattern_has_computed_key(&patterns[0])
+                    && (is_single_output_bind(body) || !fans_out(body))
+            }
+            Expr::As {
+                expr: source, body, ..
+            } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
+            other => emits_only_the_accumulator(other),
         }
-        Expr::As {
-            expr: source, body, ..
-        } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
-        // #4932: the wrappers [`foreign_bind_chain_returning_dot`] reads through hand their body's outputs
-        // on, so a chain inside one is the same sequence of path-checked steps.
-        Expr::Label { body, .. } => is_single_output_bind(body),
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-            is_single_output_bind(inner)
-        }
-        Expr::Limit { n, expr } if takes_outputs(n) => is_single_output_bind(expr),
-        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
-            if is_nth_zero(n) =>
-        {
-            is_single_output_bind(expr)
-        }
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            cannot_move_register(cond)
-                && (is_single_output_bind(then_branch) || emits_only_the_accumulator(then_branch))
-                && (is_single_output_bind(else_branch) || emits_only_the_accumulator(else_branch))
-                && (is_single_output_bind(then_branch) || is_single_output_bind(else_branch))
-        }
-        Expr::Comma(items) => {
-            items
-                .iter()
-                .all(|item| is_single_output_bind(item) || emits_only_the_accumulator(item))
-                && items.iter().any(is_single_output_bind)
-        }
-        _ => false,
     }
+    hands_outputs_on(expr, &|leaf| leaves(leaf, &plain_source))
+        && any_subexpr(expr, &mut |e| {
+            matches!(e, Expr::As { .. } | Expr::AsPattern { .. })
+        })
 }
 
 /// [`fans_out`] with `patterns_fan_out` saying whether a destructuring `as` counts.

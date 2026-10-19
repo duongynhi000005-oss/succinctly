@@ -8,7 +8,7 @@ use crate::assert_path_rows_both_routes_3749;
 /// binds are wrapped, so long as every wrapper passes its body's outputs on unchanged: a comma of such
 /// bodies, a `label`, a `first`/`limit`/`nth(0; ..)`, an `if` whose branches are each one, and a tail that is
 /// `.`, `select(true)`, `(.)?` or `try . catch .`. The binary refused each with `with result <accumulator>`.
-/// Rows are a sample (four per UPDATE shape) of a 5,760-row sweep over three outer binds, eight sources,
+/// Rows are a sample (four per UPDATE shape) of a 5,760-row hash sample of a 23,040-row sweep over three outer binds, eight sources,
 /// three INITs, `path`/`del` and four documents; every row captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 fn test_4932_reduce_update_foreign_marker_wrapped_binds_hand_the_accumulator_on() -> Result<()> {
