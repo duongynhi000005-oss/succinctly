@@ -1941,6 +1941,26 @@ fn needs_dom_fallback(
         && ((sort_keys && index.has_aliases()) || sorts_a_mapping(expr, index, bytes))
 }
 
+/// Whether `expr` is itself a `sort`, `sort_by`, `reverse`, `unique` or `unique_by`: on a
+/// document's own sequence these reorder it in place in yq, so its head comment stays on top
+/// (#4926).
+fn reorders_a_sequence(expr: &Expr) -> bool {
+    let mut expr = expr;
+    while let Expr::Paren(inner) = expr {
+        expr = inner;
+    }
+    matches!(
+        expr,
+        Expr::Builtin(
+            Builtin::Sort
+                | Builtin::SortBy(_)
+                | Builtin::Reverse
+                | Builtin::Unique
+                | Builtin::UniqueBy(_)
+        )
+    )
+}
+
 /// Whether `expr` is a `sort`/`sort_by` of a mapping in some document of `bytes`, which the M2
 /// streamers answer as an owned object with no comments, style, anchors or tags (#4386). The
 /// DOM route traces them through ([`reshape_presentation`]), so those inputs take it, as the
@@ -9081,6 +9101,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // input at all: it now gets *both* correct numbers and duplicate-key
     // preservation, matching real yq on both counts.
     let is_m2_streamable = can_use_m2_streaming(&program.expr);
+    let reorders_root_sequence = reorders_a_sequence(&program.expr);
     // #2276 code review (found live against this exact binary, on top of
     // #2262): `any_input_is_json` -- the same run-wide boolean #978
     // introduced and #996 later removed from `is_m2_streamable` above --
@@ -9517,6 +9538,10 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // non-colored path (`$writer` written directly, no
                     // buffering) is unaffected and still writes the real
                     // terminator either way.
+                    // #4926: a sort/reverse/unique of the document's own sequence keeps the
+                    // comment block above it, which the items' streaming has no node to read.
+                    let reordered_head =
+                        reorders_root_sequence && matches!(result, GenericResult::LazySeq(_));
                     let stats = stream_maybe_colored(
                         $writer,
                         $use_color,
@@ -9524,6 +9549,11 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                         nul_separator,
                         |s, boundaries| colorize_yaml(s, terminator, boundaries),
                         |out| {
+                            if reordered_head {
+                                $cursor
+                                    .stream_reordered_sequence_head(out)
+                                    .map_err(StreamFailure::from)?;
+                            }
                             result
                                 .stream_yaml::<_, YqSemantics>(out, yaml_indent, sort_keys, |w| {
                                     w.write_result_terminator(terminator)

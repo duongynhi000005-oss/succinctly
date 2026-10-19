@@ -1757,6 +1757,30 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             )
     }
 
+    /// The head of a document whose own sequence is the result, reordered (#4926): the verbatim
+    /// header the first document carries and the comment block above the sequence, which yq keeps
+    /// on top of `sort`, `reverse` and `unique` because it reorders the sequence node in place.
+    /// Nothing for any other cursor (a navigated node, a mapping, a scalar), which has no head
+    /// of its own to keep. The items stream afterwards from their own cursors.
+    pub fn stream_reordered_sequence_head<Out: core::fmt::Write>(
+        &self,
+        out: &mut Out,
+    ) -> StreamResult {
+        let self_ = self.resolve_bare_seq_item();
+        if !self_.is_document_content() {
+            return Ok(());
+        }
+        let resolved = self_.resolve_alias_target_cursor().unwrap_or(self_);
+        if !matches!(resolved.value(), YamlValue::Sequence(_)) {
+            return Ok(());
+        }
+        if self_.bp_pos == FIRST_DOCUMENT_BP {
+            write_yq_header(out, self_.text, self_.index)?;
+        }
+        self_.write_head_comments_at(out, "", self_.bp_pos)?;
+        Ok(())
+    }
+
     /// Stream YAML, unwrapping single documents (matches yq behavior).
     ///
     /// If the root is a single-document array `[doc]`, outputs just `doc` as YAML.
