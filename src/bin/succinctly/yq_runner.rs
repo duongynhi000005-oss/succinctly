@@ -5792,13 +5792,6 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // #4856: a query that is itself a `,` is answered branch by branch (see
     // `top_level_comma_branches`), so a node among computed values keeps its presentation.
     let comma_branches = top_level_comma_branches(expr);
-    let result = match comma_branches {
-        Some(_) => GenericResult::None,
-        None => eval_with_cursor_using::<YqSemantics, _>(expr, cursor),
-    };
-    if comma_branches.is_none() {
-        drop(alias_identity_guard.take());
-    }
     // A value with no live cursor of its own (an assignment/`del()`
     // result, a computed value, ...) has no comment/style to read directly
     // - but if it came from a shape-preserving write, `presentation_sync_ctx`
@@ -5996,7 +5989,11 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
         }
     };
     let mut docs = match comma_branches {
-        None => convert(sink, result),
+        None => {
+            let result = eval_with_cursor_using::<YqSemantics, _>(expr, cursor);
+            drop(alias_identity_guard.take());
+            convert(sink, result)
+        }
         Some(branches) => {
             // Each branch is evaluated and converted on its own: a node keeps the comments, style
             // and anchors its cursor carries, a computed value has none (#4856). An error anywhere
