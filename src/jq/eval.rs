@@ -37210,17 +37210,42 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
 /// bind's `.` is a hand-on rather than a path check (#3853). A handler-less `try`/`?`, a `label`, a comma
 /// and `select(true)` around the binds hand their outputs on unchanged and are read through, and an `empty`
-/// stores nothing, so it adds no state of its own; every item of a comma must itself be such a shape,
+/// (or one spelled `select(false)`, `select(null)`, `first(empty)`, `limit(0; ..)`) stores nothing, so it adds
+/// no state of its own; every item of a comma must itself be such a shape,
 /// and no arm admits a `catch` or a call that computes. A `break` is read only to a `label` inside the UPDATE: it ends that label's body, as an `empty` after
 /// the outputs already stored would, and never leaves the `foreach`. Narrower than
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
+    // An `empty` spelled out: `select` of a literal `false`/`null`, `first` or `limit` of such an
+    // expression, or a `limit` of a literal `0`, which never runs its body.
+    fn emits_nothing(e: &Expr) -> bool {
+        match unwrap_paren(e) {
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Builtin(Builtin::Select(cond)) => matches!(
+                unwrap_paren(cond),
+                Expr::Literal(Literal::Bool(false) | Literal::Null)
+            ),
+            Expr::FirstExpr(inner) => emits_nothing(inner),
+            Expr::Limit { n, expr } => {
+                emits_nothing(expr)
+                    || match unwrap_paren(n) {
+                        Expr::Literal(Literal::NumberLiteral(_, text)) => {
+                            text.parse::<f64>() == Ok(0.0)
+                        }
+                        Expr::Literal(Literal::Int(i)) => *i == 0,
+                        _ => false,
+                    }
+            }
+            _ => false,
+        }
+    }
     // `labels` are the names of the `label`s the walk is inside, so a `break` to one bound outside the
     // UPDATE (which leaves the whole `foreach`) is not read.
     fn binds<'a>(e: &'a Expr, labels: &mut Vec<&'a str>) -> Option<bool> {
         match e {
-            Expr::Identity | Expr::Builtin(Builtin::Empty) => Some(false),
+            Expr::Identity => Some(false),
+            _ if emits_nothing(e) => Some(false),
             Expr::Builtin(Builtin::Select(cond))
                 if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
             {
