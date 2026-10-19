@@ -37294,6 +37294,106 @@ fn update_is_alt_bind(update: &Expr) -> bool {
         || take_wrapped_bare_chain(update).is_some()
 }
 
+/// An `empty` spelled out: `select` of a constant that is never truthy, `first` of such an expression, or
+/// a `limit` of a constant count that is `0` (it never runs its body) or whose body is such an expression.
+/// Every spelling is a constant that cannot raise and never reads the state, so a caller may drop the rest of the
+/// fold that holds it (`update_is_single_bind_returning_input` reads it as an item that stores nothing; `resolve_foreach`
+/// skips an inert UPDATE beside such an EXTRACT, #4800): widen it only with a spelling that keeps both properties.
+fn emits_nothing(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Builtin(Builtin::Empty) => true,
+        // A condition that is constant and never truthy (`false | not | not`, `false // null`): it
+        // cannot raise, so nothing depends on the state.
+        Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
+        Expr::FirstExpr(inner) => emits_nothing(inner),
+        // A count of numeric literals only (under arithmetic that cannot raise): any other is evaluated
+        // first and may raise.
+        Expr::Limit { n, expr } => match constant_number(n) {
+            Some(count) => count == 0.0 || emits_nothing(expr),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `e` can neither raise nor have an effect on any input, so that nothing observable depends on
+/// running it ([`resolve_foreach`]'s #4800 read of a `foreach` whose EXTRACT emits nothing): literals, `.`,
+/// `not`, `tostring`, `select` of a boolean literal, and the structure around them (pipe, comma, `//`,
+/// `if`, `try`/`?`, a nested `foreach` of such parts). A destructuring pattern can raise on a value that
+/// is not the container it names, so a pattern bind (the `foreach` source's or its own) is read only
+/// `caught`, inside a `try`/`?` that swallows the raise; a `$name` pattern never raises, and a pattern
+/// with a computed key is never read (its key is an expression of its own).
+fn expr_is_inert(e: &Expr, caught: bool) -> bool {
+    fn pattern_is_plain(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(_) => true,
+            Pattern::Object(entries) => entries.iter().all(|entry| {
+                matches!(entry.key, ObjectKey::Literal(_)) && pattern_is_plain(&entry.pattern)
+            }),
+            Pattern::Array(items) => items.iter().all(pattern_is_plain),
+        }
+    }
+    fn patterns_are_inert(patterns: &[Pattern], caught: bool) -> bool {
+        patterns.iter().all(|pattern| {
+            matches!(pattern, Pattern::Var(_)) || caught && pattern_is_plain(pattern)
+        })
+    }
+    match e {
+        Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Not => true,
+        Expr::Builtin(Builtin::ToString) => true,
+        Expr::Builtin(Builtin::Select(cond)) => {
+            matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(_)))
+        }
+        Expr::Paren(inner) => expr_is_inert(inner, caught),
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => expr_is_inert(inner, true),
+        Expr::Pipe(stages) => stages.iter().all(|stage| expr_is_inert(stage, caught)),
+        Expr::Comma(items) => items.iter().all(|item| expr_is_inert(item, caught)),
+        Expr::Alternative(left, right) => {
+            expr_is_inert(left, caught) && expr_is_inert(right, caught)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_is_inert(cond, caught)
+                && expr_is_inert(then_branch, caught)
+                && expr_is_inert(else_branch, caught)
+        }
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } => {
+            matches!(
+                unwrap_paren(expr),
+                Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_)
+            ) && patterns_are_inert(patterns, caught)
+                && expr_is_inert(body, caught)
+        }
+        Expr::Foreach {
+            input,
+            patterns,
+            init,
+            update,
+            extract,
+        } => {
+            patterns_are_inert(patterns, caught)
+                && expr_is_inert(input, caught)
+                && expr_is_inert(init, caught)
+                && expr_is_inert(update, caught)
+                && extract
+                    .as_deref()
+                    .map_or(true, |extract| expr_is_inert(extract, caught))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
 /// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
@@ -37307,24 +37407,6 @@ fn update_is_alt_bind(update: &Expr) -> bool {
 /// [`update_returns_its_input`] on purpose: a nested fold has marks and statements of its own that this
 /// relaxation was not measured against.
 fn update_is_single_bind_returning_input(update: &Expr) -> bool {
-    // An `empty` spelled out: `select` of a constant that is never truthy, `first` of such an expression, or
-    // a `limit` of a constant count that is `0` (it never runs its body) or whose body is such an expression.
-    fn emits_nothing(e: &Expr) -> bool {
-        match unwrap_paren(e) {
-            Expr::Builtin(Builtin::Empty) => true,
-            // A condition that is constant and never truthy (`false | not | not`, `false // null`): it
-            // cannot raise, so nothing depends on the state.
-            Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
-            Expr::FirstExpr(inner) => emits_nothing(inner),
-            // A count of numeric literals only (under arithmetic that cannot raise): any other is evaluated
-            // first and may raise.
-            Expr::Limit { n, expr } => match constant_number(n) {
-                Some(count) => count == 0.0 || emits_nothing(expr),
-                None => false,
-            },
-            _ => false,
-        }
-    }
     // An expression whose every output is `.` itself, however often it emits (`first(.)`, `limit(2; .)`,
     // `limit(5 / 2; .)`, `nth(0; .)`, `first(., .)`): a constant nonzero count takes the first outputs of a
     // body that only hands `.` on, so it hands `.` on too, as the bare `.` does. A zero count is
@@ -61934,6 +62016,19 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         .then(|| distribute_neutral_tail(update))
         .flatten();
     let update = distributed.as_ref().unwrap_or(update);
+    // #4800: an EXTRACT that emits nothing leaves the `foreach` with no output to path-check, and an UPDATE
+    // that can neither raise nor have an effect on any state changes nothing else either, so the fold is read
+    // with an UPDATE that hands the state on. Reading the real one refused a nested `foreach` in it whose
+    // source destructures a `$x` marker -- a guess about where the register went, for an emission that is
+    // never made.
+    let update = if S::TAG == EvalTag::Jq
+        && extract.is_some_and(emits_nothing)
+        && expr_is_inert(update, false)
+    {
+        &Expr::Identity
+    } else {
+        update
+    };
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register = S::TAG != EvalTag::Jq || cannot_move_register(init);
     // #3761: `resolve_reduce`'s #3710 rule for `foreach`. A computed emission is
