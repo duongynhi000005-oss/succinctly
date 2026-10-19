@@ -894,7 +894,7 @@ pub(crate) fn owned_container_to_yaml_string(value: &OwnedValue, flow: bool) -> 
     // yq chomps the one line break its encoder ends the text with; this writer ends none, so
     // this only keeps that so if a node ever does (a block scalar).
     if out.ends_with('\n') {
-        out.pop();
+        out.pop(); // patchcov: coverage tolerate-line reason="unreachable: stream_owned_value_yaml ends no container with a line break today (a multi-line string is double-quoted), so this only guards the chomp invariant if that changes (#1130)"
     }
     out
 }
