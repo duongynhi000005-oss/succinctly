@@ -297,6 +297,20 @@ fn test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800() -> Result<
         ),
         (
             r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; (. as {a:$q} | .), nth(0+0; .); null))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), nth(0+0; .); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1; .); null))",
             "[\"a\"]\n",
             "Invalid path expression with result",

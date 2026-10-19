@@ -37334,11 +37334,13 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 emits_only_dot(inner)
             }
+            // A finite count: `1e1000 - 1e1000` folds to NaN here, where jq's literals saturate and it is `0`.
             Expr::Limit { n, expr } => {
-                constant_number(n).is_some_and(|count| count != 0.0) && emits_only_dot(expr)
+                constant_number(n).is_some_and(|count| count.is_finite() && count != 0.0)
+                    && emits_only_dot(expr)
             }
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
-                limit_literal_count(n) == Some(0.0) && emits_only_dot(expr)
+                constant_number(n) == Some(0.0) && emits_only_dot(expr)
             }
             _ => false,
         }
