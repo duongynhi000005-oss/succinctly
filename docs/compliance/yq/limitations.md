@@ -699,6 +699,19 @@ in eight contexts (mapping value, nested, sequence item, sequence in mapping, ma
 nested sequence, key, root), through the streaming route and a write; the pinned rows are
 `json_string_style_line_break_*_3587` and `test_json_string_with_a_line_break_is_a_literal_block_3587`.
 
+A *YAML source* scalar that holds U+2028 or U+2029 gets the same spelling
+([#4865](https://github.com/rust-works/succinctly/issues/4865)): yq's scanner reads either as a line
+break, and its emitter writes the scalar single-quoted across lines, the break followed by the
+indent (written here with `\u2028`/`\u2029` for the character itself: `a: 'x\u2028y'` is `a: 'x\u2028  y'`, a flow `[x\u2029y]` is `['x\u2029    y']`, a plain one
+becoming single-quoted). The streaming route used to copy the source text. The indent is the
+enclosing collection's plus one step, so a flow item under a block mapping sits two steps in and a
+root flow collection's items one step past that; the streaming route knows it for the first flow
+level only, the DOM route (a write) at every depth. Not covered: a flow collection nested in
+another on the streaming route (`a: [[x\u2028y]]`), an explicit-key scalar (`? 'x\u2028y'`), a scalar
+whose source has a space beside the break (yq trims it on decode, this keeps it and so
+double-quotes), and a *block* plain scalar with such a break, which yq rejects (`could not find
+expected ':'`) and this accepts.
+
 **One deliberate divergence (ADR-0018, output the reference cannot read back).** go-yaml tests only the
 first character of the string for the indentation indicator, so a string that starts with a break and
 then a space (`"\n a"`) is written `|-` / blank / `   a`, and reads back as `"\na"` even in yq. Ours

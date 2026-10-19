@@ -8004,9 +8004,9 @@ fn emit_string_scalar(
             }
         }
     }
-    // U+2028/U+2029 alone: single quotes across lines where go-yaml allows them (#3587).
-    if !in_flow
-        && matches!(style, "" | "flow" | VALUE_STYLE_STRING)
+    // U+2028/U+2029 alone: single quotes across lines where go-yaml allows them (#3587), and a
+    // source single-quoted scalar is spelled the same way (#4865).
+    if matches!(style, "" | "flow" | "single" | VALUE_STYLE_STRING)
         && !s.contains('\n')
         && s.contains(['\u{2028}', '\u{2029}'])
     {

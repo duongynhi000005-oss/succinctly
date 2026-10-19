@@ -24,8 +24,8 @@ use std::string::ToString;
 
 use super::encode_style::{
     go_yaml_explicit_key_scalar, go_yaml_key_is_simple, go_yaml_multiline_scalar,
-    has_unwritable_char, has_unwritable_char_in_block, write_go_yaml_double_quoted,
-    write_go_yaml_single_quoted, write_go_yaml_string,
+    has_unicode_line_separator, has_unwritable_char, has_unwritable_char_in_block,
+    write_go_yaml_double_quoted, write_go_yaml_single_quoted, write_go_yaml_string,
 };
 use super::index::YamlIndex;
 use super::line_break::{blank_line_between, is_line_break, line_break_len, line_break_len_before};
@@ -2085,7 +2085,13 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                         }
                         write_yaml_field_key(out, field)?;
                         out.write_str(": ")?;
-                        write_yaml_child_inline(out, field.value_cursor(), unit, sort_keys)?;
+                        write_yaml_child_inline(
+                            out,
+                            field.value_cursor(),
+                            unit,
+                            sort_keys,
+                            (indent_spaces != 0).then_some((indent, indent_spaces)),
+                        )?;
                         if i == last_index {
                             let value_cursor = field.value_cursor();
                             let comment = value_cursor.line_comment_raw();
@@ -2292,7 +2298,13 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             out.write_str(", ")?;
                         }
                         first = false;
-                        write_yaml_child_inline(out, cursor, unit, sort_keys)?;
+                        write_yaml_child_inline(
+                            out,
+                            cursor,
+                            unit,
+                            sort_keys,
+                            (indent_spaces != 0).then_some((indent, indent_spaces)),
+                        )?;
                         if rest.is_empty() {
                             let comment = cursor.line_comment_raw();
                             write_flow_last_item_comment(out, comment, indent)?;
@@ -9029,11 +9041,17 @@ fn write_yaml_block_field_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
 
 /// Write a child value that is always inline (flow-style mapping/sequence
 /// entries), prefixing its anchor if it has one.
+///
+/// `flow_indent` is the container's own indent and indent width when it sits in block output
+/// (`None` for a flow collection nested in another, or a `-I0` run): a scalar holding U+2028 or
+/// U+2029 is written as the multi-line single-quoted scalar yq's emitter gives it, which needs
+/// the column after the break (#4865).
 fn write_yaml_child_inline<W: AsRef<[u64]>, Out: core::fmt::Write>(
     out: &mut Out,
     value: YamlCursor<'_, W>,
     unit: char,
     sort_keys: bool,
+    flow_indent: Option<(&str, usize)>,
 ) -> StreamResult {
     if let Some(anchor) = value.anchor() {
         out.write_char('&')?;
@@ -9108,6 +9126,32 @@ fn write_yaml_child_inline<W: AsRef<[u64]>, Out: core::fmt::Write>(
     // -- already matches real yq's `""`), just this one synthesized case.
     if absent {
         return Ok(out.write_str("''")?);
+    }
+    if let (Some((indent, step)), Some(YamlValue::String(string))) = (flow_indent, &resolved) {
+        if matches!(
+            string,
+            YamlString::SingleQuoted { .. } | YamlString::Unquoted { .. }
+        ) {
+            if let Ok(text) = string.as_str() {
+                if has_unicode_line_separator(&text) && !text.contains('\n') {
+                    // A root flow collection has no block indent to sit under, and the
+                    // emitter indents it one step all the same (`{a: 'x<LS>    y'}`).
+                    let container_indent = if indent.is_empty() {
+                        deeper_yaml_indent(indent, step, unit)
+                    } else {
+                        indent.to_owned()
+                    };
+                    let scalar_indent = deeper_yaml_indent(&container_indent, step, unit);
+                    if let Some(scalar) = go_yaml_multiline_scalar(&text, &scalar_indent, step) {
+                        if let Some(tag) = value.explicit_tag_at(resolved.as_ref()) {
+                            out.write_str(tag)?;
+                            out.write_char(' ')?;
+                        }
+                        return Ok(out.write_str(&scalar)?);
+                    }
+                }
+            }
+        }
     }
     value.stream_yaml_value_at(resolved, out, "", 0, unit, sort_keys, false)
 }
@@ -9674,7 +9718,7 @@ where
                 out.write_str(", ")?;
             }
             first = false;
-            write_yaml_child_inline(out, cursor, unit, sort_keys)?;
+            write_yaml_child_inline(out, cursor, unit, sort_keys, None)?;
         }
         Ok(out.write_char(']')?)
     } else {
@@ -10102,6 +10146,21 @@ fn stream_yaml_string_value<Out: core::fmt::Write>(
             },
         },
     };
+
+    // #4865: a source single-quoted or plain scalar that holds U+2028/U+2029 is read as a line
+    // break by yq's scanner, which the emitter then spells as a multi-line single-quoted scalar
+    // (`'x<LS>  y'`, the break followed by the indent), never plain.
+    if matches!(
+        s,
+        YamlString::SingleQuoted { .. } | YamlString::Unquoted { .. }
+    ) && has_unicode_line_separator(&str_val)
+    {
+        if let Some(scalar) =
+            block.and_then(|(indent, step)| go_yaml_multiline_scalar(&str_val, indent, step))
+        {
+            return Ok(out.write_str(&scalar)?);
+        }
+    }
 
     // For quoted strings, preserve the quoting style
     match s {

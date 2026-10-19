@@ -496,6 +496,14 @@ pub(crate) fn write_go_yaml_double_quoted<Out: core::fmt::Write>(
     out.write_char('"')
 }
 
+/// Whether `s` holds U+2028 or U+2029, the two line breaks that are neither `\n` nor `\r`
+/// nor U+0085 (#4865): go-yaml's scanner keeps them as characters in a folded scalar and its
+/// emitter writes them followed by the indent, inside single quotes.
+#[must_use]
+pub fn has_unicode_line_separator(s: &str) -> bool {
+    !s.is_ascii() && s.chars().any(|c| matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
 /// Whether `s` holds a character go-yaml's emitter will not write raw.
 ///
 /// A tab, DEL, a C1 control, U+FEFF or a character outside the BMP keeps a string out of the plain
@@ -1184,6 +1192,9 @@ mod tests {
         assert_eq!(single("x\u{1F600}"), "\"x\\U0001F600\"");
         // A line break is the line-break rules' business, not this predicate's.
         assert_eq!(single("x\u{2028}y"), "'x\u{2028}y'");
+        assert!(has_unicode_line_separator("x\u{2028}y") && has_unicode_line_separator("\u{2029}"));
+        assert!(!has_unicode_line_separator("plain") && !has_unicode_line_separator("a\nb\u{85}c"));
+        assert!(!has_unicode_line_separator("caf\u{e9}"));
         assert!(has_unwritable_char("a\tb") && !has_unwritable_char_in_block("a\tb"));
         assert!(has_unwritable_char_in_block("a\u{7f}b"));
         assert!(!has_unwritable_char("plain text\nsecond line"));
