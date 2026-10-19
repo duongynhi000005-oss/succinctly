@@ -7829,12 +7829,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // gating the identity path's own per-document terminator in
             // `yq_runner.rs`'s `stream_cursor!` macro (#2795 review) --
             // `# c\n`/`---\n` now round-trip through `.` byte-for-byte.
-            // Still open on the DOM route (`-P`/a write): `OwnedValue` has
-            // no signal distinguishing this synthesized absence from a
-            // genuine `null`/`~` keyword or a literal `null` filter result
-            // once evaluation has materialized it, so the same fix can't
-            // safely land there without new plumbing -- tracked, not
-            // fixed, as of this comment.
+            // The DOM route (`-P`/a write) closes it the same way for a
+            // different reason: `OwnedValue` cannot tell this synthesized
+            // absence from a `null`/`~` keyword, so the root's node
+            // metadata records the empty spelling (#3028) and
+            // `output_value` skips the terminator for a header-only root
+            // (#2875).
             self.start_document();
             self.end_document();
         }

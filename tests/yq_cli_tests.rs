@@ -20027,6 +20027,174 @@ mod standalone_comment_attribution_2811_review {
     // `invalid_utf8_comment_line_sandwiched_by_real_ones_inserts_no_blank_2811_review`.
 }
 
+/// #2875: a scalar the source wrote as nothing (`a:`), `~`, `True` or `0x1F` keeps that text
+/// where the DOM route (`-P`, a write) prints it back, and a document with no content prints
+/// only its header. Every expected string was captured from pinned yq v4.53.3 on the same
+/// input and arguments.
+mod source_spelling_2875 {
+    use super::run_yq_stdin;
+    use anyhow::Result;
+
+    fn yq(filter: &str, input: &str, args: &[&str]) -> Result<String> {
+        let (out, code) = run_yq_stdin(filter, input, args)?;
+        assert_eq!(code, 0, "{out}");
+        Ok(out)
+    }
+
+    #[test]
+    fn a_bare_result_keeps_the_empty_value_2875() -> Result<()> {
+        assert_eq!(yq(".a", "a:\nb: 1\n", &["-P"])?, "\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_result_keeps_a_tilde_2875() -> Result<()> {
+        assert_eq!(yq(".a", "a: ~\nb: 1\n", &["-P"])?, "~\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_result_keeps_a_capitalised_bool_2875() -> Result<()> {
+        assert_eq!(yq(".a", "a: True\nb: 1\n", &["-P"])?, "True\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_result_keeps_a_hex_integer_2875() -> Result<()> {
+        assert_eq!(yq(".a", "a: 0x1F\nb: 1\n", &["-P"])?, "0x1F\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_result_keeps_a_leading_dot_float_2875() -> Result<()> {
+        assert_eq!(yq(".a", "a: .5\nb: 1\n", &["-P"])?, ".5\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_sequence_item_keeps_the_empty_value_2875() -> Result<()> {
+        assert_eq!(yq(".[0]", "- \n- 1\n", &["-P"])?, "\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_result_keeps_it_through_a_trailing_identity_2875() -> Result<()> {
+        assert_eq!(yq(".a | .", "a:\nb: 1\n", &["-P"])?, "\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_comment_only_document_prints_just_its_comment_2875() -> Result<()> {
+        assert_eq!(yq(".", "# c\n", &["-P"])?, "# c\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_marker_document_prints_just_the_marker_2875() -> Result<()> {
+        assert_eq!(yq(".", "---\n", &["-P"])?, "---\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_marker_document_prints_nothing_under_no_doc_2875() -> Result<()> {
+        assert_eq!(yq(".", "---\n", &["-P", "-N"])?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn a_header_only_document_between_comments_prints_both_2875() -> Result<()> {
+        assert_eq!(yq(".", "# c\n---\n# d\n", &["-P"])?, "# c\n---\n# d\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_later_empty_document_keeps_its_terminator_2875() -> Result<()> {
+        assert_eq!(yq(".", "a: 1\n---\n", &["-P"])?, "a: 1\n---\n\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copied_empty_value_stays_empty_2875() -> Result<()> {
+        assert_eq!(yq(".c = .a", "a:\nb: 1\n", &[])?, "a:\nb: 1\nc:\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copied_tilde_stays_a_tilde_2875() -> Result<()> {
+        assert_eq!(yq(".c = .a", "a: ~\nb: 1\n", &[])?, "a: ~\nb: 1\nc: ~\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copied_capitalised_bool_keeps_its_case_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c = .a", "a: True\nb: 1\n", &[])?,
+            "a: True\nb: 1\nc: True\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_copied_hex_integer_keeps_its_base_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c = .a", "a: 0x1F\nb: 1\n", &[])?,
+            "a: 0x1F\nb: 1\nc: 0x1F\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_replaces_the_spelling_it_overwrites_2875() -> Result<()> {
+        assert_eq!(yq(".b = .a", "a: ~\nb: True\n", &[])?, "a: ~\nb: ~\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_keeps_it_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c = .a | .d = .c", "a: ~\nb: 1\n", &[])?,
+            "a: ~\nb: 1\nc: ~\nd: ~\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_into_a_new_mapping_keeps_it_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c.d = .a.x", "a:\n  x: ~\nb: 1\n", &[])?,
+            "a:\n  x: ~\nb: 1\nc:\n  d: ~\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_into_a_new_sequence_item_keeps_it_2875() -> Result<()> {
+        assert_eq!(yq(".[2] = .[0]", "- \n- 1\n", &[])?, "-\n- 1\n-\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_keeps_it_under_the_dom_flag_2875() -> Result<()> {
+        assert_eq!(yq(".c = .a", "a:\nb: 1\n", &["-P"])?, "a:\nb: 1\nc:\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_copy_is_still_null_in_json_output_2875() -> Result<()> {
+        assert_eq!(
+            yq(".c = .a", "a:\nb: 1\n", &["-o=json", "-I=0"])?,
+            "{\"a\":null,\"b\":1,\"c\":null}\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_literal_write_has_no_spelling_to_copy_2875() -> Result<()> {
+        assert_eq!(yq(".a = 5", "a: ~\nb: 1\n", &[])?, "a: 5\nb: 1\n");
+        Ok(())
+    }
+}
+
 /// #2795: standalone (head/foot) comments print on the streaming YAML
 /// route. Every expected string was captured from pinned yq v4.53.3 on the
 /// same input and arguments. Shapes whose *attribution* the parser still
@@ -29061,13 +29229,13 @@ fn test_yaml_comma_scalar_and_empty_branches_match_iterate_1361() -> Result<()> 
     assert_eq!(via_iterate, "1\n1\n");
     let (out, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
     assert_eq!(code, 0);
-    // The printer that handles node results spells a `~` as `null` (yq keeps `~`) and writes an
-    // alias scalar's value for its `*x`, here and for `.[]` alike: not this issue's.
-    assert_eq!(out, "1\n1\nnull\n");
+    // The printer that handles node results writes an alias scalar's value for its `*x`, here and
+    // for `.[]` alike: not this issue's. It keeps a `~` as written since #2875, as yq does.
+    assert_eq!(out, "1\n1\n~\n");
     for (filter, expected) in [
         (".a, .zz", "1\nnull\n"),
         (".zz, .a", "null\n1\n"),
-        (".a, .c", "1\nnull\n"),
+        (".a, .c", "1\n~\n"),
         (".a, select(false)", "1\n"),
         ("select(false), .a", "1\n"),
         ("select(false), select(false)", ""),

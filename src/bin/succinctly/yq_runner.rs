@@ -3730,6 +3730,51 @@ fn propagate_assign_alias_marks(expr: &Expr, tree: &mut CommentTree) {
     }
 }
 
+/// Carry a scalar's source spelling through a plain assignment whose value is a static read
+/// of it (#2875): `.c = .a` on `a:` (or `a: ~`, `a: True`, `a: 0x1F`) writes `c:` (`c: ~`,
+/// `c: True`, `c: 0x1F`), because go-yaml's `Set` copies the whole source node, text and all,
+/// where the value alone reads back as `null`, `true`, `31`.
+///
+/// The same provenance gap [`propagate_assign_alias_marks`] closes for an alias mark: the
+/// reconciled tree knows nothing about the write's *source* path, so a target that is new or
+/// rewritten has no spelling of its own. Only the spelling is copied here, not the rest of the
+/// node's presentation (quoting, flow style, a trailing comment), which `yq` copies as well and
+/// which is a wider gap of its own. The spelling is kept only while it still names the value the
+/// target now holds, the check the writer applies again when it prints. The source is read from
+/// the finished tree, so a source a *later* stage rewrites (`.c = .a | .a = 5`) has no spelling
+/// left to copy and its target prints the plain value.
+fn propagate_assign_spellings(expr: &Expr, value: &OwnedValue, tree: &mut CommentTree) {
+    let Some(stages) = collect_assign_chain(expr) else {
+        return;
+    };
+    for (path_expr, value_expr) in stages {
+        let (Some(path_steps), Some(value_steps)) =
+            (static_nav_steps(path_expr), static_nav_steps(value_expr))
+        else {
+            continue;
+        };
+        let Some(spelling) = comment_tree_at_path_mut(tree, &value_steps)
+            .and_then(|node| node.meta().spelling().map(str::to_string))
+        else {
+            continue;
+        };
+        let Some(written) = owned_value_at(value, &meta_path_of(&path_steps)) else {
+            continue;
+        };
+        if !spelling_names_value(&spelling, written) {
+            continue;
+        }
+        // The value is there (checked above), so a tree that stops short of it (a key the
+        // write created under a new mapping) is grown to reach it.
+        if let Some(node @ CommentTree::Leaf(_)) =
+            comment_tree_at_path_or_create_mut(tree, &path_steps)
+        {
+            let meta = node.meta().with_spelling(Some(spelling));
+            *node.meta_mut() = meta;
+        }
+    }
+}
+
 /// One step of the path a resolved `Expr::MetaAssign` write (#798) addresses
 /// in a result document -- owned rather than borrowed from the AST like
 /// [`TreeStep`], because it comes out of evaluating `path(TARGET)` against
@@ -5916,6 +5961,16 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
         }
     }
 
+    // The same for a scalar's source spelling (#2875): not gated on `has_aliases`, since a
+    // document with no alias in it still holds `a:` and `a: ~`.
+    if presentation_sync_ctx.is_some() {
+        if let Ok(docs) = &mut docs {
+            for (value, comments) in docs.iter_mut() {
+                propagate_assign_spellings(expr, value, comments);
+            }
+        }
+    }
+
     // Apply every `PATH <slot> = value` write resolved above (#798) into
     // each result document's own reconciled tree -- same "mutate the
     // already-reconciled tree in place" timing as `propagate_assign_alias_marks`
@@ -5968,8 +6023,13 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
                 let head = comments.meta().head_comment().to_vec();
                 // The first document's `---` marker survives too (#4086).
                 let preamble = comments.meta().preamble().map(str::to_string);
+                // The text the scalar was written with (`~`, `True`, `0x1F`, or nothing for
+                // an empty value, #3028) is part of the node, not its style: yq prints it
+                // back for a bare result too (`.a` on `a:` is an empty line, #2875).
+                let spelling = comments.meta().spelling().map(str::to_string);
                 *comments = CommentTree::Leaf(
                     NodeMeta::from_comment_and_style(comments.own().map(str::to_string), "")
+                        .with_spelling(spelling)
                         .with_head_foot(head, Vec::new())
                         .with_preamble(preamble),
                 );
@@ -6696,7 +6756,16 @@ fn output_value<W: Write>(
         } else {
             write!(writer, "{output}")?;
         }
-        write_terminator(writer, config)?;
+        // A document with no content at all (`# c`, a bare `---`) prints only the header
+        // it was written with, and that header's own last line break already ends it:
+        // the terminator on top would be a blank line yq never writes (#2875). The twin
+        // of the streaming route's `is_header_only_document` skip.
+        let header_only = matches!(value, OwnedValue::Null)
+            && comments.meta().spelling() == Some("")
+            && (!comments.meta().head_comment().is_empty() || comments.meta().preamble().is_some());
+        if !header_only {
+            write_terminator(writer, config)?;
+        }
         return Ok(());
     }
 
