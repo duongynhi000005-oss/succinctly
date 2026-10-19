@@ -5362,6 +5362,18 @@ enum ArgFanout {
     All,
     /// Only the argument's first output is used; later ones are discarded.
     FirstOnly,
+    /// [`Self::FirstOnly`], except that an argument with *no* output at all
+    /// (and no escape) is read as an empty string, so `body` still runs.
+    ///
+    /// Real yq's `split`/`test`/`match`/`capture`/`sub` take the argument's
+    /// first node when there is one and the empty value when there is not --
+    /// an absent key (`.foo` on a string) or `select(false)` is not "no
+    /// call", it is a call with `""` (`"a1b" | split(.foo)` is
+    /// `["a","1","b"]`, `"a1b" | test(.foo)` is `true`), live-verified
+    /// against the pinned v4.53.3, #4903. jq's own `f(empty)` is `empty`, so
+    /// this stays yq-only. `has` reaches the same answer by its own route
+    /// (#4139) and keeps [`Self::yq_native`].
+    FirstOrBlank,
     /// A multi-output argument is refused outright rather than fanned out or
     /// truncated.
     ///
@@ -5411,6 +5423,19 @@ impl ArgFanout {
     fn yq_native<S: EvalSemantics>() -> Self {
         if S::TAG == EvalTag::Yq {
             Self::FirstOnly
+        } else {
+            Self::All
+        }
+    }
+
+    /// [`Self::yq_native`] for a builtin whose argument real yq reads as an
+    /// empty string when it produces no output (#4903) -- see
+    /// [`Self::FirstOrBlank`]. A separate name rather than a flag on
+    /// `yq_native`, so `grep 'ArgFanout::yq_native_blank_when_empty'` is the
+    /// audit for which builtins carry the substitution.
+    fn yq_native_blank_when_empty<S: EvalSemantics>() -> Self {
+        if S::TAG == EvalTag::Yq {
+            Self::FirstOrBlank
         } else {
             Self::All
         }
@@ -5531,7 +5556,7 @@ fn apply_arg_fanout(fanout: ArgFanout, args: &mut Vec<OwnedValue>) -> Result<(),
         // is a count error. (succinctly's wording for that count error differs
         // from yq's own `SETPATH: expected single path but found 2 results
         // instead`; that gap predates #1279 and is out of scope here.)
-        ArgFanout::FirstOnly => {
+        ArgFanout::FirstOnly | ArgFanout::FirstOrBlank => {
             args.truncate(1);
             Ok(())
         }
@@ -5539,6 +5564,23 @@ fn apply_arg_fanout(fanout: ArgFanout, args: &mut Vec<OwnedValue>) -> Result<(),
             Err(EvalError::single_argument_result_required(args.len()))
         }
         ArgFanout::RejectMany => Ok(()),
+    }
+}
+
+/// [`ArgFanout::FirstOrBlank`]'s other half: an argument that produced no
+/// value *and* did not escape is read as the empty string (#4903).
+///
+/// A separate step from [`apply_arg_fanout`] because that function sees only
+/// the values: an argument that escaped before yielding anything has no
+/// values either, and must keep reporting its escape rather than start a call
+/// with a blank (the two-argument form runs `body` even then, #1533).
+fn blank_when_argument_empty(
+    fanout: ArgFanout,
+    args: &mut Vec<OwnedValue>,
+    trailing: &Option<Control>,
+) {
+    if matches!(fanout, ArgFanout::FirstOrBlank) && args.is_empty() && trailing.is_none() {
+        args.push(OwnedValue::String(String::new().into()));
     }
 }
 
@@ -5633,6 +5675,7 @@ where
         } else if let Err(e) = apply_arg_fanout(fanout, &mut args) {
             return QueryResult::Error(e);
         }
+        blank_when_argument_empty(fanout, &mut args, &trailing);
         if trailing.is_none() && args.len() == 1 {
             return body(args.pop().expect("len() == 1 guarantees an element"));
         }
@@ -5870,6 +5913,8 @@ fn fanout_two_args<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         };
     }
 
+    blank_when_argument_empty(fanout, &mut outers, &outer_trailing);
+
     let mut out: Vec<OwnedValue> = Vec::new();
     for o in outers {
         let (mut inners, inner_trailing) =
@@ -5881,6 +5926,7 @@ fn fanout_two_args<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 None => QueryResult::Error(e),
             };
         }
+        blank_when_argument_empty(fanout, &mut inners, &inner_trailing);
 
         for i in inners {
             if let Some(control) = push_owned_values::<_, S>(body(o.clone(), i), &mut out) {
@@ -18513,7 +18559,8 @@ fn builtin_split<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // Real yq *has* `split` and does not fan it out: live-verified against
         // the pinned v4.53.3, `[.x | split((",","b"))]` on `a,b` is
         // `[["a","b"]]`, where jq gives two results. Bug-for-bug (ADR-0018).
-        ArgFanout::yq_native::<S>(),
+        // A separator with no output splits on `""` (#4903).
+        ArgFanout::yq_native_blank_when_empty::<S>(),
         |sep_owned| {
             // #4236 (yq): `null | split(..)` is nothing whatever the separator is.
             if S::NULL_ENTRIES_AND_SPLIT_YIELD_NOTHING && matches!(value, StandardJson::Null) {
@@ -24775,8 +24822,9 @@ fn fanout_regex_pattern_and_flags<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     // Real yq has `test`, `match`, `capture` and `sub`, and fans out none of
     // them: live-verified against the pinned v4.53.3, `[.x | test(("a","z"))]`
     // on `abc` is `[true]` where jq gives `[true,false]`. Bug-for-bug per
-    // ADR-0018.
-    let fanout = ArgFanout::yq_native::<S>();
+    // ADR-0018. An argument with no output is the empty string, not "no call"
+    // (#4903).
+    let fanout = ArgFanout::yq_native_blank_when_empty::<S>();
     let flags_present = flags_expr.is_some();
     let mut run =
         |raw_pattern: OwnedValue, raw_flags: Option<OwnedValue>| match resolve_regex_args::<S>(
@@ -25958,7 +26006,8 @@ fn yq_sub_arity3_empty_replace<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         re_expr,
         value.clone(),
         optional,
-        ArgFanout::yq_native::<S>(),
+        // A pattern with no output is the empty pattern here too (#4903).
+        ArgFanout::yq_native_blank_when_empty::<S>(),
         move |raw_pattern| {
             // #1443: reuses `resolve_regex_args`'s own yq-mode scalar-pattern
             // coercion (RegexArgFamily::Sub gives the identical
@@ -136434,6 +136483,14 @@ mod tests {
             ArgFanout::FirstOnly
         ));
         assert!(matches!(
+            ArgFanout::yq_native_blank_when_empty::<JqSemantics>(),
+            ArgFanout::All
+        ));
+        assert!(matches!(
+            ArgFanout::yq_native_blank_when_empty::<YqSemantics>(),
+            ArgFanout::FirstOrBlank
+        ));
+        assert!(matches!(
             ArgFanout::reject_many_in_yq::<JqSemantics>(),
             ArgFanout::All
         ));
@@ -136449,6 +136506,44 @@ mod tests {
             ArgFanout::contains_gate::<YqSemantics>(),
             ArgFanout::AllClearedOnEscape
         ));
+    }
+
+    /// #4903: `FirstOrBlank` substitutes an empty string only for an argument that produced no
+    /// value *and* did not escape; every other gate, and every other argument, is left alone.
+    #[test]
+    fn first_or_blank_substitutes_only_for_an_argument_with_no_output_4903() {
+        let escape = Some(Control::Error(EvalError::new("boom")));
+
+        let mut args: Vec<OwnedValue> = Vec::new();
+        blank_when_argument_empty(ArgFanout::FirstOrBlank, &mut args, &None);
+        assert_eq!(args, vec![OwnedValue::String(String::new().into())]);
+
+        // An escape with no value keeps reporting the escape, not a blank call.
+        let mut args: Vec<OwnedValue> = Vec::new();
+        blank_when_argument_empty(ArgFanout::FirstOrBlank, &mut args, &escape);
+        assert_eq!(args, Vec::<OwnedValue>::new());
+
+        // A present argument is untouched.
+        let mut args = vec![OwnedValue::int(1)];
+        blank_when_argument_empty(ArgFanout::FirstOrBlank, &mut args, &None);
+        assert_eq!(args, vec![OwnedValue::int(1)]);
+
+        // `FirstOnly` (and every other gate) still means "no output, no call".
+        for gate in [
+            ArgFanout::All,
+            ArgFanout::FirstOnly,
+            ArgFanout::RejectMany,
+            ArgFanout::AllClearedOnEscape,
+        ] {
+            let mut args: Vec<OwnedValue> = Vec::new();
+            blank_when_argument_empty(gate, &mut args, &None);
+            assert!(args.is_empty(), "{gate:?}");
+        }
+
+        // The truncation half is `FirstOnly`'s.
+        let mut args = vec![OwnedValue::int(1), OwnedValue::int(2)];
+        assert!(apply_arg_fanout(ArgFanout::FirstOrBlank, &mut args).is_ok());
+        assert_eq!(args, vec![OwnedValue::int(1)]);
     }
 
     #[cfg(feature = "regex")]

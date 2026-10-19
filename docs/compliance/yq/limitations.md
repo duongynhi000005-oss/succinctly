@@ -1849,17 +1849,40 @@ per-mode-wholesale — all rows live-verified against yq v4.53.3:
 | real yq | fans out? | `succinctly yq` |
 |---|---|---|
 | `contains` (scalars, arrays, objects) | **yes** — `[.x \| contains(("a","zz"))]` on `abc` is `[true,false]` | fans out; this *closed* a pre-existing divergence |
-| `has`, `test/1`, `test/2`, `match`, `capture`, `sub/2`, `sub/3`, `split`, `tz` | no — first output only | gated off (`ArgFanout::yq_native`) |
+| `has`, `tz` | no — first output only | gated off (`ArgFanout::yq_native`) |
+| `test/1`, `test/2`, `match`, `capture`, `sub/2`, `sub/3`, `split` | no — first output only, and an argument with **no** output is the empty string, not "no call" (#4903) | gated off, blank-filled (`ArgFanout::yq_native_blank_when_empty`) |
 | `setpath`, `delpaths` | **error** — `SETPATH: expected single path but found 2 results instead` | still errors (`ArgFanout::reject_many_in_yq`); wording differs, see below |
 | `flatten(n)` | literal depth only — `bad expression, please check expression syntax` | gated off |
 | `getpath`, `range`, `nth`, `limit`, `combinations`, `paths`, `ltrimstr`, `rtrimstr`, `startswith`, `endswith`, `index`, `rindex`, `indices`, `inside`, `splits`, `scan`, `gsub`, `strftime`, `strptime`, `bsearch`, `pow` | **lexer-rejected — the builtin does not exist** | fans out; unopposed extension |
 
-There are **three** gate predicates, so the audit is all three greps —
-`grep -E 'ArgFanout::(yq_native|reject_many_in_yq|contains_gate)' src/jq/eval.rs`. Each is named
+There are **four** gate predicates, so the audit is all four greps —
+`grep -E 'ArgFanout::(yq_native|yq_native_blank_when_empty|reject_many_in_yq|contains_gate)' src/jq/eval.rs`. Each is named
 rather than inlined precisely so that stays a grep (CLAUDE.md's #106 lesson). `contains_gate`
 is `contains`'s own gate (#1553): unlike the other two, it does not change whether the argument
 fans out (`contains` genuinely fans out in both modes, the table row above) — it only adds the
 no-prefix escape rule below.
+
+### An argument with no output is the empty string (#4903)
+
+Real yq's `split`/`test`/`match`/`capture`/`sub` take the argument's first node when there is
+one and the empty value when there is not, so an absent key (`.foo` on a string) or
+`select(false)` still makes the call; jq's `f(empty)` is `empty`, and `succinctly jq` keeps
+that. The blank is a string: a separator or pattern of `""` (`split` cuts into characters,
+`test` is true, `match` is one empty match) and, in the flags slot, no flags. An argument that
+*escaped* without producing a value keeps reporting the escape. `has` reaches the same place by
+its own route (#4139) and `join` is a different shape (its `.foo` reads the array and raises).
+
+```bash
+$ yq            -n -o=json -I0 '"a1b" | split(.foo)'   # ["a","1","b"]
+$ succinctly yq -n -o=json -I0 '"a1b" | split(.foo)'   # ["a","1","b"]
+$ yq            -n -o=json -I0 '"a1b" | test("a"; .foo)'   # true
+$ succinctly yq -n -o=json -I0 '"a1b" | test("a"; .foo)'   # true
+```
+
+Not covered: `sub`'s *replacement* slot. Real yq evaluates it once against the whole input
+rather than against each match's capture object, so `"a1b" | sub("a"; .)` is `"a1b1b"` there
+and `"{}1b"` here, and `.foo` there is blank (`"1b"`) where this prints `"null1b"` — a
+separate divergence from the argument-fan-out gate.
 
 ### The prefix rule is where the two modes deliberately part
 
