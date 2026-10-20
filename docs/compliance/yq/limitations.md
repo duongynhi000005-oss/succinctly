@@ -5543,14 +5543,14 @@ divergence, not a gap: real yq *drops* every floated comment but the last when a
 sequence holding several closes to an outer item or to end of input inside a mapping
 (`- k:\n  - # c\n  - # d\n- 2\n` keeps only `d`), which ADR-0018 rule 4 forbids
 matching — the rest go forward as the next node's head instead of being discarded to
-match. One more is a separate, pre-existing gap, not a divergence licensed by that
-rule: unlike the now-fixed *ordinary* (non-floated) case above, a comment *floated* off an absent bare
-item still attaches to its next sibling's first key/inner item rather than the sibling
-itself when that sibling is a compact mapping or a nested sequence (`- # c\n- b: 1\n` is
-`.[1] | head_comment` in real yq, `.[1].b | key | head_comment` here). This residual is
-specific to #1079's floating mechanism, not #2811's ordinary-comment placement it was
-originally conflated with, and is tracked separately as
-[#2835](https://github.com/rust-works/succinctly/issues/2835). Blank lines in any
+match. A comment *floated* off an absent bare item heads a compact-mapping or nested-sequence
+sibling in the same sequence itself, as in yq (`- # c\n- b: 1\n` is `.[1] | head_comment`; it used to
+land on the sibling's first key, #2835). Two neighbouring shapes still differ and are not licensed
+by that rule: a second absent item between them (`- # c\n-\n- b: 1\n` puts `c` after `b: 1`, where
+yq heads `.[2]` with it) and a float from a nested sequence that closed at the sibling
+(`- - # c\n- b: 1\n`, yq prints it as the foot of the sibling's entry). An explicit-key sibling
+(`- # c\n- ? k\n  : v\n`) is headed too. Pinned by
+`test_2835_c_neighbouring_shapes_still_differ` in `tests/yq_cli/i2835.rs`. Blank lines in any
 of these shapes are unmodelled on both sides (yq keeps a `\n` inside the slot value and
 reorders).
 

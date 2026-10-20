@@ -1761,24 +1761,32 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// after is still `PREV` for a later foot, and claims any deferred foot,
     /// via its own [`Self::attach_head_foot_at`].
     ///
-    /// A no-op while a comment is floated off an earlier absent bare item
-    /// (#1079's [`Self::floated_item_comment`]): this hook's own bp is a
-    /// stem, not a genuine resolved node, so it must not pre-empt the
-    /// float's settle logic the way a real [`Self::attach_head_foot_at`]/
-    /// [`Self::attach_head_foot_to_key`] call would (both set `is_item` from
-    /// `self.current_type`, which reads identically true for a stem as for
-    /// a genuine item content, so the float would otherwise wrongly settle
-    /// onto this stem's own bp instead of the sequence's owner key --
-    /// confirmed live: `k:\n  - - # c1\n  - - # c2\n` regresses `.k`'s
-    /// foot from `c1` to empty without this guard). Deferring here leaves
-    /// the float exactly where [`Self::float_absent_item_comment`]'s own
-    /// "settle the previous float" step (or, at end of document,
-    /// [`Self::flush_pending_head_lines`]'s own check) already resolves it
-    /// correctly once the sequence this item recurses into registers its
-    /// own frame and reaches a genuine content node.
+    /// A comment floated off an earlier absent bare item of the sequence this item belongs
+    /// to (#1079's [`Self::floated_item_comment`]) is taken here: the sequence is still open,
+    /// so the item is its sibling and the block heads it like any adjacent block (#2835). A
+    /// no-op when the float's sequence has since closed: this hook's own bp is a stem, not a
+    /// genuine resolved node, so it must not pre-empt the float's settle logic the way a real
+    /// [`Self::attach_head_foot_at`]/[`Self::attach_head_foot_to_key`] call would (both set
+    /// `is_item` from `self.current_type`, which reads identically true for a stem as for a
+    /// genuine item content, so the float would otherwise wrongly settle onto this stem's own
+    /// bp instead of the sequence's owner key -- confirmed live: `k:\n  - - # c1\n  - - #
+    /// c2\n` regresses `.k`'s foot from `c1` to empty without the guard). Deferring there
+    /// leaves the float exactly where [`Self::float_absent_item_comment`]'s own "settle the
+    /// previous float" step (or, at end of document, [`Self::flush_pending_head_lines`]'s own
+    /// check) already resolves it correctly once the sequence this item recurses into
+    /// registers its own frame and reaches a genuine content node.
     fn attach_item_head_at(&mut self, bp: usize, column: usize) {
-        if self.floated_item_comment.is_some() {
-            return;
+        if let Some(floated) = self.floated_item_comment {
+            // A float from an earlier item of the sequence this item belongs to, still open,
+            // is the head of this item when it is a compact mapping or nested sequence, as
+            // it is for any other item that opens next: `- # c` / `- b: 1` heads `.[1]`
+            // (#2835). One from a sequence that has since closed is a foot that
+            // `settle_float_if_sequence_closed` places, so this hook stands aside for it.
+            if !self.sequence_still_open(floated.seq_serial) {
+                return;
+            }
+            self.floated_item_comment = None;
+            self.block_passed_absent_item = false;
         }
         // A block trailing an item whose value turned out absent, closed by
         // this very stem's own recursion (#2811 review): the sequence that
@@ -4297,6 +4305,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // always >= `indent + 2`, which is why `parse_explicit_key`'s
             // opening `close_deeper_indents` cannot close the item we just
             // pushed at virtual indent `indent + 1`.
+            self.attach_item_head_at(self.bp_pos, indent);
             self.parse_explicit_key(self.current_column())?;
             // Don't close anything - mapping and item are closed by
             // close_deeper_indents when we see content at lower indent.

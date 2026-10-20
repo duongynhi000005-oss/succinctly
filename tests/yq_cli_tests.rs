@@ -19905,21 +19905,17 @@ mod standalone_comment_attribution_2811 {
         Ok(())
     }
 
-    /// Pinned residual (outside the issue's alphabet): yq answers
-    /// `.[1] | head_comment` = `h` for a `- ? k` item, the container as a
-    /// whole (go-yaml's stem comment, same as a compact `- k: v`/`- - x`
-    /// item). `- ? k` has no *stem* hook of its own -- only #1079's own
-    /// `parse_explicit_key` hook, which attaches straight to the key node
-    /// -- so the block now reaches `.[1].k`'s own head instead of falling
-    /// all the way back to `.[0]`'s foot as it used to; still short of
-    /// yq's answer until #2814 gives this shape a stem hook too.
+    /// yq answers `.[1] | head_comment` = `h` for a `- ? k` item, the container as a whole
+    /// (go-yaml's stem comment, same as a compact `- k: v`/`- - x` item). `- ? k` got a stem
+    /// hook of its own with #2835, so the block heads the item and not `.[1].k`'s key (it used
+    /// to reach the key, short of yq's answer).
     #[test]
-    fn explicit_key_item_head_residual_2811() -> Result<()> {
+    fn explicit_key_item_head_matches_yq_2811() -> Result<()> {
         assert_slots(
             "- 1\n# h\n- ? k\n  : v\n",
             &[
-                (".[1] | head_comment", ""),
-                (".[1].k | key | head_comment", "h"),
+                (".[1] | head_comment", "h"),
+                (".[1].k | key | head_comment", ""),
                 (".[0] | foot_comment", ""),
             ],
         )
@@ -23603,21 +23599,14 @@ fn test_nested_double_float_keeps_the_comment_yq_drops_1079_float() -> Result<()
 /// Known residuals, pinned with real yq's answer in the comment so a change
 /// is deliberate:
 ///
-/// - a sibling item that is a compact mapping or a nested sequence -- real
-///   yq answers `.[1] | head_comment` directly; here the comment attaches
-///   to the first key / inner item instead, the same attribution #798's
-///   standalone-line capture already has for `- 1\n# h\n- b: 1\n` (#2811);
+/// - (a sibling item that is a compact mapping or a nested sequence is matched since #2835:
+///   `tests/yq_cli/i2835.rs`);
 /// - several floated comments in a sequence that closes to an outer item
 ///   or to end of input: real yq keeps only the last (`- k:\n  - # c\n
 ///   - # d\n- 2\n` has `d` on `.[0].k`'s foot and `c` nowhere); here the
 ///   rest go forward as the next node's head, per ADR-0018 rule 4.
 #[test]
 fn test_absent_item_comment_residuals_1079_float() -> Result<()> {
-    assert_yq_getter("- # c\n- b: 1\n", ".[1] | head_comment", "\n")?;
-    assert_yq_getter("- # c\n- b: 1\n", ".[1].b | key | head_comment", "c\n")?;
-    assert_yq_getter("- # c\n- - 1\n", ".[1] | head_comment", "\n")?;
-    assert_yq_getter("- # c\n- - 1\n", ".[1][0] | head_comment", "c\n")?;
-
     let input = "- k:\n  - # c\n  - # d\n- 2\n";
     assert_yq_getter(input, ".[0].k | key | foot_comment", "d\n")?;
     assert_yq_getter(input, ".[1] | head_comment", "c\n")?;
