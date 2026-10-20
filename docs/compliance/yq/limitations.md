@@ -4063,6 +4063,31 @@ The pre-pass also takes a prefix that reads as any other non-container (`{"s":5,
 del(.s[], .y)`, a string or a bool), which yq's `.[]` skips just the same (#2346): that
 shape raised `Cannot iterate over number (5)` before.
 
+### `del()` with a comma group stops at a bare slice of the root ([#1325](https://github.com/rust-works/succinctly/issues/1325))
+
+yq's `deleteChildOperator` walks the matched nodes from the last to the first and returns at the
+first one that has no parent. A slice result is a replacement of the node it slices, so a slice
+of the root (`.[2:3]`, `.[2:3][0:1]`, `(.[2:3])?`, `.[2:3] | .[0:1]`) has none, and the delete stops
+there: the branches written after it are deleted, it and everything before it are not
+(`del(.a[0:1], .[2:3])` deletes nothing, `del(.[2:3], .a[0:1])` deletes `.a`, over an object or an
+array root alike). `succinctly yq` reproduces that. A slice further down (`.a[0:1]`) has a parent,
+and a tail after the run (`.[2:3][0]`, `.[2:3].x`) is inert without stopping anything.
+
+yq also *creates* while it resolves the paths, before the stop: an index past the end of an array
+extends it with `null`s, and an index or `.[]` on a `null` makes an array
+(`del(.x[3], .[2:3])` over `{"x":[1]}` is `{"x":[1,null,null,null]}`). A group in which a branch
+before the stop could do that keeps the behaviour it had before #1325, which deletes that branch
+and creates a little differently. "Could" is judged on the path before its first slice: a computed
+key, an index outside the array or below its start, a `.[]` that is not the last step, an index or
+`.[]` on `null`, a recursive descent, or a step on the wrong type. Every other group follows the
+rule above, over an object, array, string, number or `null` root alike. (A branch like
+`.x[3][0:1][0]`, whose slice makes it inert, creates `.x[3]` in yq and does not here; that predates
+#1325.)
+
+Still different: a bare root slice whose bounds are computed (`.[($i):3]`) is not recognised as the
+stop (the group is deleted as if it were absent), and a branch that raises before the stop raises
+with this tool's wording rather than yq's, as everywhere else.
+
 ### `del()` through a slice-run and a field tail: per element, one gap ([#2344](https://github.com/rust-works/succinctly/issues/2344), [#4542](https://github.com/rust-works/succinctly/issues/4542))
 
 `del(.a[0:2].x)` fails in yq for every target but a string: yq slices a mapping, int, bool, `null`

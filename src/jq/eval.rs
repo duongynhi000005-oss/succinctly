@@ -81668,21 +81668,154 @@ fn rewrite_yq_del_comma_branches(
     expr: &Expr,
     root: &OwnedValue,
 ) -> Result<Option<Expr>, EvalError> {
+    let mut leaves = Vec::new();
+    collect_del_comma_leaves(expr, &mut leaves);
+    // The leaves the stop swallows, by address: `rewrite_yq_del_comma_leaves` meets the same nodes
+    // while it rebuilds the tree, so the two traversals need not number them alike.
+    let swallowed: Vec<&Expr> = match yq_del_stop_leaf(&leaves, root) {
+        Some(stop) => leaves[..=stop].to_vec(),
+        None => Vec::new(),
+    };
+    rewrite_yq_del_comma_leaves(expr, root, &swallowed)
+}
+
+/// Whether a `del()` comma branch is a bare run of slices on the root (`.[2:3]`, `.[2:3][0:1]`,
+/// `(.[2:3])?`, `.[2:3] | .[0:1]`): every step a slice with literal bounds, nothing before them.
+///
+/// yq builds every slice result as a replacement of the node it slices, so the result of a slice
+/// of the root has no parent, and `deleteChildOperator` walks the matches backwards and returns at
+/// the first one without a parent (#1325): the branches after it in the comma group are deleted and
+/// everything from it back to the first is not. Anything else after the run (`.[2:3][0]`, `.[2:3].x`)
+/// is a child of the replacement and has a parent, so it is inert but stops nothing.
+fn is_bare_root_slice_run(branch: &Expr) -> bool {
+    if needs_path_prepass(branch) {
+        return false;
+    }
+    let mut steps = Vec::new();
+    flatten_delete_path(branch, false, &mut steps);
+    !steps.is_empty() && steps.iter().all(|s| s.component.is_slice())
+}
+
+/// The leaves of a comma group in source order: the branches that are not themselves a
+/// (parenthesised or optional) comma group. [`rewrite_yq_del_comma_leaves`] numbers its leaves the
+/// same way.
+fn collect_del_comma_leaves<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::Paren(inner) | Expr::Optional(inner) if is_comma_group(inner) => {
+            collect_del_comma_leaves(inner, out);
+        }
+        Expr::Comma(branches) => {
+            for branch in branches {
+                if is_comma_group(branch) {
+                    collect_del_comma_leaves(branch, out);
+                } else {
+                    out.push(branch);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `expr` is a `Comma`, however many `Paren`/`Optional` wrappers surround it.
+fn is_comma_group(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(inner) | Expr::Optional(inner) => is_comma_group(inner),
+        other => matches!(other, Expr::Comma(_)),
+    }
+}
+
+/// The index of the leaf that stops the delete (#1325): the last [`is_bare_root_slice_run`] one,
+/// provided nothing before it can have an effect beyond a delete.
+///
+/// yq resolves every path before it deletes, and resolving creates: an index past the end of an
+/// array extends it with `null`s even when the delete then stops (`del(.x[3], .[2:3])` over
+/// `{"x":[1]}` is `{"x":[1,null,null,null]}`). A leaf before the stop that may do that would have to
+/// keep its creation and lose its delete, which this does not model, so the stop is not applied to a
+/// group holding one (the group then behaves as it did before #1325).
+fn yq_del_stop_leaf(leaves: &[&Expr], root: &OwnedValue) -> Option<usize> {
+    let stop = leaves.iter().rposition(|l| is_bare_root_slice_run(l))?;
+    leaves[..stop]
+        .iter()
+        .all(|leaf| del_leaf_only_deletes(leaf, root))
+        .then_some(stop)
+}
+
+/// Whether resolving `leaf` against `root` can only select nodes, never create any: a static
+/// `Field`/`Index` path every step of which exists or stops at a missing key (yq does not create a
+/// missing key on the way to a delete). The walk ends at the first slice, whose result is a copy
+/// that nothing is created in. A computed key, an index past the end or below the start, an
+/// `Iterate` before the last step, a recursive descent or a type mismatch is treated as able to
+/// create.
+fn del_leaf_only_deletes(leaf: &Expr, root: &OwnedValue) -> bool {
+    if needs_path_prepass(leaf) {
+        return false;
+    }
+    let mut steps = Vec::new();
+    flatten_delete_path(leaf, false, &mut steps);
+    let mut current = root;
+    for (at, step) in steps.iter().enumerate() {
+        if step.component.is_slice() {
+            return true;
+        }
+        current = match (&step.component, current) {
+            // A key on `null` stops the walk without creating anything; an index or an `.[]`
+            // turns the `null` into an array (`{"m":null} | del(.m[0], .[2:3])` is `{"m":[null]}`).
+            (Expr::Field(_), OwnedValue::Null) => return true,
+            (Expr::Field(name), OwnedValue::Object(map)) => match map.get(name) {
+                Some(next) => next,
+                None => return true,
+            },
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                let resolved = if *idx < 0 {
+                    items.len() as i64 + idx
+                } else {
+                    *idx
+                };
+                match usize::try_from(resolved).ok().and_then(|i| items.get(i)) {
+                    Some(next) => next,
+                    None => return false,
+                }
+            }
+            (Expr::Iterate, OwnedValue::Array(_) | OwnedValue::Object(_)) => {
+                return at + 1 == steps.len();
+            }
+            _ => return false,
+        };
+    }
+    true
+}
+
+/// [`rewrite_yq_del_comma_branches`]'s recursion. Every leaf in `swallowed` (those up to and
+/// including the last bare-root slice run, #1325) is dropped, after its outcome has been checked for
+/// an error, which yq raises while it resolves the paths, before it deletes any.
+fn rewrite_yq_del_comma_leaves(
+    expr: &Expr,
+    root: &OwnedValue,
+    swallowed: &[&Expr],
+) -> Result<Option<Expr>, EvalError> {
     match expr {
         Expr::Paren(inner) => {
-            Ok(rewrite_yq_del_comma_branches(inner, root)?.map(|r| Expr::Paren(Box::new(r))))
+            Ok(rewrite_yq_del_comma_leaves(inner, root, swallowed)?
+                .map(|r| Expr::Paren(Box::new(r))))
         }
-        Expr::Optional(inner) => {
-            Ok(rewrite_yq_del_comma_branches(inner, root)?.map(|r| Expr::Optional(Box::new(r))))
-        }
+        Expr::Optional(inner) => Ok(rewrite_yq_del_comma_leaves(inner, root, swallowed)?
+            .map(|r| Expr::Optional(Box::new(r)))),
         Expr::Comma(branches) => {
             let mut new_branches: Vec<Expr> = vec_with_capacity(branches.len());
             for branch in branches {
-                if let Some(nested) = rewrite_yq_del_comma_branches(branch, root)? {
+                if let Some(nested) = rewrite_yq_del_comma_leaves(branch, root, swallowed)? {
                     new_branches.push(nested);
-                } else if !needs_path_prepass(branch) {
+                    continue;
+                }
+                let aborted = swallowed.iter().any(|l| core::ptr::eq(*l, branch));
+                if !needs_path_prepass(branch) {
                     match yq_del_slice_outcome(branch, root, false) {
-                        YqDelSliceOutcome::DropParent(rewritten) => new_branches.push(rewritten),
+                        YqDelSliceOutcome::DropParent(rewritten) => {
+                            if !aborted {
+                                new_branches.push(rewritten);
+                            }
+                        }
                         // A `Noop`-classified branch is inert *regardless*
                         // of what `root` actually contains: every `Noop`
                         // return in `yq_del_slice_outcome` happens before
@@ -81701,7 +81834,11 @@ fn rewrite_yq_del_comma_branches(
                         // live-verified against yq v4.53.3: `.a` stays put,
                         // only `.c` is deleted).
                         YqDelSliceOutcome::Noop => {}
-                        YqDelSliceOutcome::NotApplicable => new_branches.push(branch.clone()),
+                        YqDelSliceOutcome::NotApplicable => {
+                            if !aborted {
+                                new_branches.push(branch.clone());
+                            }
+                        }
                         // #2333: unlike `Noop`, this one *does* depend on
                         // `root` -- and real yq's own answer here is to fail
                         // the whole call, not just this branch (live-
@@ -81711,7 +81848,7 @@ fn rewrite_yq_del_comma_branches(
                         // being folded into this one branch's own fate.
                         YqDelSliceOutcome::Error(e) => return Err(e),
                     }
-                } else {
+                } else if !aborted {
                     new_branches.push(branch.clone());
                 }
             }
