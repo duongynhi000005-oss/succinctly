@@ -20,7 +20,7 @@ fail. Without `--base` the run only reports (a timeout of `--bin` still fails it
 reference to be told apart from. A timeout is its own class and never a match, whichever side hung.
 
 Usage: scripts/jq-reduce-update-bind-sweep.py --bin BIN [--base BIN] [--jq JQ] [--jobs N] [--show N]
-                                              [--sample K] [--dump FILE]
+                                              [--sample K] [--alt] [--dump FILE]
 """
 import argparse
 import collections
@@ -40,6 +40,18 @@ BINDS = [
     "$x as {a:{b:$a}}",
     "$x as {a:$a} ?// $a",
     ". as {a:$a}",
+]
+# (#4964) `--alt`: the same grid over `?//` chains, whose alternatives fail by value on different documents
+# (an object pattern on an array, an array pattern on an object) and so retry onto the next one.
+ALT_BINDS = [
+    "$x as {a:$a} ?// $a",
+    "$x as [$a] ?// $a",
+    "$x as {a:$a} ?// [$a]",
+    "$x as [$a] ?// {a:$a}",
+    "$x as {a:{b:$a}} ?// $a",
+    "$x as {a:$a} ?// {b:$a}",
+    ". as {a:$a} ?// $a",
+    "$x as {a:$a}",
 ]
 DOCS = ["null", '{"a":1}', '{"a":null}', "[1]", '{"a":{"b":1}}', "true"]
 CONTEXTS = ["path({E})", "del({E})", "({E}) |= 9"]
@@ -81,8 +93,8 @@ def shapes(b):
     ]
 
 
-def grid():
-    for init, src, b in itertools.product(INITS, SRCS, BINDS):
+def grid(binds=None):
+    for init, src, b in itertools.product(INITS, SRCS, binds or BINDS):
         for upd in shapes(b):
             reduce = f"reduce {src} as $i ({init}; {upd})"
             for ctx in CONTEXTS:
@@ -122,11 +134,12 @@ def main():
     ap.add_argument("--jq", default="/usr/bin/jq")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--show", type=int, default=10, help="rows printed per transition")
+    ap.add_argument("--alt", action="store_true", help="the grid over `?//` chains (#4964)")
     ap.add_argument("--sample", type=int, default=1, help="run every Kth row (a quick, deterministic subset)")
     ap.add_argument("--dump", help="write every row of a transition worth reading, as JSON")
     a = ap.parse_args()
 
-    rows = list(grid())[:: max(a.sample, 1)]
+    rows = list(grid(ALT_BINDS if a.alt else None))[:: max(a.sample, 1)]
     print(f"{len(rows)} rows", file=sys.stderr)
 
     def work(row):

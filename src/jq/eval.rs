@@ -38042,7 +38042,7 @@ fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
 }
 
 /// Whether a `reduce` UPDATE hands the accumulator back after destructures of an outer `$x` (#4901,
-/// #4932): a chain of binds, each a single pattern with literal keys or a plain `$name` of the marker
+/// #4932): a chain of binds, each a pattern (or, since #4964, a `?//` chain of them) with literal keys or a plain `$name` of the marker
 /// and nothing else (no pipe: a pipe headed by `$x` ends on `$x`'s node, not the accumulator), ending in
 /// `.` or any other shape [`emits_only_the_accumulator`] accepts -- and, since #4932, the same inside the
 /// wrappers [`hands_outputs_on`] reads through. A bind-free UPDATE of those shapes satisfies it too; the
@@ -38058,8 +38058,7 @@ fn foreign_bind_chain_returning_dot(e: &Expr) -> bool {
             body,
         } => {
             matches!(unwrap_paren(expr), Expr::TrackedVar(_))
-                && patterns.len() == 1
-                && !pattern_has_computed_key(&patterns[0])
+                && !patterns.iter().any(pattern_has_computed_key)
                 && foreign_bind_chain_returning_dot(body)
         }
         Expr::As { expr, body, .. } => {
@@ -38097,8 +38096,8 @@ fn emits_only_the_accumulator(e: &Expr) -> bool {
 /// Whether every bind of a `reduce` UPDATE is in tail position, so the `.` a bind's body ends on is
 /// the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
 /// the final emission is judged on the accumulator's provenance. The spine is paren, pipe (any
-/// stage but the last holds no bind) and the body of a single-pattern bind with literal keys, or a
-/// plain `$name` one, all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
+/// stage but the last holds no bind) and the body of a bind with literal keys or a plain `$name` (one
+/// pattern, or since #4964 a `?//` chain of them), all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
 /// anywhere else (under a `try` with a handler, `//`, a call or a fold) may feed a later step, which does
 /// check it.
 fn update_binds_only_in_tail(e: &Expr) -> bool {
@@ -38133,8 +38132,7 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
             body,
         } => {
             bind_free(expr)
-                && patterns.len() == 1
-                && !pattern_has_computed_key(&patterns[0])
+                && !patterns.iter().any(pattern_has_computed_key)
                 && update_binds_only_in_tail(body)
         }
         Expr::As { expr, body, .. } => bind_free(expr) && update_binds_only_in_tail(body),
@@ -50978,10 +50976,13 @@ fn fans_out(expr: &Expr) -> bool {
 /// Whether `expr` is a chain of binds that each run once (#4901): a bind of `.`, an outer `$x` or a
 /// `$var` to a single pattern with literal keys (or a bare `$name`), ending in a body that does not
 /// fan out itself. [`fans_out`] counts every destructuring bind, because a computed key, a `?//` chain
-/// or a comma source forks the walk into siblings that may see the register unevenly (#3145). None of
-/// those is here: the chain is one sequence of path-checked steps on the carried register, the shape
-/// a pipe of the same stages already is (a pipe is skipped by `fans_out`), so a body that is one
-/// refuses and answers exactly where the pipe does.
+/// or a comma source forks the walk into siblings that may see the register unevenly (#3145). A computed
+/// key and a comma source are not here: the chain is one sequence of path-checked steps on the carried
+/// register, the shape a pipe of the same stages already is (a pipe is skipped by `fans_out`), so a body
+/// that is one refuses and answers exactly where the pipe does. A `?//` chain of literal-key and
+/// plain-variable alternatives is (#4964): jq runs every alternative from the register the chain was
+/// entered with, a failed one backtracking, so no alternative sees it unevenly, and a retry onto the
+/// next is the same path-checked sequence.
 ///
 /// "Run once" is about the walk's siblings, not about emitting: a handler-less `try`/`?` around the
 /// chain (#4934) is read through too, and its body may raise and so emit nothing. That is the
@@ -51004,8 +51005,7 @@ fn is_single_output_bind(expr: &Expr) -> bool {
                 body,
             } => {
                 plain_source(source)
-                    && patterns.len() == 1
-                    && !pattern_has_computed_key(&patterns[0])
+                    && !patterns.iter().any(pattern_has_computed_key)
                     && (is_single_output_bind(body) || !fans_out(body))
             }
             Expr::As {
@@ -59403,10 +59403,14 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                 // (#3853's reading, for an alternative that ran no step). The
                                 // body's own terminal check refused `(., 1) | CHAIN`'s second
                                 // output in a fold source, where jq answers `[]`.
+                                // #4964: or a `reduce` UPDATE whose state is handed on and whose binds sit in
+                                // tail position ([`fold_body::state_handed_on_here`]): the `.` a bare
+                                // alternative ends on is the UPDATE's own output there, as it is after a step.
                                 if S::TAG == EvalTag::Jq
                                     && (fold_body::depth() == 0
                                         || fold_body::acc_is_register_here()
-                                        || fold_body::emissions_discarded_here())
+                                        || fold_body::emissions_discarded_here()
+                                        || fold_body::state_handed_on_here())
                                     && body_performs_no_step(&substituted)
                                 {
                                     match sink(seed) {
