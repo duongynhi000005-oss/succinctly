@@ -380,9 +380,9 @@ fn test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800() -> Result<
 /// literals, `not`, `tostring`, `select(true)`, and a pipe, comma, `//`, `if`, `try`/`?` or nested `foreach`
 /// of such, `$var` and a bind of `.` or `$var`, a destructuring pattern only inside a `try`/`?`) is read as one that hands the state on. A nested
 /// `foreach` in it whose source destructures a `$x` marker (`try ($x as {a:$a} | .)`) was refused for an
-/// emission that is never made, where jq answers nothing. The controls keep their refusal: an uncaught
-/// destructure raises or not by the state (`foreach ($x as {a:$a} | .) ...` raises on `[1]`), and an EXTRACT that
-/// does emit (`$i`, `.`) is the shape the earlier #4800 rows decide. Every other row captured from jq 1.7.1.
+/// emission that is never made, where jq answers nothing. The controls keep their refusal: an EXTRACT that
+/// does emit (`$i`, `.`) is the shape the earlier #4800 rows decide. (An uncaught destructure was a control too, until #4957
+/// read it as jq does.) Every other row captured from jq 1.7.1.
 #[test]
 fn test_foreach_with_an_emitting_nothing_extract_ignores_an_inert_update_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -562,14 +562,32 @@ fn test_foreach_with_an_emitting_nothing_extract_ignores_an_inert_update_4800() 
             0,
         ),
     ])?;
+    // #4957: an uncaught destructure of the register as the UPDATE answers as jq does -- it raises on `[1]` (the pattern
+    // needs an object) and emits nothing on an object -- where it was refused.
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":1}"#,
             r"path(. as $x | foreach . as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); empty))",
             "",
-            "Invalid path expression with result",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach . as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); empty))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"[1]",
+            r"path(. as $x | foreach . as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); empty))",
+            "",
+            r#"Cannot index array with string "a""#,
             5,
         ),
+    ])?;
+    assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":1}"#,
             r"path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))",
