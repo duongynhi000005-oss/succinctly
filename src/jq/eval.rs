@@ -37934,7 +37934,7 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
 }
 
 /// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a pipe whose later stages are
-/// [`plain`], or an `if` whose condition cannot move the register and whose other arm is [`plain`], a bare
+/// `plain`, or an `if` whose condition cannot move the register and whose other arm is `plain`, a bare
 /// `foreach` over a caught or plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source
 /// is one pattern of one bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and
 /// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean.
@@ -38034,20 +38034,19 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
             // The arms that are not the `foreach` must leave the register where it is: a sibling that navigates
             // (`if . then FE else .a end`) states a register the accumulator is not on.
-            Expr::Pipe(stages) => match stages.split_first() {
-                Some((head, tail)) => tail.iter().all(plain) && go(head, budget),
-                None => false,
-            },
+            Expr::Pipe(stages) => stages
+                .split_first()
+                .is_some_and(|(head, tail)| tail.iter().all(plain) && go(head, budget)),
             Expr::If {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                let arm = |branch: &Expr| go(branch, budget) || plain(branch);
+                let (in_then, in_else) = (go(then_branch, budget), go(else_branch, budget));
                 cannot_move_register(cond)
-                    && arm(then_branch)
-                    && arm(else_branch)
-                    && (go(then_branch, budget) || go(else_branch, budget))
+                    && (in_then || plain(then_branch))
+                    && (in_else || plain(else_branch))
+                    && (in_then || in_else)
             }
             _ => false,
         }
@@ -63399,7 +63398,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // node at every step ([`update_returns_its_input`]), so the next step meets `.` on it again.
     let single_bind_update_on_register =
         first_step_on_register && update_is_single_bind_returning_input(update);
-    // #4957: ...and a UPDATE that is, or holds through a `try`, a comma, a pipe head or an `if`, a `foreach` over
+    // #4957: ...and a UPDATE that is, or holds through a `try`, a pipe head or an `if`, a `foreach` over
     // a caught or plain one-variable bind ([`update_wraps_bare_bind_foreach`]). Unlike the shapes above this does
     // not need `first_step_on_register`: a source that moves the register still leaves the accumulator on it at
     // the steps whose element is the root (`foreach (.,.a)`'s first), which `active_at_register` says per step.
