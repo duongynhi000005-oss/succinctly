@@ -1,4 +1,4 @@
-//! #4099: a standalone comment directly under `key:` followed by a blank line, then the key's
+//! #4996 (item 6 of the #4099 sweep): a standalone comment directly under `key:` followed by a blank line, then the key's
 //! first child, is that child's head comment in yq -- the blank line is dropped and the comment
 //! stays where it was written. It was read as the foot of `key:` and moved to the next sibling.
 //! Each row is a live yq v4.53.3 capture.
@@ -117,7 +117,7 @@ const ROWS: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
-fn test_comment_before_a_blank_line_heads_the_first_child_4099() -> Result<()> {
+fn test_comment_before_a_blank_line_heads_the_first_child_4996() -> Result<()> {
     for (doc, filter, expected) in ROWS {
         let (stdout, code) = run_yq_stdin(filter, doc, &[])?;
         assert_eq!(
@@ -131,7 +131,7 @@ fn test_comment_before_a_blank_line_heads_the_first_child_4099() -> Result<()> {
 
 /// The comment is the first child key's head, not the parent's foot.
 #[test]
-fn test_comment_before_a_blank_line_is_the_first_childs_head_comment_4099() -> Result<()> {
+fn test_comment_before_a_blank_line_is_the_first_childs_head_comment_4996() -> Result<()> {
     let doc = "m:\n  # a\n\n  k: 1\nz: 2\n";
     for (filter, expected) in [
         (".m.k | key | head_comment", "a\n"),
