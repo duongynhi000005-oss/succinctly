@@ -37654,6 +37654,34 @@ fn is_truthy_literal(cond: &Expr) -> bool {
     )
 }
 
+/// A fold UPDATE `if C then A else . end` on a literal truthy `C` (#4957), replaced by `A`: it runs `A` and
+/// nothing else, so the marks that read a bare `A` (`plain_update_heads`, `sole_update_mark`, ..) read it
+/// too. Not an `A` that is a comma, which [`emptied_update`] leaves unread, nor any other `else` or a
+/// falsy literal: those keep the reading they had. Anything else is returned as it is.
+fn take_literal_if_branch(update: Expr) -> Expr {
+    let mut current = &update;
+    while let Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = unwrap_paren(current)
+    {
+        if is_truthy_literal(cond)
+            && matches!(unwrap_paren(else_branch), Expr::Identity)
+            && !matches!(unwrap_paren(then_branch), Expr::Comma(_))
+        {
+            current = then_branch;
+        } else {
+            break;
+        }
+    }
+    if core::ptr::eq(current, &update) {
+        update
+    } else {
+        current.clone()
+    }
+}
+
 /// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
 /// among them ([`update_returns_its_input`], #4800): jq stores the node it hands back as the state, so
 /// the next step meets `.` on the register again however far the patterns' own steps moved it, and the
@@ -63267,7 +63295,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     source_may_alias,
                     &refused_step_could_succeed,
                     &mut |walked, bind| {
-                        let bound_update = bind.apply(update, WalkOrigins::Keep);
+                        let bound_update =
+                            take_literal_if_branch(bind.apply(update, WalkOrigins::Keep));
                         let bound_extract = extract.map(|ext| bind.apply(ext, WalkOrigins::Keep));
                         // #2031: this step's own register -- see [`foreach_step_register`].
                         let (active_reg, active_at_register) = foreach_step_register::<S>(
