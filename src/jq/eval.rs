@@ -81643,9 +81643,13 @@ fn rewrite_yq_del_comma_branches(
 ) -> Result<Option<Expr>, EvalError> {
     let mut leaves = Vec::new();
     collect_del_comma_leaves(expr, &mut leaves);
-    let abort_at = yq_del_stop_leaf(&leaves, root);
-    let mut leaf = 0;
-    rewrite_yq_del_comma_leaves(expr, root, abort_at, &mut leaf)
+    // The leaves the stop swallows, by address: `rewrite_yq_del_comma_leaves` meets the same nodes
+    // while it rebuilds the tree, so the two traversals need not number them alike.
+    let swallowed: Vec<&Expr> = match yq_del_stop_leaf(&leaves, root) {
+        Some(stop) => leaves[..=stop].to_vec(),
+        None => Vec::new(),
+    };
+    rewrite_yq_del_comma_leaves(expr, root, &swallowed)
 }
 
 /// Whether a `del()` comma branch is a bare run of slices on the root (`.[2:3]`, `.[2:3][0:1]`,
@@ -81710,25 +81714,23 @@ fn yq_del_stop_leaf(leaves: &[&Expr], root: &OwnedValue) -> Option<usize> {
         .then_some(stop)
 }
 
-/// Whether resolving `leaf` against `root` can only select nodes, never create any: a slice-bearing
-/// branch (it resolves to its parent key, or to nothing), or a static `Field`/`Index` path every
-/// step of which exists or stops at a missing key (yq does not create a missing key on the way to a
-/// delete). A computed key, an index past the end or below the start, an `Iterate` before the last
-/// step, a recursive descent or a type mismatch is treated as able to create.
+/// Whether resolving `leaf` against `root` can only select nodes, never create any: a static
+/// `Field`/`Index` path every step of which exists or stops at a missing key (yq does not create a
+/// missing key on the way to a delete). The walk ends at the first slice, whose result is a copy
+/// that nothing is created in. A computed key, an index past the end or below the start, an
+/// `Iterate` before the last step, a recursive descent or a type mismatch is treated as able to
+/// create.
 fn del_leaf_only_deletes(leaf: &Expr, root: &OwnedValue) -> bool {
     if needs_path_prepass(leaf) {
         return false;
-    }
-    if !matches!(
-        yq_del_slice_outcome(leaf, root, false),
-        YqDelSliceOutcome::NotApplicable
-    ) {
-        return true;
     }
     let mut steps = Vec::new();
     flatten_delete_path(leaf, false, &mut steps);
     let mut current = root;
     for (at, step) in steps.iter().enumerate() {
+        if step.component.is_slice() {
+            return true;
+        }
         current = match (&step.component, current) {
             // A key on `null` stops the walk without creating anything; an index or an `.[]`
             // turns the `null` into an array (`{"m":null} | del(.m[0], .[2:3])` is `{"m":[null]}`).
@@ -81757,30 +81759,29 @@ fn del_leaf_only_deletes(leaf: &Expr, root: &OwnedValue) -> bool {
     true
 }
 
-/// [`rewrite_yq_del_comma_branches`]'s recursion. `leaf` numbers the leaves in source order;
-/// every leaf up to and including `abort_at` (the last bare-root slice run, #1325) is dropped,
-/// after its outcome has been checked for an error, which yq raises while it resolves the paths,
-/// before it deletes any.
+/// [`rewrite_yq_del_comma_branches`]'s recursion. Every leaf in `swallowed` (those up to and
+/// including the last bare-root slice run, #1325) is dropped, after its outcome has been checked for
+/// an error, which yq raises while it resolves the paths, before it deletes any.
 fn rewrite_yq_del_comma_leaves(
     expr: &Expr,
     root: &OwnedValue,
-    abort_at: Option<usize>,
-    leaf: &mut usize,
+    swallowed: &[&Expr],
 ) -> Result<Option<Expr>, EvalError> {
     match expr {
-        Expr::Paren(inner) => Ok(rewrite_yq_del_comma_leaves(inner, root, abort_at, leaf)?
-            .map(|r| Expr::Paren(Box::new(r)))),
-        Expr::Optional(inner) => Ok(rewrite_yq_del_comma_leaves(inner, root, abort_at, leaf)?
+        Expr::Paren(inner) => {
+            Ok(rewrite_yq_del_comma_leaves(inner, root, swallowed)?
+                .map(|r| Expr::Paren(Box::new(r))))
+        }
+        Expr::Optional(inner) => Ok(rewrite_yq_del_comma_leaves(inner, root, swallowed)?
             .map(|r| Expr::Optional(Box::new(r)))),
         Expr::Comma(branches) => {
             let mut new_branches: Vec<Expr> = vec_with_capacity(branches.len());
             for branch in branches {
-                if let Some(nested) = rewrite_yq_del_comma_leaves(branch, root, abort_at, leaf)? {
+                if let Some(nested) = rewrite_yq_del_comma_leaves(branch, root, swallowed)? {
                     new_branches.push(nested);
                     continue;
                 }
-                let aborted = abort_at.is_some_and(|at| *leaf <= at);
-                *leaf += 1;
+                let aborted = swallowed.iter().any(|l| core::ptr::eq(*l, branch));
                 if !needs_path_prepass(branch) {
                     match yq_del_slice_outcome(branch, root, false) {
                         YqDelSliceOutcome::DropParent(rewritten) => {

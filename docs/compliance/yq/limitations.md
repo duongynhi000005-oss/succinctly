@@ -4076,9 +4076,13 @@ and a tail after the run (`.[2:3][0]`, `.[2:3].x`) is inert without stopping any
 yq also *creates* while it resolves the paths, before the stop: an index past the end of an array
 extends it with `null`s, and an index or `.[]` on a `null` makes an array
 (`del(.x[3], .[2:3])` over `{"x":[1]}` is `{"x":[1,null,null,null]}`). A group in which a branch
-before the stop could do that (a computed key, an index outside the array, an index or `.[]` on
-`null`) keeps the behaviour it had before #1325, which deletes that branch and creates a little
-differently; every other group follows the rule above.
+before the stop could do that keeps the behaviour it had before #1325, which deletes that branch
+and creates a little differently. "Could" is judged on the path before its first slice: a computed
+key, an index outside the array or below its start, a `.[]` that is not the last step, an index or
+`.[]` on `null`, a recursive descent, or a step on the wrong type. Every other group follows the
+rule above, over an object, array, string, number or `null` root alike. (A branch like
+`.x[3][0:1][0]`, whose slice makes it inert, creates `.x[3]` in yq and does not here; that predates
+#1325.)
 
 Still different: a bare root slice whose bounds are computed (`.[($i):3]`) is not recognised as the
 stop (the group is deleted as if it were absent), and a branch that raises before the stop raises

@@ -187,6 +187,27 @@ fn test_1325_d_branches_before_the_stop_that_create_nothing() -> Result<()> {
     Ok(())
 }
 
+/// A scalar or `null` root takes the same rule (the slice of a string is a string, of anything else
+/// an empty sequence, and neither has a parent). (document, filter, `yq -o=json -I0` output).
+const SCALAR_ROWS: &[(&str, &str, &str)] = &[
+    ("\"abcdef\"", "del(.b, .[2:3])", "\"abcdef\"\n"),
+    ("\"abcdef\"", "del(.[2:3], .b)", "\"abcdef\"\n"),
+    ("null", "del(.b, .[2:3])", "null\n"),
+    ("null", "del(.[2:3], .b)", "null\n"),
+    ("5", "del(.b, .[2:3])", "5\n"),
+    ("5", "del(.[2:3], .b)", "5\n"),
+];
+
+#[test]
+fn test_1325_e_a_scalar_or_null_root_takes_the_same_rule() -> Result<()> {
+    for (input, filter, want) in SCALAR_ROWS {
+        let (out, code) = run_yq_stdin(filter, input, &["-o=json", "-I=0"])?;
+        assert_eq!(code, 0, "{filter} on {input}");
+        assert_eq!(&out, want, "{filter} on {input}");
+    }
+    Ok(())
+}
+
 #[test]
 fn test_1325_a_a_bare_root_slice_stops_the_delete_over_an_object() -> Result<()> {
     for (filter, want) in OBJECT_ROWS {
