@@ -78,6 +78,15 @@ fn test_4851_c_a_tag_and_an_anchor_on_separate_lines_are_accepted() -> Result<()
         ("a:\n  &x\n  !!str\n  v\nb: 1\n", "a: &x !!str v\nb: 1\n"),
         ("a: !!map\n  &x\n  b: 1\n", "a: &x !!map\n  b: 1\n"),
         ("a: &x\n  !!map\n  b: 1\n", "a: &x !!map\n  b: 1\n"),
+        // A key that merely contains a tag or an anchor inside its quotes owns no properties.
+        ("\"a: !x\":\n  !!str\n  v\n", "\"a: !x\": !!str v\n"),
+        ("'k: &a':\n  &b\n  v\n", "'k: &a': &b v\n"),
+        ("\"a: &x\":\n  &y\n  v\n", "\"a: &x\": &y v\n"),
+        ("- \"a: !x\":\n    !!str\n    v\n", "- \"a: !x\": !!str v\n"),
+        (
+            "k:\n  \"note: !important\":\n    !!str\n    v\n",
+            "k:\n  \"note: !important\": !!str v\n",
+        ),
         // Two different nodes, each with one tag.
         ("a:\n  !!str\nb:\n  !!str\n", "a: !!str\nb: !!str\n"),
         ("a: !!str\n  x\nb: !!str\n  y\n", "a: !!str x\nb: !!str y\n"),
@@ -109,6 +118,9 @@ fn test_4851_d_a_repeated_property_kind_on_a_later_line_is_refused() -> Result<(
         "-\n  !!str\n  !!int\n- 2\n",
         "-\n  !!str\n  !!int\n  v\n- 2\n",
         "- &x\n  &y\n  b: 1\n",
+        // The owner's line ends in several properties.
+        "k: &x !!map\n  &y\n  b: 1\n",
+        "- !x &y\n  !z\n  v\n",
         "- - &x\n    &y\n    b: 1\n",
         // A blank line or a comment between them does not make them two nodes.
         "a:\n  !!str\n\n  !!int\nb: 1\n",
@@ -123,5 +135,17 @@ fn test_4851_d_a_repeated_property_kind_on_a_later_line_is_refused() -> Result<(
         assert_eq!(out, "", "{input:?}");
         assert!(err.contains("inconsistent indentation"), "{input:?}: {err}");
     }
+    Ok(())
+}
+
+/// A comment after the properties is claimed by a block scalar header on the next line, not
+/// lost. It prints after the text, where yq prints it on the header line (`a: !!str | # d`); a
+/// header comment on a bare key does the same (`a:` / `  | # h`), a separate divergence recorded
+/// in `docs/compliance/yq/limitations.md`.
+#[test]
+fn test_4851_e_a_commented_properties_line_before_a_block_scalar_header() -> Result<()> {
+    let (out, code) = run_yq_stdin(".", "a:\n  !!str # d\n  |\n   text\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "a: !!str |\n  text # d\n");
     Ok(())
 }

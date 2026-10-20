@@ -7388,6 +7388,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // block scalar's own line comment first (#710) — `self.last_open_bp_pos`
         // is still this node's bp_pos here since no content/children are
         // parsed yet.
+        // A comment deferred past properties on the line above (#4851) is claimed first, so it
+        // precedes the header's own, as on a mapping key (see `take_pending_head_comment`).
+        self.take_pending_head_comment(self.last_open_bp_pos);
         self.maybe_capture_line_comment(self.last_open_bp_pos);
         self.skip_to_eol();
         self.skip_line_break();
@@ -8229,30 +8232,16 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if rest.is_empty() || rest[0] == b'#' {
                 continue;
             }
-            let code_end = (0..rest.len())
-                .find(|&i| rest[i] == b'#' && i > 0 && matches!(rest[i - 1], b' ' | b'\t'))
-                .unwrap_or(rest.len());
-            let code = &rest[..code_end];
+            let (_, properties) = split_trailing_properties(rest);
             if only_node_properties(rest) {
-                kinds(code, &mut above);
+                kinds(properties, &mut above);
                 continue;
             }
             if Self::deferred_value_owner(lead, rest).is_none() {
                 return false;
             }
-            // The owner's own trailing properties, up to its first token that is not one.
-            let mut trailing = code.len();
-            for token in code.split(|&b| b == b' ' || b == b'\t').rev() {
-                if token.is_empty() {
-                    trailing -= 1;
-                    continue;
-                }
-                if !matches!(token[0], b'&' | b'!') {
-                    break;
-                }
-                trailing -= token.len();
-            }
-            kinds(&code[trailing..], &mut above);
+            // The owner's own trailing properties.
+            kinds(properties, &mut above);
             break;
         }
         (current[0] && above[0]) || (current[1] && above[1])
@@ -8688,20 +8677,26 @@ fn trim_spaces_end(bytes: &[u8]) -> &[u8] {
     &bytes[..len]
 }
 
-/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
-/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
-/// (#4530).
-fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
-    // A `#` opens a comment only outside a quoted key (`"x # y":`), and a quote opens one only
-    // at the start of a token (`it's` does not).
+/// `line` (already without its leading spaces) split into the code before its node properties and
+/// those properties: a trailing comment is set aside, then the `&anchor` / `!tag` tokens at the
+/// end of what is left (`k: &x !!seq`, `- &x`), up to the first token that is not one. The code
+/// comes back without the whitespace before the properties. A `#` opens a comment only outside a
+/// quoted key (`"x # y":`), a quote opens one only at the start of a token (`it's` does not), and
+/// a property never starts inside one, so `"a: !x":` has none.
+fn split_trailing_properties(line: &[u8]) -> (&[u8], &[u8]) {
     let mut quote = None;
     let mut code_end = line.len();
+    // The first byte past the last closing quote: no property token starts before it.
+    let mut outside_from = 0;
     let mut i = 0;
     while i < line.len() {
         let b = line[i];
         match quote {
             Some(b'"') if b == b'\\' => i += 1,
-            Some(q) if b == q => quote = None,
+            Some(q) if b == q => {
+                quote = None;
+                outside_from = i + 1;
+            }
             Some(_) => {}
             None if matches!(b, b'"' | b'\'')
                 && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) =>
@@ -8717,18 +8712,33 @@ fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
         i += 1;
     }
     let mut code = trim_spaces_end(&line[..code_end]);
-    while let Some(token_start) = code
-        .iter()
-        .rposition(|&b| matches!(b, b' ' | b'\t'))
-        .map(|at| at + 1)
-    {
+    let mut properties_start = code.len();
+    loop {
+        let separator = code.iter().rposition(|&b| matches!(b, b' ' | b'\t'));
+        let token_start = separator.map_or(0, |at| at + 1);
         let token = &code[token_start..];
-        if !matches!(token.first(), Some(b'&' | b'!')) {
+        // The first token of the line has nothing before it to make it a property of a key, so
+        // it is one only if it does not end in the key's colon (`&x:`).
+        let is_property = matches!(token.first(), Some(b'&' | b'!'))
+            && (separator.is_some() || token.last() != Some(&b':'));
+        if token_start < outside_from || !is_property {
             break;
         }
+        properties_start = token_start;
         code = trim_spaces_end(&code[..token_start]);
+        if separator.is_none() {
+            break;
+        }
     }
-    code.last() == Some(&b':')
+    let properties = &line[properties_start.min(code_end)..code_end];
+    (code, properties)
+}
+
+/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
+/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
+/// (#4530).
+fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
+    split_trailing_properties(line).0.last() == Some(&b':')
 }
 
 /// Whether `line` (already without its leading spaces) is a `-` and nothing else, a trailing
@@ -10437,6 +10447,8 @@ mod tests {
             "a: !!str\n  !!int\nb: 1\n",
             "a: &x\n  &y\nb: 1\n",
             "a: !!map # c\n  !!str\n",
+            "k: &x !!map\n  &y\n  b: 1\n",
+            "- !x &y\n  !z\n  v\n",
             "- !!str\n  !!int\n- 2\n",
             "-\n  !!str\n  !!int\n  v\n",
             "- - &x\n    &y\n    b: 1\n",
@@ -10462,6 +10474,9 @@ mod tests {
             "x: 1\n  !!str\n",
             "\"a b\": !!str\n  &x\n  v\n",
             "a:\n  !!str # c\n  v\nb: 1\n",
+            "\"a: !x\":\n  !!str\n  v\n",
+            "'k: &a':\n  &b\n  v\n",
+            "- \"a: &x\":\n    &y\n    v\n",
         ] {
             assert!(
                 crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),

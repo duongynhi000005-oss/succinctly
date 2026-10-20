@@ -5455,6 +5455,11 @@ a comment on that bare `-` goes forward as the next node's head, as in yq. So do
 the properties themselves (`a:` / `  !!str # d` / `b: 1` prints `b: 1 # d`, #4851), and a tag or an
 anchor given on one line cannot be given again on the next (`a:` / `  !!str` / `  !!int` is refused,
 as in yq; the error reads `inconsistent indentation` where yq's reads `did not find expected key`).
+A comment after the properties is claimed by a block scalar header on the next line and prints after
+the text, where yq prints it on the header line (`a: !!str | # d`) -- the same placement a header
+comment gets on a bare key (`a:` / `  | # h`). When a comment is already pending from the line above
+(`- &x # c1` / `  !!str # c2` / `  v`), or the value line has a comment of its own (`!!str # d` /
+`v # e`), only the comment of the value's own line survives, where yq keeps both.
 One small difference remains, pinned by `test_own_line_properties_residuals_2835`: a block that
 settles past a sequence closing under a tagged empty item (`k:` / `  - # c` / `    # x` /
 `    !!str` / `z: 1`) prints a blank line before the next key that yq leaves out (the getters agree).
