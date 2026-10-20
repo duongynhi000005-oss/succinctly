@@ -49708,6 +49708,30 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
     }
 }
 
+/// The branch of an `if . then A else B end` UPDATE that a step with state `state` runs (#4948), looking
+/// through `elif` chains: a truthy state runs `A`, any other `B`, and the branch not taken moves nothing.
+/// Any other UPDATE is returned as it is, and so is an `if` on a condition other than `.`, whose own
+/// navigation may move the register before the branch runs.
+fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
+    let mut current = update;
+    while let Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = unwrap_paren(current)
+    {
+        if !matches!(unwrap_paren(cond), Expr::Identity) {
+            break;
+        }
+        current = if state.is_truthy() {
+            then_branch
+        } else {
+            else_branch
+        };
+    }
+    current
+}
+
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
 /// is a caught bind of `.` ([`source_is_caught_destructure`]) and nothing else in it can move it
 /// (#4627). Jq mode only, and not where the accumulator or register is a `null`/boolean.
@@ -63313,6 +63337,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // collected: jq evaluates every one of its outputs.
                         let entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
+                        let update_taken = if S::TAG == EvalTag::Jq {
+                            taken_if_branch(&bound_update, &entry_state)
+                        } else {
+                            &bound_update
+                        };
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
                         // escapes first, must not leave the old node's path behind).
@@ -63464,7 +63493,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 }
                                 let extract_reg = active_reg.advance::<S>(
                                     update_branch,
-                                    &bound_update,
+                                    // #4948: only the branch of an `if . then .. else .. end` the state took ran.
+                                    update_taken,
                                     frame,
                                     entry_state_by_kind || is_null_or_bool(&active_reg.value),
                                 );
