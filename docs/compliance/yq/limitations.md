@@ -699,6 +699,16 @@ in eight contexts (mapping value, nested, sequence item, sequence in mapping, ma
 nested sequence, key, root), through the streaming route and a write; the pinned rows are
 `json_string_style_line_break_*_3587` and `test_json_string_with_a_line_break_is_a_literal_block_3587`.
 
+A key *written in YAML* gets the same `? key` form when its decoded value is over 128 bytes or holds a
+break ([#4950](https://github.com/rust-works/succinctly/issues/4950)), in the spelling it was written in
+(`? "key"`, `? 'key'`; `-P` clears it), on the streaming route and the write route. A container value with
+an anchor or a tag keeps it on the `:` line and starts its first entry below. Not matched: a long key in
+flow context (yq writes `{? key : 1}`), a key holding a break under `-P` (yq writes a literal block
+there), and a key close to the limit once its anchor and tag count toward the 128 bytes (only the
+decoded value is measured). The streaming route asks once per mapping whether the document has any
+run of 129 bytes without a line break or any backslash (`YamlIndex::may_have_long_key`), so a document
+with neither never looks at a key's length.
+
 A *YAML source* scalar that holds U+2028 or U+2029 gets the same spelling
 ([#4865](https://github.com/rust-works/succinctly/issues/4865)): yq's scanner reads either as a line
 break, and its emitter writes the scalar single-quoted across lines, the break followed by the

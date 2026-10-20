@@ -2142,6 +2142,10 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                     // another entry follows it (#2795; see
                     // `write_foot_comment_lines`).
                     let mut prev_had_foot = false;
+                    // Whether any line of the document is long enough to hold a key go-yaml
+                    // writes as `? key` (#4950); asked once per mapping, so the usual document
+                    // keeps the key writer it always had.
+                    let long_keys_possible = self.index.may_have_long_key(self.text);
                     for field in items {
                         if !first {
                             if prev_had_foot {
@@ -2153,8 +2157,17 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                         first = false;
                         let key_cursor = field.key_cursor();
                         self.write_head_comments_at(out, indent, key_cursor.bp_pos)?;
-                        let explicit_key =
-                            write_yaml_block_field_key(out, field, indent, indent_spaces, unit)?;
+                        let explicit_key = if long_keys_possible {
+                            write_yaml_block_field_key_checked(
+                                out,
+                                field,
+                                indent,
+                                indent_spaces,
+                                unit,
+                            )?
+                        } else {
+                            write_yaml_block_field_key(out, field, indent, indent_spaces, unit)?
+                        };
                         out.write_char(':')?;
                         // Check if value needs newline
                         let value = field.value_cursor();
@@ -2213,7 +2226,12 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // #1485/#1881: rounded up from the field's own
                             // (compact-adjusted) column.
                             let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
-                            if explicit_key {
+                            // An anchor or a tag keeps the first entry off the `:` line (#4950:
+                            // `? key` / `: &a` / `  a: 1`).
+                            if explicit_key
+                                && value.anchor().is_none()
+                                && value.explicit_tag_at(None).is_none()
+                            {
                                 // `? key` / `: a: 1`: the value's first entry shares the
                                 // `:` line (#3587), at the column one indent step in.
                                 for _ in 1..indent_spaces {
@@ -9203,6 +9221,47 @@ fn write_yaml_block_field_key<W: AsRef<[u64]>, Out: core::fmt::Write>(
     }
     write_yaml_field_key(out, field)?;
     Ok(false)
+}
+
+/// [`write_yaml_block_field_key`] for a document that might hold a key over 128 bytes: a key
+/// written in YAML takes go-yaml's explicit form just the same when its decoded value is over
+/// 128 bytes or holds a line break (#4950), in the spelling it was written in. Returns whether it
+/// did, as the writer it wraps does.
+///
+/// A key's source span of 128 bytes or less without a backslash cannot decode to more or to a
+/// break, and a plain key's span is known without a scan, so a short key goes on to the ordinary
+/// writer.
+#[inline(never)]
+fn write_yaml_block_field_key_checked<W: AsRef<[u64]>, Out: core::fmt::Write>(
+    out: &mut Out,
+    field: YamlField<'_, W>,
+    indent: &str,
+    indent_spaces: usize,
+    unit: char,
+) -> Result<bool, StreamFailure> {
+    if !field.key_cursor().index.canonicalize_numbers() {
+        if let YamlValue::String(s) = field.key() {
+            // A break is spelled as an escape in a one-line key, so it takes a backslash.
+            let long = match s {
+                YamlString::Unquoted { start, end, .. } => end.saturating_sub(start) > 128,
+                _ => {
+                    let raw = s.raw_bytes();
+                    raw.len() > 128 || raw.contains(&b'\\')
+                }
+            };
+            if long
+                && s.as_str()
+                    .is_ok_and(|decoded| !go_yaml_key_is_simple(&decoded))
+            {
+                out.write_str("? ")?;
+                write_yaml_field_key(out, field)?;
+                out.write_char('\n')?;
+                out.write_str(indent)?;
+                return Ok(true);
+            }
+        }
+    }
+    write_yaml_block_field_key(out, field, indent, indent_spaces, unit)
 }
 
 /// Write a child value that is always inline (flow-style mapping/sequence
@@ -16420,6 +16479,59 @@ mod tests {
             }
         }
         panic!("Could not find value");
+    }
+
+    /// #4950: a YAML key over 128 bytes streams as `? key` with the `:` on a line of its own, in
+    /// the spelling it was written in; the anchor of a container value stays on the `:` line and
+    /// the first entry starts below it. Streaming the mapping directly (not through the CLI)
+    /// keeps the writer's coverage in-process.
+    #[test]
+    fn test_stream_yaml_long_key_is_an_explicit_key_4950() {
+        let long = "k".repeat(140);
+        let cases = [
+            (
+                format!("m:\n  {long}: 1\n  b: 2\n"),
+                format!("? {long}\n: 1\nb: 2"),
+            ),
+            (
+                format!("m:\n  \"{long}\": 1\n"),
+                format!("? \"{long}\"\n: 1"),
+            ),
+            (format!("m:\n  '{long}': 1\n"), format!("? '{long}'\n: 1")),
+            (
+                format!("m:\n  {long}:\n    a: 1\n"),
+                format!("? {long}\n: a: 1"),
+            ),
+            (
+                format!("m:\n  {long}: &x\n    a: 1\n"),
+                format!("? {long}\n: &x\n  a: 1"),
+            ),
+            (
+                format!("m:\n  {}: 1\n", "k".repeat(128)),
+                format!("{}: 1", "k".repeat(128)),
+            ),
+        ];
+        for (yaml, expected) in cases {
+            let index = YamlIndex::build(yaml.as_bytes()).unwrap();
+            let root = index.root(yaml.as_bytes());
+            let YamlValue::Mapping(fields) = first_doc(root) else {
+                panic!("{yaml:?}: not a mapping");
+            };
+            let field = fields.into_iter().next().expect("one field");
+            let mut out = String::new();
+            field
+                .value_cursor()
+                .stream_yaml(
+                    &mut out,
+                    IndentSpec {
+                        width: 2,
+                        unit: ' ',
+                    },
+                    false,
+                )
+                .expect("streams");
+            assert_eq!(out, expected, "{yaml:?}");
+        }
     }
 
     /// Direct coverage for `DocumentCursor::stream_yaml`'s `YamlCursor`

@@ -36,9 +36,9 @@ use succinctly::json::JsonIndex;
 use succinctly::yaml::{
     deeper_yaml_indent, format_float_yq_yaml, format_float_yq_yaml_nested, go_yaml_block_scalar,
     go_yaml_dom_scalar, go_yaml_double_quoted_scalar, go_yaml_explicit_key_scalar,
-    go_yaml_forces_double_quotes, go_yaml_resolved_tag, go_yaml_tagged_str_scalar,
-    go_yaml_unicode_separator_scalar, resolve_plain_sourced, stream_json_sequence,
-    stream_yaml_sequence, ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
+    go_yaml_forces_double_quotes, go_yaml_key_is_simple, go_yaml_resolved_tag,
+    go_yaml_tagged_str_scalar, go_yaml_unicode_separator_scalar, resolve_plain_sourced,
+    stream_json_sequence, stream_yaml_sequence, ResolvedScalar, YamlCursor, YamlIndex, YamlValue,
 };
 
 use super::m2_gate::{can_use_m2_streaming, eval_all_matches_per_document};
@@ -7561,17 +7561,30 @@ fn emit_yaml_value_at_depth(
                         // #1485/#1881: rounded up from the field's own
                         // column -- see `compact_child_indent`.
                         let val_indent = compact_child_indent(indent, &config.indent_str);
-                        // #3587: a JSON key go-yaml cannot write as a simple key (a line
-                        // break, over 128 bytes) is `? key` and the `:` on a line of its own
-                        // at the mapping's column.
-                        let explicit_key = (config.json_sourced_floats
-                            && comments.key_style(k).is_empty()
+                        // #3587: a key go-yaml cannot write as a simple key (a line break, over
+                        // 128 bytes) is `? key` and the `:` on a line of its own at the
+                        // mapping's column. A key with no style, anchor or tag of its own (JSON
+                        // or computed, or cleared by `-P`) takes go-yaml's choice of scalar; a
+                        // YAML key keeps the spelling it was written in (#4950).
+                        let plain_key = comments.key_style(k).is_empty()
                             && comments.key_anchor(k).is_none()
-                            && comments.key_tag(k).is_none())
-                        .then(|| {
+                            && comments.key_tag(k).is_none();
+                        let explicit_key = if go_yaml_key_is_simple(k) {
+                            None
+                        } else if plain_key {
                             go_yaml_explicit_key_scalar(k, &val_indent, config.indent_str.len())
-                        })
-                        .flatten()
+                        } else {
+                            Some(with_key_anchor(
+                                comments,
+                                k,
+                                yaml_quote_key(
+                                    k,
+                                    comments.key_style(k),
+                                    false,
+                                    config.json_sourced_floats,
+                                ),
+                            ))
+                        }
                         .map(|scalar| format!("? {scalar}\n{indent}"));
                         let is_explicit_key = explicit_key.is_some();
                         let key = explicit_key.unwrap_or_else(|| {
