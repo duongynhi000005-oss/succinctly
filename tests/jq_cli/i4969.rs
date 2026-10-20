@@ -419,3 +419,84 @@ fn test_4969_reduce_update_alt_chain_bind_of_dot_controls_that_answer() -> Resul
         ),
     ])
 }
+
+/// #4969: the `?//` chains with no bare `$name` alternative must keep their exact wording. Their retry
+/// target is another pattern, not the whole accumulator, so the first alternative's refusal names the step
+/// jq names (`near attempt to access element "a" of ...`); the exemption for a source starting at the
+/// accumulator is read only for a chain holding a bare `$name`. Also the single-pattern forms, whose
+/// wording was never touched.
+#[test]
+fn test_4969_reduce_update_alt_chain_without_a_bare_alternative_keeps_its_wording() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            "{\"a\":1}",
+            "path(reduce .. as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "del(reduce .. as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "path(reduce (.,.a?) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "del(reduce (.,.a?) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "path(reduce (.,..) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "del(reduce (.,..) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "path(reduce limit(2;..) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "del(reduce limit(2;..) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "path(reduce (.,.[]?) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            "{\"a\":1}",
+            "del(reduce (.,.[]?) as $i (.; . as [$a] ?// {a:$a} | .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+    ])
+}

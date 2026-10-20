@@ -62214,12 +62214,13 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         });
         marker && !fold
     };
-    // #4969: whether UPDATE holds a `?//` chain. Syntactic, so decided once.
+    // #4969: whether UPDATE holds a `?//` chain with a bare `$name` alternative, the retry target that binds
+    // the whole accumulator. Syntactic, so decided once.
     let update_has_alt_chain = S::TAG == EvalTag::Jq
-        && any_subexpr(
-            update,
-            &mut |e| matches!(e, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
-        );
+        && any_subexpr(update, &mut |e| {
+            matches!(e, Expr::AsPattern { patterns, .. }
+                if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
+        });
     // #4486: whether some comma item of UPDATE is a caught pure navigation, which emits nothing on
     // an accumulator it raises on ([`silence_failing_caught_navs`]).
     let update_has_caught_nav = update_navigates && comma_with_caught_navigation(update);
@@ -62657,8 +62658,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // `.` in a comma) leaves the accumulator on it at the step the accumulator is already
                         // at the register, so a pattern step on it passes as jq's does; the move marks below
                         // are for an element that is some other node. Read only for an UPDATE holding a `?//`
-                        // chain, the one shape whose retry onto the bare alternative made the mark unsound;
-                        // every other shape keeps the wording it had.
+                        // chain with a bare `$name` alternative, whose retry onto it binds the whole
+                        // accumulator and made the mark unsound; every other shape keeps the wording it had.
                         let elem_is_accumulator = update_has_alt_chain
                             && acc_at_register
                             && elem
