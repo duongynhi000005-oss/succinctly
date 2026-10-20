@@ -5534,9 +5534,14 @@ comment gets on a bare key (`a:` / `  | # h`). When a comment is already pending
 Comment lines between a bare `-` and the properties (`k:` / `  - # c` / `    # x` / `    !!str` /
 `z: 1`) head whatever opens after the empty node, as the dash line's own comment does (#4851), where
 they used to be placed by their column: the foot of `k`, printed with a blank line after it. One
-small difference remains, pinned by `test_4851_e` in `tests/yq_cli/i4851.rs`: at the
+small difference remains, pinned by `test_4851_g` in `tests/yq_cli/i4851.rs`: at the
 end of the document (`k:` / `  - # c` / `    !!str` and nothing after it) yq drops the comments
-outright and this keeps them as the document's foot, since matching would discard them.
+outright and this keeps them as the document's foot, since matching would discard them; the same
+before a `---` or `...` (`k:` / `  -` / `    # x` / `    !!str` / `---`). Three more shapes differ,
+pinned by `test_4851_h`: a blank line between the properties and the next key still prints a blank
+line after the comments where yq prints none, and a comment after the properties line
+(`    !!str` / `  # y`) prints after the block where yq prints it first, then a blank line, then the
+block.
 
 A bare item's comment before a value that *does* follow (`- # note` / `  k: v`, #1079's other
 half) is the head comment of that value's first node in yq: the first key of a block mapping or the

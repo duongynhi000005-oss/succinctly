@@ -4206,7 +4206,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         // Comment lines between the dash and the properties go forward with
                         // the rest, as the dash line's own comment does below: yq heads
                         // whatever opens next with them, not placing them by the column they
-                        // were written at (#4851).
+                        // were written at (#4851). The whole block is reset, a line pending
+                        // above the dash included, since it is one block to the placement
+                        // rule and yq moves it the same way (`- 1` / `# a` / `-` / `# x` /
+                        // `!!str`, measured).
                         self.pending_block = PendingBlock::default();
                     }
                     match (trailing, empty_property_item) {

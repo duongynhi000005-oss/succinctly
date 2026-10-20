@@ -155,7 +155,7 @@ fn test_4851_e_a_commented_properties_line_before_a_block_scalar_header() -> Res
 /// placed by the column they were written at, which made them the sequence owner's foot and
 /// printed a blank line after them that yq does not.
 #[test]
-fn test_4851_d_comment_lines_before_own_line_properties_head_the_next_node() -> Result<()> {
+fn test_4851_f_comment_lines_before_own_line_properties_head_the_next_node() -> Result<()> {
     let rows: &[(&str, &str)] = &[
         (
             "k:\n  - # c\n    # x\n    !!str\nz: 1\n",
@@ -235,10 +235,44 @@ fn test_4851_d_comment_lines_before_own_line_properties_head_the_next_node() -> 
 /// (`k:` / `  - # c` / `    # x` / `    !!str` prints no `# c` / `# x`), and this keeps them as
 /// the document's foot: matching would discard them (recorded in `limitations.md`).
 #[test]
-fn test_4851_e_comments_before_own_line_properties_at_the_end_of_the_document_are_kept(
+fn test_4851_g_comments_before_own_line_properties_at_the_end_of_the_document_are_kept(
 ) -> Result<()> {
     let (out, code) = run_yq_stdin(".", "k:\n  - # c\n    # x\n    !!str\n", &[])?;
     assert_eq!(code, 0);
     assert_eq!(out, "k:\n  - !!str\n# c\n# x\n");
+    Ok(())
+}
+
+/// Shapes next to the block that still differ from yq, pinned with this tool's answer so a change
+/// is deliberate (all recorded in `limitations.md`): a `---` or `...` after the empty node (yq
+/// drops the comments, this keeps them), a blank line between the properties and the next key
+/// (yq prints none after the comments), and a comment after the properties line (yq orders it
+/// before the block, with a blank line between them).
+#[test]
+fn test_4851_h_residuals_next_to_the_block_are_pinned() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        (
+            "k:\n  -\n    # x\n    !!str\n---\nz: 1\n",
+            "k:\n  - !!str\n# x\n---\nz: 1\n",
+        ),
+        ("k:\n  -\n    # x\n    !!str\n...\n", "k:\n  - !!str\n# x\n"),
+        (
+            "k:\n  - # c\n    # x\n    !!str\n\nz: 1\n",
+            "k:\n  - !!str\n# c\n# x\n\nz: 1\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\n  # y\nz: 1\n",
+            "k:\n  - !!str\n# x\n# y\nz: 1\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\n# y\nz: 1\n",
+            "k:\n  - !!str\n# x\n\n# y\nz: 1\n",
+        ),
+    ];
+    for (input, ours) in rows {
+        let (out, code) = run_yq_stdin(".", input, &[])?;
+        assert_eq!(code, 0, "{input:?}");
+        assert_eq!(&out, ours, "{input:?}");
+    }
     Ok(())
 }
