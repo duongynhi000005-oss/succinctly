@@ -127,6 +127,8 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Whether the indexed text could spell a `<<` merge key, measured once on first use (#4102);
     /// see [`Self::may_have_merge_keys`].
     may_have_merge_keys: OnceCell<bool>,
+    /// Memo for [`Self::may_have_long_key`].
+    may_have_long_key: OnceCell<bool>,
     /// The BP position of every document's content node, in document order, measured once on
     /// first use (#4871); see [`Self::document_starts`].
     document_starts: OnceCell<Vec<usize>>,
@@ -230,6 +232,7 @@ impl YamlIndex<Vec<u64>> {
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
             may_have_merge_keys: OnceCell::new(),
+            may_have_long_key: OnceCell::new(),
             document_starts: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         };
@@ -303,6 +306,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             yq_header: OnceCell::new(),
             text_is_ascii: OnceCell::new(),
             may_have_merge_keys: OnceCell::new(),
+            may_have_long_key: OnceCell::new(),
             document_starts: OnceCell::new(),
             yq_preamble: OnceCell::new(),
         }
@@ -1026,6 +1030,29 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
                 }
             }
             false
+        })
+    }
+
+    /// Whether `text` could hold a mapping key that go-yaml cannot write as a simple key: one
+    /// decoding to over 128 bytes, or to a line break (#4950). `false` is a proof that none does
+    /// and `true` only that one might.
+    ///
+    /// A key is written on one line, so one over 128 bytes needs a run of more than 128 bytes
+    /// with no line break, and such a run holds a whole aligned 64-byte block with none; a key
+    /// that decodes to a line break, being on one line, spells it as an escape, so it needs a
+    /// backslash. The answer is whether some aligned block has no `\n` or `\r`, or the text has
+    /// a `\`, from one pass of the standard library's byte search, kept from the first
+    /// measurement. `text` must be the text the index was built from.
+    #[must_use]
+    pub(crate) fn may_have_long_key(&self, text: &[u8]) -> bool {
+        *self.may_have_long_key.get_or_init(|| {
+            // A `?` may open an explicit key, which can fold several short lines into one
+            // long key.
+            text.contains(&b'\\')
+                || text.contains(&b'?')
+                || text
+                    .chunks_exact(64)
+                    .any(|block| !block.contains(&b'\n') && !block.contains(&b'\r'))
         })
     }
 
@@ -2813,6 +2840,41 @@ mod tests {
             semi.tags,
         );
         assert!((0..rebuilt.bp().len()).all(|bp| rebuilt.property_start(bp).is_none()));
+    }
+
+    /// #4950: `false` proves that no key is long or holds a break; `true` only that one might (a
+    /// line of 64 bytes or more can answer `true` without holding a long key).
+    #[test]
+    fn test_may_have_long_key_4950() {
+        let long = "k".repeat(129);
+        let near = "k".repeat(40);
+        for (text, expected) in [
+            ("a: 1\nb: [2, 3]\n".to_string(), false),
+            (format!("{near}: 1\n{near}: 2\n"), false),
+            (format!("{long}: 1\n"), true),
+            (format!("m:\n  \"{long}\": 1\n"), true),
+            ("\"a\\nb\": 1\n".to_string(), true),
+            // An explicit key can fold short lines into one long key.
+            ("? a\n  b\n: v\n".to_string(), true),
+            // Short lines of CR breaks are lines too.
+            (format!("a: 1\r\nb: {near}\r\n{near}\r\n"), false),
+            // A long value on one line may sit beside a key, so it answers `true` too.
+            (format!("a: {long}\n"), true),
+            // Shorter than a block: nothing to measure.
+            ("a: 1".to_string(), false),
+        ] {
+            let index = YamlIndex::build(text.as_bytes()).expect("should parse");
+            assert_eq!(
+                index.may_have_long_key(text.as_bytes()),
+                expected,
+                "{text:?}"
+            );
+            assert_eq!(
+                index.may_have_long_key(text.as_bytes()),
+                expected,
+                "{text:?}"
+            );
+        }
     }
 
     /// #4102: a document is cleared of merge keys only when no spelling of `<<` can occur in
