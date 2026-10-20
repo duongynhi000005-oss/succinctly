@@ -5753,13 +5753,14 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
   (#4193): then the fold spans every node too, so `.v[] | {"n": .p, "m": (.q | select(. > 1))}`
   over three nodes of which the middle one has no `m` is nothing in yq, and `{"n":1,"m":5}
   {"n":3,"m":7}` here.
-- **`,` over two variable references.** yq's `UNION` drops its right operand when both operands are
-  variable references, whatever they hold: `1 as $z | 2 as $y | $z, $y` prints only `1`, and so does
-  `$z, $y, $w`; `., .` collapses too (`succinctly yq` already does that one). Array collection is
-  unaffected (`[$z, $y]` is `[1,2]`). It is a property of the comma operator everywhere, not of
-  `{...}`, so a bare entry shows it: `[[1,2],[3,4]] as $z | {$z, $z}` is `1 2 3 4` in yq and `1 2 2 4`
-  here. The mechanism is not the pointer comparison in `operator_union.go` that it first looks like
-  (#4183).
+- **`,` over two reads of one variable (#4183).** A `,` drops its right operand when both operands
+  are the very same list (a pointer comparison in `operator_union.go`), and a variable read hands back
+  the list the variable is stored in, so `[1] as $z | $z, $z` is `[1]` once, as `., .` is, and
+  `[1] as $z | [$z, $z]` is `[[1]]` (`succinctly yq` agrees; two different variables keep both). The
+  earlier reading of this (`1 as $z | 2 as $y | $z, $y` printing only `1`) was the scope of an `as` body,
+  which ends at a comma in yq as a pipe binds tighter than `,`: `(1 as $z | 2 as $y | $z), $y`, and
+  `succinctly yq` parses it that way now. Not matched: a bare entry of an object, where the collapse
+  shows differently (`[[1,2],[3,4]] as $z | {$z, $z}` is `1 2 3 4` in yq and `1 2 2 4 9 12 12 16` here).
 - **A parenthesized pair (#4185).** `{"x": 1, ("a": 2)}` is `{"x":1,"a":2}` in yq (`:` is an
   ordinary binary operator). `succinctly yq` flattens a parenthesised run of pairs at an entry
   position into the object's own entries, in order (`{("a": 2, ("b": 3))}` is `{"a":2,"b":3}`);
