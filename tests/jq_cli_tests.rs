@@ -115105,7 +115105,7 @@ fn test_format_prefixed_string_succinctly_extensions_3316() -> Result<()> {
             "\"\\\"a\\\"|\\\"b\\\"\"\n",
         ),
         (r#"@yaml "v: \(1)""#, "null", "\"v: 1\\n\"\n"),
-        (r#"@props "k=\(1)""#, "null", "\"k=1\"\n"),
+        (r#"@props "k=\(1)""#, "null", "\"k=1\\n\"\n"),
         (r#"@urid "\(.s)""#, r#"{"s":"a b"}"#, "\"a b\"\n"),
     ] {
         let (stdout, code) = run_jq_stdin(filter, input, &["-c"])?;
