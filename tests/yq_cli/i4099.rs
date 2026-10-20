@@ -3,8 +3,8 @@
 //! `YAML parse error: empty input` (exit 1). Each row is a live yq v4.53.3 capture over empty
 //! stdin; an empty file, and `-` for stdin, answer the same.
 //!
-//! yq skips an empty file among several and reads the others; that is not done here, so a run
-//! with more than one input is not covered.
+//! yq reads no document from an empty file and evaluates once against an empty one when a run read none;
+//! the rows with several files pin that.
 
 use anyhow::Result;
 use tempfile::NamedTempFile;
@@ -48,5 +48,50 @@ fn test_empty_file_is_one_empty_document_4099() -> Result<()> {
             "{filter}: {stderr}"
         );
     }
+    Ok(())
+}
+
+/// An empty file among several contributes nothing; every file empty is one empty document.
+#[test]
+fn test_empty_file_among_several_inputs_4099() -> Result<()> {
+    let empty = NamedTempFile::new()?;
+    let other_empty = NamedTempFile::new()?;
+    let mut one = NamedTempFile::new()?;
+    std::io::Write::write_all(&mut one, b"a: 1\n")?;
+    for (filter, files, expected) in [
+        (".a", vec![empty.path(), one.path()], "1\n"),
+        (".a", vec![one.path(), empty.path()], "1\n"),
+        (
+            ".a",
+            vec![one.path(), empty.path(), one.path()],
+            "1\n---\n1\n",
+        ),
+        (".a", vec![empty.path(), other_empty.path()], "null\n"),
+        (".a = 1", vec![empty.path(), other_empty.path()], "a: 1\n"),
+        ("file_index", vec![empty.path(), other_empty.path()], "0\n"),
+        ("file_index", vec![empty.path(), one.path()], "1\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_files(filter, &files, &[])?;
+        assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}: {stderr}");
+    }
+    Ok(())
+}
+
+/// JSON has no line-break document: an empty `.json` input is a `null` one.
+#[test]
+fn test_empty_json_input_is_null_4099() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("e.json");
+    std::fs::write(&path, "")?;
+    for (filter, args, expected) in [
+        (".", vec!["-o", "json"], "null\n"),
+        (".a", vec![], "null\n"),
+        (".a = 1", vec!["-o", "json", "-I", "0"], "{\"a\":1}\n"),
+    ] {
+        let (stdout, stderr, code) = run_yq_files(filter, &[path.as_path()], &args)?;
+        assert_eq!((stdout.as_str(), code), (expected, 0), "{filter}: {stderr}");
+    }
+    let (stdout, code) = run_yq_stdin(".", "", &["-p", "json", "-o", "json"])?;
+    assert_eq!((stdout.as_str(), code), ("null\n", 0));
     Ok(())
 }
