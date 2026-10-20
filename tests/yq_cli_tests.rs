@@ -35766,73 +35766,37 @@ fn test_1223_multi_path_del_object_target_jq_mode_unaffected() -> Result<()> {
     Ok(())
 }
 
-/// #1223 follow-up (found by `/code-review`, filed separately): a comma
-/// branch that is itself a bare root slice (`.[2:3]`, not chained under a
-/// `Field`/`Index`) used to still reach `resolve_dynamic_indexes`'s
-/// crashing navigation, because `rewrite_yq_del_comma_branches` only
-/// rewrote a `DropParent`-classified branch away from its raw slice and
-/// left a `Noop`-classified one (which a bare root slice always is --
-/// empty residual prefix, `empty_prefix_is_identity: false`) completely
-/// unrewritten. #1219's own fix for the *sibling* crash (an `Object`
-/// target combined with a chained-slice-then-non-slice branch, see
-/// `test_1219_comma_grouped_noop_sibling_object_target_no_longer_crashes`)
-/// generalized to drop *every* `Noop`-classified branch from the comma
-/// group before navigation, which incidentally also fixes this crash --
-/// `Noop` classification never depends on `root`, so it's always safe to
-/// decide before navigation regardless of which specific shape produced
-/// it. The crash is gone, but the *result* still isn't what real yq gives:
-/// real yq leaves this whole combination completely unchanged (verified
-/// live against yq v4.53.3), while succinctly still applies the chained
-/// slice's own correct-in-isolation parent-key-drop rule to `.a` -- the
-/// same "no coherent rule to replicate" territory as the
-/// order-sensitivity gap below, now non-crashing but still a real
-/// divergence. If this is ever addressed, update this expectation.
+/// #1223 follow-up (found by `/code-review`, filed separately): a comma branch that is itself a
+/// bare root slice (`.[2:3]`, not chained under a `Field`/`Index`) used to still reach
+/// `resolve_dynamic_indexes`'s crashing navigation. #1219 dropped it from the group, which fixed the
+/// crash but kept the chained slice's own delete of `.a`; real yq leaves the whole document alone,
+/// because the bare slice of the root has no parent and its delete stops at it (#1325, matched
+/// since).
 #[test]
-fn test_1223_bare_slice_sibling_object_target_no_longer_crashes_but_still_diverges() -> Result<()> {
+fn test_1223_bare_slice_sibling_object_target_matches_real_yq_1325() -> Result<()> {
     let (out, code) = run_yq_stdin(
         "del(.a[0:1], .[2:3])",
         r#"{"a":{"x":1,"y":2},"b":6,"c":9}"#,
         &["-o=json", "-I=0"],
     )?;
     assert_eq!(code, 0, "out: {out:?}");
-    assert_eq!(
-        out.trim(),
-        r#"{"b":6,"c":9}"#,
-        "real yq gives {{\"a\":{{\"x\":1,\"y\":2}},\"b\":6,\"c\":9}} (fully unchanged) for this combination"
-    );
+    assert_eq!(out.trim(), r#"{"a":{"x":1,"y":2},"b":6,"c":9}"#);
     Ok(())
 }
 
-/// #1219 follow-up (found by `/code-review`'s third pass): the same
-/// bare-slice-sibling gap above, but with a trailing slice-*run*
-/// (`.a[0:2][0:1]`, #1219's own generalization) instead of a single
-/// trailing slice. On `main` (pre-#1219), this exact input hard-errored
-/// (`Cannot index object with object`) the same way the single-slice case
-/// used to; post-#1219 it no longer crashes, but -- like the single-slice
-/// case above -- still diverges from real yq for this specific ordering
-/// (real yq leaves the whole document unchanged here; the reversed
-/// ordering, `del(.[2:3], .a[0:2][0:1])`, happens to match real yq
-/// exactly, live-verified). Same "no coherent rule, order-sensitive"
-/// territory as the test above, extended to the run-generalized shape --
-/// not a new gap, just this one now reachable for a run as well as a
-/// single slice. If this is ever reconciled, update this expectation.
+/// #1219 follow-up (found by `/code-review`'s third pass): the same bare-slice sibling, with a
+/// trailing slice-*run* (`.a[0:2][0:1]`) instead of a single trailing slice. Real yq leaves the
+/// whole document unchanged for this ordering and deletes `.a` for the reversed one (#1325).
 #[test]
-fn test_1219_bare_slice_sibling_trailing_run_no_longer_crashes_but_still_diverges() -> Result<()> {
+fn test_1219_bare_slice_sibling_trailing_run_matches_real_yq_1325() -> Result<()> {
     let (out, code) = run_yq_stdin(
         "del(.a[0:2][0:1], .[2:3])",
         r#"{"a":[1,2,3,4,5,6],"b":6,"c":9}"#,
         &["-o=json", "-I=0"],
     )?;
     assert_eq!(code, 0, "out: {out:?}");
-    assert_eq!(
-        out.trim(),
-        r#"{"b":6,"c":9}"#,
-        "real yq gives {{\"a\":[1,2,3,4,5,6],\"b\":6,\"c\":9}} (fully unchanged) for this ordering"
-    );
+    assert_eq!(out.trim(), r#"{"a":[1,2,3,4,5,6],"b":6,"c":9}"#);
 
-    // The reversed ordering, unlike the one above, happens to match real
-    // yq exactly (same coincidental-agreement pattern the #1223 test above
-    // documents for the single-slice shape).
     let (out_reversed, code_reversed) = run_yq_stdin(
         "del(.[2:3], .a[0:2][0:1])",
         r#"{"a":[1,2,3,4,5,6],"b":6,"c":9}"#,
@@ -35888,50 +35852,31 @@ fn test_1223_computed_key_with_trailing_slice_now_matches_real_yq_1102() -> Resu
     Ok(())
 }
 
-/// #1223's own issue text names a second, unrelated finding: succinctly's
-/// multi-path `del()` combining a chained-slice branch with a bare-slice
-/// sibling was order-*insensitive* (both orderings agreed, deleting both
-/// index 0 and the `.[2:3]` range) — real yq is itself order-*sensitive*
-/// for this exact shape (confirmed live against yq v4.53.3: the two
-/// orderings give two different answers, neither of which is the
-/// composition of the two single-path results). There is no coherent rule
-/// to replicate here (`delete_expr_paths_at`'s sibling-index-shifting
-/// logic, not #1223's/#1219's own fixes, drives this) — pinned as a known,
-/// separately-tracked gap rather than silently unasserted.
-///
-/// #1219 changed *what* succinctly gets wrong here, as a side effect of
-/// wiring `yq_del_slice_outcome` into the multi-path branch (a bare
-/// `.[2:3]` sibling, with nothing else in its own path, is itself a no-op
-/// shape and now correctly drops out of the delete set on its own) —
-/// live-verified this happens to make the *second* ordering (`out_b`) match
-/// real yq exactly now, while the first ordering (`out_a`) remains a
-/// mismatch, just a different one than before. Still no coherent single
-/// rule underlies real yq's own order-sensitivity, so this stays pinned as
-/// a known gap rather than chased further. If this is ever reconciled,
-/// update this test's expectations and the doc comment above.
+/// #1223's own issue text names a second, unrelated finding: a multi-path `del()` combining a
+/// chained-slice branch with a bare-slice sibling is order-*sensitive* in real yq (confirmed live
+/// against yq v4.53.3: the two orderings give two different answers, neither the composition of the
+/// two single-path results). It is one rule, not an inconsistency (#1325): the bare slice of the
+/// root has no parent, and yq's delete walks the matches backwards and returns at the first one
+/// without a parent, so the branches written before it are never deleted. `tests/yq_cli/i1325.rs`
+/// holds the full oracle matrix; this keeps the original pair.
 #[test]
-fn test_yq_mixed_bare_root_and_chained_slice_del_known_gap_1223() -> Result<()> {
+fn test_yq_mixed_bare_root_and_chained_slice_del_matches_real_yq_1325() -> Result<()> {
     let input = r"[[1,2,3],[4,5,6],[7,8,9],[10,11,12]]";
 
     let (out_a, code_a) = run_yq_stdin("del(.[0][0:1], .[2:3])", input, &["-o=json", "-I=0"])?;
     assert_eq!(code_a, 0, "out: {out_a:?}");
     assert_eq!(
         out_a.trim(),
-        r"[[4,5,6],[7,8,9],[10,11,12]]",
-        "real yq gives [[1,2,3],[4,5,6],[7,8,9],[10,11,12]] (unchanged) for this ordering"
+        r"[[1,2,3],[4,5,6],[7,8,9],[10,11,12]]",
+        "the bare slice is last, so the delete stops before it deletes anything"
     );
 
-    // This ordering now matches real yq exactly (#1219 side effect) — kept
-    // in this "known gap" test rather than promoted to its own passing
-    // test, since it's one half of an order-sensitive pair whose *other*
-    // half (`out_a` above) still diverges; splitting them would obscure
-    // that they're the same underlying gap.
     let (out_b, code_b) = run_yq_stdin("del(.[2:3], .[0][0:1])", input, &["-o=json", "-I=0"])?;
     assert_eq!(code_b, 0, "out: {out_b:?}");
     assert_eq!(
         out_b.trim(),
         r"[[4,5,6],[7,8,9],[10,11,12]]",
-        "real yq gives [[4,5,6],[7,8,9],[10,11,12]] (only index 0 dropped) for this ordering -- now matches"
+        "index 0 is deleted before the walk reaches the bare slice and stops"
     );
 
     Ok(())
