@@ -37983,6 +37983,11 @@ fn update_returns_its_input(e: &Expr) -> bool {
 ///   it would without the `try`, the empty UPDATE being the resolver's own derivation;
 /// - `update_tail_unchecked` marks the body ([`fold_body::state_handed_on`]) so that the `.` a bind ends on
 ///   goes unchecked, which a raise before it never reaches.
+///
+/// #4953: [`update_binds_only_in_tail`] reads the same wrappers for any tail, not only the accumulator
+/// (`try ($x as {a:$a} | 5)`), so the arms here are shared by three predicates with different leaves: a
+/// change to one (an `if` whose condition navigates, a count other than a nonzero constant) moves all of
+/// them, and `tests/jq_cli/i4953.rs` pins a wrapper per arm with a computed tail.
 fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
     match unwrap_paren(e) {
         Expr::Comma(items) => items.iter().all(|item| hands_outputs_on(item, leaf)),
@@ -38089,10 +38094,10 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
             )
         })
     }
-    // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/`nth(0; ..)`, an
-    // `if`, a handler-less `try`/`?`), which hand their body's outputs on, so the tail a bind in one of
-    // them ends on is still the UPDATE's own output. A raise in the chain is caught by a `try` and empties
-    // the UPDATE, which the resolver derives once the register is carried in.
+    // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/
+    // `nth(0; ..)`, an `if`, a handler-less `try`/`?`), which hand their body's outputs on, so the tail
+    // a bind in one of them ends on is still the UPDATE's own output. A raise in the chain is caught by
+    // a `try` and empties the UPDATE, which the resolver derives once the register is carried in.
     hands_outputs_on(e, &|leaf| match leaf {
         Expr::Pipe(stages) => match stages.split_last() {
             Some((last, head)) => head.iter().all(bind_free) && update_binds_only_in_tail(last),

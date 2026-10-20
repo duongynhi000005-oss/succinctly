@@ -12,7 +12,7 @@ use crate::assert_path_rows_both_routes_3749;
 /// through it. A reduce UPDATE's binds all sit in tail position there, and `update_binds_only_in_tail`
 /// did not read the `try`/`?` or the wrappers around it, so the register was never carried in. Covers an
 /// object, an array and a nested pattern, a plain `$q`, tails `5`/`"s"`/`[1]`/`{}`/`$a`, INITs
-/// `0`/`{}`/`[]`, and `limit`/`label`/a comma around the `try`. Every row captured from `/usr/bin/jq`
+/// `0`/`{}`/`[]`, and `limit`/`first`/`nth(0; ..)`/`if`/`label`/a comma around the `try`. Every row captured from `/usr/bin/jq`
 /// 1.7.1, both routes.
 #[test]
 fn test_4953_reduce_update_try_around_foreign_bind_with_computed_tail_raises_on_null() -> Result<()>
@@ -133,6 +133,62 @@ fn test_4953_reduce_update_try_around_foreign_bind_with_computed_tail_raises_on_
         (
             "null",
             "path(. as $x | reduce .. as $i (0; try ($x as {a:$a} | 5)))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "path(. as $x | reduce 1 as $i (0; if true then try ($x as {a:$a} | 5) else . end))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "del(. as $x | reduce 1 as $i (0; if false then . else try ($x as {a:$a} | $a) end))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            "path(. as $x | reduce 1 as $i (0; first(try ($x as {a:$a} | 5))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "del(. as $x | reduce 1 as $i (0; nth(0; try ($x as {a:$a} | 5))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "(. as $x | reduce 1 as $i (0; limit(2; try ($x as {a:$a} | 5)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "path(. as $x | reduce 1 as $i (0; ($x as {a:$a} | 5), ($x as {a:$a} | 6)))",
+            "",
+            "Invalid path expression with result 6",
+            5,
+        ),
+        (
+            "null",
+            "path(. as $x | reduce 1 as $i (0; label $l | try ($x as {a:$a} | 5)))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            "null",
+            "path(. as $x | reduce 1 as $i (0; try (try ($x as {a:$a} | 5))))",
             "",
             "Invalid path expression with result 5",
             5,
