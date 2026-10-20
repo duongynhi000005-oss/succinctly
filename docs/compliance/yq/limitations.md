@@ -361,8 +361,11 @@ The same licensed divergence applies when it is not: deleting the key, or `sort_
 below its alias, expands the alias to the key's text (`c: key`) where yq prints an
 unresolvable `*k`. An alias used *as* a key (`*k : 2`) is a separate, pre-existing gap, and so
 are two routes that still print a key bare: `keys` (`- &k key` in yq) and `pick`, and a `<<` merge
-expands the merged mapping's keys, anchors included, where yq keeps `<<: *m` (a value anchor under
-a merge is expanded the same way, so `&j` is then declared twice, which YAML allows).
+expands the merged mapping's keys where yq keeps `<<: *m`. The expansion does not re-declare the
+source's anchors ([#2513](https://github.com/rust-works/succinctly/issues/2513)): `default: &d` /
+`  a: &y 1` / `item: {<<: *d, b: 2}` written with `.item.b = 3` prints `a: 1` under `item`, not a
+second `&y` that every later `*y` would resolve to; an inline source (`<<: {a: &y 1}`), which is
+written nowhere else, keeps its declaration. An alias inside the merged-in fields (`*y`) is kept.
 
 Related open items in the same family, still unresolved:
 [#1359](https://github.com/rust-works/succinctly/issues/1359) (a write that changes a node's

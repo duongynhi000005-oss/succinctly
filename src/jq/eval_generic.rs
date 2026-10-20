@@ -3034,6 +3034,12 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
         let mut comment_map = IndexMap::new();
         let mut key_comment_map = IndexMap::new();
         let mut guard = DisplayKeyGuard::default();
+        // #2513: a merge-resolved list holds fields of the merge sources, which sit outside this
+        // mapping (`<<: *base`). The id range of this mapping's own subtree tells them from the
+        // mapping's children, an inline `<<: {..}` source included.
+        let own_subtree = (fields.head_key_cursor().is_none() && !child_under_alias)
+            .then(|| cursor.and_then(|c| c.subtree_end().map(|end| (c.node_id(), end))))
+            .flatten();
         let mut f = fields;
         let mut is_first = true;
         // #2405: retained past the loop so the trailing-gap check below has
@@ -3041,6 +3047,16 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
         // `last_field`.
         let mut last_field: Option<V::Cursor> = None;
         while let Some((field, rest)) = f.uncons() {
+            // #2513: such a field is a copy of the source's own, so its subtree is an alias
+            // expansion as far as `&anchor` declarations are concerned (#2500): the source
+            // already declares them where it is written.
+            let field_under_alias = child_under_alias
+                || own_subtree.is_some_and(|(start, end)| {
+                    field
+                        .value_cursor
+                        .document_parent()
+                        .is_some_and(|p| !(start..end).contains(&p.node_id()))
+                });
             // #2405: same #1247/#1642 key resolution and #1677 key/value
             // delimiter checks as `to_owned_at_depth`, via the one shared
             // `DocumentField::checked_key` definition -- this walk used to
@@ -3062,7 +3078,7 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
                 &field.value,
                 Some(&field.value_cursor),
                 depth + 1,
-                child_under_alias,
+                field_under_alias,
                 HeadFootRead::SkippedForMappingValue,
             )?;
             if field.key_cursor.document_has_standalone_comments() {
@@ -3109,13 +3125,13 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
             // #2598: a key's own `&anchor`, unless this subtree is an alias
             // expansion, where it is the anchor target's own mark copied onto
             // this position (#2500's rule for a value's `Declares`).
-            let key_anchor = if child_under_alias {
+            let key_anchor = if field_under_alias {
                 None
             } else {
                 DocumentCursor::anchor(&field.key_cursor).map(str::to_string)
             };
             // #4088: the key's own explicit tag, on the same terms as its anchor.
-            let key_tag = if child_under_alias {
+            let key_tag = if field_under_alias {
                 None
             } else {
                 DocumentCursor::explicit_tag_of_non_alias(&field.key_cursor).map(str::to_string)
