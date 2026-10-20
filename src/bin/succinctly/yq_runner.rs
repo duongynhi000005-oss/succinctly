@@ -3210,7 +3210,8 @@ fn reconcile_presentation_at_depth(
         // give, and a kind-changed node's children carry no presentation
         // memory of their own either way. Comment and style are still
         // dropped, since neither describes anything that survived the kind
-        // change. [`enforce_anchor_soundness`], run afterwards, is what
+        // change (a document root, which a write rewrote, keeps its head and foot comments,
+        // #4997; see [`kind_changed_leaf`]). [`enforce_anchor_soundness`], run afterwards, is what
         // decides whether a carried `Declares` mark is still emittable.
         //
         // An `Aliases` mark is handled differently (found in review): unlike
@@ -3234,7 +3235,16 @@ fn reconcile_presentation_at_depth(
         // equal `.a`'s by coincidence, wrongly keeping `*x`.
         (OwnedValue::Object(_) | OwnedValue::Array(_), _)
         | (_, OwnedValue::Object(_) | OwnedValue::Array(_)) => {
-            kind_changed_leaf(pristine_tree, targets)
+            // The document's own comments follow a write that changed its kind (#4997); a
+            // computed result with no write in it (`[.d]`) is not the document.
+            let rewrites_the_document = depth == 0 && !targets.is_empty();
+            let container_result =
+                matches!(result_value, OwnedValue::Object(_) | OwnedValue::Array(_));
+            kind_changed_leaf(
+                pristine_tree,
+                targets,
+                rewrites_the_document.then_some(container_result),
+            )
         }
         // Both scalars, any variant/value: same node, only its value
         // changed - its own comment, style and anchor mark survive. Real
@@ -3269,11 +3279,19 @@ fn grown_container_meta(meta: &NodeMeta, grown: bool) -> NodeMeta {
 }
 
 /// The tree for a node whose kind changed (container <-> scalar): it keeps an anchor
-/// declaration, a custom tag and, at the document root, the preamble, never the rest.
+/// declaration, a custom tag and, at the document root, the preamble, never the rest -- except
+/// that the root of a document a write rewrote keeps the document's head comment and, for a
+/// container, its foot (#4997).
 /// Out of line so `reconcile_presentation_at_depth`'s recursive frame stays small (its
 /// #1005 depth-guard test overflows under coverage instrumentation otherwise).
 #[inline(never)]
-fn kind_changed_leaf(pristine_tree: &CommentTree, targets: &[RelTarget<'_>]) -> CommentTree {
+fn kind_changed_leaf(
+    pristine_tree: &CommentTree,
+    targets: &[RelTarget<'_>],
+    // `Some(container)` at the root of a document a write has rewritten, `container` being whether
+    // the new root is a mapping or sequence (#4997).
+    rewritten_document: Option<bool>,
+) -> CommentTree {
     let is_write_target = targets.iter().any(|(steps, ..)| steps.is_empty());
     let anchor = match &pristine_tree.meta().anchor {
         mark @ Some(AnchorMark::Declares(_)) => mark.clone(),
@@ -3281,11 +3299,24 @@ fn kind_changed_leaf(pristine_tree: &CommentTree, targets: &[RelTarget<'_>]) -> 
         _ => None,
     };
     let tag = pristine_tree.meta().tag().filter(|tag| is_custom_tag(tag));
-    CommentTree::Leaf(
-        NodeMeta::empty_with_anchor(anchor)
-            .with_tag(tag.map(str::to_string))
-            .with_preamble(pristine_tree.meta().preamble().map(str::to_string)),
-    )
+    let meta = NodeMeta::empty_with_anchor(anchor)
+        .with_tag(tag.map(str::to_string))
+        .with_preamble(pristine_tree.meta().preamble().map(str::to_string));
+    // The comments around a document stay around whatever it is rewritten to: `# c` / `null`
+    // written `.a = 1` is `# c` / `a: 1`, and so is a comment-only file. The head always; the
+    // foot with a container, which prints it (a scalar root does not).
+    let meta = match rewritten_document {
+        Some(container) => meta.with_head_foot(
+            pristine_tree.meta().head_comment().to_vec(),
+            if container {
+                pristine_tree.meta().foot_comment().to_vec()
+            } else {
+                Vec::new()
+            },
+        ),
+        None => meta,
+    };
+    CommentTree::Leaf(meta)
 }
 
 /// The tree for a scalar a write may have changed (see [`written_scalar_meta`]); out of

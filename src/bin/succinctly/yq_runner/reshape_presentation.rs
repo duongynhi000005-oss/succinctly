@@ -128,11 +128,9 @@ pub(super) fn navigation_construction(expr: &Expr) -> bool {
     }
 }
 
-/// What a static read lands on: the node, or `None` for a position the document does not hold,
-/// and the key node it was reached by when the last step was a member.
+/// What a static read lands on: the node, or `None` for a position the document does not hold.
 struct Landed<C> {
     node: Option<C>,
-    key: Option<C>,
     /// The last step was an index: the node is an element of a sequence, whose standalone comments
     /// are its own, where a mapping member's are its key's.
     element: bool,
@@ -149,15 +147,12 @@ fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
             let Some(node) = from.node else {
                 return Some(Landed {
                     node: None,
-                    key: None,
                     element: false,
                 });
             };
             let found = node.value().as_object()?.find_cursor(name).ok()?;
-            let key = found.as_ref().and_then(DocumentCursor::prev_sibling);
             Some(Landed {
                 node: found,
-                key,
                 element: false,
             })
         }
@@ -165,7 +160,6 @@ fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
             let Some(node) = from.node else {
                 return Some(Landed {
                     node: None,
-                    key: None,
                     element: false,
                 });
             };
@@ -178,7 +172,6 @@ fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
                 .and_then(|i| elements.get_cursor(i));
             Some(Landed {
                 node: found,
-                key: None,
                 element: true,
             })
         }
@@ -194,23 +187,9 @@ fn landed_pair<C: DocumentCursor>(at: &Landed<C>) -> Option<ResultWithComments> 
     };
     let (value, mut tree) =
         to_owned_with_comments::<_, YqSemantics>(&node.value(), Some(node)).ok()?;
-    // A mapping member's standalone comments live on its key; the walk of a whole document merges
-    // them into the value's, and so does this. A scalar leaves its key's foot behind with the key
-    // (a container's closes inside it), and the comment above any node but a sequence element
-    // goes with the key or the document (#865).
-    if let Some(key) = &at.key {
-        if key.document_has_standalone_comments() {
-            let (head, foot) = (key.head_comment_raw(), key.foot_comment_raw());
-            if !head.is_empty() || !foot.is_empty() {
-                let foot = if matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_)) {
-                    foot
-                } else {
-                    Vec::new()
-                };
-                *tree.meta_mut() = tree.meta().with_head_foot(head, foot);
-            }
-        }
-    }
+    // A mapping member's standalone comments live on its key, which a construction does not carry:
+    // `d:` / `  x: 2` / `# f` read as `[.d]` leaves `# f` (the key's foot) behind, while a comment
+    // inside the container (`  # f`) is a foot of one of its own keys and rides in the tree (#865).
     if !at.element {
         drop_head_comment(&mut tree);
     } else if node.document_has_standalone_comments() {
@@ -240,7 +219,6 @@ pub(super) fn trace_navigation_construction<C: DocumentCursor>(
                 &Expr::Pipe(path.to_vec().into()),
                 Landed {
                     node: Some(*root),
-                    key: None,
                     element: false,
                 },
             )?;
@@ -258,7 +236,6 @@ fn entry_pair<C: DocumentCursor>(e: &Expr, root: &C, depth: usize) -> Option<Res
     }
     let start = || Landed {
         node: Some(*root),
-        key: None,
         element: false,
     };
     match e {

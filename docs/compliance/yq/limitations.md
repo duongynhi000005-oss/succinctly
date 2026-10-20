@@ -6264,6 +6264,13 @@ document came from, where yq writes the result into the first file. A file holdi
 break is a document and is read as one. A write to a comment-only file prints the write without the comment,
 where yq keeps it above (`# c` / `a: 1`).
 
+### A write that changes the kind of a document root keeps its comments ([#4997](https://github.com/rust-works/succinctly/issues/4997))
+
+`# c` / `null` (or `~`, or a file of comments alone) written `.a = 1` is `# c` / `a: 1`, and a scalar or
+container root rewritten to the other kind keeps the document's head comment and its foot, as in yq. Not
+matched: the head comment of a *non-first* document (`x: 1` / `---` / `# c` / `5` written `. = [1]` loses `# c`, which
+yq keeps), and a root with an explicit tag (`# c` / `!!null` written `.a = 1` prints a blank line after the comment).
+
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in
