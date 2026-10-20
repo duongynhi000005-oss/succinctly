@@ -171,6 +171,14 @@ SOURCES = [
     # ...but not on a branch that never runs (#4632): jq answers these
     ("wrapped-sel-false", "[select(false) | . as {b:$b} | .]"),
     ("wrapped-limit-0", "[limit(0; . as {b:$b} | .)]"),
+    # (#4941) a stage that hands its input on once and cannot raise ahead of the destructure is no control flow
+    ("wrapped-sel-true", "[select(true) | . as {b:$b} | .]"),
+    ("wrapped-sel-1", "[select(1) | . as {b:$b} | .]"),
+    ("wrapped-first-dot", "[first(.) | . as {b:$b} | .]"),
+    ("wrapped-limit-dot", "[limit(2; .) | . as {b:$b} | .]"),
+    ("wrapped-opt-dot", "[(.)? | . as {b:$b} | .]"),
+    ("wrapped-sel-true-alt", "[false // (select(true) | . as {b:$b} | .)]"),
+    ("wrapped-sel-false-then", "[select(true) | select(false) | . as {b:$b} | .]"),
     ("wrapped-if-false", "[if false then . as {b:$b} | . else 1 end]"),
     ("wrapped-first", "[first(1, (. as {b:$b} | .))]"),
     # (#4635) ...but a `//` right operand whose left cannot be truthy, and the handler of a `try`
