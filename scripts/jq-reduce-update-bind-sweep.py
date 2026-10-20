@@ -5,7 +5,7 @@
 and `jq-fold-body-register-grid-sweep.py` always nests a fold in the UPDATE (which the resolver reads
 differently: `update_reads_foreign_marker` excludes it), so neither gates the shape #4901/#4932/#4934
 changed. The grid here is INIT x SOURCE x BIND x UPDATE shape x document x context, six x six x six x
-twenty x six x three = 77,760 rows. The UPDATE shapes are a bind chain bare, under `try`/`?` (with and
+twenty-seven x six x three = 104,976 rows. The UPDATE shapes are a bind chain bare, under `try`/`?` (with and
 without a handler), under `limit`/`first`/`label`/`if`/a comma/`//`, and ending in `.`, a navigation,
 a literal, `$a` or `$x`; the INITs are `.`, the literal accumulators `0`/`{}`/`[]`/`null` and a navigated
 `.a`; the documents include `null`, which a `null` `$x` is the register of by kind.
@@ -69,6 +69,14 @@ def shapes(b):
         f"try (try ({b} | .))",
         f"try ({b} | .) // 7",
         f"select(true) | try ({b} | .)",
+        # (#4953) the wrappers around a chain that ends in a computed value, which hands no accumulator on
+        f"limit(1; try ({b} | 5))",
+        f"label $l | try ({b} | 5)",
+        f"try ({b} | 5), .",
+        f"if true then try ({b} | 5) else . end",
+        f"first(try ({b} | $a))",
+        f"({b} | 5)?",
+        f"label $l | ({b} | break $l)",
     ]
 
 

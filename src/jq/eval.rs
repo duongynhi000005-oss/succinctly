@@ -38069,8 +38069,9 @@ fn emits_only_the_accumulator(e: &Expr) -> bool {
 /// the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
 /// the final emission is judged on the accumulator's provenance. The spine is paren, pipe (any
 /// stage but the last holds no bind) and the body of a single-pattern bind with literal keys, or a
-/// plain `$name` one. A bind anywhere else (under a comma, `try`, `if`, `//`, a call or a fold)
-/// may feed a later step, which does check it.
+/// plain `$name` one, all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
+/// anywhere else (under a `try` with a handler, `//`, a call or a fold) may feed a later step, which does
+/// check it.
 fn update_binds_only_in_tail(e: &Expr) -> bool {
     fn bind_free(e: &Expr) -> bool {
         !any_subexpr(e, &mut |inner| {
@@ -38088,7 +38089,11 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
             )
         })
     }
-    match unwrap_paren(e) {
+    // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/`nth(0; ..)`, an
+    // `if`, a handler-less `try`/`?`), which hand their body's outputs on, so the tail a bind in one of
+    // them ends on is still the UPDATE's own output. A raise in the chain is caught by a `try` and empties
+    // the UPDATE, which the resolver derives once the register is carried in.
+    hands_outputs_on(e, &|leaf| match leaf {
         Expr::Pipe(stages) => match stages.split_last() {
             Some((last, head)) => head.iter().all(bind_free) && update_binds_only_in_tail(last),
             None => true,
@@ -38105,7 +38110,7 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
         }
         Expr::As { expr, body, .. } => bind_free(expr) && update_binds_only_in_tail(body),
         other => bind_free(other),
-    }
+    })
 }
 
 /// Whether a nested `foreach` or `reduce` hands its INIT through untouched (#3953, #4320): one loop
