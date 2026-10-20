@@ -16343,9 +16343,9 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         Builtin::FormatNamed(name) => builtin_format_named::<W, S>(name, value, optional),
         Builtin::Strptime(fmt) => builtin_strptime::<W, S>(fmt, value, optional),
         Builtin::Todate => builtin_todate::<W, S>(value, optional),
-        Builtin::Fromdate => builtin_fromdate::<W>(value, optional),
+        Builtin::Fromdate => builtin_fromdateiso8601::<W>(value, optional),
         Builtin::Todateiso8601 => builtin_todate::<W, S>(value, optional), // alias for todate
-        Builtin::Fromdateiso8601 => builtin_fromdate::<W>(value, optional), // alias for fromdate
+        Builtin::Fromdateiso8601 => builtin_fromdateiso8601::<W>(value, optional),
 
         // Phase 17: Combinations
         Builtin::Combinations => builtin_combinations::<W, S>(value, optional),
@@ -85769,6 +85769,36 @@ fn builtin_fromdate<W: Clone + AsRef<[u64]>>(
         Ok(timestamp) => QueryResult::Owned(OwnedValue::Float(timestamp)),
         Err(_) if optional => QueryResult::None,
         Err(e) => QueryResult::Error(EvalError::new(e)),
+    }
+}
+
+/// Builtin: fromdate / fromdateiso8601 -- jq defines both as `strptime("%Y-%m-%dT%H:%M:%SZ") | mktime` (#4967),
+/// so exactly that shape parses (and what [`parse_strptime`] accepts after it), where [`builtin_fromdate`]'s
+/// lenient ISO 8601 grammar stays yq's `to_unix`.
+fn builtin_fromdateiso8601<W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'_, W>,
+    optional: bool,
+) -> QueryResult<'_, W> {
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(e) => return QueryResult::Error(EvalError::decode_failure(e.message())),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::strptime_requires_string()),
+    };
+    const FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+    let t = match parse_strptime(&input, FORMAT) {
+        Ok((t, _)) => t,
+        Err(_) if optional => return QueryResult::None,
+        Err(_) => return QueryResult::Error(EvalError::strptime_no_match(&input, FORMAT)),
+    };
+    // ...then `mktime`'s own conversion, `-1` and the dates before 1900 it refuses included.
+    match jq_timegm_secs(t.year, t.month, t.day, t.hour, t.minute, t.second) {
+        Ok(Some(secs)) => QueryResult::Owned(OwnedValue::Float(secs as f64)),
+        Ok(None) | Err(_) if optional => QueryResult::None,
+        Ok(None) => QueryResult::Error(EvalError::new("invalid gmtime representation")),
+        Err(e) => QueryResult::Error(e),
     }
 }
 
