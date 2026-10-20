@@ -38042,9 +38042,9 @@ fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
 }
 
 /// Whether a `reduce` UPDATE hands the accumulator back after destructures of an outer `$x` (#4901,
-/// #4932): a chain of binds, each a pattern (or, since #4964, a `?//` chain of them) with literal keys or a plain `$name` of the marker
-/// and nothing else (no pipe: a pipe headed by `$x` ends on `$x`'s node, not the accumulator), ending in
-/// `.` or any other shape [`emits_only_the_accumulator`] accepts -- and, since #4932, the same inside the
+/// #4932): a chain of binds, each a pattern (or, since #4964, a `?//` chain of them) with literal keys
+/// or a plain `$name` of the marker and nothing else (no pipe: a pipe headed by `$x` ends on `$x`'s node,
+/// not the accumulator), ending in `.` or any other shape [`emits_only_the_accumulator`] accepts -- and, since #4932, the same inside the
 /// wrappers [`hands_outputs_on`] reads through. A bind-free UPDATE of those shapes satisfies it too; the
 /// caller's `foreign_bind_update` is what says a foreign `$x` is read. The binds' steps are
 /// path-checked as jq's are, and the `.` they end on is the accumulator, which a `reduce` hands back
@@ -50974,8 +50974,8 @@ fn fans_out(expr: &Expr) -> bool {
 }
 
 /// Whether `expr` is a chain of binds that each run once (#4901): a bind of `.`, an outer `$x` or a
-/// `$var` to a single pattern with literal keys (or a bare `$name`), ending in a body that does not
-/// fan out itself. [`fans_out`] counts every destructuring bind, because a computed key, a `?//` chain
+/// `$var` to a single pattern with literal keys (or a bare `$name`, or since #4964 a `?//` chain of
+/// them), ending in a body that does not fan out itself. [`fans_out`] counts every destructuring bind, because a computed key, a `?//` chain
 /// or a comma source forks the walk into siblings that may see the register unevenly (#3145). A computed
 /// key and a comma source are not here: the chain is one sequence of path-checked steps on the carried
 /// register, the shape a pipe of the same stages already is (a pipe is skipped by `fans_out`), so a body
