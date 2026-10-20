@@ -56722,7 +56722,10 @@ fn is_plain_bind_chain(e: &Expr) -> bool {
 
 /// Whether `e` emits its input and nothing else, exactly once, and cannot raise (#4941): `.`,
 /// `select` of a truthy literal, and a `first`/`limit` (constant nonzero count)/`nth(0; ..)`, `try` or
-/// `?` of such. Narrower than [`emits_only_the_accumulator`], which also admits a comma (two outputs).
+/// `?` of such. Narrower than [`emits_only_the_accumulator`], which also admits a comma (two outputs), and
+/// not derived from it: a comma anywhere inside (`limit(2; ., .)`) emits twice. Like it, the `try` arm drops
+/// its handler, which is sound only while every arm cannot raise; an arm that can must not be added
+/// without reading that arm again.
 fn emits_input_once(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Identity => true,
@@ -56815,7 +56818,13 @@ fn leading_destructure_of_dot_element(source: &Expr, read: LeadingRead<'_>) -> O
         Expr::Pipe(stages) => {
             // #4667: `first(., X)` and its `limit(1; ..)`/`nth(0; ..)` spellings are `.`.
             // #4933: a `select` that certainly passes hands `.` on and spells no step of its own.
-            let first = stages.iter().find(|stage| {
+            // #4933: a parenthesised pipe among the stages is the same sequence (`(select(true) | .) | ..`).
+            let flat: Vec<&Expr> = if passing.is_some() {
+                flatten_pipe_stages(stages)
+            } else {
+                stages.iter().collect()
+            };
+            let first = flat.into_iter().find(|stage| {
                 !is_identity_stage(stage)
                     && !takes_only_an_identity_leaf(peel_try_wrappers(stage))
                     && !passing.is_some_and(|passing| {
@@ -56879,6 +56888,18 @@ fn peel_leading_run(e: &Expr) -> &Expr {
     }
 }
 
+/// The stages of a pipe with every nested (parenthesised) pipe spliced in, in order.
+fn flatten_pipe_stages(stages: &[Expr]) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    for stage in stages {
+        match unwrap_paren(stage) {
+            Expr::Pipe(inner) => out.extend(flatten_pipe_stages(inner)),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Whether `stage` is a `select(c)` that certainly passes its input on (#4933): `c` a truthy literal, a
 /// bound marker that is truthy, or a condition [`passing_marker_selects`] decided passes. The condition
 /// runs in a subexpression, so a passing `select` spells no path step.
@@ -56932,8 +56953,8 @@ fn leading_destructure_of_marker(
             // path step) and hands the register on when it passes, which the caller's verdict already
             // says it does for the destructure to be reached; the first step jq path-checks is the
             // destructure's.
-            let mut rest = stages
-                .iter()
+            let mut rest = flatten_pipe_stages(stages)
+                .into_iter()
                 .filter(|stage| !is_identity_stage(stage) && !is_passing_select(stage, passing));
             let first = rest.next()?;
             if let Expr::TrackedVar(marker) = unwrap_paren(first) {
