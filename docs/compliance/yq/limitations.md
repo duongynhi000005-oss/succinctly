@@ -5532,11 +5532,11 @@ sequence holding several closes to an outer item or to end of input inside a map
 matching — the rest go forward as the next node's head instead of being discarded to
 match. A comment *floated* off an absent bare item heads a compact-mapping or nested-sequence
 sibling in the same sequence itself, as in yq (`- # c\n- b: 1\n` is `.[1] | head_comment`; it used to
-land on the sibling's first key, #2835). Three neighbouring shapes still differ and are not licensed
+land on the sibling's first key, #2835). Two neighbouring shapes still differ and are not licensed
 by that rule: a second absent item between them (`- # c\n-\n- b: 1\n` puts `c` after `b: 1`, where
-yq heads `.[2]` with it), a float from a nested sequence that closed at the sibling
-(`- - # c\n- b: 1\n`, yq prints it as the foot of the sibling's entry), and an explicit-key sibling
-(`- # c\n- ? k\n  : v\n`, the comment lands on the key). Pinned by
+yq heads `.[2]` with it) and a float from a nested sequence that closed at the sibling
+(`- - # c\n- b: 1\n`, yq prints it as the foot of the sibling's entry). An explicit-key sibling
+(`- # c\n- ? k\n  : v\n`) is headed too. Pinned by
 `test_2835_c_neighbouring_shapes_still_differ` in `tests/yq_cli/i2835.rs`. Blank lines in any
 of these shapes are unmodelled on both sides (yq keeps a `\n` inside the slot value and
 reorders).

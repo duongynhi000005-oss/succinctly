@@ -43,6 +43,13 @@ const ROWS: &[(&str, &str)] = &[
     ("- # c\n- !!map\n  b: 1\n", "-\n- !!map\n  # c\n  b: 1\n"),
     ("- # c\n- [1]\n", "-\n# c\n- [1]\n"),
     ("- # c\n- {a: 1}\n", "-\n# c\n- {a: 1}\n"),
+    ("- # c\n- ? k\n  : v\n", "-\n# c\n- k: v\n"),
+    ("- 1\n# h\n- ? k\n  : v\n", "- 1\n# h\n- k: v\n"),
+    ("- # c\n- ? k\n", "-\n# c\n- k:\n"),
+    (
+        "a:\n  - 1\n  # h\n  - ? k\n    : v\nz: 2\n",
+        "a:\n  - 1\n  # h\n  - k: v\nz: 2\n",
+    ),
 ];
 
 #[test]
@@ -63,6 +70,32 @@ fn test_2835_b_the_head_is_the_siblings_not_its_first_keys() -> Result<()> {
         ("- # c\n- b: 1\n", ".[1].b | key | head_comment", "\n"),
         ("- # c\n- - 1\n", ".[1] | head_comment", "c\n"),
         ("- # c\n- - 1\n", ".[1][0] | head_comment", "\n"),
+        ("- # c\n- &a b: 1\n", ".[1] | head_comment", "c\n"),
+        ("- # c\n- &a b: 1\n", ".[1].b | key | head_comment", "\n"),
+        ("- # c\n- !!map\n  b: 1\n", ".[1] | head_comment", "\n"),
+        (
+            "- # c\n- !!map\n  b: 1\n",
+            ".[1].b | key | head_comment",
+            "c\n",
+        ),
+        ("- # c\n- [1]\n", ".[1] | head_comment", "c\n"),
+        ("- # c\n- ? k\n  : v\n", ".[1] | head_comment", "c\n"),
+        ("- # c\n- ? k\n  : v\n", ".[1].k | key | head_comment", "\n"),
+        (
+            "a:\n  - # c\n  - b: 1\nz: 2\n",
+            ".a[1] | head_comment",
+            "c\n",
+        ),
+        (
+            "- # c\n- b: 1\n  d: 2\n- e: 3\n",
+            ".[1] | head_comment",
+            "c\n",
+        ),
+        (
+            "- # c\n- b: 1\n  d: 2\n- e: 3\n",
+            ".[2] | head_comment",
+            "\n",
+        ),
         (
             "k:\n  - - # c1\n  - - # c2\n",
             ".k | key | foot_comment",
@@ -79,13 +112,12 @@ fn test_2835_b_the_head_is_the_siblings_not_its_first_keys() -> Result<()> {
 
 /// Neighbouring shapes that still differ from yq, pinned with this tool's answer so a change is
 /// deliberate (recorded in `limitations.md`): a second absent item between the float and the
-/// sibling, a float from a nested sequence that closed at the sibling, an explicit-key sibling.
+/// sibling, a float from a nested sequence that closed at the sibling.
 #[test]
 fn test_2835_c_neighbouring_shapes_still_differ() -> Result<()> {
     let rows: &[(&str, &str)] = &[
         ("- # c\n-\n- b: 1\n", "-\n-\n- b: 1\n  # c\n"),
         ("- - # c\n- b: 1\n", "- -\n- # c\n  b: 1\n"),
-        ("- # c\n- ? k\n  : v\n", "-\n- # c\n  k: v\n"),
     ];
     for (input, ours) in rows {
         let (out, code) = run_yq_stdin(".", input, &[])?;

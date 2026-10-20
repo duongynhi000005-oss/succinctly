@@ -19905,21 +19905,17 @@ mod standalone_comment_attribution_2811 {
         Ok(())
     }
 
-    /// Pinned residual (outside the issue's alphabet): yq answers
-    /// `.[1] | head_comment` = `h` for a `- ? k` item, the container as a
-    /// whole (go-yaml's stem comment, same as a compact `- k: v`/`- - x`
-    /// item). `- ? k` has no *stem* hook of its own -- only #1079's own
-    /// `parse_explicit_key` hook, which attaches straight to the key node
-    /// -- so the block now reaches `.[1].k`'s own head instead of falling
-    /// all the way back to `.[0]`'s foot as it used to; still short of
-    /// yq's answer until #2814 gives this shape a stem hook too.
+    /// yq answers `.[1] | head_comment` = `h` for a `- ? k` item, the container as a whole
+    /// (go-yaml's stem comment, same as a compact `- k: v`/`- - x` item). `- ? k` got a stem
+    /// hook of its own with #2835, so the block heads the item and not `.[1].k`'s key (it used
+    /// to reach the key, short of yq's answer).
     #[test]
-    fn explicit_key_item_head_residual_2811() -> Result<()> {
+    fn explicit_key_item_head_matches_yq_2811() -> Result<()> {
         assert_slots(
             "- 1\n# h\n- ? k\n  : v\n",
             &[
-                (".[1] | head_comment", ""),
-                (".[1].k | key | head_comment", "h"),
+                (".[1] | head_comment", "h"),
+                (".[1].k | key | head_comment", ""),
                 (".[0] | foot_comment", ""),
             ],
         )
