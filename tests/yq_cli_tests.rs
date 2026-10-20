@@ -32473,15 +32473,14 @@ fn test_yq_del_identical_null_bool_literal_is_noop_3207() -> Result<()> {
 }
 
 /// #3207: a `del()` target that is neither plain navigation nor a parentless value still refuses.
-/// succinctly's "untracked" is wider than yq's "pathless": yq's `$var` keeps node identity and
-/// `tojson` keeps its input's path, so both of these *delete `.a`* in yq; a no-op here would
-/// silently drop the delete. (A literal -- identical to the input or not, #1865 -- deletes nothing,
+/// succinctly's "untracked" is wider than yq's "pathless": yq's `$var` keeps node identity, so it
+/// *deletes `.a`* in yq; a no-op here would silently drop the delete. (`del(.a | tojson)` deletes
+/// `.a` as well and does since #4476.) (A literal -- identical to the input or not, #1865 -- deletes nothing,
 /// as in yq: `test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865`.)
 #[test]
 fn test_yq_del_other_untracked_targets_still_refuse_3207() -> Result<()> {
     for (filter, doc) in [
         ("del(.a as $y | $y)", "a: {b: 1}\nc: 2\n"),
-        ("del(.a | tojson)", "a: {b: 1}\n"),
         ("del(. == false)", "true\n"),
     ] {
         let (out, err, code) = run_yq_stdin_with_stderr(filter, doc, &[])?;

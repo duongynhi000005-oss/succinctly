@@ -1,8 +1,9 @@
 //! #4476: a value derived from a navigated node keeps the node's slot in yq (`CopyAsReplacement`),
 //! so `del(.b | tostring)` deletes `.b` and `del(.arr[] | tostring)` empties `.arr`; succinctly's
 //! untracked branches carry no provenance and refused with `Invalid path expression`. A pipe of
-//! navigation ending in `tostring`, `length`, `not` or `@json` (stages that answer every node) now
-//! deletes the navigation. The bare-root slice rows of the same issue were matched by #1325.
+//! navigation ending in `tostring`, `length`, `not`, `@json`, `tojson` or `type` (stages that answer every
+//! node) now deletes the navigation, through `?`, parentheses and commas. The bare-root slice rows of the
+//! same issue were matched by #1325 (PR #4979).
 //!
 //! Every output is captured from yq v4.53.3.
 
@@ -37,6 +38,14 @@ const ROWS: &[(&str, &str)] = &[
     ("del(.arr[1:2] | tostring)", "{\"a\":1,\"b\":2,\"c\":3,\"s\":\"x\",\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
     ("del(.o | not)", "{\"a\":1,\"b\":2,\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"t\":true,\"z\":null}\n"),
     ("del(.b | tostring), 1", "{\"a\":1,\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n1\n"),
+    ("del(.s | tojson)", "{\"a\":1,\"b\":2,\"c\":3,\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(.s | type)", "{\"a\":1,\"b\":2,\"c\":3,\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(.o | tojson)", "{\"a\":1,\"b\":2,\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"t\":true,\"z\":null}\n"),
+    ("del((.a, .b) | tostring)", "{\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(.b? | tostring)", "{\"a\":1,\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(.zz? | tostring)", "{\"a\":1,\"b\":2,\"c\":3,\"s\":\"x\",\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(.arr[]? | type)", "{\"a\":1,\"b\":2,\"c\":3,\"s\":\"x\",\"arr\":[],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
+    ("del(((.a, .b), .c) | tostring)", "{\"s\":\"x\",\"arr\":[1,2,3],\"o\":{\"p\":5,\"q\":6},\"t\":true,\"z\":null}\n"),
 ];
 
 #[test]
@@ -60,6 +69,7 @@ fn test_4476_b_the_other_derived_targets_are_still_refused() -> Result<()> {
         "del(.arr | map(.))",
         "del(. | tostring)",
         "del(.. | tostring)",
+        "del((. , .a) | tostring)",
     ] {
         let (out, code) = run_yq_stdin(filter, DOC, &["-o=json", "-I=0"])?;
         assert_eq!((out.as_str(), code), ("", 1), "{filter}");

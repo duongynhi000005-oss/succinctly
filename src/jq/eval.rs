@@ -69891,7 +69891,7 @@ fn yq_slot_keeping_del_target(expr: &Expr) -> Option<Expr> {
     let deriving_stage = |stage: &Expr| {
         matches!(
             unwrap_paren(stage),
-            Expr::Builtin(Builtin::ToString | Builtin::Length)
+            Expr::Builtin(Builtin::ToString | Builtin::Length | Builtin::ToJson | Builtin::Type)
                 | Expr::Not
                 | Expr::Format(FormatType::Json)
         )
@@ -69924,26 +69924,32 @@ fn yq_slot_keeping_del_target(expr: &Expr) -> Option<Expr> {
             // Without a step down from the root the derived value can be the document itself
             // (`. | tostring`, `.. | tostring`), which has no parent in yq: it stops the delete
             // instead of going, and the rewrite would delete the document.
-            fn steps_down(e: &Expr) -> bool {
-                match unwrap_paren(e) {
-                    Expr::Pipe(inner) => inner.iter().any(steps_down),
-                    Expr::Field(_)
-                    | Expr::Index { .. }
-                    | Expr::ArrayKey(_)
-                    | Expr::Iterate
-                    | Expr::IndexExpr { .. }
-                    | Expr::Slice { .. }
-                    | Expr::SliceExpr { .. } => true,
-                    _ => false,
-                }
-            }
-            let steps_down = stages[..split].iter().any(steps_down);
+            let steps_down = stages[..split].iter().any(del_target_steps_down);
             if !steps_down {
                 return None;
             }
             Some(Expr::pipe(stages[..split].to_vec()))
         }
         _ => None,
+    }
+}
+
+/// Whether a `del()` navigation step goes below the root (a key, an index, `.[]`, a slice), so the
+/// nodes it yields have a parent in yq. `.`, `..` and the like do not.
+fn del_target_steps_down(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Pipe(inner) => inner.iter().any(del_target_steps_down),
+        // Every member must: a root among them is parentless and stops the delete.
+        Expr::Comma(inner) => inner.iter().all(del_target_steps_down),
+        Expr::Optional(inner) => del_target_steps_down(inner),
+        Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::ArrayKey(_)
+        | Expr::Iterate
+        | Expr::IndexExpr { .. }
+        | Expr::Slice { .. }
+        | Expr::SliceExpr { .. } => true,
+        _ => false,
     }
 }
 
