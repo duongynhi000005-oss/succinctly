@@ -41251,14 +41251,15 @@ fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
 /// the bare item (#4800). Looks through parentheses and nested commas; any other expression is returned as
 /// it is, and so is a comma with two items that can emit (`(FE), 7`), whose siblings store values of their own.
 fn without_empty_siblings(expr: &Expr) -> &Expr {
-    let Expr::Comma(items) = unwrap_paren(expr) else {
-        return expr;
-    };
-    let mut emitting = items.iter().filter(|item| !emits_nothing(item));
-    match (emitting.next(), emitting.next()) {
-        (Some(only), None) => without_empty_siblings(only),
-        _ => expr,
+    let mut current = expr;
+    while let Expr::Comma(items) = unwrap_paren(current) {
+        let mut emitting = items.iter().filter(|item| !emits_nothing(item));
+        match (emitting.next(), emitting.next()) {
+            (Some(only), None) => current = only,
+            _ => break,
+        }
     }
+    current
 }
 
 /// What a fold UPDATE leaves behind when the `foreach` that heads it emits nothing (#4754).
@@ -41536,6 +41537,12 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let on_dot = matches!(unwrap_paren(cond), Expr::Identity);
             // #4778: ...or a pure function of it (`if .a then FE else . end`).
             if !on_dot && !is_pure_of_dot(cond) {
+                return None;
+            }
+            // A comma branch (`if . then (FE, empty) else . end`) is not read like the bare `FE`: the bare
+            // form's `.a` EXTRACT lets the index error escape a `?` where jq answers `[]`, which the
+            // comma form did not (it was refused outright), so reading it would regress that row (#4800).
+            if matches!(unwrap_paren(then_branch), Expr::Comma(_)) {
                 return None;
             }
             let mut emptied = emptied_update(then_branch)?;
