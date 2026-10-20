@@ -56684,10 +56684,11 @@ fn resolve_marker_ifs(source: &Expr) -> Expr {
 /// literal entry. `None` for anything that may not reach the destructure (a `select`, an `if`, a
 /// `//`, a `try` ahead of it, where jq raises nothing and the source is just empty), a `?//` chain,
 /// a computed key, or a bare variable.
-fn leading_destructure_of_dot_element(
-    source: &Expr,
-    passing: Option<&[Expr]>,
-) -> Option<OwnedValue> {
+fn leading_destructure_of_dot_element(source: &Expr, read: LeadingRead<'_>) -> Option<OwnedValue> {
+    let passing = match read {
+        LeadingRead::AsWritten => None,
+        LeadingRead::Named { passing } => Some(passing),
+    };
     // Naming only (#4933): the caller that decides whether a caught raise empties the source reads the
     // spine as it was.
     let source = if passing.is_some() {
@@ -56704,7 +56705,7 @@ fn leading_destructure_of_dot_element(
                     && !takes_only_an_identity_leaf(peel_try_wrappers(stage))
                     && !passing.is_some_and(|passing| is_passing_select(stage, passing))
             })?;
-            leading_destructure_of_dot_element(first, passing)
+            leading_destructure_of_dot_element(first, read)
         }
         // #4651: a chain of destructuring alternatives raises on the last one's first step, jq's
         // retry having run out of alternatives; its `.` source may be written `(.|.)`.
@@ -56716,6 +56717,28 @@ fn leading_destructure_of_dot_element(
         }
         _ => None,
     }
+}
+
+/// How [`leading_destructure_of_dot_element`] reads a source's spine.
+#[derive(Clone, Copy)]
+enum LeadingRead<'a> {
+    /// As written: a stage is the first one only if nothing ahead of it spells a step. What decides
+    /// whether a caught raise empties the source reads it so (#4704).
+    AsWritten,
+    /// To name the step a refusal already decided raises (#4933): through a `select` that certainly
+    /// passes (`passing` are the conditions [`passing_marker_selects`] decided) and the wrappers
+    /// [`peel_leading_run`] peels.
+    Named { passing: &'a [Expr] },
+}
+
+/// `find` on `source` as written, then on `source` with its `[ .. ]` wrappers dropped
+/// ([`drop_array_wrappers`]), then on the part that always runs when it is a bare `//` or `try ... catch`
+/// ([`bare_run_branch_of_source`]) -- the analyses that already decide the refusal -- so the step is named
+/// wherever the destructure sits in them (#4933). One definition for the `.` and the `$x` finder.
+fn first_naming<T>(source: &Expr, find: impl Fn(&Expr) -> Option<T>) -> Option<T> {
+    find(source)
+        .or_else(|| find(&drop_array_wrappers(source)))
+        .or_else(|| bare_run_branch_of_source(source, false).and_then(&find))
 }
 
 /// `e` with the wrappers peeled that run their inner expression first and raise what it raises (#4933): the
@@ -56890,7 +56913,7 @@ fn caught_leading_destructure_emits_nothing(source: &Expr) -> bool {
     fn raises(body: &Expr) -> bool {
         match unwrap_paren(body) {
             Expr::Alternative(left, right) if never_truthy(left) => raises(right),
-            other => leading_destructure_of_dot_element(other, None).is_some(),
+            other => leading_destructure_of_dot_element(other, LeadingRead::AsWritten).is_some(),
         }
     }
     // Whether `body` yields nothing once the wrapper around it swallows its raise.
@@ -57614,15 +57637,10 @@ fn drive_fold_source_with<S: EvalSemantics>(
         // #4933: the destructure may sit inside `[ .. ]`, behind a `false // ..` or in the handler of a
         // `try error catch ..`, the parts that always run ([`drop_array_wrappers`],
         // [`bare_run_branch_of_source`]); jq raises on it the same.
-        let dropped = drop_array_wrappers(source);
-        let run_branch = bare_run_branch_of_source(source, false);
-        let named_dot = leading_destructure_of_dot_element(source, Some(&passing_selects))
-            .or_else(|| leading_destructure_of_dot_element(&dropped, Some(&passing_selects)))
-            .or_else(|| {
-                run_branch.and_then(|branch| {
-                    leading_destructure_of_dot_element(branch, Some(&passing_selects))
-                })
-            });
+        let named = LeadingRead::Named {
+            passing: &passing_selects,
+        };
+        let named_dot = first_naming(source, |e| leading_destructure_of_dot_element(e, named));
         let refusal = match named_dot.filter(|_| in_moved_body) {
             Some(element) => {
                 EvalError::invalid_path_expression_near_access(&element, ambient.value)
@@ -57632,19 +57650,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
             None if foreign_verdict
                 && (moved_foreign || (!destructures_unplaced_register && !equal_verdict)) =>
             {
-                match leading_destructure_of_marker(source, &foreign_markers, &passing_selects)
-                    .or_else(|| {
-                        leading_destructure_of_marker(&dropped, &foreign_markers, &passing_selects)
-                    })
-                    .or_else(|| {
-                        run_branch.and_then(|branch| {
-                            leading_destructure_of_marker(
-                                branch,
-                                &foreign_markers,
-                                &passing_selects,
-                            )
-                        })
-                    }) {
+                match first_naming(source, |e| {
+                    leading_destructure_of_marker(e, &foreign_markers, &passing_selects)
+                }) {
                     Some((element, container)) => {
                         EvalError::invalid_path_expression_near_access(&element, &container)
                     }
