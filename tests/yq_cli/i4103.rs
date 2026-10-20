@@ -4,9 +4,10 @@
 //! answer can differ from the full scan's for those nodes. It cannot be made to: each query reads
 //! every member through a `select(true)` (the stage that leaves the node a bare cursor, so its slot
 //! is found by the scan, which the remembered member then resumes), then asks `key`/`path` of the
-//! `<<` value, and the answer is the one a fresh read gives and the one yq gives, for an alias, an inline mapping and a
-//! sequence of aliases. An overridden duplicate is not reachable by any read (a `select` on its
-//! value finds nothing in yq either).
+//! `<<` value. The answer is the one yq gives, and the one a read with nothing remembered gives
+//! (the `fresh` rows), for an alias, an inline mapping and a sequence of aliases, with the `<<`
+//! entry first, in the middle and last. An overridden duplicate is not reachable by any read (a
+//! `select` on its value finds nothing in yq either).
 //!
 //! Every output is captured from yq v4.53.3.
 
@@ -40,6 +41,28 @@ fn inline_doc() -> String {
 
 fn sequence_doc() -> String {
     doc("  <<: [*a, *b]\n", "", "a: &a {x: 1}\nb: &b {y: 2}\n")
+}
+
+fn middle_doc() -> String {
+    let mut text = String::from("base: &b\n  p: 1\n  q: 2\nitem:\n");
+    for i in 0..20 {
+        text.push_str(&format!("  k{i}: {i}\n"));
+    }
+    text.push_str("  <<: *b\n");
+    for i in 20..40 {
+        text.push_str(&format!("  k{i}: {i}\n"));
+    }
+    text.push_str("  k5: dup\n");
+    text
+}
+
+fn last_doc() -> String {
+    let mut text = String::from("base: &b\n  p: 1\n  q: 2\nitem:\n");
+    for i in 0..40 {
+        text.push_str(&format!("  k{i}: {i}\n"));
+    }
+    text.push_str("  <<: *b\n");
+    text
 }
 
 fn check(document: &str, rows: &[(&str, &str)]) -> Result<()> {
@@ -128,4 +151,113 @@ fn test_4103_sequence_merge_value_after_a_wide_scan_matches_yq() -> Result<()> {
             ),
         ],
     )
+}
+
+#[test]
+fn test_4103_middle_merge_entry_after_a_wide_scan_matches_yq() -> Result<()> {
+    check(
+        &middle_doc(),
+        &[
+            (
+                "[.item | (.[], .[\"<<\"]) | select(true) | path] | .[-3:]",
+                "[[\"item\",\"k38\"],[\"item\",\"k39\"],[\"item\",\"<<\"]]\n",
+            ),
+            (
+                "[.item | (.[], .[\"<<\"]) | select(true) | key] | .[-3:]",
+                "[\"k38\",\"k39\",\"<<\"]\n",
+            ),
+            (
+                "[.item | (.[\"<<\"], .[]) | select(true) | key] | .[0:3]",
+                "[\"<<\",\"k0\",\"k1\"]\n",
+            ),
+            (
+                "[.item | (.k39, .[\"<<\"], .k0) | select(true) | path]",
+                "[[\"item\",\"k39\"],[\"item\",\"<<\"],[\"item\",\"k0\"]]\n",
+            ),
+            (
+                "[.item | (.[], .[\"<<\"], .k5) | select(true) | key] | .[-4:]",
+                "[\"k38\",\"k39\",\"<<\",\"k5\"]\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_4103_last_merge_entry_after_a_wide_scan_matches_yq() -> Result<()> {
+    check(
+        &last_doc(),
+        &[
+            (
+                "[.item | (.[], .[\"<<\"]) | select(true) | path] | .[-3:]",
+                "[[\"base\",\"p\"],[\"base\",\"q\"],[\"item\",\"<<\"]]\n",
+            ),
+            (
+                "[.item | (.[], .[\"<<\"]) | select(true) | key] | .[-3:]",
+                "[\"p\",\"q\",\"<<\"]\n",
+            ),
+            (
+                "[.item | (.[\"<<\"], .[]) | select(true) | key] | .[0:3]",
+                "[\"<<\",\"k0\",\"k1\"]\n",
+            ),
+            (
+                "[.item | (.k39, .[\"<<\"], .k0) | select(true) | path]",
+                "[[\"item\",\"k39\"],[\"item\",\"<<\"],[\"item\",\"k0\"]]\n",
+            ),
+            (
+                "[.item | (.[], .[\"<<\"], .k5) | select(true) | key] | .[-4:]",
+                "[\"p\",\"q\",\"<<\",\"k5\"]\n",
+            ),
+        ],
+    )
+}
+
+/// Reads with nothing remembered: one node, asked alone. The same answers as the wide scans above.
+#[test]
+fn test_4103_fresh_read_of_the_merge_value_matches_yq() -> Result<()> {
+    check(
+        &alias_doc(),
+        &[
+            (".item[\"<<\"] | path", "[\"item\",\"<<\"]\n"),
+            (".item[\"<<\"] | key", "\"<<\"\n"),
+            (".item[\"<<\"] | select(true) | path", "[\"item\",\"<<\"]\n"),
+            (".item.k39 | path", "[\"item\",\"k39\"]\n"),
+        ],
+    )?;
+    check(
+        &inline_doc(),
+        &[
+            (".item[\"<<\"] | path", "[\"item\",\"<<\"]\n"),
+            (".item[\"<<\"] | key", "\"<<\"\n"),
+            (".item[\"<<\"] | select(true) | path", "[\"item\",\"<<\"]\n"),
+            (".item.k39 | path", "[\"item\",\"k39\"]\n"),
+        ],
+    )?;
+    check(
+        &sequence_doc(),
+        &[
+            (".item[\"<<\"] | path", "[\"item\",\"<<\"]\n"),
+            (".item[\"<<\"] | key", "\"<<\"\n"),
+            (".item[\"<<\"] | select(true) | path", "[\"item\",\"<<\"]\n"),
+            (".item.k39 | path", "[\"item\",\"k39\"]\n"),
+        ],
+    )?;
+    check(
+        &middle_doc(),
+        &[
+            (".item[\"<<\"] | path", "[\"item\",\"<<\"]\n"),
+            (".item[\"<<\"] | key", "\"<<\"\n"),
+            (".item[\"<<\"] | select(true) | path", "[\"item\",\"<<\"]\n"),
+            (".item.k39 | path", "[\"item\",\"k39\"]\n"),
+        ],
+    )?;
+    check(
+        &last_doc(),
+        &[
+            (".item[\"<<\"] | path", "[\"item\",\"<<\"]\n"),
+            (".item[\"<<\"] | key", "\"<<\"\n"),
+            (".item[\"<<\"] | select(true) | path", "[\"item\",\"<<\"]\n"),
+            (".item.k39 | path", "[\"item\",\"k39\"]\n"),
+        ],
+    )?;
+    Ok(())
 }
