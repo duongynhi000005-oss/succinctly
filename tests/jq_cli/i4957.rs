@@ -315,13 +315,6 @@ fn test_4957_bare_caught_bind_foreach_update_on_a_root_register() -> Result<()> 
         ),
         (
             r#"{"a":null}"#,
-            r"[path(. as $x | foreach (1,2) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 7; .a))?]",
-            "[]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":null}"#,
             r"[path(. as $x | foreach (.,.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .; .a))?]",
             "[]\n",
             "",
@@ -379,20 +372,6 @@ fn test_4957_bare_caught_bind_foreach_update_on_a_root_register() -> Result<()> 
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_4957_bare_caught_bind_foreach_update_spellings() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
-        (
-            r"[1]",
-            r"[del(. as $x | foreach (.) as $i (.; (foreach (($x as {b:$a} | .)) as $y (.; .; .)), .; .))?]",
-            "[]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":true}"#,
-            r"[del(. as $x | foreach (1,2) as $i (.; (foreach ((. as {a:$a} | .)) as $y (.; .; .)), .; .))?]",
-            "[]\n",
-            "",
-            0,
-        ),
         (
             r"[1]",
             r"[del(. as $x | foreach (.) as $i (.; (foreach (($x as [$a] | .)) as $y (.; .; .)) | 5; .))?]",
@@ -487,11 +466,13 @@ fn test_4957_bare_caught_bind_foreach_update_spellings() -> Result<()> {
     ])
 }
 
-/// #4957: shapes the read does not take -- a pattern of two or more variables (its absent key lands on a `null` the
-/// resolver places differently from jq's), a body other than `.`, a `?//` chain, a nested pattern, a `select` stage, a source that computes --
-/// refuse as they did, loudly, or answer as jq does. Reading them as the bare one-variable bind flipped these rows to
-/// a caught raise that printed `[]`/`"C"` where jq prints a path, or to an answer where jq refuses (11 and 6 of 40,000
-/// and 30,000 random rows). Each row is `(input, filter, jq 1.7.1's stdout, jq's exit code)`.
+/// #4957: shapes the read does not take refuse as they did, loudly, or answer as jq does: a pattern of two or more
+/// variables (its absent key lands on a `null` the resolver places differently from jq's), a body other than `.`, an
+/// INIT or UPDATE of the inner `foreach` that is not `.`, an `if` arm that navigates (`else .a`), a comma item beside
+/// the `foreach` (`(FE), 7`), a `null` or boolean EXTRACT, a `?//` chain, a nested pattern, a `select` stage, a source
+/// that computes. Reading them as the bare one-variable bind flipped rows like these to a caught raise that printed
+/// `[]`/`"C"` where jq prints a path, or to an answer where jq refuses (random grids of 30,000 to 50,000 rows found
+/// 2 to 11 of each). Each row is `(input, filter, jq 1.7.1's stdout, jq's exit code)`.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_4957_shapes_outside_the_read_never_answer_where_jq_differs() -> Result<()> {
@@ -580,12 +561,114 @@ fn test_4957_shapes_outside_the_read_never_answer_where_jq_differs() -> Result<(
             "[[\"b\"],[\"b\"]]\n",
             0,
         ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else .a end; empty)) catch "C""#,
+            "\"C\"\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (..) as $i (.; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else .a end; empty)) catch "C""#,
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else .a? end; empty)) catch "C""#,
+            "\"C\"\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), .a; empty)) catch "C""#,
+            "\"C\"\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; .a?, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); empty)) catch "C""#,
+            "\"C\"\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; if . then .a else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end; empty)) catch "C""#,
+            "\"C\"\n",
+            0,
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else 5 end; empty)) catch "C""#,
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"try del(. as $x | foreach ((.,.)) as $i (.; foreach (try ($x as {b:$a} | .)) as $y (0; $y; .); null)) catch "C""#,
+            "{\"a\":1}\n",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[del(. as $x | foreach ((.,1)) as $i (.; foreach (try ($x as {b:$a} | .)) as $y (0; $y; .); null))?]",
+            "[{\"a\":{\"a\":null}}]\n",
+            0,
+        ),
+        (
+            r#"{"b":null}"#,
+            r#"try path(. as $x | foreach ((.,.)) as $i (.; (foreach (try ($x as {b:$a} | .)) as $y (0; $y; .)) | .; null)) catch "C""#,
+            "[\"b\"]\n[\"b\"]\n",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (1,2) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 7; .a))?]",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r"[del(. as $x | foreach (.) as $i (.; (foreach (($x as {b:$a} | .)) as $y (.; .; .)), .; .))?]",
+            "[]\n",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[del(. as $x | foreach (1,2) as $i (.; (foreach ((. as {a:$a} | .)) as $y (.; .; .)), .; .))?]",
+            "[]\n",
+            0,
+        ),
+        (
+            r"[1]",
+            r#"try del(. as $x | foreach (first(.,.a)) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.; .; .))), []; $x)) catch "C""#,
+            "null\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r#"try del(. as $x | foreach ($x) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.; .; .))), "s"; $i)) catch "C""#,
+            "null\n",
+            0,
+        ),
+        (
+            r"[[1],[2]]",
+            r"[path(. as $x | foreach ($x) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.; .; .))), null; $x))?]",
+            "[[]]\n",
+            0,
+        ),
+        (
+            r#"{"b":null}"#,
+            r#"try del(. as $x | foreach ((.,.a),.) as $i (.; (foreach (($x as {a:$a} | .)?) as $y (.; .; .)) | not; null)) catch "C""#,
+            "{\"b\":null}\n",
+            0,
+        ),
     ];
     for (input, filter, jq_stdout, jq_code) in rows {
         let (stdout, _stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
         let same_as_jq = stdout == *jq_stdout && code == *jq_code;
-        // jq answers and the binary refuses (a refusal prints nothing), or jq refuses and the binary refuses too.
-        let refuses = code != 0 && (*jq_code != 0 || stdout.is_empty());
+        // jq answers and the binary refuses (exit 5, nothing printed), or jq refuses and the binary refuses too.
+        let refuses = code == 5 && (*jq_code != 0 || stdout.is_empty());
         assert!(
             same_as_jq || refuses,
             "{filter} on {input}: jq {jq_stdout:?} (exit {jq_code}), binary {stdout:?} (exit {code})"
