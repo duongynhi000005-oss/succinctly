@@ -7232,12 +7232,12 @@ fn decode_block_literal(
             }
         }
         ChompingIndicator::Clip => {
-            // Clip: Ensure exactly one trailing newline
+            // Clip: at most one trailing newline. Never *add* one (#4959): the loop above
+            // wrote a `\n` for every break the text has, so a result not ending in `\n` is an
+            // unterminated final line, which clip leaves alone (`|` over `  x` with no final
+            // break is `"x"` in yq, as `>` is below).
             while result.ends_with("\n\n") {
                 result.pop();
-            }
-            if !result.is_empty() && !result.ends_with('\n') {
-                result.push('\n');
             }
         }
         ChompingIndicator::Keep => {
@@ -12934,6 +12934,35 @@ mod tests {
             }
         } else {
             panic!("expected mapping");
+        }
+    }
+
+    /// #4959: clip chomping keeps one final break only if the text has one, so a literal block
+    /// that ends the input without it decodes without it (as the folded scalar does), whatever
+    /// the indentation, a CRLF body or a blank line inside.
+    #[test]
+    fn test_block_literal_clip_adds_no_break_at_eof_4959() {
+        for (yaml, expected) in [
+            ("a: |\n  x\n  y", "x\ny"),
+            ("a: |\n  x\n  y\n", "x\ny\n"),
+            ("a: |\n  x\n  y\n\n", "x\ny\n"),
+            ("a: |\n  x\n\n  y", "x\n\ny"),
+            ("a: |\n  x\r\n  y", "x\ny"),
+            ("a: |2\n    x\n    y", "  x\n  y"),
+            ("a: |\n x", "x"),
+            ("a: |-\n  x\n  y", "x\ny"),
+            ("a: |+\n  x\n  y", "x\ny"),
+            ("a: |+\n  x\n  y\n\n", "x\ny\n\n"),
+        ] {
+            let index = YamlIndex::build(yaml.as_bytes()).unwrap();
+            let root = index.root(yaml.as_bytes());
+            let YamlValue::Mapping(fields) = first_doc(root) else {
+                panic!("{yaml:?}: expected mapping");
+            };
+            let Some(YamlValue::String(s)) = fields.find("a") else {
+                panic!("{yaml:?}: expected string");
+            };
+            assert_eq!(&*s.as_str().unwrap(), expected, "{yaml:?}");
         }
     }
 
