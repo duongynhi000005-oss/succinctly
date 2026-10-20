@@ -1398,7 +1398,7 @@ validate:
   every bare `key: value` outright was reverted before merge -- it over-rejected input real
   yq accepts. Several top-level values are now read as a stream (#2839): an input that opens with a scalar
   (`"a": 1`, `true: 1`, `1 2`) is cut into its values first, and one that opens with `{`/`[` is cut
-  only after its single-value parse has failed (so a well-formed object or array pays nothing),
+  only after its single-value parse has failed (so on the streaming routes a well-formed object or array pays nothing; `--eval-all`/`--slurp`/`--inplace` cut every input first, one byte scan that measured within noise of a 16 MB document's ~700 ms),
   each value (whitespace, `,` or `:` between them) re-read as one document. `1 2`, `{"a":1}{"a":2}`,
   `[1][2]`, `1,2`, `"a": 1` and `true: 1` match yq on stdin and on a file. A stream whose *later* value
   is bad (`1 2 ]`, `{"a":1} x`, `1 {"a":`, `1 [1,,2]`) prints the values before it and then fails, as

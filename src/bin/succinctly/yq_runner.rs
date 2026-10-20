@@ -1061,6 +1061,10 @@ struct JsonValueSplit {
 /// parser, which rejects a malformed one.
 fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
     let is_sep = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b',' | b':');
+    let stop = |pieces, at| JsonValueSplit {
+        pieces,
+        stopped_at: Some(at),
+    };
     let mut pieces = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -1069,10 +1073,6 @@ fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
             continue;
         }
         let start = i;
-        let stopped = JsonValueSplit {
-            pieces: Vec::new(),
-            stopped_at: Some(start),
-        };
         match bytes[i] {
             b'{' | b'[' => {
                 let mut depth = 0usize;
@@ -1097,7 +1097,7 @@ fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
                     i += 1;
                 }
                 if depth != 0 {
-                    return JsonValueSplit { pieces, ..stopped };
+                    return stop(pieces, start);
                 }
             }
             b'"' => {
@@ -1106,7 +1106,7 @@ fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
                     i += if bytes[i] == b'\\' { 2 } else { 1 };
                 }
                 if i >= bytes.len() {
-                    return JsonValueSplit { pieces, ..stopped };
+                    return stop(pieces, start);
                 }
                 i += 1;
             }
@@ -1123,10 +1123,10 @@ fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
                     || (matches!(token[0], b'-' | b'0'..=b'9')
                         && std::str::from_utf8(token).is_ok_and(|t| t.parse::<f64>().is_ok()));
                 if !is_literal {
-                    return JsonValueSplit { pieces, ..stopped };
+                    return stop(pieces, start);
                 }
             }
-            _ => return JsonValueSplit { pieces, ..stopped },
+            _ => return stop(pieces, start),
         }
         pieces.push((start, i.min(bytes.len())));
     }
@@ -8979,17 +8979,20 @@ fn discard_yq_partial_prefix<V: DocumentValue>(result: GenericResult<V>) -> Gene
 pub fn run_yq(args: YqCommand) -> Result<i32> {
     silence_depth_guard_panic_line();
     JSON_STREAM_TAIL_ERROR.with(|e| *e.borrow_mut() = None);
+    // `-e` exits 1 for "no match" too, which says nothing about the stream's bad value.
+    let exit_status = args.exit_status;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_yq_inner(args)));
     match outcome {
         // #2839: the good values of a `-p json` stream are out; now the bad one.
-        Ok(Ok(exit_codes::SUCCESS)) => match JSON_STREAM_TAIL_ERROR.with(|e| e.borrow_mut().take())
+        Ok(Ok(code))
+            if code == exit_codes::SUCCESS || (exit_status && code == exit_codes::YQ_FAILURE) =>
         {
-            Some(message) => {
+            if let Some(message) = JSON_STREAM_TAIL_ERROR.with(|e| e.borrow_mut().take()) {
                 eprintln!("Error: YAML parse error: {message}");
-                Ok(exit_codes::YQ_FAILURE)
+                return Ok(exit_codes::YQ_FAILURE);
             }
-            None => Ok(exit_codes::SUCCESS),
-        },
+            Ok(code)
+        }
         Ok(result) => result,
         Err(payload) => {
             let Some(message) = depth_guard_panic_message(&*payload) else {

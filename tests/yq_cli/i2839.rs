@@ -42,6 +42,14 @@ fn test_stream_prints_values_before_a_bad_one_2839() -> Result<()> {
         let (stdout, _, code) = run_yq_stdin_with_stderr(".", doc, JSON)?;
         assert_eq!((code, stdout.as_str()), (1, ""), "{doc:?}");
     }
+    // `-e` exits 1 for "no match" too, and the bad value is still reported.
+    let (stdout, stderr, code) = run_yq_stdin_with_stderr(
+        "select(. == 5)",
+        "1 2 ]",
+        &["-p=json", "-o=json", "-I=0", "-e"],
+    )?;
+    assert_eq!((code, stdout.as_str()), (1, ""));
+    assert!(stderr.contains("unexpected content"), "{stderr:?}");
     // A filter error on a good value outranks the bad one behind it.
     let (stdout, stderr, code) = run_yq_stdin_with_stderr("error(\"boom\")", "{\"a\":1} x", JSON)?;
     assert_eq!((code, stdout.as_str()), (1, ""));
