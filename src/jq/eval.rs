@@ -31328,7 +31328,11 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         .collect();
 
     let result = super::eval_generic::eval_yq_documents_together::<S, _>(expr, &inputs);
-    detach_from_temp_document::<_, S>(generic_to_query_result::<_, S>(result))
+    let result = detach_from_temp_document::<_, S>(generic_to_query_result::<_, S>(result));
+    // The throwaway documents are dropped on return, and a later one could be allocated where
+    // one stood (#4646).
+    super::eval_generic::forget_source_documents();
+    result
 }
 
 // =============================================================================

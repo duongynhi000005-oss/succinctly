@@ -71,11 +71,20 @@ struct Loaded {
     documents: Vec<usize>,
     /// (document, address of a path link) -> the node id that path leads to.
     nodes: RefCell<HashMap<(usize, usize), usize>>,
-    /// (document, address of a sequence's path link) -> the index of the element after the one
-    /// asked for last, and the list standing there.
-    resume: RefCell<HashMap<(usize, usize), (usize, usize)>>,
+    /// (document, address of a sequence's path link) -> how its elements are reached.
+    sequences: RefCell<HashMap<(usize, usize), Sequence>>,
     /// (document, address of a mapping's path link) -> what is known of its keys.
     members: RefCell<HashMap<(usize, usize), Members>>,
+}
+
+/// How the elements of one sequence are reached.
+enum Sequence {
+    /// The elements have been asked for in order so far: the index of the one after the element
+    /// asked for last, and the list standing there.
+    Resume(usize, usize),
+    /// An element was asked for out of order, so the sequence is listed once: the node id of
+    /// each element.
+    Listed(Vec<usize>),
 }
 
 /// What is known of one mapping's keys.
@@ -97,7 +106,7 @@ impl Source {
                 let YamlValue::Sequence(mut rest) = index.root(&self.bytes).value() else {
                     return None;
                 };
-                while let Some((document, next)) = rest.uncons_cursor() {
+                while let Some((document, next)) = DocumentElements::uncons_cursor(&rest) {
                     documents.push(document.node_id());
                     rest = next;
                 }
@@ -105,7 +114,7 @@ impl Source {
                     index,
                     documents,
                     nodes: RefCell::default(),
-                    resume: RefCell::default(),
+                    sequences: RefCell::default(),
                     members: RefCell::default(),
                 })
             })
@@ -216,8 +225,10 @@ impl Loaded {
         }
     }
 
-    /// Element `index` of the sequence at `parent`, resuming after the element asked for last
-    /// when this is the one that follows it.
+    /// Element `index` of the sequence at `parent`.
+    ///
+    /// Elements asked for in order resume after the one read last; the first one asked for out of
+    /// order lists the sequence once, so no order costs a walk from the head per element.
     fn element<'a>(
         &self,
         document: usize,
@@ -230,27 +241,35 @@ impl Loaded {
             document,
             path.as_ref().map_or(0, |link| Rc::as_ptr(link) as usize),
         );
-        let resumed = self
-            .resume
-            .borrow()
-            .get(&slot)
-            .filter(|(next, _)| *next == index)
-            .and_then(|(_, head)| elements.at_head_id(*head));
-        let mut rest = match resumed {
-            Some(rest) => rest,
+        let mut sequences = self.sequences.borrow_mut();
+        let rest = match sequences.get(&slot) {
+            Some(Sequence::Listed(ids)) => {
+                return ids.get(index).and_then(|id| parent.at_node_id(*id));
+            }
+            Some(Sequence::Resume(next, head)) if *next == index => elements.at_head_id(*head)?,
+            Some(Sequence::Resume(..)) => {
+                let mut ids = Vec::new();
+                let mut rest = elements;
+                while let Some((element, after)) = DocumentElements::uncons_cursor(&rest) {
+                    ids.push(element.node_id());
+                    rest = after;
+                }
+                let found = ids.get(index).and_then(|id| parent.at_node_id(*id));
+                sequences.insert(slot, Sequence::Listed(ids));
+                return found;
+            }
             None => {
                 let mut rest = elements;
                 for _ in 0..index {
-                    rest = rest.uncons_cursor()?.1;
+                    rest = DocumentElements::uncons_cursor(&rest)?.1;
                 }
                 rest
             }
         };
-        let (element, after) = rest.uncons_cursor()?;
-        rest = after;
-        match rest.head_id() {
-            Some((head, _)) => self.resume.borrow_mut().insert(slot, (index + 1, head)),
-            None => self.resume.borrow_mut().remove(&slot),
+        let (element, after) = DocumentElements::uncons_cursor(&rest)?;
+        match after.head_id() {
+            Some((head, _)) => sequences.insert(slot, Sequence::Resume(index + 1, head)),
+            None => sequences.remove(&slot),
         };
         Some(element)
     }

@@ -7635,6 +7635,24 @@ pub type SourcePath = Option<Rc<SourcePathLink>>;
 /// position of its own), or `None` where the source has no such node.
 pub type SourcePositionFn = dyn Fn(usize, usize, &SourcePath, bool) -> Option<(usize, usize)>;
 
+/// What is recorded of one node of a registered document (#4646).
+#[derive(Clone)]
+enum RecordedPath {
+    /// The node's path and whether the node is a mapping key.
+    At(SourcePath, bool),
+    /// A node the resolver cannot be asked about (its key is neither a string nor an integer).
+    Unanswerable,
+}
+
+impl RecordedPath {
+    fn into_path(self) -> Option<(SourcePath, bool)> {
+        match self {
+            Self::At(path, at_key) => Some((path, at_key)),
+            Self::Unanswerable => None,
+        }
+    }
+}
+
 /// The source-position resolver `--eval-all` installs, for the current thread (#4646).
 ///
 /// `--eval-all` evaluates each document through a reindexed copy, so a cursor's own `line`/
@@ -7646,7 +7664,7 @@ pub type SourcePositionFn = dyn Fn(usize, usize, &SourcePath, bool) -> Option<(u
 /// before.
 #[cfg(feature = "std")]
 mod source_positions {
-    use super::{SourcePath, SourcePositionFn};
+    use super::{RecordedPath, SourcePositionFn};
     use alloc::rc::Rc;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -7656,8 +7674,10 @@ mod source_positions {
         resolver: Option<Rc<SourcePositionFn>>,
         /// Document token -> (file, document within it).
         documents: HashMap<usize, (usize, usize)>,
-        /// (document token, node id) -> the node's path, and whether the node is a key.
-        paths: HashMap<(usize, usize), (SourcePath, bool)>,
+        /// (document token, node id) -> the node's path and whether the node is a key, or `None`
+        /// for a node the resolver cannot be asked about. An entry is never replaced, so a link
+        /// is not freed while the scope lives and its address names its node for good.
+        paths: HashMap<(usize, usize), RecordedPath>,
     }
 
     thread_local! {
@@ -7699,20 +7719,24 @@ mod source_positions {
         CURRENT.with(|c| c.borrow().documents.get(&token).copied())
     }
 
-    pub(crate) fn known_path(token: usize, node: usize) -> Option<(SourcePath, bool)> {
+    pub(crate) fn known_path(token: usize, node: usize) -> Option<RecordedPath> {
         CURRENT.with(|c| c.borrow().paths.get(&(token, node)).cloned())
     }
 
-    pub(crate) fn remember_path(token: usize, node: usize, path: SourcePath, at_key: bool) {
+    pub(crate) fn remember_path(token: usize, node: usize, path: RecordedPath) {
         CURRENT.with(|c| {
-            c.borrow_mut().paths.insert((token, node), (path, at_key));
+            c.borrow_mut().paths.entry((token, node)).or_insert(path);
         });
+    }
+
+    pub(crate) fn forget_documents() {
+        CURRENT.with(|c| c.borrow_mut().documents.clear());
     }
 }
 
 #[cfg(not(feature = "std"))]
 mod source_positions {
-    use super::{SourcePath, SourcePositionFn};
+    use super::{RecordedPath, SourcePositionFn};
     use alloc::rc::Rc;
 
     pub(crate) fn resolver() -> Option<Rc<SourcePositionFn>> {
@@ -7735,11 +7759,13 @@ mod source_positions {
         None
     }
 
-    pub(crate) fn known_path(_token: usize, _node: usize) -> Option<(SourcePath, bool)> {
+    pub(crate) fn known_path(_token: usize, _node: usize) -> Option<RecordedPath> {
         None
     }
 
-    pub(crate) fn remember_path(_token: usize, _node: usize, _path: SourcePath, _at_key: bool) {}
+    pub(crate) fn remember_path(_token: usize, _node: usize, _path: RecordedPath) {}
+
+    pub(crate) fn forget_documents() {}
 }
 
 /// Install `resolver` as the source-position resolver until the returned guard is dropped
@@ -7759,6 +7785,12 @@ pub(crate) fn register_source_document(token: usize, file: usize, document: usiz
     }
 }
 
+/// Forget the documents [`register_source_document`] named: they are dropped when
+/// `--eval-all` returns, and a later document could be allocated where one stood (#4646).
+pub(crate) fn forget_source_documents() {
+    source_positions::forget_documents();
+}
+
 /// The path from its document's root to the node `cursor` stands on, and whether that node is a
 /// mapping key; `None` for a node the resolver cannot be asked about (#4646).
 ///
@@ -7768,14 +7800,14 @@ pub(crate) fn register_source_document(token: usize, file: usize, document: usiz
 fn source_path_of<S: EvalSemantics, C: DocumentCursor>(cursor: &C) -> Option<(SourcePath, bool)> {
     let token = cursor.document_token();
     if let Some(known) = source_positions::known_path(token, cursor.node_id()) {
-        return Some(known);
+        return known.into_path();
     }
     let Some(parent) = cursor.document_parent() else {
         return Some((None, false));
     };
     let (parent_path, _) = source_path_of::<S, C>(&parent)?;
     remember_children_paths::<S, C>(&parent, &parent_path, token);
-    source_positions::known_path(token, cursor.node_id())
+    source_positions::known_path(token, cursor.node_id())?.into_path()
 }
 
 /// Record the path of each child of `parent` (the node whose own path is `parent_path`): a
@@ -7792,30 +7824,44 @@ fn remember_children_paths<S: EvalSemantics, C: DocumentCursor>(
         let mut rest = fields;
         while let Some((field, next)) = rest.uncons() {
             rest = next;
-            let Some(CursorSlot::Value { key, key_cursor }) = member_slot(field.key_cursor, true)
-            else {
+            let (key_id, value_id) = (field.key_cursor.node_id(), field.value_cursor.node_id());
+            let step = match member_slot(field.key_cursor, true) {
+                Some(CursorSlot::Value { key, key_cursor }) => {
+                    member_step(retype_member_key(retype, key, &key_cursor))
+                }
+                _ => None,
+            };
+            let Some(step) = step else {
+                // Recorded as unanswerable, so asking again does not walk the parent again.
+                source_positions::remember_path(token, key_id, RecordedPath::Unanswerable);
+                source_positions::remember_path(token, value_id, RecordedPath::Unanswerable);
                 continue;
             };
-            let Some(step) = member_step(retype_member_key(retype, key, &key_cursor)) else {
-                continue;
-            };
-            let link = Some(Rc::new(SourcePathLink {
+            let link = Rc::new(SourcePathLink {
                 parent: parent_path.clone(),
                 step,
-            }));
-            source_positions::remember_path(token, field.key_cursor.node_id(), link.clone(), true);
-            source_positions::remember_path(token, field.value_cursor.node_id(), link, false);
+            });
+            source_positions::remember_path(
+                token,
+                key_id,
+                RecordedPath::At(Some(Rc::clone(&link)), true),
+            );
+            source_positions::remember_path(token, value_id, RecordedPath::At(Some(link), false));
         }
     } else if let Some(elements) = value.as_array() {
         let mut rest = elements;
         let mut index = 0;
         while let Some((element, next)) = rest.uncons_cursor() {
             rest = next;
-            let link = Some(Rc::new(SourcePathLink {
+            let link = Rc::new(SourcePathLink {
                 parent: parent_path.clone(),
                 step: SourcePathStep::Element(index),
-            }));
-            source_positions::remember_path(token, element.node_id(), link, false);
+            });
+            source_positions::remember_path(
+                token,
+                element.node_id(),
+                RecordedPath::At(Some(link), false),
+            );
             index += 1;
         }
     }

@@ -31,6 +31,10 @@ const SEQ: &str = "a:\n  - 1\n  - b: 2\n";
 const MERGED: &str = "x: &k\n  p: 1\n  q: [3, 4]\ny:\n  <<: *k\n  r: 5\n---\nz: 1\n";
 const KEYS: &str = "k: 1\nl:\n  m: [1, 2]\n";
 const MERGE_ONE: &str = "x: &k\n  p: 1\n  q: [3, 4]\ny:\n  <<: *k\n  r: 5\n";
+const BARE: &str =
+    "a:\n  - # c\n    k: v\n  -\n    z: 1\n  - plain\n  - [1, 2]\n  - - n\n    - m\n";
+const ODD_KEYS: &str =
+    "1: a\ntrue: b\nnull: c\n? [1, 2]\n: d\n2.5: e\n~: g\nx:\n  1: h\n  y: [1, {z: 1}]\n";
 const DUPLICATE: &str = "a: 1\nb: 2\na: 3\nc:\n  - x\n  - y\n  - z\n";
 
 /// (filter, files, expected stdout).
@@ -86,6 +90,23 @@ const ROWS: &[(&str, &[Source], &str)] = &[
         "[3,2,3,7,6,7]\n",
     ),
     ("[.c[] | line]", &[("d.yaml", DUPLICATE)], "[5,6,7]\n"),
+    // A sequence read out of order is listed once; a bare `-` item answers the position of its
+    // value, and a key that is a number, a boolean, null or a collection is still found.
+    (
+        "[(.a[3]|line), (.a[0]|line), (.a[2]|line), (.a[4]|line), (.a[1]|line), (.a[5][1]|line)]",
+        &[("b.yaml", BARE)],
+        "[7,3,6,8,5,0]\n",
+    ),
+    (
+        "[.a[] | [line,column]]",
+        &[("b.yaml", BARE)],
+        "[[3,5],[5,5],[6,5],[7,5],[8,5]]\n",
+    ),
+    (
+        "[.. | [line,column]]",
+        &[("o.yaml", ODD_KEYS)],
+        "[[1,1],[1,4],[2,7],[3,7],[5,3],[6,6],[7,4],[9,3],[9,6],[10,6],[10,7],[10,10],[10,14]]\n",
+    ),
     // A mapping key has a position of its own.
     (".l | key | [line,column]", &[("f.yaml", KEYS)], "[2,1]\n"),
     (".l | keys | .[] | [line,column]", &[("f.yaml", KEYS)], "[3,3]\n"),
