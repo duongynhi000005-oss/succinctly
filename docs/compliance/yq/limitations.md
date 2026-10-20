@@ -364,8 +364,10 @@ are two routes that still print a key bare: `keys` (`- &k key` in yq) and `pick`
 expands the merged mapping's keys where yq keeps `<<: *m`. The expansion does not re-declare the
 source's anchors ([#2513](https://github.com/rust-works/succinctly/issues/2513)): `default: &d` /
 `  a: &y 1` / `item: {<<: *d, b: 2}` written with `.item.b = 3` prints `a: 1` under `item`, not a
-second `&y` that every later `*y` would resolve to; an inline source (`<<: {a: &y 1}`), which is
-written nowhere else, keeps its declaration. An alias inside the merged-in fields (`*y`) is kept.
+second `&y` that every later `*y` would resolve to. That holds for a source written elsewhere in the
+output, outside the mapping or a sibling of it; an inline source (`<<: {a: &y 1}`, or one inside a `<<`
+sequence), which is written nowhere else, keeps its declaration. An alias inside the merged-in fields
+(`*y`) is kept.
 
 Related open items in the same family, still unresolved:
 [#1359](https://github.com/rust-works/succinctly/issues/1359) (a write that changes a node's

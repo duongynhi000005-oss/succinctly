@@ -2928,6 +2928,34 @@ enum HeadFootRead {
     SkippedForMappingValue,
 }
 
+/// Whether a field whose value sits in `parent` is a copy of a merge source written elsewhere in
+/// the output, for the mapping at node `start` whose subtree ends at `end` (#2513): `parent` is
+/// outside that subtree, or is inside it without being the mapping itself or under its `<<`
+/// value (a sibling the merge key aliases).
+fn member_is_copy_of_source<C: DocumentCursor>(parent: &C, start: usize, end: usize) -> bool {
+    let mut node = *parent;
+    loop {
+        let id = node.node_id();
+        if id == start {
+            return false;
+        }
+        if !(start..end).contains(&id) {
+            return true;
+        }
+        let Some(up) = node.document_parent() else {
+            return true;
+        };
+        if up.node_id() == start {
+            // A direct child of the mapping: the value of the `<<` key itself holds an inline
+            // source, any other is a member a merge key may alias.
+            return !node
+                .prev_sibling()
+                .is_some_and(|key| key.value().as_str().is_some_and(|text| text == "<<"));
+        }
+        node = up;
+    }
+}
+
 /// `under_alias`: whether some ancestor on the path from the root is itself
 /// an alias node -- i.e. whether the node currently being converted was
 /// only reached by resolving through a `YamlValue::Alias` to its target's
@@ -3034,12 +3062,15 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
         let mut comment_map = IndexMap::new();
         let mut key_comment_map = IndexMap::new();
         let mut guard = DisplayKeyGuard::default();
-        // #2513: a merge-resolved list holds fields of the merge sources, which sit outside this
-        // mapping (`<<: *base`). The id range of this mapping's own subtree tells them from the
-        // mapping's children, an inline `<<: {..}` source included.
+        // #2513: a merge-resolved list holds fields of the merge sources (`<<: *base`), and the
+        // source is written where it stands too, so a field of one is a copy whose `&anchor`
+        // declarations the output already carries. An inline source (`<<: {..}`, or one inside a
+        // `<<` sequence) is written nowhere else, and so is the mapping's own member.
         let own_subtree = (fields.head_key_cursor().is_none() && !child_under_alias)
             .then(|| cursor.and_then(|c| c.subtree_end().map(|end| (c.node_id(), end))))
             .flatten();
+        // The verdict for the last parent asked about: a run of fields shares one.
+        let mut copied_parent: Option<(usize, bool)> = None;
         let mut f = fields;
         let mut is_first = true;
         // #2405: retained past the loop so the trailing-gap check below has
@@ -3052,10 +3083,18 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
             // already declares them where it is written.
             let field_under_alias = child_under_alias
                 || own_subtree.is_some_and(|(start, end)| {
-                    field
-                        .value_cursor
-                        .document_parent()
-                        .is_some_and(|p| !(start..end).contains(&p.node_id()))
+                    let Some(parent) = field.value_cursor.document_parent() else {
+                        return false;
+                    };
+                    if let Some((id, verdict)) =
+                        copied_parent.filter(|(id, _)| *id == parent.node_id())
+                    {
+                        let _ = id;
+                        return verdict;
+                    }
+                    let verdict = member_is_copy_of_source(&parent, start, end);
+                    copied_parent = Some((parent.node_id(), verdict));
+                    verdict
                 });
             // #2405: same #1247/#1642 key resolution and #1677 key/value
             // delimiter checks as `to_owned_at_depth`, via the one shared

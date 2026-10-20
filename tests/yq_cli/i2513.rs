@@ -33,6 +33,18 @@ const ROWS: &[(&str, &str, &str)] = &[
         ".item.b = 3",
         "item:\n  a: &y 1\n  b: 3\nz: *y\n",
     ),
+    // A source that is a sibling inside the merging mapping is written there too.
+    (
+        "item:\n  x: &d {a: &y 1}\n  <<: *d\n  b: 2\nz: *y\n",
+        ".item.b = 3",
+        "item:\n  x: &d {a: &y 1}\n  a: 1\n  b: 3\nz: *y\n",
+    ),
+    // A `<<` sequence mixing an alias source (copied) with an inline one (kept).
+    (
+        "e: &e {m: &y 7}\nitem:\n  <<: [*e, {c: &w 2}]\n  b: 2\nz: *y\nq: *w\n",
+        ".item.b = 3",
+        "e: &e {m: &y 7}\nitem:\n  c: &w 2\n  m: 7\n  b: 3\nz: *y\nq: *w\n",
+    ),
 ];
 
 #[test]
