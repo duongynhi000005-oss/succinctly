@@ -40,6 +40,8 @@ const ROWS: &[(&str, &str)] = &[
         "a:\n  # c\n  - [1]\n  - y\n",
     ),
     ("- # c\n  {k: 1}\n- 2\n", "# c\n- {k: 1}\n- 2\n"),
+    // A blank line between the comment and the value (#4996 heads the value, as yq does).
+    ("-\n  # f\n\n  z\n- y\n", "# f\n- z\n- y\n"),
 ];
 
 #[test]
@@ -79,16 +81,12 @@ fn test_4268_b_the_getters_follow() -> Result<()> {
     Ok(())
 }
 
-/// Shapes that still differ from yq, pinned with this tool's answer so a change is deliberate
-/// (recorded in `limitations.md`): a blank line between the comment and the value (the comment is
-/// settled backwards as the previous item's foot), and a comment on the dash line as well as one
-/// below it (the printed order is the own-line one first, yq's the dash one first; the `head_comment` getter has the yq order).
+/// A shape that still differs from yq, pinned with this tool's answer so a change is deliberate
+/// (recorded in `limitations.md`): a comment on the dash line as well as one below it (the printed
+/// order is the own-line one first, yq's the dash one first; the `head_comment` getter has the yq order).
 #[test]
 fn test_4268_c_neighbouring_shapes_still_differ() -> Result<()> {
-    let rows: &[(&str, &str)] = &[
-        ("-\n  # f\n\n  z\n- y\n", "- z\n# f\n\n- y\n"),
-        ("- # c\n  # f\n  z\n- y\n", "# f\n# c\n- z\n- y\n"),
-    ];
+    let rows: &[(&str, &str)] = &[("- # c\n  # f\n  z\n- y\n", "# f\n# c\n- z\n- y\n")];
     for (input, ours) in rows {
         let (out, code) = run_yq_stdin(".", input, &[])?;
         assert_eq!(code, 0, "{input:?}");

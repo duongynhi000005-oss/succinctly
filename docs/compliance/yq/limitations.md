@@ -5455,6 +5455,13 @@ head_comment` is non-empty, `.b | head_comment` is `""`) — and both
 `reconcile_presentation_at_depth` and `strip_presentation_style_at_depth` already carried
 it through a write for free, via their existing whole-`NodeMeta` clones.
 
+A comment under `key:` followed by a blank line and then the key's first child
+([#4099](https://github.com/rust-works/succinctly/issues/4099)) is that child's head, as in yq (`m:` / `  # a` /
+blank / `  k: 1` keeps `# a` above `k`, and drops the blank line): the node opening after the detached comment
+is deeper than the block the key is in, so it is the key's first child. Not matched: an *indentless* sequence child
+(`m:` / `  # c` / blank / `- 1`, the `-` at the key's column) is not deeper, so its comment stays `m:`'s foot where
+yq makes it the item's head.
+
 One DOM-route-only residual, not shared with the streaming route: real yq's own root-vs-
 navigated distinction for a bare *scalar* result (a container keeps its head/foot
 regardless of navigation, matching the streaming route's rule below, but a navigated-away
@@ -5602,10 +5609,10 @@ omits the comment, where yq prints `# own` above `c: 2` ([#4256](https://github.
 One other shape keeps losing it: an alias item (`- # al` / `  *x`; the DOM writer has no head
 comment for an alias, the explicit #2796 error). A scalar or flow item answers its dash comment as
 its head, and comment lines between the dash and such a value head it too
-([#4268](https://github.com/rust-works/succinctly/issues/4268)); two shapes still differ, pinned by
-`test_4268_c` in `tests/yq_cli/i4268.rs`: a blank line between the own-line comment and the value
-(it is settled backwards as the previous item's foot), and a comment on the dash line together with
-one below it (the printed order is the own-line one first, yq's the dash one first; the `head_comment` getter answers in yq's order).
+([#4268](https://github.com/rust-works/succinctly/issues/4268), a blank line between the own-line
+comment and the value included since #4996); one shape still differs, pinned by `test_4268_c` in
+`tests/yq_cli/i4268.rs`: a comment on the dash line together with one below it (the printed order is
+the own-line one first, yq's the dash one first; the `head_comment` getter answers in yq's order).
 
 A block scalar whose `|`/`>` header is on a line of its own below the owning `-` or `key:`
 (`a:` / `  >` / `  text`) reads its text since #4259, and so does one with an anchor or tag in
