@@ -41556,6 +41556,9 @@ struct EmptiedUpdate<'a> {
     /// value that is not the state, and leaves jq's register where it was. It may emit several values
     /// (`{a:(1,2)} | FE`, #4797): the `foreach` then runs once per value, each run as empty as the first.
     literal_head: bool,
+    /// Whether the `foreach` sits in a comma branch of the `if` (`if . then (FE, empty) else . end`, #4800): read
+    /// like the bare `if`, except that a stage after the `if` is not (see the `If` arm).
+    comma_branch: bool,
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
@@ -41824,6 +41827,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             has_fallback: false,
             truthy: false,
             literal_head: false,
+            comma_branch: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
@@ -41860,6 +41864,9 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(stages.get(skipped)?)?;
             emptied.literal_head |= literal_head;
             let after = &stages[skipped + 1..];
+            if emptied.comma_branch && !after.is_empty() {
+                return None;
+            }
             let guarded = stages[..skipped]
                 .iter()
                 .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
@@ -41876,7 +41883,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             }
             (after.is_empty() && !guarded).then_some(emptied)
         }
-        e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
+        // A `try`/`?` around a comma branch keeps the refusal, as a stage after the `if` does ([`EmptiedUpdate::comma_branch`]).
+        e if emptied_wrapper_inner(e).is_some() => {
+            emptied_update(emptied_wrapper_inner(e)?).filter(|emptied| !emptied.comma_branch)
+        }
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
@@ -41896,14 +41906,20 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if !on_dot && !is_pure_of_dot(cond) {
                 return None;
             }
-            // A comma branch (`if . then (FE, empty) else . end`) is not read like the bare `FE`: the shapes
-            // around it that #4948 does not reach (an `if` on another condition than `.`, a stage after the
-            // `if`) still let the bare form's `.a` index error escape a `?` where jq answers `[]`, which the
-            // comma form did not (it was refused outright), so reading it would regress those rows (#4800).
-            if matches!(unwrap_paren(then_branch), Expr::Comma(_)) {
+            // A comma branch (`if . then (FE, empty) else . end`) is read like the bare `FE` (#4800), but only
+            // under the condition `.` and with nothing after the `if` ([`EmptiedUpdate::comma_branch`]). For an
+            // `if` on another condition (`if .a then (FE, empty) else . end`) and for a stage after the `if`, the
+            // bare form matches jq but the comma form read the same way lets the `.a` EXTRACT's index error
+            // escape a `?` and a `try` where jq answers `[]` (20 of a 15,200-row grid, all matching jq while the
+            // comma was refused), so those keep the refusal, and so does a `try`/`?` around it. Why the comma
+            // differs there is not isolated.
+            let comma_branch = matches!(unwrap_paren(then_branch), Expr::Comma(_));
+            let mut emptied = emptied_update(then_branch)?;
+            emptied.comma_branch |= comma_branch;
+            // After the recursion, so that a comma behind a nested `if` is refused under this one's condition too.
+            if emptied.comma_branch && !on_dot {
                 return None;
             }
-            let mut emptied = emptied_update(then_branch)?;
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
             if on_dot && !emptied.literal_head {

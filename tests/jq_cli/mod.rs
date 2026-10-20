@@ -27,6 +27,7 @@ mod i4800_first_limit_if;
 mod i4800_foreach_beside_empty;
 mod i4800_foreach_beside_empty_stage;
 mod i4800_foreach_container_landing;
+mod i4800_foreach_if_comma_branch;
 mod i4800_foreach_if_label_empty_siblings;
 mod i4800_foreach_label_empty_siblings;
 mod i4800_nth_dropped_binds;
