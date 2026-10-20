@@ -6270,6 +6270,13 @@ container root rewritten to the other kind keeps the document's head comment and
 matched: the head comment of a *non-first* document (`x: 1` / `---` / `# c` / `5` written `. = [1]` loses `# c`, which
 yq keeps), and a root with an explicit tag (`# c` / `!!null` written `.a = 1` prints a blank line after the comment).
 
+### A block scalar header's comment ([#5001](https://github.com/rust-works/succinctly/issues/5001))
+
+A comment after a block scalar's `|`/`>` indicator stays on the header line in the places the value is
+written where it stands: `.`, `-P`, and a write that leaves the scalar alone or replaces it. A copy of the scalar
+(`.b = .a`, `. as $v | {"z": $v}`, `pick`), a recursive merge over it (`. *d {"a": "n"}`) and a document whose
+root is a block scalar carry no such comment, or print an extra document, where yq keeps it ([#5003](https://github.com/rust-works/succinctly/issues/5003)).
+
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in

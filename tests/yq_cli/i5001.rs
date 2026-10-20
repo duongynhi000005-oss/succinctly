@@ -1,9 +1,10 @@
 //! #5001: a comment after a block scalar's `|`/`>` indicator is the header line's comment. It was written after
 //! the scalar's last line, where inside a block scalar it is content, so a round trip changed the string
-//! (`"DROP TABLE x # sql\n"`). yq keeps it on the header line, on every route and for every chomping or
+//! (`"DROP TABLE x # sql\n"`). yq keeps it on the header line, on `.`, `-P` and writes, for every chomping or
 //! indentation indicator, anchor and tag.
 //!
-//! Every output is captured from yq v4.53.3.
+//! Every output is captured from yq v4.53.3. A value the writer cannot keep as a block scalar (`x  `
+//! with trailing spaces, an empty body) is written quoted and keeps the comment after it, as any scalar does.
 
 use anyhow::Result;
 
@@ -81,6 +82,22 @@ const ROWS: &[(&str, &[&str], &str, &str)] = &[
         "a: | # c\n  x # not a comment\n",
     ),
     (".", &[], "a:\n  | # h\n  text\n", "a: | # h\n  text\n"),
+    (".", &[], "a: | # c\n  x  \n", "a: \"x  \\n\" # c\n"),
+    (".", &[], "a: |- # c\n", "a: \"\" # c\n"),
+    (".", &[], "a: !!str |- # c\n", "a: !!str \"\" # c\n"),
+    (
+        ".",
+        &[],
+        "a:\n  - &x | # c\n    v\n  - *x\n",
+        "a:\n  - &x | # c\n    v\n  - *x\n",
+    ),
+    (".", &[], "a: |1 # c\n  x\n", "a: |2 # c\n   x\n"),
+    (
+        ".",
+        &[],
+        "a: >- # c\n  x\n\n  y\n",
+        "a: >- # c\n  x\n\n  y\n",
+    ),
     (".a", &[], "a: | # c\n  x\n", "x\n\n"),
 ];
 
