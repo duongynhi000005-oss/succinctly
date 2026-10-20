@@ -1554,6 +1554,13 @@ pub trait DocumentValue: Sized + Clone {
         self.as_object()
     }
 
+    /// The object's fields as yq *renders* them (`-o json`, `tojson`, a value nested in another one, #4983,
+    /// #4987). [`as_object`](Self::as_object) is the iteration (`.[]`, `.[] | key`); only a YAML mapping that holds
+    /// a merge key differs, so the default is `as_object`.
+    fn as_object_rendered(&self) -> Option<Self::Fields> {
+        self.as_object()
+    }
+
     /// Try to get as array elements.
     fn as_array(&self) -> Option<Self::Elements>;
 

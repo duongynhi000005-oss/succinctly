@@ -52,4 +52,5 @@ mod i4947;
 mod i4950;
 mod i4959;
 mod i4977;
+mod i4983;
 mod i865;

@@ -2673,6 +2673,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                 }
             }
             YamlValue::Mapping(fields) => {
+                // #4983: a mapping renders through yq's rendering expansion, not the iteration one.
+                let fields = fields.rendered();
                 if fields.is_empty() {
                     return Ok(out.write_str("{}")?);
                 }
@@ -2834,6 +2836,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                 }
             }
             YamlValue::Mapping(fields) => {
+                // #4983: a mapping renders through yq's rendering expansion, not the iteration one.
+                let fields = fields.rendered();
                 output.push('{');
                 let mut first = true;
                 for field in fields {
@@ -3649,6 +3653,8 @@ fn write_yaml_value_as_json<W: AsRef<[u64]>>(output: &mut String, value: YamlVal
             }
         }
         YamlValue::Mapping(fields) => {
+            // #4983: a mapping renders through yq's rendering expansion, not the iteration one.
+            let fields = fields.rendered();
             output.push('{');
             let mut first = true;
             for field in fields {
@@ -5237,6 +5243,10 @@ enum FieldsInner<'a, W> {
     Direct(Option<YamlCursor<'a, W>>),
     Merged {
         entries: Rc<Vec<(YamlCursor<'a, W>, YamlCursor<'a, W>)>>,
+        /// Whether the iteration and rendering views of this mapping can differ: some `<<` lists two or more
+        /// sources (#4983). With one source (the common `<<: *base`) they are the same list, and
+        /// [`YamlFields::rendered`] reuses it instead of resolving the merge again.
+        views_differ: bool,
         /// The mapping's first key, so `find`/`find_cursor` can walk its own
         /// fields in document order and answer a name the way yq's path
         /// traversal does (#1318, #2478). `entries` alone can't: it is the
@@ -5257,10 +5267,12 @@ impl<W> Clone for FieldsInner<'_, W> {
             FieldsInner::Direct(c) => FieldsInner::Direct(*c),
             FieldsInner::Merged {
                 entries,
+                views_differ,
                 first_key,
                 index,
             } => FieldsInner::Merged {
                 entries: entries.clone(),
+                views_differ: *views_differ,
                 first_key: first_key.clone(),
                 index: *index,
             },
@@ -5304,10 +5316,11 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
                 inner: FieldsInner::Direct(key_cursor),
             };
         }
-        match resolve_merge_keys(key_cursor) {
-            Some(entries) => Self {
+        match resolve_merge_keys(key_cursor, MergeView::Iteration) {
+            Some((entries, views_differ)) => Self {
                 inner: FieldsInner::Merged {
                     entries: Rc::new(entries),
+                    views_differ,
                     first_key: Rc::new(key_cursor),
                     index: 0,
                 },
@@ -5326,6 +5339,34 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
         match &self.inner {
             FieldsInner::Direct(_) => self.clone(),
             FieldsInner::Merged { first_key, .. } => Self::raw(**first_key),
+        }
+    }
+
+    /// The fields as yq's rendering reads them (`-o json`, `tojson`, a value nested in another, #4983): a
+    /// sequence of sources folded in reverse. [`from_mapping_cursor`](Self::from_mapping_cursor)'s
+    /// list is the iteration (`MergeView::Iteration`: `.[]`, `.[] | key`); a mapping without a merge key reads
+    /// the same either way.
+    pub(crate) fn rendered(&self) -> Self {
+        match &self.inner {
+            FieldsInner::Direct(_) => self.clone(),
+            // The same list when no `<<` has two sources to order differently.
+            FieldsInner::Merged {
+                views_differ: false,
+                ..
+            } => self.clone(),
+            FieldsInner::Merged { first_key, .. } => {
+                match resolve_merge_keys(**first_key, MergeView::Rendering) {
+                    Some((entries, views_differ)) => Self {
+                        inner: FieldsInner::Merged {
+                            entries: Rc::new(entries),
+                            views_differ,
+                            first_key: first_key.clone(),
+                            index: 0,
+                        },
+                    },
+                    None => self.clone(),
+                }
+            }
         }
     }
 
@@ -5370,6 +5411,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
             }
             FieldsInner::Merged {
                 entries,
+                views_differ,
                 first_key,
                 index,
             } => {
@@ -5378,6 +5420,7 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
                 let rest = Self {
                     inner: FieldsInner::Merged {
                         entries: entries.clone(),
+                        views_differ: *views_differ,
                         first_key: first_key.clone(),
                         index: index + 1,
                     },
@@ -5580,7 +5623,8 @@ impl<'a, W: AsRef<[u64]>> Iterator for YamlFields<'a, W> {
 /// key is confirmed to exist.
 fn resolve_merge_keys<'a, W: AsRef<[u64]>>(
     first_key: Option<YamlCursor<'a, W>>,
-) -> Option<Vec<(YamlCursor<'a, W>, YamlCursor<'a, W>)>> {
+    view: MergeView,
+) -> Option<(MergedEntries<'a, W>, bool)> {
     let mut fields = YamlFields::raw(first_key);
     let mut seen: Vec<(YamlCursor<'a, W>, YamlCursor<'a, W>, YamlValue<'a, W>)> = Vec::new();
 
@@ -5595,13 +5639,16 @@ fn resolve_merge_keys<'a, W: AsRef<[u64]>>(
             for (key, value, key_value) in seen {
                 upsert_field(&mut entries, &mut positions, key, value, &key_value);
             }
-            merge_field_into(&mut entries, &mut positions, field.value_cursor);
+            let mut views_differ =
+                merge_field_into(&mut entries, &mut positions, field.value_cursor, view) > 1;
 
             fields = rest;
             while let Some((field, rest)) = fields.uncons() {
                 let key_value = field.key_cursor.value();
                 if is_merge_key_value(&key_value) {
-                    merge_field_into(&mut entries, &mut positions, field.value_cursor);
+                    views_differ |=
+                        merge_field_into(&mut entries, &mut positions, field.value_cursor, view)
+                            > 1;
                 } else {
                     upsert_field(
                         &mut entries,
@@ -5614,7 +5661,7 @@ fn resolve_merge_keys<'a, W: AsRef<[u64]>>(
                 fields = rest;
             }
 
-            return Some(entries);
+            return Some((entries, views_differ));
         }
 
         seen.push((field.key_cursor, field.value_cursor, key_value));
@@ -5771,9 +5818,25 @@ fn complex_key_content<W: AsRef<[u64]>>(key: &YamlCursor<'_, W>) -> Option<Strin
     rendered_ok.then_some(rendered)
 }
 
-/// Expand one `<<` field's merge sources into `entries`/`positions`.
+/// A merged mapping's resolved `(key, value)` cursor pairs.
+type MergedEntries<'a, W> = Vec<(YamlCursor<'a, W>, YamlCursor<'a, W>)>;
+
+/// Which of yq's two readings of a merged mapping a field list is (#4983).
 ///
-/// Reverse the source list so an earlier-listed source (higher merge-spec
+/// yq renders a mapping (`-o json`, `tojson`, a nested value) and iterates it (`.[]`, `.[] | key`)
+/// through different expansions of the same `<<`: with `a: {x: 1, z: 9}` and `b: {y: 2, z: 8}`,
+/// `<<: [*a, *b]` renders `{"y":2,"z":9,"x":1}` and iterates `x, z, y` with `z` = 8.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeView {
+    /// A sequence folded in reverse (see [`merge_field_into`]).
+    Rendering,
+    /// Every source, in listed order, each field upserting in place.
+    Iteration,
+}
+
+/// Expand one `<<` field's merge sources into `entries`/`positions`, returning how many sources it had.
+///
+/// For [`MergeView::Rendering`], reverse the source list so an earlier-listed source (higher merge-spec
 /// priority) is applied last and wins value conflicts, while a later-listed
 /// source's unique keys still claim the earlier positions (see
 /// `resolve_merge_keys`'s doc comment).
@@ -5781,8 +5844,18 @@ fn merge_field_into<'a, W: AsRef<[u64]>>(
     entries: &mut Vec<(YamlCursor<'a, W>, YamlCursor<'a, W>)>,
     positions: &mut KeyPositions,
     value_cursor: YamlCursor<'a, W>,
-) {
-    for source in merge_sources(value_cursor).into_iter().rev() {
+    view: MergeView,
+) -> usize {
+    let mut sources = merge_sources(value_cursor);
+    let count = sources.len();
+    match view {
+        // (yq's JSON rendering also leaves an inline-mapping source out, #4987; this layer serves
+        // `succinctly jq` over YAML too, where that would discard merged keys with no reference to match.)
+        MergeView::Rendering => sources.reverse(),
+        // #4983: in listed order, each field upserting, as yq's iteration walks them.
+        MergeView::Iteration => {}
+    }
+    for source in sources {
         for source_field in YamlFields::raw(source.first_child()) {
             let key_value = source_field.key_cursor.value();
             upsert_field(
@@ -5794,6 +5867,7 @@ fn merge_field_into<'a, W: AsRef<[u64]>>(
             );
         }
     }
+    count
 }
 
 /// Insert a field by name, or overwrite an existing entry's value in place.
@@ -8618,6 +8692,16 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
             // See `as_str`'s `Alias` arm above (#1191/#1193, PR #1314).
             YamlValue::Alias { target, .. } => {
                 target.and_then(|t| t.resolve_alias_chain()?.as_object())
+            }
+            _ => None,
+        }
+    }
+
+    fn as_object_rendered(&self) -> Option<Self::Fields> {
+        match self {
+            YamlValue::Mapping(fields) => Some(fields.rendered()),
+            YamlValue::Alias { target, .. } => {
+                target.and_then(|t| t.resolve_alias_chain()?.as_object_rendered())
             }
             _ => None,
         }
