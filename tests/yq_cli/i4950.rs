@@ -12,7 +12,8 @@ use crate::run_yq_stdin;
 
 fn expand(text: &str) -> String {
     let mut out = text.replace("<S130>", &"a b ".repeat(33));
-    for n in [125, 128, 129, 130, 140] {
+    out = out.replace("<N140>", &"1".repeat(140));
+    for n in [50, 125, 128, 129, 130, 140] {
         out = out.replace(&format!("<K{n}>"), &"k".repeat(n));
     }
     out
@@ -44,6 +45,11 @@ const ROWS: &[(&str, &[&str], &str, &str)] = &[
     (".", &["-P"], "- <K140>: 1\n  b: 2\n", "- ? <K140>\n  : 1\n  b: 2\n"),
     (".", &[], "&x <K125>: 1\n", "&x <K125>: 1\n"),
     (".", &[], "&x <K140>: 1\n", "? &x <K140>\n: 1\n"),
+    (".", &[], "m:\n  <K140>: # c\n    a: 1\n", "m:\n  ? <K140>\n  : # c\n    a: 1\n"),
+    (".", &[], "m:\n  <K140>: # c\n    - 1\n    - 2\n", "m:\n  ? <K140>\n  : # c\n    - 1\n    - 2\n"),
+    (".z = 1", &[], "m:\n  <N140>: 1\n", "m:\n  ? <N140>\n  : 1\nz: 1\n"),
+    (".", &["-P"], "m:\n  <N140>: 1\n", "m:\n  ? <N140>\n  : 1\n"),
+    (".", &[], "? <K50>\n  <K50>\n  <K50>\n: v\n", "? <K50> <K50> <K50>\n: v\n"),
 ];
 
 #[test]

@@ -2205,7 +2205,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // anchor/tag -- matching the oracle
                             // (`b: # floated\n  # own\n    c: 1`).
                             let mut key_comments = key_cursor.line_comments_raw();
+                            let mut key_comment_written = false;
                             if let Some(first) = key_comments.next() {
+                                key_comment_written = true;
                                 write_line_comment(out, Some(first))?;
                                 write_extra_line_comments(out, indent, key_comments)?;
                                 // Same anchor/tag rendering as the `else`
@@ -2226,9 +2228,11 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // #1485/#1881: rounded up from the field's own
                             // (compact-adjusted) column.
                             let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
-                            // An anchor or a tag keeps the first entry off the `:` line (#4950:
-                            // `? key` / `: &a` / `  a: 1`).
+                            // An anchor, a tag or a comment on the `:` line keeps the first entry
+                            // off it (#4950: `? key` / `: &a` / `  a: 1`, `? key` / `: # c` /
+                            // `  a: 1`).
                             if explicit_key
+                                && !key_comment_written
                                 && value.anchor().is_none()
                                 && value.explicit_tag_at(None).is_none()
                             {

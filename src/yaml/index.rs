@@ -1046,7 +1046,10 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[must_use]
     pub(crate) fn may_have_long_key(&self, text: &[u8]) -> bool {
         *self.may_have_long_key.get_or_init(|| {
+            // A `?` may open an explicit key, which can fold several short lines into one
+            // long key.
             text.contains(&b'\\')
+                || text.contains(&b'?')
                 || text
                     .chunks_exact(64)
                     .any(|block| !block.contains(&b'\n') && !block.contains(&b'\r'))
@@ -2851,6 +2854,8 @@ mod tests {
             (format!("{long}: 1\n"), true),
             (format!("m:\n  \"{long}\": 1\n"), true),
             ("\"a\\nb\": 1\n".to_string(), true),
+            // An explicit key can fold short lines into one long key.
+            ("? a\n  b\n: v\n".to_string(), true),
             // Short lines of CR breaks are lines too.
             (format!("a: 1\r\nb: {near}\r\n{near}\r\n"), false),
             // A long value on one line may sit beside a key, so it answers `true` too.

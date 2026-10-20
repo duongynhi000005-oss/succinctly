@@ -7571,7 +7571,13 @@ fn emit_yaml_value_at_depth(
                             && comments.key_tag(k).is_none();
                         let explicit_key = if go_yaml_key_is_simple(k) {
                             None
-                        } else if plain_key {
+                        } else if plain_key
+                            && (config.json_sourced_floats
+                                || k.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']))
+                        {
+                            // A YAML key too long for a simple key but with no break keeps
+                            // the text it was written with: go-yaml's choice would quote a
+                            // key that reads as a number, which it did not (#4950).
                             go_yaml_explicit_key_scalar(k, &val_indent, config.indent_str.len())
                         } else {
                             Some(with_key_anchor(
