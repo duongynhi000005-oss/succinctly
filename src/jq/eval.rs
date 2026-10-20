@@ -41558,12 +41558,6 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if !on_dot && !is_pure_of_dot(cond) {
                 return None;
             }
-            // A comma branch (`if . then (FE, empty) else . end`) is not read like the bare `FE`: the bare
-            // form's `.a` EXTRACT lets the index error escape a `?` where jq answers `[]`, which the
-            // comma form did not (it was refused outright), so reading it would regress that row (#4800).
-            if matches!(unwrap_paren(then_branch), Expr::Comma(_)) {
-                return None;
-            }
             let mut emptied = emptied_update(then_branch)?;
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
