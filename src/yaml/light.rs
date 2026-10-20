@@ -7681,8 +7681,13 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     /// node and `YamlFields::uncons` a direct mapping's key and value as consecutive siblings:
     /// [`next_element`](DocumentCursor::next_element) walks exactly those chains, so a scan for
     /// an element's slot resumes instead of restarting from the first (#2784; JSON since #3702).
-    /// A merged mapping lists fewer members than it has children, which only means a resumed
-    /// scan misses a node the full scan finds, and the full scan then decides.
+    /// A merged mapping lists fewer members than it has children (its `<<` entry is not in the
+    /// merged list), and the resumed walk follows the raw chain, so the two can disagree in either
+    /// direction: the resume misses a node the list holds (the full scan then decides), and it can
+    /// answer a node the list omits, which is only the `<<` value, whose slot is its `<<` key as
+    /// in yq (an overridden duplicate is not reachable by any read). `tests/yq_cli/i4103.rs` pins
+    /// the answer against yq for an alias, an inline mapping and a sequence of aliases, after a
+    /// scan wide enough to be remembered (#4103).
     const RESUMABLE_ELEMENT_SCAN: bool = true;
 
     /// The element after this one, as `DocumentElements::uncons_cursor` hands it out: the next
