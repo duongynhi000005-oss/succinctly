@@ -1045,6 +1045,55 @@ pub(crate) mod yq_read_only_context {
     }
 }
 
+/// Whether the path walk now running resolves a `del()` target, for the current thread (#4461).
+///
+/// A computed slice bound that yields not exactly one number is yq's count error, but yq raises it
+/// only once the target produced a *node*. A write (`=`, `|=`) creates an absent key, so it has
+/// one; `del()` does not, and a key that is not in the document is nothing to delete from. The
+/// resolver hands both the same `null` branch, so the slice resolver cannot tell them apart
+/// without being told which one is asking. Ambient for the reason
+/// [`yq_read_only_context`] is: the slice resolver sits many levels below the caller that knows.
+/// `std` only; without a thread-local a `del()` reads as a write, which is the old behaviour.
+#[cfg(feature = "std")]
+pub(crate) mod yq_delete_context {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn active() -> bool {
+        ACTIVE.with(Cell::get)
+    }
+
+    /// Restores the previous state on drop.
+    #[must_use]
+    pub(crate) struct Guard(bool);
+
+    pub(crate) fn enter() -> Guard {
+        Guard(ACTIVE.with(|c| c.replace(true)))
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|c| c.set(self.0));
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) mod yq_delete_context {
+    pub(crate) fn active() -> bool {
+        false
+    }
+
+    pub(crate) struct Guard;
+
+    pub(crate) fn enter() -> Guard {
+        Guard
+    }
+}
+
 /// Ambient alias-identity table for yq-mode writes (#1351 — the remaining half of
 /// ADR-0017's mechanism 2).
 ///
@@ -66235,6 +66284,58 @@ fn untrackable_branch_escape(
 /// `target_is_passthrough` escape running *between* the resolve and the
 /// reserve, so hoisting the reserve would swap which error surfaced -- went
 /// with it.
+/// Whether `path`, followed from `root`, ends at a node a `del()` can reach (#4461).
+///
+/// A field of a mapping that does not hold it, a field or an index into a scalar, a field of a
+/// `null` and an index into a mapping are not nodes in yq: `del()` finds nothing there and no
+/// bound is ever looked at. Everything else is one, including what a write would create and
+/// yq's reads pad: an index past the end of a sequence, an index into a `null`, a field of a
+/// sequence (which fails on its own). A component this does not read (a slice, an optional, a
+/// computed step) answers `true`, the answer before this existed.
+fn names_document_node(root: &OwnedValue, path: &PathPrefix) -> bool {
+    let mut components = Vec::new();
+    let mut at = path;
+    while let PathPrefix::Node {
+        parent, component, ..
+    } = at
+    {
+        components.push(component);
+        at = parent;
+    }
+    let mut current = root;
+    for component in components.into_iter().rev() {
+        let (Expr::Field(_) | Expr::Index { .. }) = component else {
+            return true;
+        };
+        current = match (component, current) {
+            (Expr::Field(name), OwnedValue::Object(fields)) => match fields.get(name.as_str()) {
+                Some(next) => next,
+                None => return false,
+            },
+            (Expr::Index { .. }, OwnedValue::Object(_)) | (Expr::Field(_), OwnedValue::Null) => {
+                return false
+            }
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+                let at = if *idx < 0 { len + *idx } else { *idx };
+                match usize::try_from(at).ok().and_then(|i| items.get(i)) {
+                    Some(next) => next,
+                    None => return true,
+                }
+            }
+            (
+                _,
+                OwnedValue::Bool(_)
+                | OwnedValue::Int(_)
+                | OwnedValue::Float(_)
+                | OwnedValue::String(_),
+            ) => return false,
+            _ => return true,
+        };
+    }
+    true
+}
+
 fn resolve_target_for_pair<'a, S: EvalSemantics>(
     target: &Expr,
     value: &'a OwnedValue,
@@ -67087,6 +67188,15 @@ fn resolve_slice_expr_sink<'a, S: EvalSemantics>(
             return stash.stop(Control::from(control));
         }
         if branches.is_empty() {
+            return Demand::Continue;
+        }
+        // #4461: `del()` of a key the document does not hold has no node to slice, where a write
+        // would have created one.
+        if yq_delete_context::active()
+            && branches
+                .iter()
+                .all(|b| !names_document_node(value, &b.path))
+        {
             return Demand::Continue;
         }
         stash.stop(Control::Error(count_error.clone()))
@@ -69481,6 +69591,8 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
     if !needs_path_prepass(expr) {
         return Ok(DelPaths::Verbatim);
     }
+    // #4461: a slice bound's count error waits for a target that is in the document.
+    let _deleting = (S::TAG == EvalTag::Yq).then(yq_delete_context::enter);
     let untracked = if S::TAG == EvalTag::Yq {
         Untracked::KeepInOrder
     } else {

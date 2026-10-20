@@ -27218,6 +27218,18 @@ fn path_context_step_computed_slice<S: EvalSemantics, V: DocumentValue>(
     // (`owned_identity_values`) needs it restored, not just the outermost.
     let mut targets: LazyTargetSteps<V> = None;
     let was_read_only = yq_read_only_context::active();
+    // #4461: yq rules on a bound that did not produce exactly one number only once the target
+    // produced a node, after any error the target itself raised (#2056), so the target is stepped
+    // first and a target with no node, or a failing one, never reaches the bounds.
+    if S::TAG == EvalTag::Yq {
+        let mut stepped_targets = Vec::new();
+        let stepped = path_context_step_target::<S, V>(target, pos, &mut stepped_targets);
+        if stepped.is_err() || stepped_targets.is_empty() {
+            return stepped
+                .map_err(|c| path_context_component_escape::<S, V>(out, produced_from, c));
+        }
+        targets = Some((stepped_targets, stepped));
+    }
     // #3293: both stashes below answer `Demand::Stop` to a bound's
     // generator, and a `?//` inside that bound retries past the stop
     // (#1519), so either can describe an alternative jq has abandoned --
@@ -35920,6 +35932,29 @@ fn owned_identity_computed_step<S: EvalSemantics, V: DocumentValue>(
             // The target and whether its slice is tracked, resolved on the
             // first bound pair that arrives.
             let mut resolved: ResolvedComputedSliceTarget<V> = None;
+            // #4461: the target first in yq (see `path_context_step_computed_slice`), so a target
+            // with no node, or a failing one, never reaches the bounds.
+            let resolve_target = || -> Result<Option<_>, EvalError> {
+                Ok(
+                    owned_identity_operand::<S, V>(target, value, id, optional)?.map(
+                        |(target_value, target_id)| {
+                            // #2834: see `owned_identity_slice_is_tracked`. A dynamic-bound slice off
+                            // a detached, non-null value must not fabricate a component.
+                            let tracked =
+                                owned_identity_slice_is_tracked::<S, V>(&target_id, &target_value);
+                            let parent = Rc::new(target_value.clone());
+                            (target_value, target_id, parent, tracked)
+                        },
+                    ),
+                )
+            };
+            if S::TAG == EvalTag::Yq {
+                match resolved.get_or_insert_with(resolve_target) {
+                    Ok(None) => return Ok(()),
+                    Err(err) => return Err(Control::Error(err.clone())),
+                    Ok(Some(_)) => {}
+                }
+            }
             let drive_bound =
                 |bound: &Option<Expr>, sink: &mut dyn FnMut(OwnedValue) -> Demand| -> Flow {
                     match bound {
@@ -35944,59 +35979,42 @@ fn owned_identity_computed_step<S: EvalSemantics, V: DocumentValue>(
             let starts_flow = drive_bound(&start_expr, &mut |s| {
                 walk_error.begin();
                 let _scope = was_read_only.then(yq_read_only_context::enter);
-                let ends_flow =
-                    drive_bound(&end_expr, &mut |e| {
-                        walk_error.begin();
-                        let _scope = was_read_only.then(yq_read_only_context::enter);
-                        let operand =
-                            resolved.get_or_insert_with(|| {
-                                Ok(owned_identity_operand::<S, V>(target, value, id, optional)?
-                                    .map(|(target_value, target_id)| {
-                                        // #2834: see
-                                        // `owned_identity_slice_is_tracked`. A
-                                        // dynamic-bound slice off a detached,
-                                        // non-null value must not fabricate a
-                                        // component.
-                                        let tracked = owned_identity_slice_is_tracked::<S, V>(
-                                            &target_id,
-                                            &target_value,
-                                        );
-                                        let parent = Rc::new(target_value.clone());
-                                        (target_value, target_id, parent, tracked)
-                                    }))
-                            });
-                        let (_, target_id, parent, tracked) = match operand {
-                            Ok(Some(found)) => found,
-                            Ok(None) => return Demand::Continue,
-                            Err(err) => return walk_error.stop(Control::Error(err.clone())),
-                        };
-                        let (values, control) = owned_identity_values::<S>(
-                            &wrap(Expr::SliceExpr {
-                                target: target.clone(),
-                                start: start_expr
-                                    .as_ref()
-                                    .map(|_| Box::new(Expr::tracked_value(s.clone()))),
-                                end: end_expr
-                                    .as_ref()
-                                    .map(|_| Box::new(Expr::tracked_value(e.clone()))),
-                            }),
-                            value,
-                            optional,
-                            &id.root_witness(),
-                        );
-                        if *tracked {
-                            let component = literal_component_from_values(s.clone(), e.clone());
-                            for v in values {
-                                out.push((v, target_id.child(parent, component.clone())));
-                            }
-                        } else {
-                            out.extend(values.into_iter().map(|v| (v, target_id.clone())));
+                let ends_flow = drive_bound(&end_expr, &mut |e| {
+                    walk_error.begin();
+                    let _scope = was_read_only.then(yq_read_only_context::enter);
+                    let operand = resolved.get_or_insert_with(resolve_target);
+                    let (_, target_id, parent, tracked) = match operand {
+                        Ok(Some(found)) => found,
+                        Ok(None) => return Demand::Continue,
+                        Err(err) => return walk_error.stop(Control::Error(err.clone())),
+                    };
+                    let (values, control) = owned_identity_values::<S>(
+                        &wrap(Expr::SliceExpr {
+                            target: target.clone(),
+                            start: start_expr
+                                .as_ref()
+                                .map(|_| Box::new(Expr::tracked_value(s.clone()))),
+                            end: end_expr
+                                .as_ref()
+                                .map(|_| Box::new(Expr::tracked_value(e.clone()))),
+                        }),
+                        value,
+                        optional,
+                        &id.root_witness(),
+                    );
+                    if *tracked {
+                        let component = literal_component_from_values(s.clone(), e.clone());
+                        for v in values {
+                            out.push((v, target_id.child(parent, component.clone())));
                         }
-                        match control {
-                            Some(control) => walk_error.stop(control),
-                            None => Demand::Continue,
-                        }
-                    });
+                    } else {
+                        out.extend(values.into_iter().map(|v| (v, target_id.clone())));
+                    }
+                    match control {
+                        Some(control) => walk_error.stop(control),
+                        None => Demand::Continue,
+                    }
+                });
                 // A retry inside `T` that yielded nothing, or raised, never
                 // re-invoked its sink to reset what that stashed.
                 walk_error.settle(&ends_flow, end_direct_retry);
