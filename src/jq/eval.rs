@@ -41916,15 +41916,19 @@ fn source_destructures_to_container(source: &Expr) -> bool {
         })
 }
 
-/// Whether `expr` holds a `try` whose handler can emit (#4800): jq runs a handler after backtracking to its `try`,
-/// so its outputs carry the register the `try` entered with, which [`source_destructures_to_container`]'s reading
-/// does not state (`try FE catch (.)`, with an EXTRACT of `FE` that raises on the container, answered `[]` for jq's
-/// `[[]]`). A handler that emits nothing (`catch empty`) has no output to misplace.
-fn has_emitting_handler(expr: &Expr) -> bool {
-    any_subexpr(
-        expr,
-        &mut |e| matches!(e, Expr::Try { catch: Some(handler), .. } if !emits_nothing(handler)),
-    )
+/// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
+/// `try`, so its outputs carry the register the `try` entered with, which [`source_destructures_to_container`]'s
+/// reading states only for the ones [`update_entry_try_bodies`] names. A handler that emits nothing (`catch empty`)
+/// has no output to misplace.
+fn emitting_handler_count(expr: &Expr) -> usize {
+    let mut count = 0;
+    any_subexpr(expr, &mut |e| {
+        if matches!(e, Expr::Try { catch: Some(handler), .. } if !emits_nothing(handler)) {
+            count += 1;
+        }
+        false
+    });
+    count
 }
 
 /// The walk [`source_destructures_to_null_or_bool`] and [`source_destructures_to_container`] share: whether
@@ -43926,10 +43930,23 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
             // file: real yq's lexer rejects `try`, so there is no oracle,
             // and yq's scalar-write no-op convention would turn a wrong
             // acceptance into silent corruption rather than a loud error.
+            // #5004: ...or, for a `try` around the `foreach` a fold UPDATE is made of, the register the step entered
+            // that UPDATE with ([`foreach_update_try_entry`]).
+            let update_entry = if S::TAG == EvalTag::Jq {
+                foreach_update_try_entry(expr, catch.as_deref(), frame)
+            } else {
+                None
+            };
             let entry_register = match (S::TAG, trackable) {
                 (EvalTag::Jq, true) => Some(value),
-                (EvalTag::Jq, false) => frame.register(),
+                (EvalTag::Jq, false) => frame.register().or(update_entry.as_ref()),
                 _ => None,
+            };
+            // ...and a handler seeded with that register, however it got here (a value head's stage carries it on
+            // the frame), states it to the fold ([`fold_body::entry_handler_delivering`]).
+            let handler_mark = || {
+                (update_entry.is_some() && entry_register == update_entry.as_ref())
+                    .then(fold_body::entry_handler_delivering)
             };
             match resolve_node_sink::<S>(expr, value, trackable, snapshot, frame, keep, sink) {
                 ResolveFlow::Escaped(EvalEscape::Error(e)) if !e.is_uncatchable() => {
@@ -43952,6 +43969,7 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                     } else {
                         CaughtPayload::Value
                     };
+                    let _handler = handler_mark();
                     resolve_catch_sink::<S>(
                         catch.as_deref(),
                         e.payload(),
@@ -43968,15 +43986,18 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 // seeded trackable on a `null` register (#3133 review: `(.a
                 // | label $out | try (break $out) catch .b) = 1` on
                 // `{"a":null}` wrote where jq refuses).
-                ResolveFlow::Escaped(EvalEscape::Break(_)) => resolve_catch_sink::<S>(
-                    catch.as_deref(),
-                    OwnedValue::Null,
-                    frame,
-                    entry_register,
-                    CaughtPayload::Label,
-                    keep,
-                    sink,
-                ),
+                ResolveFlow::Escaped(EvalEscape::Break(_)) => {
+                    let _handler = handler_mark();
+                    resolve_catch_sink::<S>(
+                        catch.as_deref(),
+                        OwnedValue::Null,
+                        frame,
+                        entry_register,
+                        CaughtPayload::Label,
+                        keep,
+                        sink,
+                    )
+                }
                 other => other,
             }
         }
@@ -52433,6 +52454,8 @@ impl FoldRegister {
         // #3790: whatever this resolves is a fold's UPDATE or EXTRACT, where `.` is the
         // accumulator and jq's register may have been moved by the fold's own source.
         let _in_fold_body = fold_body::enter();
+        // #5004: the body this resolves, which a `catch` handler's statement is read for.
+        let body_depth = fold_body::depth();
         let tr = self.trackable && at_register;
         // #2042: the register's own position is what a navigated marker in
         // UPDATE/EXTRACT is certified against -- whether or not the
@@ -52559,7 +52582,13 @@ impl FoldRegister {
                     // `Unmoved` of a `//` UPDATE, whose shape a nested `foreach` in the left
                     // operand makes opaque, against the register an untracked entry holds.
                     let by_alternate = alternate && matches!(branch.register, BranchRegister::Unmoved(_));
+                    // #5004: or an `Unmoved` of a `catch` handler around the `foreach` the UPDATE is made of,
+                    // seeded with the register the step entered UPDATE with ([`foreach_update_try_entry`]),
+                    // which no allowlisted shape forwards: the nested fold makes the UPDATE opaque.
+                    let by_entry_handler = matches!(branch.register, BranchRegister::Unmoved(_))
+                        && fold_body::entry_handler_delivering_at(body_depth);
                     (by_alternate
+                        || by_entry_handler
                         || *forwards.get_or_insert_with(|| {
                             matches!(entry_marker_shape(expr), EntryMarkers::Forwarded)
                         }))
@@ -64591,9 +64620,22 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // emits, so an inner source that is empty leaves this one emitting nothing.
                         let _sole_update_foreach =
                             sole_update_mark::<S>(&bound_update, true, false);
+                        // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
+                        // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
+                        // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
+                        // register, or retries an alternative on the body's raise, in ways the step does not report.
+                        let entry_try_bodies = (matches!(patterns, [Pattern::Var(_)])
+                            && active_reg.trackable)
+                            .then(|| update_entry_try_bodies(&bound_update))
+                            .flatten();
+                        // ...and only when every handler in UPDATE that can emit is one of those `try`s.
+                        let handlers_placed = entry_try_bodies.as_ref().is_some_and(|tries| {
+                            tries.len() == emitting_handler_count(&bound_update)
+                        });
                         // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                         // register onto, not the state the last step left. Where the pattern lands on a
-                        // container the `foreach` is handed a `null`/boolean, which is never that node.
+                        // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
+                        // handler that emits, only where #5004 places that handler's output.
                         let _register = (_sole_update_foreach.is_some()
                             && elem.register_path.is_some()
                             && plain_update_heads(&bound_update).is_some_and(|(heads, source)| {
@@ -64601,10 +64643,20 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     source_destructures_to_null_or_bool(source, &handed)
                                         || (is_null_or_bool(&handed)
                                             && source_destructures_to_container(source)
-                                            && !has_emitting_handler(&bound_update))
+                                            && (handlers_placed
+                                                || emitting_handler_count(&bound_update) == 0))
                                 })
                             }))
                         .then(|| fold_body::foreach_register(elem.value.clone()));
+                        // #5004: placed only where that reading holds, which is where the resolver models whether
+                        // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
+                        // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
+                        // grids turned 33 of 40,000 rows into wrong answers).
+                        let _update_try_entry = entry_try_bodies
+                            .filter(|_| _register.is_some())
+                            .map(|tries| {
+                                fold_body::update_try_entry(tries, active_reg.value.clone())
+                            });
                         // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
                         // read the register the step left.
                         let _register_folds = (S::TAG == EvalTag::Jq)
@@ -65001,6 +65053,67 @@ fn exact_passthrough_stage(expr: &Expr) -> bool {
                 && exact_passthrough_stage(else_branch)
         }
         _ => false,
+    }
+}
+
+/// The register jq restores at the entry of a `try` around the `foreach` a fold UPDATE is made of (#5004): the
+/// register the `foreach` step entered its UPDATE with, which [`fold_body::update_try_entry`] names for the `try`s on
+/// the way to that `foreach` ([`update_entry_try_bodies`]). Nothing ahead of such a `try` in the UPDATE moves the
+/// register (value heads and wrappers do not), so a handler's output is placed there, seeded with it where the frame
+/// carries no register (the UPDATE fans out) and stated back to the fold either way: `path(. as $x | foreach (.a,.) as $i (.; try (FE) catch (.); $i))` on `{"a":null}` is
+/// jq's `[]`, with `FE` a caught foreign-`$x` `foreach` whose EXTRACT raises. A `try` without a handler has nothing
+/// to place, and a frame whose register is lost carries none ([`Frame::with_register`]).
+fn foreach_update_try_entry(
+    body: &Expr,
+    catch: Option<&Expr>,
+    frame: &Frame,
+) -> Option<OwnedValue> {
+    if catch.is_none() || frame.register_loss.is_lost() {
+        return None;
+    }
+    fold_body::update_try_entry_for(body)
+}
+
+/// The bodies (address and copy) of the `try`s with a handler that emits around the `foreach` a fold UPDATE is made
+/// of ([`plain_update_heads`]), on the way to it, for [`fold_body::update_try_entry`] (#5004); `None` when there is
+/// none, or the UPDATE is no such shape. A `try` elsewhere (in that `foreach`'s INIT or source, or nested deeper)
+/// is not one of them. Nor is any `try` when that `foreach`'s INIT can move the register: the raise such an INIT
+/// leads its source to (a foreign `$x` no longer the register) is not one the resolver models, so an earlier step
+/// already emits nothing where jq's handler emits, and placing the later steps' handler outputs turned the refusal
+/// of `(. as $x | foreach (.,.a) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.a?; empty; error($x))) catch
+/// null)?; $i)) = 9` on `{"a":{"a":true}}` into a write of `{"a":9}` (jq raises).
+fn update_entry_try_bodies(update: &Expr) -> Option<Vec<(usize, Expr)>> {
+    fn walk<'e>(expr: &'e Expr, tries: &mut Vec<(usize, Expr)>) -> Option<&'e Expr> {
+        match unwrap_paren(without_empty_siblings(expr)) {
+            foreach @ Expr::Foreach { .. } => Some(foreach),
+            Expr::Pipe(stages) => walk(
+                stages
+                    .iter()
+                    .find(|stage| plain_update_heads(stage).is_some())?,
+                tries,
+            ),
+            Expr::Label { name, body } => walk(label_sole_item(name, body)?, tries),
+            other => {
+                if let Expr::Try {
+                    expr: body,
+                    catch: Some(handler),
+                } = other
+                {
+                    if !is_empty_handler(handler) {
+                        tries.push((expr_key(body), (**body).clone()));
+                    }
+                }
+                walk(emptied_wrapper_inner(other)?, tries)
+            }
+        }
+    }
+    plain_update_heads(update)?;
+    let mut tries = Vec::new();
+    match walk(update, &mut tries)? {
+        Expr::Foreach { init, .. } if !tries.is_empty() && cannot_move_register(init) => {
+            Some(tries)
+        }
+        _ => None,
     }
 }
 
@@ -73929,6 +74042,14 @@ mod terminal_retry {
 mod fold_body {
     use std::cell::{Cell, RefCell};
 
+    /// The [`update_try_entry`] mark: the body depth, the `try` bodies it names (address and copy), and the
+    /// register those `try`s are entered with.
+    type TryEntry = (
+        u32,
+        alloc::vec::Vec<(usize, super::Expr)>,
+        super::OwnedValue,
+    );
+
     thread_local! {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known to be jq's register (#3953), 0 for none.
@@ -73945,6 +74066,11 @@ mod fold_body {
         static MOVED_AT: RefCell<Option<(u32, super::Rc<super::PathPrefix>)>> = const { RefCell::new(None) };
         /// The [`foreach_register`] mark.
         static FOREACH_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
+        /// The [`update_try_entry`] mark ([`TryEntry`]).
+        static UPDATE_TRY_ENTRY: RefCell<Option<TryEntry>> =
+            const { RefCell::new(None) };
+        /// The body depth whose `try` handler, seeded from [`UPDATE_TRY_ENTRY`], is delivering, 0 for none.
+        static ENTRY_HANDLER_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none, shifted left two:
         /// bit 0 is the moved bit, bit 1 the stating bit.
         static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -74321,6 +74447,69 @@ mod fold_body {
         })
     }
 
+    /// Restores the previous [`update_try_entry`] mark.
+    pub(crate) struct TryEntryGuard(Option<TryEntry>);
+
+    /// Names the register a `foreach` UPDATE about to be entered starts from (`register`, the step's own), for
+    /// the `try`s around the `foreach` that UPDATE is made of, by each one's body (`tries`, its address and a copy:
+    /// a pipe hands its stages on copied, [`super::update_entry_try_bodies`], #5004): jq restores that register
+    /// when such a `try` catches, so its handler's output carries it. Only [`update_try_entry_for`] reads it.
+    pub(crate) fn update_try_entry(
+        tries: alloc::vec::Vec<(usize, super::Expr)>,
+        register: super::OwnedValue,
+    ) -> TryEntryGuard {
+        let previous =
+            UPDATE_TRY_ENTRY.with(|a| a.borrow_mut().replace((depth() + 1, tries, register)));
+        TryEntryGuard(previous)
+    }
+
+    impl Drop for TryEntryGuard {
+        fn drop(&mut self) {
+            UPDATE_TRY_ENTRY.with(|a| *a.borrow_mut() = self.0.take());
+        }
+    }
+
+    /// The register [`update_try_entry`] named for the `try` whose body is `body`, in the body being resolved: the
+    /// same node, or an equal copy of one. Every other `try` the body resolves is inside one of those bodies, so
+    /// never equal to one.
+    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<super::OwnedValue> {
+        let key = super::expr_key(body);
+        UPDATE_TRY_ENTRY.with(|a| {
+            a.borrow()
+                .as_ref()
+                .filter(|(at, tries, _)| {
+                    depth() > 0
+                        && *at == depth()
+                        && tries
+                            .iter()
+                            .any(|(address, copy)| *address == key || copy == body)
+                })
+                .map(|(_, _, register)| register.clone())
+        })
+    }
+
+    /// Restores the previous [`entry_handler_delivering`] mark.
+    pub(crate) struct EntryHandlerGuard(u32);
+
+    /// Marks the body being resolved as delivering the outputs of a `catch` handler seeded from
+    /// [`update_try_entry_for`] (#5004), which state the register the `try` was entered with.
+    pub(crate) fn entry_handler_delivering() -> EntryHandlerGuard {
+        EntryHandlerGuard(ENTRY_HANDLER_DEPTH.with(|a| a.replace(depth())))
+    }
+
+    impl Drop for EntryHandlerGuard {
+        fn drop(&mut self) {
+            ENTRY_HANDLER_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the output being delivered now comes from an [`entry_handler_delivering`] handler of the body at
+    /// `body_depth`, the one whose fold is asking. A fold nested in the handler emits from a deeper body, and a fold
+    /// the handler's body emits into was entered at a shallower one, so neither reads it.
+    pub(crate) fn entry_handler_delivering_at(body_depth: u32) -> bool {
+        body_depth > 0 && ENTRY_HANDLER_DEPTH.with(Cell::get) == body_depth
+    }
+
     /// Marks the body about to be entered as moved too when the body being resolved is (#4651): a
     /// nested fold whose source cannot move the register and whose INIT is `.` runs its UPDATE on
     /// the accumulator the moved body handed it, which the register is still not at. The element's
@@ -74547,6 +74736,29 @@ mod fold_body {
 
     pub(crate) fn foreach_register_here() -> Option<super::OwnedValue> {
         None
+    }
+
+    pub(crate) struct TryEntryGuard;
+
+    pub(crate) fn update_try_entry(
+        _tries: alloc::vec::Vec<(usize, super::Expr)>,
+        _register: super::OwnedValue,
+    ) -> TryEntryGuard {
+        TryEntryGuard
+    }
+
+    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<super::OwnedValue> {
+        None
+    }
+
+    pub(crate) struct EntryHandlerGuard;
+
+    pub(crate) fn entry_handler_delivering() -> EntryHandlerGuard {
+        EntryHandlerGuard
+    }
+
+    pub(crate) fn entry_handler_delivering_at(_body_depth: u32) -> bool {
+        false
     }
 
     pub(crate) fn foreach_register_set_here() -> bool {
