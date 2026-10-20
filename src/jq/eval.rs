@@ -78836,17 +78836,17 @@ fn builtin_tostream<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     )
 }
 
-/// One event of jq's `fromstream` when it is not a plain `[path, leaf]` or `[path]` array (#4971):
+/// One event of jq's `fromstream` (#4971):
 /// `if $i | length == 2 then setpath(["e"]; $i[0] | length == 0) | setpath(["x"] + $i[0]; $i[1])
 /// else setpath(["e"]; $i[0] | length == 1) end`, with the accumulator `x` and the new `e`.
 fn fromstream_generic_event<S: EvalSemantics>(
     x: OwnedValue,
     event: &OwnedValue,
 ) -> Result<(OwnedValue, bool), EvalError> {
-    let length = jq_length_of(event)?;
+    let length = jq_length_of::<S>(event)?;
     let first = jq_first_element(event)?;
     if length == 2.0 {
-        let ended = jq_length_of(&first)? == 0.0;
+        let ended = jq_length_of::<S>(&first)? == 0.0;
         let path: Vec<OwnedValue> = match &first {
             OwnedValue::Array(items) => items.iter().cloned().collect(),
             OwnedValue::Null => Vec::new(),
@@ -78864,7 +78864,7 @@ fn fromstream_generic_event<S: EvalSemantics>(
         };
         Ok((set_value_at_path::<S>(x, &path, leaf)?, ended))
     } else {
-        Ok((x, jq_length_of(&first)? == 1.0))
+        Ok((x, jq_length_of::<S>(&first)? == 1.0))
     }
 }
 
@@ -78913,35 +78913,13 @@ fn builtin_fromstream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         if e {
             x = OwnedValue::Null;
         }
-        // The two shapes a real stream has take the direct arms; any other event runs jq's own definition
-        // (`if $i | length == 2 then .. $i[0] | length == 0 .. else $i[0] | length == 1 end`) step by step (#4971).
-        match &event {
-            OwnedValue::Array(parts) => match parts.as_slice() {
-                [OwnedValue::Array(path), leaf_value] => {
-                    e = path.is_empty();
-                    x = match set_value_at_path::<S>(x, path, leaf_value.clone()) {
-                        Ok(v) => v,
-                        Err(err) => return QueryResult::Error(err),
-                    };
-                }
-                [OwnedValue::Array(path)] => {
-                    e = path.len() == 1;
-                }
-                _ => match fromstream_generic_event::<S>(x, &event) {
-                    Ok((next, ended)) => {
-                        x = next;
-                        e = ended;
-                    }
-                    Err(err) => return QueryResult::Error(err),
-                },
-            },
-            _ => match fromstream_generic_event::<S>(x, &event) {
-                Ok((next, ended)) => {
-                    x = next;
-                    e = ended;
-                }
-                Err(err) => return QueryResult::Error(err),
-            },
+        // jq's own definition, event by event (#4971).
+        match fromstream_generic_event::<S>(x, &event) {
+            Ok((next, ended)) => {
+                x = next;
+                e = ended;
+            }
+            Err(err) => return QueryResult::Error(err),
         }
         if e {
             outputs.push(x.clone());
@@ -78959,14 +78937,14 @@ fn builtin_fromstream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ///
 /// jq's real signature takes a single filter argument: the depth comes from
 /// `.` (the value piped into `truncate_stream` itself), not a second
-/// argument, and `stream` is evaluated against that same `.` — matching
-/// jq-1.7.1's `def truncate_stream(stream): . as $n | stream | ...`.
+/// argument, and `stream` runs on `null`, not on that `.` -- jq-1.7.1's
+/// `def truncate_stream(stream): . as $n | null | stream | ..` (#4971).
 ///
-/// jq's own definition compares the path length against `$n` with the
-/// generic `>` operator, not a numeric type check, so a non-numeric `.` at
-/// the call site (e.g. `null | truncate_stream(...)`) does not error — every
-/// event's length sorts above `null` in jq's ordering, so every event is
-/// kept unmodified. [`compare_values`] reuses that same ordering here.
+/// The path length is compared against `$n` with the generic `>` operator,
+/// not a numeric type check, so a `null` depth keeps every event; a kept
+/// event's path is sliced `[$n:]` (a negative depth counts from the end, a
+/// boolean one raises `Array/string slice indices must be integers`).
+/// [`compare_values`] reuses jq's ordering here.
 fn builtin_truncate_stream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     stream_expr: &Expr,
     value: StandardJson<'a, W>,
@@ -79018,33 +78996,37 @@ fn builtin_truncate_stream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     };
 
     // `if (.[0]|length) > $n then setpath([0]; .[0][$n:]) else empty end` over every event (#4971).
+    let null = OwnedValue::Null;
     let mut outputs = Vec::new();
     for event in events {
-        let first = match jq_first_element(&event) {
-            Ok(first) => first,
-            Err(e) => return QueryResult::Error(e),
+        let first = match &event {
+            OwnedValue::Array(items) => items.first().unwrap_or(&null),
+            OwnedValue::Null => &null,
+            other => {
+                return QueryResult::Error(EvalError::cannot_index_with_type(
+                    other.type_name(),
+                    "number",
+                ))
+            }
         };
-        let path_len = match jq_length_of(&first) {
+        let path_len = match jq_length_of::<S>(first) {
             Ok(n) => OwnedValue::Float(n),
             Err(e) => return QueryResult::Error(e),
         };
         if compare_values::<S>(&path_len, &depth) != core::cmp::Ordering::Greater {
             continue;
         }
-        let sliced = match jq_slice_from(&first, &depth) {
+        let sliced = match jq_slice_from(first, &depth) {
             Ok(v) => v,
             Err(e) => return QueryResult::Error(e),
         };
-        let mut parts: Vec<OwnedValue> = match &event {
-            OwnedValue::Array(items) => items.iter().cloned().collect(),
-            _ => Vec::new(),
-        };
-        if parts.is_empty() {
-            parts.push(sliced);
-        } else {
-            parts[0] = sliced;
-        }
-        outputs.push(OwnedValue::array_from(parts));
+        outputs.push(match event {
+            OwnedValue::Array(mut parts) if !parts.is_empty() => {
+                parts[0] = sliced;
+                OwnedValue::Array(parts)
+            }
+            _ => OwnedValue::array_from(vec![sliced]),
+        });
     }
 
     match control {
@@ -86487,17 +86469,9 @@ fn builtin_load<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
 // Phase 17: Combinations
 
-/// jq's `length` over any value (#4971): `null` is 0, a number its absolute value, a string its code points, an
-/// array or object its size; a boolean has none.
-fn jq_length_of(value: &OwnedValue) -> Result<f64, EvalError> {
-    Ok(match value {
-        OwnedValue::Null => 0.0,
-        OwnedValue::Bool(_) => return Err(EvalError::has_no_length(value)),
-        OwnedValue::String(s) => s.chars().count() as f64,
-        OwnedValue::Array(items) => items.len() as f64,
-        OwnedValue::Object(map) => map.len() as f64,
-        other => other.as_f64().map_or(0.0, f64::abs),
-    })
+/// jq's `length` over any value as a number (#4971), through [`owned_value_jq_length`].
+fn jq_length_of<S: EvalSemantics>(value: &OwnedValue) -> Result<f64, EvalError> {
+    owned_value_jq_length::<S>(value).map(|n| n.as_f64().unwrap_or(0.0))
 }
 
 /// `value[0]` as a stream event's first element reads it (#4971): an array's first element (`null` when it has
@@ -86559,19 +86533,24 @@ fn jq_slice_from(value: &OwnedValue, depth: &OwnedValue) -> Result<OwnedValue, E
 fn empty_length_or_index_error<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: &StandardJson<'_, W>,
 ) -> Result<(), EvalError> {
-    let owned = to_owned_lossy::<S, _>(value);
-    let zero = match &owned {
-        OwnedValue::Null => true,
-        OwnedValue::Bool(_) => return Err(EvalError::has_no_length(&owned)),
-        OwnedValue::String(s) => s.is_empty(),
-        OwnedValue::Object(map) => map.is_empty(),
-        other => other.as_f64().is_some_and(|n| n == 0.0),
+    let zero = match value {
+        StandardJson::Null => true,
+        StandardJson::Bool(b) => return Err(EvalError::has_no_length(&OwnedValue::Bool(*b))),
+        StandardJson::Object(fields) => fields.is_empty(),
+        other => {
+            // A string or a number (an array never gets here): small, and its kind needs the decode.
+            let owned = to_owned_lossy::<S, _>(other);
+            match &owned {
+                OwnedValue::String(s) => s.is_empty(),
+                n => n.as_f64().is_some_and(|n| n == 0.0),
+            }
+        }
     };
     if zero {
         Ok(())
     } else {
         Err(EvalError::cannot_index_with_type(
-            owned.type_name(),
+            type_name(value),
             "number",
         ))
     }
