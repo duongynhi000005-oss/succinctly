@@ -2568,81 +2568,82 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            let entry = if let Some(group) = pair_group {
+            if let Some(group) = pair_group {
                 entries.extend(group);
-                None
-            } else if yq_entry {
-                Some(self.parse_yq_object_entry()?)
             } else {
-                let (key, dollar_shorthand_value) = if self.peek() == Some('(') {
-                    // Dynamic key: (expr)
-                    self.next();
-                    let key_expr = self.parse_expr()?;
-                    self.expect(')')?;
-                    (ObjectKey::Expr(Box::new(key_expr)), None)
-                } else if self.peek() == Some('"') {
-                    // String key
-                    let s = self.parse_string_literal()?;
-                    (ObjectKey::Literal(s), None)
-                } else if self.mode == ParserMode::Jq && self.peek() == Some('$') {
-                    let sigil_offset = self.pos;
-                    let (name, line, has_colon) = self.parse_dollar_name()?;
-                    if has_colon {
-                        if name == "__loc__" {
-                            return Err(ParseError::new(
-                                "may need parentheses around object key expression",
-                                self.pos,
-                            ));
+                let entry = if yq_entry {
+                    self.parse_yq_object_entry()?
+                } else {
+                    let (key, dollar_shorthand_value) = if self.peek() == Some('(') {
+                        // Dynamic key: (expr)
+                        self.next();
+                        let key_expr = self.parse_expr()?;
+                        self.expect(')')?;
+                        (ObjectKey::Expr(Box::new(key_expr)), None)
+                    } else if self.peek() == Some('"') {
+                        // String key
+                        let s = self.parse_string_literal()?;
+                        (ObjectKey::Literal(s), None)
+                    } else if self.mode == ParserMode::Jq && self.peek() == Some('$') {
+                        let sigil_offset = self.pos;
+                        let (name, line, has_colon) = self.parse_dollar_name()?;
+                        if has_colon {
+                            if name == "__loc__" {
+                                return Err(ParseError::new(
+                                    "may need parentheses around object key expression",
+                                    self.pos,
+                                ));
+                            }
+                            let key_value = dollar_var_expr(name, line);
+                            if let Expr::Var(name) = &key_value {
+                                self.var_sites.push(VarSite {
+                                    name: name.clone(),
+                                    offset: sigil_offset,
+                                });
+                            }
+                            (ObjectKey::Expr(Box::new(key_value)), None)
+                        } else {
+                            let value = dollar_var_expr(name.clone(), line);
+                            if let Expr::Var(name) = &value {
+                                self.var_sites.push(VarSite {
+                                    name: name.clone(),
+                                    offset: sigil_offset,
+                                });
+                            }
+                            (ObjectKey::Literal(name), Some(value))
                         }
-                        let key_value = dollar_var_expr(name, line);
-                        if let Expr::Var(name) = &key_value {
-                            self.var_sites.push(VarSite {
-                                name: name.clone(),
-                                offset: sigil_offset,
-                            });
-                        }
-                        (ObjectKey::Expr(Box::new(key_value)), None)
                     } else {
-                        let value = dollar_var_expr(name.clone(), line);
-                        if let Expr::Var(name) = &value {
-                            self.var_sites.push(VarSite {
-                                name: name.clone(),
-                                offset: sigil_offset,
-                            });
-                        }
-                        (ObjectKey::Literal(name), Some(value))
-                    }
-                } else {
-                    // Identifier key
-                    let name = self.parse_ident()?;
-                    (ObjectKey::Literal(name), None)
-                };
+                        // Identifier key
+                        let name = self.parse_ident()?;
+                        (ObjectKey::Literal(name), None)
+                    };
 
-                self.skip_ws();
-
-                // Check for shorthand: `{foo}` means `{foo: .foo}`
-                let value = if let Some(v) = dollar_shorthand_value {
-                    v
-                } else if self.peek() == Some(':') {
-                    self.next();
                     self.skip_ws();
-                    self.parse_object_value()?
-                } else {
-                    // Shorthand: key must be literal identifier
-                    match &key {
-                        ObjectKey::Literal(name) => Expr::Field(name.clone()),
-                        ObjectKey::Expr(_) | ObjectKey::Bare => {
-                            return Err(ParseError::new(
-                                "dynamic key requires explicit value",
-                                self.pos,
-                            ));
-                        }
-                    }
-                };
 
-                Some(ObjectEntry { key, value })
-            };
-            entries.extend(entry);
+                    // Check for shorthand: `{foo}` means `{foo: .foo}`
+                    let value = if let Some(v) = dollar_shorthand_value {
+                        v
+                    } else if self.peek() == Some(':') {
+                        self.next();
+                        self.skip_ws();
+                        self.parse_object_value()?
+                    } else {
+                        // Shorthand: key must be literal identifier
+                        match &key {
+                            ObjectKey::Literal(name) => Expr::Field(name.clone()),
+                            ObjectKey::Expr(_) | ObjectKey::Bare => {
+                                return Err(ParseError::new(
+                                    "dynamic key requires explicit value",
+                                    self.pos,
+                                ));
+                            }
+                        }
+                    };
+
+                    ObjectEntry { key, value }
+                };
+                entries.push(entry);
+            }
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
@@ -2698,7 +2699,7 @@ impl<'a> Parser<'a> {
     /// A pair outside an object (`("a": 2)` alone) stays a parse error: yq answers a
     /// one-element sequence nested in a sequence there, a shape with no `Expr`.
     fn try_parse_yq_pair_group(&mut self, top: bool) -> Option<Vec<ObjectEntry>> {
-        if self.pair_group_budget == 0 {
+        if !self.paren_group_may_hold_pair() || self.pair_group_budget == 0 {
             return None;
         }
         self.pair_group_budget -= 1;
@@ -2722,6 +2723,57 @@ impl<'a> Parser<'a> {
             self.pos = saved_pos;
         }
         group
+    }
+
+    /// Whether the `(` at the cursor holds a `:` directly at its own level (or inside a nested
+    /// `(...)`), outside any string, bracket, brace or comment: the necessary condition for a
+    /// pair group. A parenthesised key (`(.a): 1`) and a slice or object inside parentheses fail
+    /// it, so they never cost an attempt, a rewind or a share of the budget.
+    ///
+    /// A text scan rather than a parse, so a miss can only be a program this scan misjudges
+    /// (single-quoted text, which yq's lexer rejects anyway): it then keeps its old meaning.
+    fn paren_group_may_hold_pair(&self) -> bool {
+        let bytes = self.input.as_bytes();
+        let mut stack: Vec<u8> = Vec::new();
+        let mut i = self.pos;
+        while let Some(&b) = bytes.get(i) {
+            if stack.last() == Some(&b'"') {
+                match b {
+                    b'\\' => {
+                        if bytes.get(i + 1) == Some(&b'(') {
+                            stack.push(b'(');
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    b'"' => {
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            match b {
+                b'#' => {
+                    while bytes.get(i).is_some_and(|&c| c != b'\n') {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'"' | b'(' | b'[' | b'{' => stack.push(b),
+                b')' | b']' | b'}' => {
+                    stack.pop();
+                    if stack.is_empty() {
+                        return false;
+                    }
+                }
+                b':' if stack.iter().all(|&c| c == b'(') => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
     }
 
     /// The body of [`Self::try_parse_yq_pair_group`]; a `None` makes the caller rewind.

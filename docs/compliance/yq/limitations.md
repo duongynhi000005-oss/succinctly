@@ -5675,9 +5675,10 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
   outside an object (`("a": 2)` alone is `[[{"a":2}]]` in yq, a sequence nested in a sequence, a
   shape with no `Expr` here, so it stays a parse error), a chained pair (`{"x": 1, ("a": 2: 3)}`
   is `{"x":1,"a":[[{"2":3}]]}` in yq and a parse error here), and a group mixing a bare entry with
-  a pair (`{("a","b": 3)}` prints nothing in yq, a parse error here). The group attempt parses
-  the text twice when it fails, so a parse draws on a budget of 256 attempts; past it a group is
-  parsed as the parenthesised expression it is.
+  a pair (`{("a","b": 3)}` prints nothing in yq, a parse error here). Only a
+  group with a `:` at its own level is tried (a parenthesised key, a slice and a string are not),
+  and a failed attempt parses the text again, so a parse draws on a budget of 256 attempts; past
+  it a group is parsed as the parenthesised expression it is.
 - **The `*` error text.** The error a failed multiply raises is succinctly's usual
   `object (...) and number (1) cannot be multiplied`, not yq's `cannot multiply !!map with
   !!int`; the exit status agrees (a message-only divergence shared with every other `*`).

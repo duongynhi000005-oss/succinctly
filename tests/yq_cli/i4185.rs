@@ -93,23 +93,44 @@ fn test_4185_c_a_malformed_group_is_still_an_error() -> Result<()> {
     Ok(())
 }
 
-/// The retry budget bounds a nest of failing groups, so a deep one parses (and fails) quickly
-/// rather than costing `2^depth`.
+/// A group that mixes a bare entry with a pair fails after its first entry has been parsed, and
+/// is then parsed again; the budget bounds a nest of them, so 40 levels fail at once rather than
+/// costing `2^40`. (yq answers this shape with its `CollectObject` error; the exit status agrees.)
 #[test]
 fn test_4185_d_nested_failing_groups_do_not_blow_up() -> Result<()> {
     let mut filter = String::from(".a");
     for _ in 0..40 {
-        filter = format!("{{({filter}), \"x\": 1}}");
+        filter = format!("{{({filter}, \"k\": 1)}}");
     }
-    let (_, code) = run_yq_stdin(&filter, INPUT, &["-o=json", "-I0"])?;
-    assert!(code == 0 || code == 1, "exit {code}");
+    let (out, code) = run_yq_stdin(&filter, INPUT, &["-o=json", "-I0"])?;
+    assert_eq!((out.as_str(), code), ("", 1));
+    Ok(())
+}
+
+/// Parenthesised keys, and parentheses whose `:` is inside a string, slice or object, are not
+/// pair groups: they cost no attempt, so a pair group after any number of them still parses.
+#[test]
+fn test_4185_e_ordinary_parentheses_do_not_spend_the_group_budget() -> Result<()> {
+    let keys = "(.a): 1, ".repeat(300);
+    let filter = format!("{{{keys}(\"z\": 2)}}");
+    let (out, code) = run_yq_stdin(&filter, INPUT, &["-o=json", "-I0"])?;
+    assert_eq!((out.as_str(), code), ("{\"5\":1,\"z\":2}\n", 0));
+    for filter in [
+        r#"{("a:b"): 1, ("z": 2)}"#,
+        r#"{(.a | tostring | .[0:1]): 1, ("z": 2)}"#,
+        r#"{("a\(.a):b"): 1, ("z": 2)}"#,
+    ] {
+        let (out, code) = run_yq_stdin(filter, INPUT, &["-o=json", "-I0"])?;
+        assert_eq!(code, 0, "{filter}");
+        assert!(out.ends_with(",\"z\":2}\n"), "{filter}: {out}");
+    }
     Ok(())
 }
 
 /// Nesting is charged against the expression depth limit, so a pathological tower of groups is a
 /// parse error rather than a stack overflow.
 #[test]
-fn test_4185_e_a_tower_of_groups_is_refused_not_overflowed() -> Result<()> {
+fn test_4185_f_a_tower_of_groups_is_refused_not_overflowed() -> Result<()> {
     let filter = format!("{{{}\"a\": 1{}}}", "(".repeat(1000), ")".repeat(1000));
     let (out, code) = run_yq_stdin(&filter, INPUT, &["-o=json", "-I0"])?;
     assert_eq!((out.as_str(), code), ("", 1));
