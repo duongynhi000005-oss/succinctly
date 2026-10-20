@@ -32283,8 +32283,8 @@ fn test_yq_untracked_comma_branch_genuine_error_still_propagates_1764() -> Resul
 /// walks its targets back to front and stops at the first one with no parent -- so
 /// `del(.a, 1)` deletes nothing, where the three sibling operations would skip `1` and write `.a`.
 /// A lone literal (`del(1)`) deletes nothing, as in yq. A target that is neither plain navigation nor
-/// a parentless value (`del(.b | tostring)`, a bound `$y`) keeps raising, since succinctly's
-/// "untracked" is wider than yq's "pathless". The full order matrix is
+/// a parentless value (a bound `$y`, arithmetic) keeps raising, since succinctly's "untracked" is
+/// wider than yq's "pathless"; `del(.b | tostring)` deletes `.b` since #4476. The full order matrix is
 /// `test_yq_del_stops_at_the_first_parentless_target_from_the_back_1865`.
 #[test]
 fn test_yq_untracked_comma_branch_del_stops_the_loop_1764() -> Result<()> {
@@ -32292,11 +32292,15 @@ fn test_yq_untracked_comma_branch_del_stops_the_loop_1764() -> Result<()> {
     assert_eq!((out.as_str(), code), ("{\"a\":1,\"b\":2}\n", 0));
     let (out, code) = run_yq_stdin("del(1)", "a: 1\nb: 2\n", &["-o=json", "-I=0"])?;
     assert_eq!((out.as_str(), code), ("{\"a\":1,\"b\":2}\n", 0));
-    for filter in [
-        "del(.b | tostring)",
+    let (out, code) = run_yq_stdin("del(.b | tostring)", "a: 1\nb: 2\n", &["-o=json", "-I=0"])?;
+    assert_eq!((out.as_str(), code), ("{\"a\":1}\n", 0));
+    let (out, code) = run_yq_stdin(
         "del(.a, .b | tostring)",
-        "del(.a, (.b as $y | $y))",
-    ] {
+        "a: 1\nb: 2\n",
+        &["-o=json", "-I=0"],
+    )?;
+    assert_eq!((out.as_str(), code), ("{}\n", 0));
+    for filter in ["del(.a, (.b as $y | $y))", "del(.a, .b + 1)"] {
         let (_out, err, code) = run_yq_stdin_with_stderr(filter, "a: 1\nb: 2\n", &["-o", "json"])?;
         assert_ne!(code, 0, "{filter}");
         assert!(
