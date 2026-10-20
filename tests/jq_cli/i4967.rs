@@ -205,5 +205,20 @@ fn test_4967_fromdate_parses_exactly_the_iso_format() -> Result<()> {
             r"strptime/1 requires string inputs and arguments",
             5,
         ),
+        ("null", r"5 | fromdate?", "", "", 0),
+        (
+            "null",
+            r#""2020-01-01T23:59:60Z" | fromdate"#,
+            "1577923200\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#""2020-01-01T23:59:60Z" | fromdate | todate"#,
+            "\"2020-01-02T00:00:00Z\"\n",
+            "",
+            0,
+        ),
     ])
 }

@@ -85746,7 +85746,8 @@ fn builtin_todate<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     QueryResult::Owned(OwnedValue::String(result.into()))
 }
 
-/// Builtin: fromdate - parse ISO 8601 date string to Unix timestamp
+/// Lenient ISO 8601 parse to a Unix timestamp: yq's `to_unix` only. jq's `fromdate` is
+/// [`builtin_fromdateiso8601`] and takes exactly `%Y-%m-%dT%H:%M:%SZ` (#4967).
 fn builtin_fromdate<W: Clone + AsRef<[u64]>>(
     value: StandardJson<'_, W>,
     optional: bool,
@@ -85955,7 +85956,7 @@ fn builtin_from_unix<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 }
 
 /// Builtin: to_unix - convert ISO 8601 date string to Unix epoch
-/// This is semantically identical to fromdate/fromdateiso8601 but with yq naming convention
+/// Lenient ISO 8601 parse, unlike jq-mode `fromdate`/`fromdateiso8601` (#4967)
 ///
 /// yq's `to_unix` is `time.Unix()`, an `!!int`; jq's `fromdate` is a float that prints whole
 /// (#4203). A float in yq mode would print as `1.7052768e+09` and carry the `!!float` tag.
@@ -85963,7 +85964,7 @@ fn builtin_to_unix<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'_, W>,
     optional: bool,
 ) -> QueryResult<'_, W> {
-    // to_unix is the same as fromdate - parses ISO 8601 string to Unix timestamp
+    // to_unix parses a lenient ISO 8601 string to a Unix timestamp (not jq's strict `fromdate`, #4967)
     match builtin_fromdate::<W>(value, optional) {
         QueryResult::Owned(OwnedValue::Float(n))
             if S::TAG == EvalTag::Yq && n.fract() == 0.0 && n.abs() < 9.0e15 =>

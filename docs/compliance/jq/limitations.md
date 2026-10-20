@@ -9443,6 +9443,17 @@ is still flushed as it is written. Pinned by `test_print_json_writes_no_partial_
 
 ## Deliberate divergences (ADR-0018 rule 4)
 
+### `fromdate` parses exactly `%Y-%m-%dT%H:%M:%SZ`; yq's `to_unix` stays lenient (#4967)
+
+`fromdate`/`fromdateiso8601` run `strptime("%Y-%m-%dT%H:%M:%SZ") | mktime` as jq defines them: a date alone, no `Z`,
+fractional seconds, an offset and lower-case `t`/`z` are `date "..." does not match format ...` errors, and the dates
+`mktime` refuses (before 1900, a result of `-1`) raise `invalid gmtime representation`. The expected rows in
+`tests/jq_cli/i4967.rs` are the macOS `/usr/bin/jq` 1.7.1's: that jq's libc `strptime` is the platform's, so a glibc `jq`
+differs on a few of them (leading white space before `%Y`, which glibc skips) and `mktime`'s `-1` handling is jq's own code.
+A NUL byte inside the string ends C `strptime` in jq and is scanned past here (as it is by `strptime`, #4965).
+yq's `to_unix` keeps its own lenient ISO 8601 parser (`builtin_fromdate`): its yq oracle has not been captured for the
+forms above, so it is not changed here.
+
 ### A non-string `strflocaltime`/`strftime` format raises where jq aborts (#3046)
 
 `0 | strflocaltime(1)` and `0 | strftime(1)` kill jq 1.7.1 on an assertion
