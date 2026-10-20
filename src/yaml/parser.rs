@@ -1191,7 +1191,15 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.settle_dedented_block(next, root);
                     return;
                 }
-                if !self.first_node_takes_no_foot_quirk(prev, prev_indent, next.is_some()) {
+                // The node opening now is deeper than the block `PREV` is in, so it is `PREV`'s
+                // first child: the comment above it, whatever its own column, is that child's head
+                // across the blank line, not `PREV`'s foot (`m:` / `  # a` / blank / `  k: 1` is
+                // `.m.k`'s key's head, measured against yq v4.53.3, #4099).
+                let heads_first_child =
+                    next.is_some_and(|(_, next_column)| next_column > prev_indent);
+                if !heads_first_child
+                    && !self.first_node_takes_no_foot_quirk(prev, prev_indent, next.is_some())
+                {
                     self.drain_pending_into_foot(prev);
                     return;
                 }
