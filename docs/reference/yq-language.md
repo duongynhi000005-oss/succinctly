@@ -555,17 +555,20 @@ echo '{a: 1, b: [2, 3]}' | succinctly yq -o json -I 0 '@yaml'
 # (yq keeps `b: [2, 3]` flow-style here because it remembers the source's style;
 # an owned value carries none -- #739, #865)
 
-# Encode as Java properties
+# Encode as Java properties (every line ends with a newline, the last one too,
+# so the printed result is followed by a blank line, as in yq)
 echo '{database: "postgres", port: 5432}' | succinctly yq '@props'
 # Output:
 # database = postgres
 # port = 5432
+#
 
 # Nested objects use dot-notation
 echo '{db: {host: "localhost", port: 5432}}' | succinctly yq '@props'
 # Output:
 # db.host = localhost
 # db.port = 5432
+#
 ```
 
 ### Position-Based Navigation (Succinctly Extension)
