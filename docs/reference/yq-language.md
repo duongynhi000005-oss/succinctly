@@ -147,6 +147,12 @@ of the comma, because they are a boundary the shunting yard cannot see across;
 construction brackets do not, since `[...]` scopes evaluation rather than
 precedence.
 
+The body of an `as` binding is one of those pipe chains, so the binding does not
+reach past a comma (#4183): `1 as $z | $z, $z + 1` is `(1 as $z | $z), ($z + 1)`,
+and the `$z` after the comma is unbound, which reads as nothing (`1`, `1`). Write
+`1 as $z | ($z, $z + 1)` to keep it in scope (`1`, `2`). `.items[] as $i | $i.name,
+$i.id` therefore prints only the names. The same holds for the body's `and`/`or`.
+
 #### `and`/`or` bind looser than `|`, `=` and `//`, and chain to the right
 
 yq ranks `and` and `or` at the *same* precedence (20), below `|` (30) and below
