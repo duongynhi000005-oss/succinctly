@@ -2938,6 +2938,23 @@ the mode, so `succinctly jq` over a YAML document keeps the merged view
 (`["p","q","r"]`, `3`). The listing is `DocumentValue::as_object_listed`; `find`, iteration and
 the value reads still use the merged view.
 
+**Iterating a merged mapping and rendering it are two expansions in yq
+([#4983](https://github.com/rust-works/succinctly/issues/4983)).** With `a: &a {x: 1, z: 9}` and
+`b: &b {y: 2, z: 8}`, yq renders `item: {<<: [*a, *b], k: 0}` as `{"y":2,"z":9,"x":1,"k":0}` (a
+sequence of sources folded in reverse, so the earlier source wins a shared key) but iterates it
+(`.[]`, `.[] | key`, `map(.)`) in listed order with each field upserting in place: keys
+`x, z, y, k`, values `1, 8, 2, 0` (the later source wins `z`, as `.item.z` already answered).
+An own key written after the `<<` overrides the merged value in place and one written before it is
+overridden by it. `succinctly yq` matches both since #4983 (`MergeView::Rendering` for the JSON writers and
+the owned conversion, `MergeView::Iteration` for everything else that reads the fields), over the
+13 merge shapes in `tests/yq_cli/i4983.rs`. A mapping with one source reads the same either way. The
+layer is shared with `succinctly jq` over YAML, which therefore iterates a sequence merge the way yq
+does (and answers `.item.z` the way it already did). Still divergent: yq's JSON rendering leaves an
+*inline-mapping* source out (`<<: {q: 1}` renders `{"k":0}`; `.item.q` and `.[]` still see it,
+[#4987](https://github.com/rust-works/succinctly/issues/4987)), which would discard merged keys for
+`succinctly jq` over YAML with no reference to match, so it needs the mode; `path` of a merged member
+names its anchor's location in yq (`["a","x"]`) and the mapping's own here (`["item","x"]`).
+
 Still divergent, because the mapping is no longer a document node by the time the builtin runs
 and an owned object has no `<<` entry to list:
 

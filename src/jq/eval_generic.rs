@@ -432,7 +432,7 @@ fn to_owned_checked_at_depth<S: EvalSemantics, V: DocumentValue>(
     depth: usize,
 ) -> Result<OwnedValue, EvalError> {
     check_nesting_depth(depth)?;
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let mut map = IndexMap::new();
         let mut guard = DisplayKeyGuard::default();
         let mut f = fields;
@@ -658,7 +658,7 @@ fn to_owned_at_depth<S: EvalSemantics, V: DocumentValue>(
         ));
     }
     // Check containers first (arrays and objects have no type ambiguity)
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let mut map = IndexMap::new();
         let mut guard = DisplayKeyGuard::default();
         let mut f = fields;
@@ -1334,7 +1334,7 @@ fn to_owned_cursor_at_depth<S: EvalSemantics, C: DocumentCursor, B: CursorWalkOu
 ) -> Result<B::Out, EvalError> {
     check_depth(depth)?;
     let value = known.unwrap_or_else(|| cursor.value());
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let mut map = IndexMap::new();
         let mut guard = DisplayKeyGuard::default();
         // #3478: the collision bookkeeping of a walk that keeps no members
