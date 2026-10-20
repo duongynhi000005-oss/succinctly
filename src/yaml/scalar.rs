@@ -116,7 +116,9 @@ impl ResolvedScalar {
     /// weren't folded in here — see the #907 follow-up issue.
     ///
     /// A tag-forced float (`!!float 2`) stays a bare
-    /// [`OwnedValue::Float`] here, keeping the value's *text* out of it, so
+    /// [`OwnedValue::Float`] here, keeping the value's *text* out of it -- bar
+    /// an integer past `i64`, whose digits are its value (`!!float
+    /// 99999999999999999999 | tostring` answers them, #4921) -- so
     /// string-producing builtins answer what real yq answers
     /// (`!!float 2 | tostring` is `2`, #1090). A variant of this method that
     /// re-spelled it as `2.0` to survive the `yq` runner's reindex round trip
@@ -132,34 +134,23 @@ impl ResolvedScalar {
             Self::Float(_) if is_preservable_float_literal(&text) => {
                 OwnedValue::from_number_literal::<YqSemantics>(&text)
             }
-            Self::Float(f) => match preservable_float_literal_text(&text) {
-                Some(normalized) => OwnedValue::from_number_literal::<YqSemantics>(&normalized),
-                // #2438: same document boundary as `to_owned_at_depth`'s own
-                // bare-float arm (`src/jq/eval_generic.rs`) -- an explicitly
-                // tagged `!!float 100000000000000000000` reaches `OwnedValue`
-                // here instead, and needs the identical provenance record.
-                None => OwnedValue::from_document_float(f),
-            },
-            Self::Str => OwnedValue::String(text.into_owned().into()),
-        }
-    }
-
-    /// [`to_owned_value`](Self::to_owned_value) for a scalar that resolved from
-    /// its plain (untagged) spelling: the one place an integer too big for `i64`
-    /// keeps its digits (#1129), as real yq does -- `tostring` answers
-    /// `99999999999999999999`, not `1e+20` -- while the JSON writers still print
-    /// the rounded float ([`overflowed_int_json_text`]).
-    ///
-    /// Not folded into `to_owned_value` itself: an explicitly tagged
-    /// `!!float 100000000000000000000` goes through that one and must keep
-    /// printing its `!!float` tag, which a literal's text would drop.
-    #[must_use]
-    pub fn to_owned_value_plain(self, text: Cow<'_, str>) -> OwnedValue {
-        match self {
+            // #1129/#4921: an integer past `i64` keeps the digits the document
+            // spelled, whether it resolved from its plain spelling or was
+            // forced by `!!float`; the JSON writers still ask for the rounded
+            // double ([`overflowed_int_json_text`]).
             Self::Float(f) if f.is_finite() && is_overflowed_int_literal(&text) => {
                 OwnedValue::from_number_literal::<YqSemantics>(&text)
             }
-            _ => self.to_owned_value(text),
+            Self::Float(f) => match preservable_float_literal_text(&text) {
+                Some(normalized) => OwnedValue::from_number_literal::<YqSemantics>(&normalized),
+                // #2438: same document boundary as `to_owned_at_depth`'s own
+                // bare-float arm (`src/jq/eval_generic.rs`) -- a tag-forced
+                // float with no literal to keep (`!!float 0x1p70`-shaped
+                // text, or one past the digit bound) reaches `OwnedValue`
+                // here, and needs the identical provenance record.
+                None => OwnedValue::from_document_float(f),
+            },
+            Self::Str => OwnedValue::String(text.into_owned().into()),
         }
     }
 }
@@ -423,22 +414,29 @@ pub(super) fn is_preservable_float_literal(s: &str) -> bool {
 /// keeps the predicate's own scan short on a JSON writer's hot path.
 pub(crate) const MAX_OVERFLOWED_INT_LITERAL_LEN: usize = 309;
 
-/// True if `s` is a plain decimal integer spelling too big for `i64`
-/// (`99999999999999999999`, `-9223372036854775809`): the digits
-/// `resolve_plain` turns into a [`Float`](ResolvedScalar::Float) only because
-/// `parse_int_or_float`'s `i64` parse failed (#1129).
+/// True if `s` is a decimal integer spelling too big for `i64`
+/// (`99999999999999999999`, `-9223372036854775809`, `+99999999999999999999`,
+/// `0099999999999999999999`): the digits `resolve_plain` turns into a
+/// [`Float`](ResolvedScalar::Float) only because `parse_int_or_float`'s `i64`
+/// parse failed (#1129), or that a `!!float` tag forces to one.
 ///
 /// Real yq keeps such a scalar's text byte-for-byte (`tostring`, `"\(.)"`,
 /// `.a = .a` all answer `99999999999999999999`) while its JSON encoder prints
 /// the rounded float (`100000000000000000000.0`), so the text has to ride along
 /// with the value and each JSON writer has to ask for the rounded spelling
-/// ([`overflowed_int_json_text`]). Only a bare `[-]digits` run qualifies, with no
-/// leading zero: `+9...` and `0099...` are not valid JSON number text, which the
-/// reindex bridge parses what it is handed as, and are left to the float path
-/// they already take (#954 documents that divergence).
+/// ([`overflowed_int_json_text`]). The optional sign may be `-` or `+` and the
+/// run may carry leading zeros (#4921): the text is the value there too, and
+/// the JSON writers never print it -- they print the double -- so being no
+/// valid JSON number text costs nothing there. The reindex bridge is the one
+/// reader that takes the text as number syntax; it reads the leading zeros
+/// the way it reads `007` and keeps a `+` for this shape
+/// ([`JsonNumber::bridge_signed_overflowed_int`](crate::json::light::JsonNumber)).
 ///
 /// Does not check finiteness: a 400-digit run is also `[-]digits`, and the
-/// caller already holds the parsed `f64` to decide that.
+/// caller already holds the parsed `f64` to decide that. The 309-digit bound
+/// counts leading zeros too, so a longer padded run keeps the older rounded
+/// path: this runs on every literal a JSON writer prints, and the scan stays
+/// short.
 #[must_use]
 pub(crate) fn is_overflowed_int_literal(s: &str) -> bool {
     // `i64::MAX` is 19 digits, so nothing shorter overflows: the common numeric
@@ -446,9 +444,8 @@ pub(crate) fn is_overflowed_int_literal(s: &str) -> bool {
     if s.len() < 19 {
         return false;
     }
-    let digits = s.strip_prefix('-').unwrap_or(s);
+    let digits = s.strip_prefix(['-', '+']).unwrap_or(s);
     (19..=MAX_OVERFLOWED_INT_LITERAL_LEN).contains(&digits.len())
-        && digits.as_bytes()[0] != b'0'
         && digits.bytes().all(|b| b.is_ascii_digit())
         && s.parse::<i64>().is_err()
 }
@@ -1017,25 +1014,39 @@ mod tests {
         ));
     }
 
-    /// #1129: only a bare `[-]digits` run past `i64` keeps its digits.
+    /// #1129/#4921: a `[-+]?digits` run past `i64` keeps its digits, leading
+    /// zeros and a `+` included.
     #[test]
-    fn overflowed_int_literal_is_a_bare_digit_run_past_i64() {
+    fn overflowed_int_literal_is_a_digit_run_past_i64() {
         for s in [
             "9223372036854775808",
             "-9223372036854775809",
             "99999999999999999999",
             "-99999999999999999999",
+            // #4921: the spellings JSON number text does not allow.
+            "+99999999999999999999",
+            "0099999999999999999999",
+            "-0099999999999999999999",
+            "+0099999999999999999999",
+            "007777777777777777777777",
+            "009223372036854775808",
         ] {
             assert!(is_overflowed_int_literal(s), "expected kept: {s:?}");
         }
         for s in [
             "",
             "-",
+            "+",
             "9223372036854775807",
             "-9223372036854775808",
-            "+99999999999999999999",
-            "007777777777777777777777",
+            "+9223372036854775807",
+            // Padding in front of a value that fits `i64` is still an `i64`.
+            "0000000000009223372036854775807",
+            "0000000000000000000000",
             "0",
+            "++99999999999999999999",
+            "+-99999999999999999999",
+            "-+99999999999999999999",
             "99999999999999999999.5",
             "99999999999999999999e0",
             "0xFFFFFFFFFFFFFFFFFFFF",
@@ -1054,6 +1065,11 @@ mod tests {
         assert!(!is_overflowed_int_literal(&past_cap));
         // 309 ones is a finite double (1.1e308), the longest a scalar can be.
         assert!(overflowed_int_json_text(&at_cap).is_some());
+        // #4921: a sign is not a digit, but zero padding is one.
+        assert!(is_overflowed_int_literal(&format!("+{at_cap}")));
+        assert!(is_overflowed_int_literal(&format!("-{at_cap}")));
+        assert!(!is_overflowed_int_literal(&format!("0{at_cap}")));
+        assert!(is_overflowed_int_literal(&format!("00{}", &at_cap[2..])));
     }
 
     /// #1129: yq's JSON spelling is the rounded double, scientific past its
@@ -1070,6 +1086,24 @@ mod tests {
         );
         assert_eq!(overflowed_int_json_text("12"), None);
         assert_eq!(overflowed_int_json_text("1.5e30"), None);
+    }
+
+    /// #4921: a `+`-signed or zero-padded run is encoded as the same double as
+    /// the bare spelling -- yq's JSON encoder never prints a scalar's text.
+    #[test]
+    fn overflowed_int_json_text_ignores_sign_and_padding_4921() {
+        for (raw, json) in [
+            ("+99999999999999999999", "100000000000000000000.0"),
+            ("0099999999999999999999", "100000000000000000000.0"),
+            ("-0099999999999999999999", "-100000000000000000000.0"),
+            ("+9223372036854775808", "9223372036854776000.0"),
+        ] {
+            assert_eq!(
+                overflowed_int_json_text(raw).as_deref(),
+                Some(json),
+                "{raw:?}"
+            );
+        }
     }
 
     /// #1211: a zero-mantissa literal has no "significant digits" for the
