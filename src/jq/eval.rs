@@ -64621,11 +64621,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // Found once, and only where it is read.
                         let bare_step =
                             matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
-                        let mut entry_try_bodies = None;
+                        let mut entry_tries = None;
                         // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                         // register onto, not the state the last step left. Where the pattern lands on a
                         // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
-                        // handler that emits, only where #5004 places every such handler's output.
+                        // handler that emits, only where #5004 places every such handler's output, or the handler
+                        // is inside the nested `foreach`'s INIT, UPDATE or EXTRACT (it emits into that state).
                         let _register = (_sole_update_foreach.is_some()
                             && elem.register_path.is_some()
                             && plain_update_heads(&bound_update).is_some_and(|(heads, source)| {
@@ -64636,14 +64637,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             && match emitting_handler_count(&bound_update) {
                                                 0 => true,
                                                 emitting => {
-                                                    entry_try_bodies = bare_step
-                                                        .then(|| {
-                                                            update_entry_try_bodies(&bound_update)
-                                                        })
+                                                    entry_tries = bare_step
+                                                        .then(|| update_entry_tries(&bound_update))
                                                         .flatten();
-                                                    entry_try_bodies.as_ref().is_some_and(|tries| {
-                                                        tries.len() == emitting
-                                                    })
+                                                    entry_tries.as_ref().is_some_and(
+                                                        |(tries, inner)| {
+                                                            tries.len() + inner == emitting
+                                                        },
+                                                    )
                                                 }
                                             })
                                 })
@@ -64655,8 +64656,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // grids turned 33 of 40,000 rows into wrong answers).
                         let _update_try_entry = (bare_step && _register.is_some())
                             .then(|| {
-                                entry_try_bodies
+                                entry_tries
                                     .take()
+                                    .map(|(tries, _)| tries)
                                     .or_else(|| update_entry_try_bodies(&bound_update))
                             })
                             .flatten()
@@ -65128,6 +65130,12 @@ fn is_single_caught_destructure(source: &Expr) -> bool {
 /// of `(. as $x | foreach (.,.a) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.a?; empty; error($x))) catch
 /// null)?; $i)) = 9` on `{"a":{"a":true}}` into a write of `{"a":9}` (jq raises).
 fn update_entry_try_bodies(update: &Expr) -> Option<Vec<(usize, Expr)>> {
+    update_entry_tries(update).map(|(tries, _)| tries)
+}
+
+/// [`update_entry_try_bodies`], with how many handlers that can emit sit inside that `foreach`'s INIT, UPDATE and
+/// EXTRACT: those emit into its own state, not at the outer `try`'s entry, so they are no output #5004 must place.
+fn update_entry_tries(update: &Expr) -> Option<(Vec<(usize, Expr)>, usize)> {
     fn walk<'e>(expr: &'e Expr, tries: &mut Vec<(usize, Expr)>) -> Option<&'e Expr> {
         match unwrap_paren(without_empty_siblings(expr)) {
             foreach @ Expr::Foreach { .. } => Some(foreach),
@@ -65155,12 +65163,20 @@ fn update_entry_try_bodies(update: &Expr) -> Option<Vec<(usize, Expr)>> {
     plain_update_heads(update)?;
     let mut tries = Vec::new();
     match walk(update, &mut tries)? {
-        Expr::Foreach { input, init, .. }
-            if !tries.is_empty()
-                && cannot_move_register(init)
-                && is_single_caught_destructure(input) =>
+        Expr::Foreach {
+            input,
+            init,
+            update,
+            extract,
+            ..
+        } if !tries.is_empty()
+            && cannot_move_register(init)
+            && is_single_caught_destructure(input) =>
         {
-            Some(tries)
+            let inner = emitting_handler_count(init)
+                + emitting_handler_count(update)
+                + extract.as_deref().map_or(0, emitting_handler_count);
+            Some((tries, inner))
         }
         _ => None,
     }

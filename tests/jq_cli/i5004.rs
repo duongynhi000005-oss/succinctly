@@ -507,3 +507,153 @@ fn test_foreach_update_try_handler_of_a_caught_break_sits_at_the_try_entry_5004(
         ),
     ])
 }
+
+/// #5004: a handler inside the nested `foreach`'s INIT, UPDATE or EXTRACT (`try (.a) catch 7`) emits into that
+/// `foreach`'s own state, not at the outer `try`'s entry, so it does not keep #4978's refusal of a container landing
+/// behind a handler that emits: only a handler around the `foreach` does, and that one is placed. It was refused where
+/// jq answers. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_foreach_update_try_handler_beside_a_handler_inside_the_nested_foreach_5004() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch $i; $i))",
+            "",
+            "Invalid path expression with result {\"a\":{\"a\":null}}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.a,.) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch select(false)) catch (.); $i))"#,
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch (.); $i))",
+            "",
+            "Invalid path expression with result {\"a\":[null]}",
+            5,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; error("x"))) catch select(false)) catch 7; $i)) |= 9"#,
+            "{\"a\":[null]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"(. as $x | foreach (.a,.) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; error("x"))) catch select(false)) catch $i; $i)) |= 9"#,
+            "{\"a\":[null]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r"path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch 7; $i))",
+            "",
+            "Invalid path expression with result {\"a\":{\"a\":true}}",
+            5,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"path(. as $x | foreach (.a,.) as $i (.; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch select(false)) catch $i; $i))"#,
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch select(false)) catch (.); $i))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"path(. as $x | foreach (.a,.) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)) catch select(false)) catch (.); $i))",
+            "",
+            "Invalid path expression with result {\"a\":[null]}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)) catch select(false)) catch 7; $i))",
+            "",
+            "Invalid path expression with result {\"a\":{\"a\":null}}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))?]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i)) |= 9"#,
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"del(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))?]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.a,.) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"(. as $x | foreach (.a,.) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i)) |= 9"#,
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"del(. as $x | foreach (.a,.) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch 7; $i))?]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch 7; $i))"#,
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
