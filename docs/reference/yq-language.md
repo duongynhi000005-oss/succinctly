@@ -548,6 +548,11 @@ Beyond jq's standard formats (`@json`, `@csv`, `@base64`, etc.), yq adds:
 | `@yaml`   | YAML block-style encoding          | `a: 1\nb: 2\n`           |
 | `@props`  | Java properties format             | `key = value`            |
 
+`@props` escapes as yq's properties encoder does (#4977): backslash, tab, newline, carriage return and
+form feed become `\\`, `\t`, `\n`, `\r`, `\f`; a key also escapes every space and `:` (`a\ b = 1`), a value
+only a leading space (`a = \  x`); everything else (`=`, `#`, `!`, non-ASCII) is written as it is, and a
+root scalar is not escaped. A scalar whose joined key is empty (`{"": "v"}`) writes nothing.
+
 ```bash
 # Encode as YAML string (block-style, trailing newline included, like yq)
 echo '{a: 1, b: [2, 3]}' | succinctly yq -o json -I 0 '@yaml'

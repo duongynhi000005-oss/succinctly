@@ -21949,15 +21949,17 @@ fn format_props_recursive(value: &OwnedValue, prefix: String, out: &mut String, 
         }
         _ => {
             // Scalar value - output as "key = value"
-            if prefix.is_empty() {
-                // Top-level scalar without key: yq prints the text as it is, unescaped (#4977)
+            if depth == 0 {
+                // A root scalar has no key: yq prints the text as it is, unescaped (#4977)
                 out.push_str(&props_value_to_string(value, false));
-            } else {
+                out.push('\n');
+            } else if !prefix.is_empty() {
                 out.push_str(&props_escape(&prefix, true));
                 out.push_str(" = ");
                 out.push_str(&props_value_to_string(value, true));
+                out.push('\n');
             }
-            out.push('\n');
+            // else: a scalar whose joined key is empty (`{"":"v"}`) writes nothing in yq, not even a line
         }
     }
 }

@@ -63,6 +63,14 @@ fn test_4977_props_escapes_keys_and_values_as_yqs_encoder_does() -> Result<()> {
         ("\"  x\"", "  x"),
         ("\"x\\\\y\"", "x\\y"),
         ("\"\\u00e9\"", "é"),
+        // A scalar whose joined key is empty writes nothing in yq (a root scalar does not).
+        ("{\"\": \"v\"}", ""),
+        ("{\"\": {\"b\": 1}}", "b = 1"),
+        ("{\"a\": {\"\": 1}}", "a. = 1"),
+        ("{\"\": \"\"}", ""),
+        ("{\"\": \"a\\nb\"}", ""),
+        ("{\"a\": 1, \"\": 2, \"b\": 3}", "a = 1\nb = 3"),
+        ("{\"a\": [{\"\": 1}]}", "a.0. = 1"),
     ];
     for (input, want) in rows {
         let (out, code) = run_yq_stdin("@props", input, &["-p=json", "-r"])?;
