@@ -37933,6 +37933,128 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
     binds(update, &mut Vec::new()) == Some(true)
 }
 
+/// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a pipe whose later stages are
+/// `plain`, or an `if` whose condition cannot move the register and whose other arm is `plain`, a bare
+/// `foreach` over a caught or plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source
+/// is one pattern of one bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and
+/// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean.
+/// Such a `foreach` meets `.` on the register wherever the enclosing fold's accumulator still is, so its
+/// source destructures a `$x` the resolver can place against it (the bind is `jv_identical` to the register,
+/// or it is not and the pattern's step raises) instead of getting the loud refusal an unplaced body gets.
+///
+/// Deliberately narrow, each limit a shape that went from a refusal to an answer jq does not give in a random
+/// differential grid (the resolver does not yet carry the register the inner source moves to the inner
+/// `foreach`'s emission): reading any nested `foreach` this way, 6 of 30,000 rows (a `?//` chain, a nested
+/// pattern, a `select` stage); a second variable in the pattern, 11 of 40,000; a body other than `.`, 2 more;
+/// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
+/// or boolean EXTRACT, and a comma sibling beside the `foreach` (`(FE), null`, `(FE), []`), 4 of 100,000.
+fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> bool {
+    /// `$name as {k: $v} | .` / `$name as [$v] | .` (or `. as ..`): a one-variable pattern whose body hands the
+    /// input back, behind any `try`/`?`.
+    fn bare_bind_source(e: &Expr) -> bool {
+        /// One bare variable in an object or array pattern: a second entry lands on the `null` an absent
+        /// key or index reads as, which the resolver's walk places differently from jq's (a caught raise
+        /// answered `[]` or `"C"` where jq answers a path, 11 of 40,000 random rows).
+        fn flat(pattern: &Pattern) -> bool {
+            match pattern {
+                Pattern::Object(entries) => matches!(
+                    entries.as_slice(),
+                    [entry] if matches!(entry.key, ObjectKey::Literal(_))
+                        && entry.bind.is_none()
+                        && matches!(entry.pattern, Pattern::Var(_))
+                ),
+                Pattern::Array(items) => matches!(items.as_slice(), [Pattern::Var(_)]),
+                Pattern::Var(_) => false,
+            }
+        }
+        match unwrap_paren(e) {
+            Expr::Try { expr, catch } => {
+                catch.as_deref().map_or(true, |handler| {
+                    matches!(unwrap_paren(handler), Expr::Identity)
+                }) && bare_bind_source(expr)
+            }
+            Expr::Optional(inner) => bare_bind_source(inner),
+            Expr::AsPattern {
+                expr,
+                patterns,
+                body,
+            } => match patterns.as_slice() {
+                [pattern] => {
+                    matches!(
+                        unwrap_paren(expr),
+                        Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_)
+                    ) && flat(pattern)
+                        && matches!(unwrap_paren(body), Expr::Identity)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    /// An expression that may emit a `null` or a boolean: a literal, `not`, a comparison, `and`/`or`. jq's
+    /// `jv_identical` holds those equal by kind, so an emission of one is accepted or refused by the node the
+    /// register sits on after the inner `foreach`'s bind moved it, which the resolver does not carry yet.
+    fn may_emit_null_or_bool(e: &Expr) -> bool {
+        any_subexpr(e, &mut |x| {
+            matches!(
+                x,
+                Expr::Literal(Literal::Null | Literal::Bool(_))
+                    | Expr::Not
+                    | Expr::Compare { .. }
+                    | Expr::And(..)
+                    | Expr::Or(..)
+            )
+        })
+    }
+    /// An arm, pipe tail or comma item that is not the `foreach`: it leaves the register where it is and emits
+    /// no `null` or boolean.
+    fn plain(e: &Expr) -> bool {
+        cannot_move_register(e) && !may_emit_null_or_bool(e)
+    }
+    fn go(e: &Expr, budget: u8) -> bool {
+        let Some(budget) = budget.checked_sub(1) else {
+            return false;
+        };
+        match unwrap_paren(e) {
+            Expr::Foreach {
+                input,
+                patterns,
+                init,
+                update,
+                extract,
+            } => {
+                matches!(patterns.as_slice(), [Pattern::Var(_)])
+                    && matches!(unwrap_paren(init), Expr::Identity)
+                    && matches!(unwrap_paren(update), Expr::Identity)
+                    && extract.as_deref().map_or(true, |extract| {
+                        matches!(unwrap_paren(extract), Expr::Identity)
+                    })
+                    && bare_bind_source(input)
+            }
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
+            // The arms that are not the `foreach` must leave the register where it is: a sibling that navigates
+            // (`if . then FE else .a end`) states a register the accumulator is not on.
+            Expr::Pipe(stages) => stages
+                .split_first()
+                .is_some_and(|(head, tail)| tail.iter().all(plain) && go(head, budget)),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let (in_then, in_else) = (go(then_branch, budget), go(else_branch, budget));
+                cannot_move_register(cond)
+                    && (in_then || plain(then_branch))
+                    && (in_else || plain(else_branch))
+                    && (in_then || in_else)
+            }
+            _ => false,
+        }
+    }
+    outer_extract.map_or(true, |extract| !may_emit_null_or_bool(extract))
+        && go(e, WRAPPED_CHAIN_DEPTH)
+}
+
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
 /// enclosing fold left it: a chain behind other stages ([`bounded_chain_behind_stages`], #4669), or a
 /// bare `first(CHAIN)` ([`take_wrapped_bare_chain`], #4537) as the body itself. The body is that
@@ -63276,6 +63398,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // node at every step ([`update_returns_its_input`]), so the next step meets `.` on it again.
     let single_bind_update_on_register =
         first_step_on_register && update_is_single_bind_returning_input(update);
+    // #4957: ...and a UPDATE that is, or holds through a `try`, a pipe head or an `if`, a `foreach` over
+    // a caught or plain one-variable bind ([`update_wraps_bare_bind_foreach`]). Unlike the shapes above this does
+    // not need `first_step_on_register`: a source that moves the register still leaves the accumulator on it at
+    // the steps whose element is the root (`foreach (.,.a)`'s first), which `active_at_register` says per step.
+    // The outermost fold only: one inside another fold's body was not measured.
+    let bare_bind_foreach_update_on_register = S::TAG == EvalTag::Jq
+        && fold_body::depth() == 0
+        && patterns_all_bare(patterns)
+        && cannot_move_register(init)
+        && update_wraps_bare_bind_foreach(update, extract);
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
@@ -63283,7 +63415,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             // `drive_fold_source_with` then sends to the resolver's walk of a bound (#4669). #4835: also
             // behind a `try`, a comma, a pipe or an `if`.
             || body_holds_chain_foreach(update, chain_foreach_may_move_init))
-        || single_bind_update_on_register;
+        || single_bind_update_on_register
+        || bare_bind_foreach_update_on_register;
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register = first_step_on_register
         && extract.is_some_and(|extract| {
