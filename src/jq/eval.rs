@@ -56714,6 +56714,27 @@ fn is_plain_bind_chain(e: &Expr) -> bool {
         Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Literal(_) => true,
         Expr::AsPattern { body, .. } | Expr::As { body, .. } => is_plain_bind_chain(body),
         Expr::Pipe(stages) => stages.iter().all(is_plain_bind_chain),
+        // #4941: a stage that hands its input on once and cannot raise or empty it (`select(true)`,
+        // `first(.)`, `(.)?`) runs once on every output of the stage before it, as `.` does.
+        other => emits_input_once(other),
+    }
+}
+
+/// Whether `e` emits its input and nothing else, exactly once, and cannot raise (#4941): `.`,
+/// `select` of a truthy literal, and a `first`/`limit` (constant nonzero count)/`nth(0; ..)`, `try` or
+/// `?` of such. Narrower than [`emits_only_the_accumulator`], which also admits a comma (two outputs).
+fn emits_input_once(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity => true,
+        Expr::Builtin(Builtin::Select(cond)) => is_truthy_literal(cond),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            emits_input_once(inner)
+        }
+        Expr::Limit { n, expr } => takes_outputs(n) && emits_input_once(expr),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
+            is_nth_zero(n) && emits_input_once(expr)
+        }
+        Expr::Try { expr, .. } | Expr::Optional(expr) => emits_input_once(expr),
         _ => false,
     }
 }
@@ -56797,7 +56818,9 @@ fn leading_destructure_of_dot_element(source: &Expr, read: LeadingRead<'_>) -> O
             let first = stages.iter().find(|stage| {
                 !is_identity_stage(stage)
                     && !takes_only_an_identity_leaf(peel_try_wrappers(stage))
-                    && !passing.is_some_and(|passing| is_passing_select(stage, passing))
+                    && !passing.is_some_and(|passing| {
+                        is_passing_select(stage, passing) || emits_input_once(stage)
+                    })
             })?;
             leading_destructure_of_dot_element(first, read)
         }
