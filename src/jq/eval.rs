@@ -37965,10 +37965,20 @@ fn update_returns_its_input(e: &Expr) -> bool {
 /// such a shape. None of them catches anything, so a raise in a leaf is the wrapper's raise too. One
 /// walk for [`foreign_bind_chain_returning_dot`] and [`is_single_output_bind`], so the wrappers they
 /// read through cannot drift apart.
+///
+/// #4934: and a `try`/`?` with no handler. That one does catch: a bind step that raises makes the UPDATE
+/// empty and the next state `null`, whether it raises depends on the register being where the bind's
+/// source is, and the answer is the resolver's, not this walk's -- reading the wrapper through is what
+/// carries the register into the body ([`FoldRegister::resolve_sink`]'s `carries`), where it was
+/// withheld and a refusal of a step jq passes (a `null` `$x` against a `null` register) was swallowed
+/// as the step's raise, leaving a `null` state that a `null` document's register accepts. The claim a
+/// caller draws from a `true` is only ever for an UPDATE that emitted something
+/// (`update_hands_state_on`'s `last.is_some()`), so a caught raise hands nothing on.
 fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
     match unwrap_paren(e) {
         Expr::Comma(items) => items.iter().all(|item| hands_outputs_on(item, leaf)),
         Expr::Label { body, .. } => hands_outputs_on(body, leaf),
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => hands_outputs_on(expr, leaf),
         Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
             hands_outputs_on(inner, leaf)
         }
