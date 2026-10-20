@@ -23731,16 +23731,17 @@ fn test_comment_on_a_bare_dash_before_own_line_properties_goes_forward_2835() ->
 
 /// The residual left next to #2835, pinned with real yq's answer so a change is deliberate. (The
 /// comment after own-line properties and the two stacked property lines it also listed are
-/// matched since #4851: `tests/yq_cli/i4851.rs`.)
+/// matched since #4851: `tests/yq_cli/i4851.rs`, which also holds the block of comment lines
+/// before the properties, a head of the next node in yq and no longer a foot of the key here.)
 #[test]
 fn test_own_line_properties_residuals_2835() -> Result<()> {
-    // The foot of a sequence closing past a tagged item: the getters agree with yq, the printed
-    // block gets a blank line yq leaves out.
+    // The block of comment lines before the properties heads `z`; `k` has no foot.
     let input = "k:\n  - # c\n    # x\n    !!str\nz: 1\n";
-    assert_yq_getter(input, ".k | key | foot_comment", "c\nx\n")?;
+    assert_yq_getter(input, ".k | key | foot_comment", "\n")?;
+    assert_yq_getter(input, ".z | key | head_comment", "c\nx\n")?;
     let (out, code) = run_yq_stdin(".", input, &[])?;
     assert_eq!(code, 0);
-    assert_eq!(out, "k:\n  - !!str\n# c\n# x\n\nz: 1\n");
+    assert_eq!(out, "k:\n  - !!str\n# c\n# x\nz: 1\n");
     Ok(())
 }
 

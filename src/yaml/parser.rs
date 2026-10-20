@@ -4202,6 +4202,16 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 let empty_property_item =
                     !value_is_null && self.next_line_is_properties_of_a_null_value(indent);
                 if value_is_null || empty_property_item {
+                    if empty_property_item && self.pending_head_lines.len() > above_dash {
+                        // Comment lines between the dash and the properties go forward with
+                        // the rest, as the dash line's own comment does below: yq heads
+                        // whatever opens next with them, not placing them by the column they
+                        // were written at (#4851). The whole block is reset, a line pending
+                        // above the dash included, since it is one block to the placement
+                        // rule and yq moves it the same way (`- 1` / `# a` / `-` / `# x` /
+                        // `!!str`, measured).
+                        self.pending_block = PendingBlock::default();
+                    }
                     match (trailing, empty_property_item) {
                         (Some(range), false) => self.float_absent_item_comment(range),
                         (Some(range), true) => self.float_comment_past_empty_property_item(range),
