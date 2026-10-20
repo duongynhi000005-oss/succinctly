@@ -1277,6 +1277,69 @@ fn eval_all_documents(
     Ok(all_docs)
 }
 
+/// Makes `line` and `column` of a node `--eval-all` reads from YAML answer its position in the
+/// file the user passed, where `expr` reads one (#4646).
+///
+/// `--eval-all` evaluates each document through a reindexed copy of its value, so the cursor a
+/// node stands on indexes the regenerated text (`[1,14]` for the third line's `b`). The scope
+/// installed here is asked for the node by its path instead, and answers from the source's own
+/// index: the same cursor, and the same `line`/`column`, the streaming route reads. The index of
+/// a source is built when the first position is asked of it, so a run that never reads one pays
+/// nothing beyond keeping a copy of the bytes.
+fn enter_eval_all_source_positions(
+    expr: &jq::Expr,
+    input_sources: &[GatheredSource],
+    input_files: &[String],
+) -> Option<jq::SourcePositionsScope> {
+    if !jq::walk::uses_cursor_metadata_builtins(expr) {
+        return None;
+    }
+    struct Source {
+        file: usize,
+        bytes: Vec<u8>,
+        index: std::cell::OnceCell<Option<YamlIndex>>,
+    }
+    let file_indices = gathered_file_indices(input_files);
+    let sources: Vec<Source> = input_sources
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, format, _))| *format != InputFormat::Json)
+        .map(|(source_idx, (bytes, ..))| Source {
+            file: file_indices.get(source_idx).copied().unwrap_or(source_idx),
+            bytes: bytes.clone(),
+            index: std::cell::OnceCell::new(),
+        })
+        .collect();
+    Some(jq::enter_source_positions_scope(std::rc::Rc::new(
+        move |file, document, steps, at_key| {
+            let source = sources.iter().find(|s| s.file == file)?;
+            let index = source
+                .index
+                .get_or_init(|| YamlIndex::build(&source.bytes).ok())
+                .as_ref()?;
+            let root = index.root(&source.bytes);
+            let cursor = match root.value() {
+                YamlValue::Sequence(docs) => {
+                    let mut rest = docs;
+                    let mut found = None;
+                    for position in 0.. {
+                        let (doc_cursor, next) = rest.uncons_cursor()?;
+                        if position == document {
+                            found = Some(doc_cursor);
+                            break;
+                        }
+                        rest = next;
+                    }
+                    found?
+                }
+                _ if document == 0 => root,
+                _ => return None,
+            };
+            succinctly::jq::eval_generic::source_position_at(cursor, steps, at_key)
+        },
+    )))
+}
+
 /// Applies `--front-matter`, if set, to raw input bytes before format
 /// resolution and validation: the raw bytes (e.g. Markdown) aren't valid
 /// standalone YAML, so extraction must happen first. Returns
@@ -9071,6 +9134,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         if gathered.1.is_none() {
             let all_docs = eval_all_documents(&gathered.0, &input_files, args.document)?;
             let reported = sink.report_count();
+            let _positions =
+                enter_eval_all_source_positions(&program.expr, &gathered.0, &input_files);
             let query_result: QueryResult<'_, Vec<u64>> =
                 jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
             let results = query_result_to_owned_values(query_result, &mut sink);
@@ -10198,6 +10263,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             Some(results) => results,
             None => {
                 let all_docs = eval_all_documents(&input_sources, &input_files, args.document)?;
+                let _positions =
+                    enter_eval_all_source_positions(&program.expr, &input_sources, &input_files);
                 let query_result: QueryResult<'_, Vec<u64>> =
                     jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
                 query_result_to_owned_values(query_result, &mut sink)

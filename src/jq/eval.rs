@@ -31224,6 +31224,24 @@ pub fn enter_file_index_scope(file_index: usize) -> FileIndexScope {
     ))
 }
 
+/// Make `line`/`column` of a node read under `--eval-all` answer the position in the source text
+/// `resolver` names, until the returned guard is dropped (#4646).
+///
+/// `--eval-all` evaluates each document through a reindexed copy, whose own cursor indexes the
+/// regenerated text; `resolver(file, document, path)` is asked instead, and answers
+/// `(line, column)` of the node at `path` in the document the caller read (of its key when the
+/// flag is set), or `None` where the source has no such node. [`source_position_at`](super::eval_generic::source_position_at) is the resolver's body for a source that has
+/// a cursor.
+#[must_use = "the scope ends when the guard is dropped"]
+pub fn enter_source_positions_scope(
+    resolver: alloc::rc::Rc<super::eval_generic::SourcePositionFn>,
+) -> SourcePositionsScope {
+    SourcePositionsScope(super::eval_generic::enter_source_positions(resolver))
+}
+
+/// The scope [`enter_source_positions_scope`] opens; dropping it closes the scope.
+pub struct SourcePositionsScope(#[allow(dead_code)] super::eval_generic::SourcePositionsGuard);
+
 /// Make `filename` answer `names[file_index]` for every evaluation until the
 /// returned guard is dropped (#2648).
 ///
