@@ -8827,7 +8827,9 @@ impl<'a> Parser<'a> {
         // evaluates to exactly its branch, so nothing else changes.
         if exprs.len() >= 2 {
             let tail = &exprs[exprs.len() - 2..];
-            if tail.iter().all(yq_union_returns_input_context) {
+            let key = |e: &Expr| yq_union_list_identity(e, Some(YqUnionList::Input), true);
+            let (left, right) = (key(&tail[0]), key(&tail[1]));
+            if left.is_some() && left == right {
                 exprs.pop();
                 return Ok(Expr::Comma(exprs));
             }
@@ -9072,7 +9074,18 @@ impl<'a> Parser<'a> {
         let mut patterns = self.parse_pattern_alternatives()?;
         self.expect('|')?;
         self.skip_ws();
-        let body = self.parse_expr()?;
+        let body = match self.mode {
+            ParserMode::Jq => self.parse_expr()?,
+            // The body is a pipe chain, and a pipe binds tighter than `,` and `and`/`or` in yq:
+            // `1 as $z | $z, $y` is `(1 as $z | $z), $y`, so `$y` is not in the binding's scope
+            // (#4183). Still a scope of its own, as `parse_expr` makes it.
+            ParserMode::Yq => {
+                let expd = core::mem::replace(&mut self.expd_operand, false);
+                let body = self.parse_pipe_no_comma();
+                self.expd_operand = expd;
+                body?
+            }
+        };
 
         // No `?//` alternatives: keep the simpler, pre-existing `Expr::As`
         // shape for a bare `$var` pattern (every other `Expr::As` call site
@@ -9533,6 +9546,57 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The list a yq-mode `,` operand evaluates to when the operand does not build one, `None` when
+/// it does.
+///
+/// That is the property real yq's `,` pointer-compares on -- see
+/// [`Parser::parse_yq_comma_expr`] for the mechanism and the captured sequence. In the surface
+/// language `.` hands back the list it was given, and so do the two shapes that are transparently
+/// `.`: parentheses, and a pipe whose every stage is itself transparent (`. | .`, live-verified to
+/// collapse: `(.a, .b) | ((. | .), .)` prints 2 lines, not 4). A `$name` hands back the list the
+/// variable is stored in (#4183). A pipe passes the list on to its next stage, so `. | $a` is the
+/// variable's list and `.a | .` is the fresh one `.a` built.
+///
+/// Deliberately *not* extended to assignment operands, which real yq's own comment names as the
+/// guard's intended case (`(.foo = "bar"), (.thing = "cat")`): succinctly's assignments return an
+/// independently-edited document rather than mutating one shared context, so collapsing the pair
+/// would drop a write rather than de-duplicate one. That is a separate, larger divergence --
+/// `yq '(.a.c = 1), (.b.c = 2)'` prints **one** document with both writes where succinctly prints
+/// two with one each -- recorded in docs/compliance/yq/limitations.md rather than half-fixed here.
+fn yq_union_list_identity(
+    expr: &Expr,
+    input: Option<YqUnionList>,
+    own_variables: bool,
+) -> Option<YqUnionList> {
+    match expr {
+        Expr::Identity => input,
+        // #4183: `$name` hands back the list the variable is stored in, the same one every time it
+        // is read in one context, so two reads of one name are one list to the pointer compare
+        // (`[1] as $z | [$z, $z]` is `[[1]]`). A stage after the first of a pipe runs in a child
+        // context, which copies every variable's list: `. | $z` is a fresh list, `$z | .` is the
+        // variable's.
+        Expr::Var(name) if own_variables => Some(YqUnionList::Variable(name.clone())),
+        Expr::Paren(inner) => yq_union_list_identity(inner, input, own_variables),
+        Expr::Pipe(stages) => {
+            let mut list = input;
+            for (i, stage) in stages.iter().enumerate() {
+                list = yq_union_list_identity(stage, list, own_variables && i == 0);
+            }
+            list
+        }
+        _ => None,
+    }
+}
+
+/// Which list a yq `,` operand evaluates to, when it is one the operand did not build (#4183).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum YqUnionList {
+    /// The list the operand was handed.
+    Input,
+    /// The list a variable is stored in.
+    Variable(String),
+}
+
 /// Parse a jq expression string into an AST.
 ///
 /// # Examples
@@ -9561,33 +9625,6 @@ impl<'a> Parser<'a> {
 /// // Object construction
 /// let expr = parse("{name: .name, age: .age}").unwrap();
 /// ```
-/// Does this yq-mode expression hand its input context object straight back,
-/// unchanged and un-copied?
-///
-/// That is the property real yq's `,` pointer-compares on -- see
-/// [`Parser::parse_yq_comma_expr`] for the mechanism and the captured
-/// sequence. In the surface language only `.` has it, plus the two shapes
-/// that are transparently `.`: parentheses, and a pipe whose every stage is
-/// itself transparent (`. | .`, live-verified to collapse:
-/// `(.a, .b) | ((. | .), .)` prints 2 lines, not 4).
-///
-/// Deliberately *not* extended to assignment operands, which real yq's own
-/// comment names as the guard's intended case (`(.foo = "bar"), (.thing =
-/// "cat")`): succinctly's assignments return an independently-edited document
-/// rather than mutating one shared context, so collapsing the pair would drop
-/// a write rather than de-duplicate one. That is a separate, larger
-/// divergence -- `yq '(.a.c = 1), (.b.c = 2)'` prints **one** document with
-/// both writes where succinctly prints two with one each -- recorded in
-/// docs/compliance/yq/limitations.md rather than half-fixed here.
-fn yq_union_returns_input_context(expr: &Expr) -> bool {
-    match expr {
-        Expr::Identity => true,
-        Expr::Paren(inner) => yq_union_returns_input_context(inner),
-        Expr::Pipe(stages) => stages.iter().all(yq_union_returns_input_context),
-        _ => false,
-    }
-}
-
 pub fn parse(input: &str) -> Result<Expr, ParseError> {
     parse_with_mode(input, ParserMode::Jq)
 }

@@ -25074,7 +25074,7 @@ fn test_split_exp_empty_result_errors() -> Result<()> {
 
 #[test]
 fn test_split_exp_many_results_errors() -> Result<()> {
-    let (_stdout, stderr, code) = run_yq_split(".", "a: 1\n", &["--split-exp", "$index, $index"])?;
+    let (_stdout, stderr, code) = run_yq_split(".", "a: 1\n", &["--split-exp", "$index, 1"])?;
     assert_ne!(code, 0);
     assert!(
         stderr.contains("exactly one string") && stderr.contains("2 results"),

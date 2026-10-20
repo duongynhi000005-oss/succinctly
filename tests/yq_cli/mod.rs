@@ -31,6 +31,7 @@ mod i3600;
 mod i4099;
 mod i4103;
 mod i4136;
+mod i4183;
 mod i4185;
 mod i4206;
 mod i4268;
