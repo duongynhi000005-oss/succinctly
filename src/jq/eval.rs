@@ -41470,9 +41470,28 @@ fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> boo
 /// better than the element (`LostAt` it), and called that error a guess. An absent key lands on `null` and is
 /// [`source_destructures_to_null_or_bool`]'s. Only bare `$name` entries of a pattern with literal keys are read.
 fn source_destructures_to_container(source: &Expr) -> bool {
-    source_destructures_onto(source, &|child| {
-        matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
-    })
+    // A destructure of a value computed from a marker (`$x.a as {a:$q}`) steps from a node the walk below
+    // does not look at, and moves the register somewhere it does not name.
+    let derived_destructure = any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { expr, .. }
+            if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
+                && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
+    });
+    !derived_destructure
+        && source_destructures_onto(source, &|child| {
+            matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
+        })
+}
+
+/// Whether `expr` holds a `try` whose handler can emit (#4800): jq runs a handler after backtracking to its `try`,
+/// so its outputs carry the register the `try` entered with, which [`source_destructures_to_container`]'s reading
+/// does not state (`try FE catch (.)`, with an EXTRACT of `FE` that raises on the container, answered `[]` for jq's
+/// `[[]]`). A handler that emits nothing (`catch empty`) has no output to misplace.
+fn has_emitting_handler(expr: &Expr) -> bool {
+    any_subexpr(
+        expr,
+        &mut |e| matches!(e, Expr::Try { catch: Some(handler), .. } if !emits_nothing(handler)),
+    )
 }
 
 /// The walk [`source_destructures_to_null_or_bool`] and [`source_destructures_to_container`] share: whether
@@ -63778,7 +63797,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
                                     source_destructures_to_null_or_bool(source, &handed)
                                         || (is_null_or_bool(&handed)
-                                            && source_destructures_to_container(source))
+                                            && source_destructures_to_container(source)
+                                            && !has_emitting_handler(&bound_update))
                                 })
                             }))
                         .then(|| fold_body::foreach_register(elem.value.clone()));
@@ -73318,12 +73338,17 @@ mod fold_body {
         }
     }
 
+    /// Whether a [`foreach_register`] mark taken at `at` is for the body being resolved.
+    fn foreach_register_is_here(at: u32) -> bool {
+        depth() > 0 && at == depth()
+    }
+
     /// The node [`foreach_register`] named for the body being resolved.
     pub(crate) fn foreach_register_here() -> Option<super::OwnedValue> {
         FOREACH_REGISTER.with(|a| {
             a.borrow()
                 .as_ref()
-                .filter(|(at, _)| depth() > 0 && *at == depth())
+                .filter(|(at, _)| foreach_register_is_here(*at))
                 .map(|(_, value)| value.clone())
         })
     }
@@ -73333,7 +73358,7 @@ mod fold_body {
         FOREACH_REGISTER.with(|a| {
             a.borrow()
                 .as_ref()
-                .is_some_and(|(at, _)| depth() > 0 && *at == depth())
+                .is_some_and(|(at, _)| foreach_register_is_here(*at))
         })
     }
 

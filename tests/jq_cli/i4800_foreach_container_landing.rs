@@ -1,7 +1,7 @@
 //! #4800: the caught foreign-`$x` `foreach` of a `foreach` UPDATE over a moving source, where the pattern's step lands on
 //! a container. `FE` is `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`.
 
-use crate::assert_path_rows_both_routes_3749;
+use crate::{assert_path_rows_both_routes_3749, run_jq_full};
 use anyhow::Result;
 
 /// #4800: on `{"a":{"a":null}}` the step whose element is the root moves jq's register onto `{"a":null}` and leaves
@@ -658,4 +658,67 @@ fn test_caught_foreign_foreach_landing_on_a_container_behind_a_boolean_head_4800
             5,
         ),
     ])
+}
+
+/// #4800: a `try` around the `foreach` whose handler emits nothing (`catch empty`) has no output to misplace, so the
+/// container landing is read through it as through a bare `try`.
+#[test]
+fn test_caught_foreign_foreach_landing_on_a_container_behind_a_catch_empty_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch empty; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch empty; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch empty; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) catch empty; .a)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+    ])
+}
+
+/// #4800: a handler that emits is not read through. jq runs it after backtracking to its `try`, so its output carries
+/// the register the `try` entered with (the root here, so jq's `$i` is `[]` and `[path(..)?]` is `[[]]`); the
+/// container reading does not state that, and read through the handler it answered `[]`, dropping jq's path. It keeps
+/// the refusal it had before (`has_emitting_handler`): loud, not a wrong answer.
+#[test]
+fn test_caught_foreign_foreach_landing_behind_an_emitting_handler_stays_refused_4800() -> Result<()>
+{
+    let filter = r"[path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i))?]";
+    let input = r#"{"a":{"a":null}}"#;
+    for (stdout, stderr, code) in [
+        run_jq_full(&["-c", filter], Some(input))?,
+        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
+    ] {
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", 5),
+            "{filter}: stderr {stderr:?}"
+        );
+        assert!(
+            stderr
+                .contains(r#"Invalid path expression near attempt to access element "a" of null"#),
+            "{filter}: {stderr:?}"
+        );
+    }
+    Ok(())
 }
