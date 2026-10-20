@@ -33,6 +33,7 @@ mod i4103;
 mod i4136;
 mod i4185;
 mod i4206;
+mod i4268;
 mod i4386;
 mod i4461;
 mod i4646;

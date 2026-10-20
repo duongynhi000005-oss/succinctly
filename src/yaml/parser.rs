@@ -1831,6 +1831,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // A bare `-` item's scalar value on its own line: the node a
             // foot deferred to "the item's first key/scalar" was waiting
             // for (#2811; the item's own hook left it unclaimed).
+            //
+            // Comment lines between the dash and the value are this node's head (`-` / `  # f` /
+            // `  z`, #4268): the bare-item arm left them pending for "the item's first node",
+            // which for a mapping or a sequence is its own first key or item, and for a scalar
+            // is the scalar itself, where they used to ride on to the next item.
+            self.flush_pending_head_lines(Some((self.bp_pos, column)));
             self.claim_deferred_foot(self.bp_pos);
         }
     }
