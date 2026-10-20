@@ -41558,9 +41558,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if !on_dot && !is_pure_of_dot(cond) {
                 return None;
             }
-            // A comma branch (`if . then (FE, empty) else . end`) is not read like the bare `FE`: the bare
-            // form's `.a` EXTRACT lets the index error escape a `?` where jq answers `[]`, which the
-            // comma form did not (it was refused outright), so reading it would regress that row (#4800).
+            // A comma branch (`if . then (FE, empty) else . end`) is not read like the bare `FE`: the shapes
+            // around it that #4948 does not reach (an `if` on another condition than `.`, a stage after the
+            // `if`) still let the bare form's `.a` index error escape a `?` where jq answers `[]`, which the
+            // comma form did not (it was refused outright), so reading it would regress those rows (#4800).
             if matches!(unwrap_paren(then_branch), Expr::Comma(_)) {
                 return None;
             }
@@ -49706,6 +49707,25 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
         } => cannot_move_register(handler) && chain(body),
         _ => false,
     }
+}
+
+/// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
+/// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
+/// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
+/// read as before; so does any `if` on a condition other than `.`, whose own navigation may move the register
+/// before a branch runs.
+fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
+    let mut current = update;
+    while let Expr::If {
+        cond, else_branch, ..
+    } = unwrap_paren(current)
+    {
+        if state.is_truthy() || !matches!(unwrap_paren(cond), Expr::Identity) {
+            break;
+        }
+        current = else_branch;
+    }
+    current
 }
 
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
@@ -63313,6 +63333,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // collected: jq evaluates every one of its outputs.
                         let entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
+                        let update_taken = if S::TAG == EvalTag::Jq {
+                            taken_if_branch(&bound_update, &entry_state)
+                        } else {
+                            &bound_update
+                        };
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
                         // escapes first, must not leave the old node's path behind).
@@ -63464,7 +63489,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 }
                                 let extract_reg = active_reg.advance::<S>(
                                     update_branch,
-                                    &bound_update,
+                                    // #4948: only the branch of an `if . then .. else .. end` the state took ran.
+                                    update_taken,
                                     frame,
                                     entry_state_by_kind || is_null_or_bool(&active_reg.value),
                                 );
