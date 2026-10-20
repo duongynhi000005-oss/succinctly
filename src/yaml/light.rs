@@ -5295,6 +5295,17 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
         }
     }
 
+    /// The mapping's own entries, in document order, with a `<<` merge key left as the ordinary
+    /// key it is spelled as: what yq's `keys`, `length` and `has` list (#3556). A
+    /// mapping without a merge key is its own listing. [`find`](Self::find) and iteration keep
+    /// the merged view, which is what a value read wants.
+    pub(crate) fn listed(&self) -> Self {
+        match &self.inner {
+            FieldsInner::Direct(_) => self.clone(),
+            FieldsInner::Merged { first_key, .. } => Self::raw(**first_key),
+        }
+    }
+
     /// Raw (merge-unaware) cons-list over a mapping's direct children.
     ///
     /// Used internally by [`resolve_merge_keys`] to walk a mapping's own
@@ -8579,6 +8590,17 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
             // See `as_str`'s `Alias` arm above (#1191/#1193, PR #1314).
             YamlValue::Alias { target, .. } => {
                 target.and_then(|t| t.resolve_alias_chain()?.as_object())
+            }
+            _ => None,
+        }
+    }
+
+    fn as_object_listed(&self) -> Option<Self::Fields> {
+        match self {
+            YamlValue::Mapping(fields) => Some(fields.listed()),
+            // See `as_str`'s `Alias` arm above (#1191/#1193, PR #1314).
+            YamlValue::Alias { target, .. } => {
+                target.and_then(|t| t.resolve_alias_chain()?.as_object_listed())
             }
             _ => None,
         }

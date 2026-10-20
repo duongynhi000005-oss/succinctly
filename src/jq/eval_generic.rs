@@ -24076,6 +24076,22 @@ fn eval_has_generic<S: EvalSemantics, V: DocumentValue>(
     ))
 }
 
+/// The fields a key-listing builtin (`keys`, `keys_unsorted`, `length`, `has`) reads (#3556).
+///
+/// yq counts the entries a mapping spells, a `<<` merge key included, where a value read
+/// (`.p`, `.[]`, the document itself) goes through the merge. That is a rule of the mode, not of
+/// the input format, so jq mode keeps the value view. `to_entries` still reads the value view: its
+/// `<<` entry would have to survive `from_entries` as the merge key it is, which a bare owned
+/// object cannot say.
+#[inline]
+fn listed_object<S: EvalSemantics, V: DocumentValue>(value: &V) -> Option<V::Fields> {
+    if S::TAG == EvalTag::Yq {
+        value.as_object_listed()
+    } else {
+        value.as_object()
+    }
+}
+
 /// `has(key)`'s check for one already-resolved key -- the body of
 /// [`eval_has_generic`]. Mirrors `eval::has_one_key`'s match order exactly
 /// (null receiver, then object+string key, then array+numeric key, then
@@ -24092,7 +24108,10 @@ fn eval_has_one_key<S: EvalSemantics, V: DocumentValue>(
     // #2800: yq's `has(k)` on a mapping compares the key's *text* for any scalar argument
     // (`has(1)` is true on a `1:` member); see `eval::has_one_key`'s twin of this arm.
     if S::TAG == EvalTag::Yq && !matches!(key_owned, OwnedValue::String(_)) {
-        if let (Some(fields), Some(text)) = (value.as_object(), yq_scalar_text::<S>(&key_owned)) {
+        if let (Some(fields), Some(text)) = (
+            listed_object::<S, V>(value),
+            yq_scalar_text::<S>(&key_owned),
+        ) {
             if let Err(err) = empty_fields_tail_gap_ok(&fields, cursor.as_ref()) {
                 return GenericResult::Error(err);
             }
@@ -24102,7 +24121,7 @@ fn eval_has_one_key<S: EvalSemantics, V: DocumentValue>(
             };
         }
     }
-    match (&key_owned, value.as_object(), value.as_array()) {
+    match (&key_owned, listed_object::<S, V>(value), value.as_array()) {
         // #2261: `contains_checked`, not the bare `contains` -- catches a
         // trailing stray comma (`{"a":1,} | has("a")`), a #1194 unpaired
         // tail, and a #1677 delimiter fault, none of which `contains`
@@ -32335,7 +32354,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                     Ok(len) => GenericResult::Owned(OwnedValue::Int(len as i64)),
                     Err(err) => GenericResult::Error(err),
                 }
-            } else if let Some(fields) = value.as_object() {
+            } else if let Some(fields) = listed_object::<S, V>(&value) {
                 // #1194: `effective_len` counts a member whose key never
                 // stringifies (`census`'s `unkeyed`), so `length` answered 1
                 // for `{invalid: 1}` while `keys` listed none. Refuse rather
@@ -32380,7 +32399,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
         }
 
         Builtin::Keys => {
-            if let Some(fields) = value.as_object() {
+            if let Some(fields) = listed_object::<S, V>(&value) {
                 // #2594: `effective_keys`, whatever eventually drains this
                 // `LazyKeys`, walks fields alone -- a zero-field `{,}`
                 // listed `[]` rather than raising.
@@ -32432,7 +32451,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
         }
 
         Builtin::KeysUnsorted => {
-            if let Some(fields) = value.as_object() {
+            if let Some(fields) = listed_object::<S, V>(&value) {
                 // #2594: same zero-field `{,}` gap as `Keys` above.
                 if let Err(err) = empty_fields_tail_gap_ok(&fields, cursor.as_ref()) {
                     return GenericResult::Error(err);
@@ -43151,6 +43170,65 @@ mod tests {
             .stream_yaml::<_, JqSemantics>(&mut out, IndentSpec::spaces(2), false, |_| Ok(()))
             .unwrap();
         assert_eq!(out, "- b\n- a\n- c");
+    }
+
+    /// #3556: yq counts and lists the entries a mapping spells, a `<<` merge key included; jq mode
+    /// keeps the merged view -- the mode decides, never the input format (ADR-0018).
+    #[test]
+    fn test_key_listing_builtins_follow_the_mode_on_a_merge_key_3556() {
+        use crate::yaml::YamlIndex;
+
+        let yaml = b"base: &base {p: 1, q: 2}\nitem:\n  <<: *base\n  r: 3\n";
+        let index = YamlIndex::build(yaml).unwrap();
+        let doc = index.root(yaml).first_child().unwrap();
+        let run = |src: &str, yq: bool| -> OwnedValue {
+            let expr = crate::jq::parse(src).unwrap();
+            let result = if yq {
+                eval_with_cursor_using::<YqSemantics, _>(&expr, doc)
+            } else {
+                eval_with_cursor_using::<JqSemantics, _>(&expr, doc)
+            };
+            if yq {
+                result.into_owned::<YqSemantics>().unwrap().unwrap()
+            } else {
+                result.into_owned::<JqSemantics>().unwrap().unwrap()
+            }
+        };
+        let strings = |names: &[&str]| {
+            OwnedValue::Array(
+                names
+                    .iter()
+                    .map(|n| OwnedValue::String((*n).to_string().into()))
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+        };
+        for (src, yq_answer, jq_answer) in [
+            (
+                ".item | keys",
+                strings(&["<<", "r"]),
+                strings(&["p", "q", "r"]),
+            ),
+            (".item | length", OwnedValue::Int(2), OwnedValue::Int(3)),
+            (
+                ".item | has(\"p\")",
+                OwnedValue::Bool(false),
+                OwnedValue::Bool(true),
+            ),
+            (
+                ".item | has(\"<<\")",
+                OwnedValue::Bool(true),
+                OwnedValue::Bool(false),
+            ),
+            (
+                ".item | has(\"r\")",
+                OwnedValue::Bool(true),
+                OwnedValue::Bool(true),
+            ),
+        ] {
+            assert_eq!(run(src, true), yq_answer, "yq: {src}");
+            assert_eq!(run(src, false), jq_answer, "jq: {src}");
+        }
     }
 
     #[test]
