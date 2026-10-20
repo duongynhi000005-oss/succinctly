@@ -41457,12 +41457,35 @@ fn head_value<'a, S: EvalSemantics>(
 /// seed the state does not have, and a boolean the state is not refuses the emission where jq only
 /// meets that at the end of the path. Only bare `$name` entries of a pattern with literal keys are read.
 fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> bool {
-    fn lands(value: &OwnedValue, patterns: &[Pattern], state: &OwnedValue) -> bool {
+    source_destructures_onto(source, &|child| {
+        null_bool_identical(state, child.unwrap_or(&OwnedValue::Null))
+    })
+}
+
+/// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on an object or an
+/// array, and there is one (#4800): `$x as {a:$a} | .` with `$x.a` `{"a":null}`. jq's register is then that
+/// container after the pattern's step, which a `null` or boolean state is never `jv_identical` to, so the
+/// pattern's `.` body emits the state off the register ([`resolve_as_pattern`]'s #3853 hand-on) and the next
+/// step that navigates it raises jq's own catchable error; the resolver had placed the register nowhere
+/// better than the element (`LostAt` it), and called that error a guess. An absent key lands on `null` and is
+/// [`source_destructures_to_null_or_bool`]'s. Only bare `$name` entries of a pattern with literal keys are read.
+fn source_destructures_to_container(source: &Expr) -> bool {
+    source_destructures_onto(source, &|child| {
+        matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
+    })
+}
+
+/// The walk [`source_destructures_to_null_or_bool`] and [`source_destructures_to_container`] share: whether
+/// `source` destructures a `$x` marker at all, and every destructure is one pattern of bare `$name` entries with
+/// literal keys whose landing child (`None` for an absent key or index) satisfies `lands_ok`.
+fn source_destructures_onto(source: &Expr, lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool) -> bool {
+    fn lands(
+        value: &OwnedValue,
+        patterns: &[Pattern],
+        kind_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
+    ) -> bool {
         let [pattern] = patterns else {
             return false;
-        };
-        let kind_ok = |child: Option<&OwnedValue>| {
-            null_bool_identical(state, child.unwrap_or(&OwnedValue::Null))
         };
         match (pattern, value) {
             (Pattern::Object(entries), OwnedValue::Object(fields)) => entries.iter().all(|entry| {
@@ -41486,7 +41509,7 @@ fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> boo
         if let Expr::AsPattern { expr, patterns, .. } = e {
             if let Expr::TrackedVar(marker) = unwrap_paren(expr) {
                 seen = true;
-                all &= lands(&marker.value, patterns, state);
+                all &= lands(&marker.value, patterns, lands_ok);
             }
         }
         false
@@ -59523,12 +59546,16 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         // accumulator is the register's node and whose source and INIT cannot
                         // have moved it ([`fold_body::acc_is_register`]): `.` is the register
                         // there, and jq backtracks the whole UPDATE.
+                        // #4800: or a `foreach` UPDATE whose source named the element the register
+                        // is on ([`fold_body::foreach_register`]): the walk started from that node, so
+                        // the register it moved to is known, not guessed.
                         if S::TAG == EvalTag::Jq
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
                                 || fold_body::fresh_source_here()
                                 || fold_body::emissions_discarded_here()
-                                || fold_body::state_handed_on_here())
+                                || fold_body::state_handed_on_here()
+                                || fold_body::foreach_register_set_here())
                             && !seed.trackable
                             && (body_performs_no_step(&substituted)
                                 // #4932: ...or a body that hands the accumulator on in a `reduce` UPDATE whose
@@ -63743,12 +63770,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let _sole_update_foreach =
                             sole_update_mark::<S>(&bound_update, true, false);
                         // #4800: ...and a caught foreign `$x` is read against the element the source moved the
-                        // register onto, not the state the last step left.
+                        // register onto, not the state the last step left. Where the pattern lands on a
+                        // container the `foreach` is handed a `null`/boolean, which is never that node.
                         let _register = (_sole_update_foreach.is_some()
                             && elem.register_path.is_some()
                             && plain_update_heads(&bound_update).is_some_and(|(heads, source)| {
                                 head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
                                     source_destructures_to_null_or_bool(source, &handed)
+                                        || (is_null_or_bool(&handed)
+                                            && source_destructures_to_container(source))
                                 })
                             }))
                         .then(|| fold_body::foreach_register(elem.value.clone()));
@@ -73298,6 +73328,15 @@ mod fold_body {
         })
     }
 
+    /// Whether [`foreach_register`] named a node for the body being resolved, without cloning it.
+    pub(crate) fn foreach_register_set_here() -> bool {
+        FOREACH_REGISTER.with(|a| {
+            a.borrow()
+                .as_ref()
+                .is_some_and(|(at, _)| depth() > 0 && *at == depth())
+        })
+    }
+
     /// Marks the body about to be entered as moved too when the body being resolved is (#4651): a
     /// nested fold whose source cannot move the register and whose INIT is `.` runs its UPDATE on
     /// the accumulator the moved body handed it, which the register is still not at. The element's
@@ -73524,6 +73563,10 @@ mod fold_body {
 
     pub(crate) fn foreach_register_here() -> Option<super::OwnedValue> {
         None
+    }
+
+    pub(crate) fn foreach_register_set_here() -> bool {
+        false
     }
 
     pub(crate) fn source_moved_here() -> bool {
