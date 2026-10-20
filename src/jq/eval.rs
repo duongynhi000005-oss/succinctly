@@ -41371,8 +41371,39 @@ fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
             heads.extend(inner_heads);
             Some((heads, source))
         }
+        Expr::Label { name, body } => plain_update_heads(label_sole_item(name, body)?),
         other => emptied_wrapper_inner(other).and_then(plain_update_heads),
     }
+}
+
+/// The one item a `label $name | BODY` scope runs, when its body is that item with nothing around it that
+/// changes what it emits (#4800): the bare body, or a comma whose other items emit nothing
+/// ([`emits_nothing`]) or are a `break $name` *behind* the item (it only ends the scope once the item has
+/// emitted). A `break $name` ahead of the item skips it, and one inside it ends it early, so neither is read.
+fn label_sole_item<'a>(name: &str, body: &'a Expr) -> Option<&'a Expr> {
+    fn is_break(item: &Expr, name: &str) -> bool {
+        matches!(unwrap_paren(item), Expr::Break(n) if n == name)
+    }
+    let item = match unwrap_paren(body) {
+        Expr::Comma(items) => {
+            let at = items
+                .iter()
+                .position(|item| !emits_nothing(item) && !is_break(item, name))?;
+            if items[..at].iter().any(|item| is_break(item, name)) {
+                return None;
+            }
+            if !items[at + 1..]
+                .iter()
+                .all(|item| emits_nothing(item) || is_break(item, name))
+            {
+                return None;
+            }
+            &items[at]
+        }
+        other => other,
+    };
+    let breaks_inside = any_subexpr(item, &mut |e| matches!(e, Expr::Break(n) if n == name));
+    (!breaks_inside).then_some(item)
 }
 
 /// The single value the value heads [`plain_update_heads`] found hand the `foreach` when the state is `state`:
@@ -41504,7 +41535,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             Expr::Comma(items) => {
                 let mut heads = items.iter().filter(|item| {
                     !matches!(unwrap_paren(item), Expr::Break(n) if n == name)
-                        && !matches!(unwrap_paren(item), Expr::Builtin(Builtin::Empty))
+                        && !emits_nothing(item)
                 });
                 let head = heads.next()?;
                 if heads.next().is_some() {
