@@ -16343,9 +16343,9 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         Builtin::FormatNamed(name) => builtin_format_named::<W, S>(name, value, optional),
         Builtin::Strptime(fmt) => builtin_strptime::<W, S>(fmt, value, optional),
         Builtin::Todate => builtin_todate::<W, S>(value, optional),
-        Builtin::Fromdate => builtin_fromdate::<W>(value, optional),
+        Builtin::Fromdate => builtin_fromdateiso8601::<W>(value, optional),
         Builtin::Todateiso8601 => builtin_todate::<W, S>(value, optional), // alias for todate
-        Builtin::Fromdateiso8601 => builtin_fromdate::<W>(value, optional), // alias for fromdate
+        Builtin::Fromdateiso8601 => builtin_fromdateiso8601::<W>(value, optional),
 
         // Phase 17: Combinations
         Builtin::Combinations => builtin_combinations::<W, S>(value, optional),
@@ -85746,7 +85746,8 @@ fn builtin_todate<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     QueryResult::Owned(OwnedValue::String(result.into()))
 }
 
-/// Builtin: fromdate - parse ISO 8601 date string to Unix timestamp
+/// Lenient ISO 8601 parse to a Unix timestamp: yq's `to_unix` only. jq's `fromdate` is
+/// [`builtin_fromdateiso8601`] and takes exactly `%Y-%m-%dT%H:%M:%SZ` (#4967).
 fn builtin_fromdate<W: Clone + AsRef<[u64]>>(
     value: StandardJson<'_, W>,
     optional: bool,
@@ -85769,6 +85770,36 @@ fn builtin_fromdate<W: Clone + AsRef<[u64]>>(
         Ok(timestamp) => QueryResult::Owned(OwnedValue::Float(timestamp)),
         Err(_) if optional => QueryResult::None,
         Err(e) => QueryResult::Error(EvalError::new(e)),
+    }
+}
+
+/// Builtin: fromdate / fromdateiso8601 -- jq defines both as `strptime("%Y-%m-%dT%H:%M:%SZ") | mktime` (#4967),
+/// so exactly that shape parses (and what [`parse_strptime`] accepts after it), where [`builtin_fromdate`]'s
+/// lenient ISO 8601 grammar stays yq's `to_unix`.
+fn builtin_fromdateiso8601<W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'_, W>,
+    optional: bool,
+) -> QueryResult<'_, W> {
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(e) => return QueryResult::Error(EvalError::decode_failure(e.message())),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::strptime_requires_string()),
+    };
+    const FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+    let t = match parse_strptime(&input, FORMAT) {
+        Ok((t, _)) => t,
+        Err(_) if optional => return QueryResult::None,
+        Err(_) => return QueryResult::Error(EvalError::strptime_no_match(&input, FORMAT)),
+    };
+    // ...then `mktime`'s own conversion, `-1` and the dates before 1900 it refuses included.
+    match jq_timegm_secs(t.year, t.month, t.day, t.hour, t.minute, t.second) {
+        Ok(Some(secs)) => QueryResult::Owned(OwnedValue::Float(secs as f64)),
+        Ok(None) | Err(_) if optional => QueryResult::None,
+        Ok(None) => QueryResult::Error(EvalError::new("invalid gmtime representation")),
+        Err(e) => QueryResult::Error(e),
     }
 }
 
@@ -85925,7 +85956,7 @@ fn builtin_from_unix<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 }
 
 /// Builtin: to_unix - convert ISO 8601 date string to Unix epoch
-/// This is semantically identical to fromdate/fromdateiso8601 but with yq naming convention
+/// Lenient ISO 8601 parse, unlike jq-mode `fromdate`/`fromdateiso8601` (#4967)
 ///
 /// yq's `to_unix` is `time.Unix()`, an `!!int`; jq's `fromdate` is a float that prints whole
 /// (#4203). A float in yq mode would print as `1.7052768e+09` and carry the `!!float` tag.
@@ -85933,7 +85964,7 @@ fn builtin_to_unix<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'_, W>,
     optional: bool,
 ) -> QueryResult<'_, W> {
-    // to_unix is the same as fromdate - parses ISO 8601 string to Unix timestamp
+    // to_unix parses a lenient ISO 8601 string to a Unix timestamp (not jq's strict `fromdate`, #4967)
     match builtin_fromdate::<W>(value, optional) {
         QueryResult::Owned(OwnedValue::Float(n))
             if S::TAG == EvalTag::Yq && n.fract() == 0.0 && n.abs() < 9.0e15 =>

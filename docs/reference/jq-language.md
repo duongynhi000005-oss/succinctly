@@ -264,7 +264,7 @@ below and [ADR-0019](../adrs/adr-0019.md).
 - [x] `strftime(fmt)` - Format broken-down time (or a raw Unix timestamp number) as string
 - [x] `strptime(fmt)` - Parse string to broken-down time
 - [x] `todate` / `todateiso8601` - Convert Unix timestamp to ISO 8601 string
-- [x] `fromdate` / `fromdateiso8601` - Parse ISO 8601 string to Unix timestamp
+- [x] `fromdate` / `fromdateiso8601` - Parse a `%Y-%m-%dT%H:%M:%SZ` string to Unix timestamp (`strptime("%Y-%m-%dT%H:%M:%SZ") | mktime`: a date alone, an offset or fractional seconds are errors)
 - [x] `from_unix` - Convert Unix epoch to ISO 8601 string (yq extension)
 - [x] `to_unix` - Parse ISO 8601 string to Unix epoch (yq extension)
 - [x] `tz(zone)` - Convert Unix timestamp to datetime in specified timezone (yq extension)
