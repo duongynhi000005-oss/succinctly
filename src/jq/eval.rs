@@ -37654,12 +37654,12 @@ fn is_truthy_literal(cond: &Expr) -> bool {
     )
 }
 
-/// A fold UPDATE `if C then A else . end` on a literal truthy `C` (#4957), replaced by `A`: it runs `A` and
+/// A fold UPDATE `if C then A else . end` on a literal truthy `C` (#4957), read as `A`: it runs `A` and
 /// nothing else, so the marks that read a bare `A` (`plain_update_heads`, `sole_update_mark`, ..) read it
 /// too. Not an `A` that is a comma, which [`emptied_update`] leaves unread, nor any other `else` or a
 /// falsy literal: those keep the reading they had. Anything else is returned as it is.
-fn take_literal_if_branch(update: Expr) -> Expr {
-    let mut current = &update;
+fn take_literal_if_branch(update: &Expr) -> &Expr {
+    let mut current = update;
     while let Expr::If {
         cond,
         then_branch,
@@ -37675,11 +37675,7 @@ fn take_literal_if_branch(update: Expr) -> Expr {
             break;
         }
     }
-    if core::ptr::eq(current, &update) {
-        update
-    } else {
-        current.clone()
-    }
+    current
 }
 
 /// Whether a `foreach` UPDATE is made of single-pattern binds of `.` and `.` alone, at least one bind
@@ -62894,6 +62890,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         .then(|| distribute_neutral_tail(update))
         .flatten();
     let update = distributed.as_ref().unwrap_or(update);
+    // #4957: an `if` on a literal truthy condition is the branch it names, to every mark below.
+    let update = if S::TAG == EvalTag::Jq {
+        take_literal_if_branch(update)
+    } else {
+        update
+    };
     // #4800: an EXTRACT that emits nothing leaves the `foreach` with no output to path-check, and an UPDATE
     // that can neither raise nor have an effect on any state changes nothing else either, so the fold is read
     // with an UPDATE that hands the state on. Reading the real one refused a nested `foreach` in it whose
@@ -63295,8 +63297,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     source_may_alias,
                     &refused_step_could_succeed,
                     &mut |walked, bind| {
-                        let bound_update =
-                            take_literal_if_branch(bind.apply(update, WalkOrigins::Keep));
+                        let bound_update = bind.apply(update, WalkOrigins::Keep);
                         let bound_extract = extract.map(|ext| bind.apply(ext, WalkOrigins::Keep));
                         // #2031: this step's own register -- see [`foreach_step_register`].
                         let (active_reg, active_at_register) = foreach_step_register::<S>(
