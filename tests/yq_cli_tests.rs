@@ -6075,27 +6075,43 @@ const TWO_ALIASES_NAMING_EQUAL_SCALARS: &str =
 #[test]
 fn test_yq_merge_keys_keep_colliding_complex_keys_in_streams_3467() -> Result<()> {
     let rows: &[(&str, &str, &str)] = &[
-        (MERGED_VS_LOCAL_COMPLEX, ".b | length", "2\n"),
-        (MERGED_VS_LOCAL_COMPLEX, ".b | keys", "- \"\"\n- \"\"\n"),
+        (MERGED_VS_LOCAL_COMPLEX, "[.b[]] | length", "2\n"),
+        (
+            MERGED_VS_LOCAL_COMPLEX,
+            ".b | to_entries | map(.key)",
+            "- \"\"\n- \"\"\n",
+        ),
         (
             MERGED_VS_LOCAL_COMPLEX,
             ".b | to_entries",
             "- key: \"\"\n  value: x\n- key: \"\"\n  value: y\n",
         ),
-        (TWO_MERGE_SOURCES_COMPLEX, ".b | length", "2\n"),
-        (TWO_MERGE_SOURCES_COMPLEX, ".b | keys", "- \"\"\n- \"\"\n"),
-        (MERGED_COMPLEX_VS_GENUINE_EMPTY, ".b | length", "2\n"),
+        (TWO_MERGE_SOURCES_COMPLEX, "[.b[]] | length", "2\n"),
+        (
+            TWO_MERGE_SOURCES_COMPLEX,
+            ".b | to_entries | map(.key)",
+            "- \"\"\n- \"\"\n",
+        ),
+        (MERGED_COMPLEX_VS_GENUINE_EMPTY, "[.b[]] | length", "2\n"),
         // Keys that only *look* alike stay two entries: `[1]` against `["1"]`
         // (a number and a string), two different mapping keys, and two equal
         // ones in different nodes (compared by node, never by content).
-        (MERGED_NUMBER_VS_STRING_KEY, ".b | length", "2\n"),
-        (MERGED_DIFFERENT_MAPPING_KEYS, ".b | length", "2\n"),
-        (MERGED_EQUAL_MAPPING_KEYS, ".b | length", "2\n"),
-        (DIFFERENT_ALIAS_KEYS_MERGED_AND_LOCAL, ".b | length", "2\n"),
-        (EMPTY_SEQUENCE_VS_ONE_KEY, ".b | length", "2\n"),
-        (DIFFERENT_NESTED_SEQUENCE_KEYS, ".b | length", "2\n"),
-        (EQUAL_MAPPING_NESTED_IN_SEQUENCE_KEY, ".b | length", "2\n"),
-        (DIFFERENT_ALIAS_TO_MAPPING_KEYS, ".b | length", "2\n"),
+        (MERGED_NUMBER_VS_STRING_KEY, "[.b[]] | length", "2\n"),
+        (MERGED_DIFFERENT_MAPPING_KEYS, "[.b[]] | length", "2\n"),
+        (MERGED_EQUAL_MAPPING_KEYS, "[.b[]] | length", "2\n"),
+        (
+            DIFFERENT_ALIAS_KEYS_MERGED_AND_LOCAL,
+            "[.b[]] | length",
+            "2\n",
+        ),
+        (EMPTY_SEQUENCE_VS_ONE_KEY, "[.b[]] | length", "2\n"),
+        (DIFFERENT_NESTED_SEQUENCE_KEYS, "[.b[]] | length", "2\n"),
+        (
+            EQUAL_MAPPING_NESTED_IN_SEQUENCE_KEY,
+            "[.b[]] | length",
+            "2\n",
+        ),
+        (DIFFERENT_ALIAS_TO_MAPPING_KEYS, "[.b[]] | length", "2\n"),
         // Looking up the genuine `""` key finds it, never a complex key that
         // shares its spelling.
         (MERGED_COMPLEX_VS_GENUINE_EMPTY, ".b | .[\"\"]", "z\n"),
@@ -6185,7 +6201,7 @@ fn test_yq_merge_keys_still_override_ordinary_and_genuine_empty_keys_3467() -> R
     const ORDINARY: &str = "a: &a\n  p: 1\n  q: 3\nb:\n  <<: *a\n  p: 2\n  r: 4\n";
     const GENUINE_EMPTY: &str = "a: &a\n  \"\": 1\nb:\n  <<: *a\n  \"\": 2\n";
     let rows: &[(&str, &str, &str)] = &[
-        (MERGED_VS_LOCAL_IDENTICAL_COMPLEX, ".b | length", "1\n"),
+        (MERGED_VS_LOCAL_IDENTICAL_COMPLEX, "[.b[]] | length", "1\n"),
         (
             MERGED_VS_LOCAL_IDENTICAL_COMPLEX,
             ".b | to_entries",
@@ -6196,55 +6212,71 @@ fn test_yq_merge_keys_still_override_ordinary_and_genuine_empty_keys_3467() -> R
             ".b.z = 1",
             "a: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (SAME_SOURCE_REPEATED_COMPLEX, ".b | length", "1\n"),
+        (SAME_SOURCE_REPEATED_COMPLEX, "[.b[]] | length", "1\n"),
         (
             SAME_SOURCE_REPEATED_COMPLEX,
             ".b.z = 1",
             "a: &a\n  '': x\nb:\n  '': x\n  z: 1\n",
         ),
-        (SAME_ALIAS_KEY_MERGED_AND_LOCAL, ".b | length", "1\n"),
+        (SAME_ALIAS_KEY_MERGED_AND_LOCAL, "[.b[]] | length", "1\n"),
         (
             SAME_ALIAS_KEY_MERGED_AND_LOCAL,
             ".b.z = 1",
             "k: &k [1]\na: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (EMPTY_SEQUENCE_KEY_MERGED_AND_LOCAL, ".b | length", "1\n"),
+        (
+            EMPTY_SEQUENCE_KEY_MERGED_AND_LOCAL,
+            "[.b[]] | length",
+            "1\n",
+        ),
         (
             EMPTY_SEQUENCE_KEY_MERGED_AND_LOCAL,
             ".b.z = 1",
             "a: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (ANCHORED_MAPPING_KEY_AND_ITS_ALIAS, ".b | length", "1\n"),
-        (ANCHORED_SEQUENCE_KEY_AND_ITS_ALIAS, ".b | length", "1\n"),
-        (TWO_ALIASES_NAMING_EQUAL_SCALARS, ".b | length", "1\n"),
-        (SAME_ALIAS_TO_MAPPING_KEY, ".b | length", "1\n"),
+        (ANCHORED_MAPPING_KEY_AND_ITS_ALIAS, "[.b[]] | length", "1\n"),
+        (
+            ANCHORED_SEQUENCE_KEY_AND_ITS_ALIAS,
+            "[.b[]] | length",
+            "1\n",
+        ),
+        (TWO_ALIASES_NAMING_EQUAL_SCALARS, "[.b[]] | length", "1\n"),
+        (SAME_ALIAS_TO_MAPPING_KEY, "[.b[]] | length", "1\n"),
         (
             SAME_ALIAS_TO_MAPPING_KEY,
             ".b.z = 1",
             "m: &m {p: 1}\na: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (NESTED_SEQUENCE_KEY_MERGED_AND_LOCAL, ".b | length", "1\n"),
+        (
+            NESTED_SEQUENCE_KEY_MERGED_AND_LOCAL,
+            "[.b[]] | length",
+            "1\n",
+        ),
         (
             NESTED_SEQUENCE_KEY_MERGED_AND_LOCAL,
             ".b.z = 1",
             "a: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (BLOCK_SEQUENCE_KEY_MERGED_AND_LOCAL, ".b | length", "1\n"),
+        (
+            BLOCK_SEQUENCE_KEY_MERGED_AND_LOCAL,
+            "[.b[]] | length",
+            "1\n",
+        ),
         (
             BLOCK_SEQUENCE_KEY_MERGED_AND_LOCAL,
             ".b.z = 1",
             "a: &a\n  '': x\nb:\n  '': y\n  z: 1\n",
         ),
-        (TWO_SOURCES_SHARING_A_COMPLEX_KEY, ".b | length", "1\n"),
+        (TWO_SOURCES_SHARING_A_COMPLEX_KEY, "[.b[]] | length", "1\n"),
         (
             TWO_SOURCES_SHARING_A_COMPLEX_KEY,
             ".b.z = 1",
             "a: &a\n  '': x\nc: &c\n  '': w\nb:\n  '': x\n  z: 1\n",
         ),
-        (ORDINARY, ".b | length", "3\n"),
-        (ORDINARY, ".b | keys", "- p\n- q\n- r\n"),
+        (ORDINARY, "[.b[]] | length", "3\n"),
+        (ORDINARY, ".b | to_entries | map(.key)", "- p\n- q\n- r\n"),
         (ORDINARY, ".b.p", "2\n"),
-        (GENUINE_EMPTY, ".b | length", "1\n"),
+        (GENUINE_EMPTY, "[.b[]] | length", "1\n"),
         (
             GENUINE_EMPTY,
             ".b | to_entries",
@@ -6288,7 +6320,7 @@ fn test_yq_merge_key_content_comparison_stops_at_the_node_cap_3467() -> Result<(
     };
     for (level, expected) in [(0, "1\n"), (1, "2\n")] {
         let (output, stderr, code) =
-            run_yq_stdin_with_stderr(".b | length", &key_twice(level), &[])?;
+            run_yq_stdin_with_stderr("[.b[]] | length", &key_twice(level), &[])?;
         assert_eq!(code, 0, "level {level}, stderr: {stderr}");
         assert_eq!(output, expected, "level {level}");
     }
@@ -6314,7 +6346,7 @@ fn test_yq_merge_key_alias_fanout_in_a_complex_key_is_bounded_3467() -> Result<(
     yaml.push_str("src: &s\n  ? [*l6]\n  : v\nb:\n  <<: *s\n  k: 1\n");
 
     let started = std::time::Instant::now();
-    let (output, stderr, code) = run_yq_stdin_with_stderr(".b | length", &yaml, &[])?;
+    let (output, stderr, code) = run_yq_stdin_with_stderr("[.b[]] | length", &yaml, &[])?;
     let elapsed = started.elapsed();
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(output, "2\n");
@@ -18787,21 +18819,23 @@ fn test_pretty_print_flag_forces_block_style_705() -> Result<()> {
     Ok(())
 }
 
-/// `keys_unsorted` on a mapping resolved through a `<<: *anchor` merge key
-/// exercises `YamlFields`'s `Merged` variant (an `Rc`-shared entry list, the
-/// reason `YamlFields` can't be `Copy` the way `JsonFields` is) through the
-/// new lazy path — must still stream in merge-then-local order.
+/// `keys_unsorted` on a mapping that holds a `<<: *anchor` merge key streams the mapping's own
+/// entries in document order, the merge key among them as the key it is spelled as -- the same
+/// listing `keys` gives in yq mode (#3556). The `Merged` variant of `YamlFields` (an `Rc`-shared
+/// entry list, the reason `YamlFields` can't be `Copy` the way `JsonFields` is) still backs the
+/// value reads and is pinned through this lazy path in jq mode by
+/// `test_yaml_keys_unsorted_stream_lazy_merge_key_685` in `eval_generic.rs`.
 #[test]
 fn test_keys_unsorted_yaml_merge_key_lazy_685() -> Result<()> {
     let input = "defaults: &defaults\n  b: 1\n  a: 2\nitem:\n  <<: *defaults\n  c: 3\n";
 
     let (output, code) = run_yq_stdin(".item | keys_unsorted", input, &["-o", "json", "-I0"])?;
     assert_eq!(code, 0);
-    assert_eq!(output.trim(), r#"["b","a","c"]"#);
+    assert_eq!(output.trim(), r#"["<<","c"]"#);
 
     let (output, code) = run_yq_stdin(".item | keys_unsorted", input, &[])?;
     assert_eq!(code, 0);
-    assert_eq!(output.trim(), "- b\n- a\n- c");
+    assert_eq!(output.trim(), "- \"<<\"\n- c");
 
     Ok(())
 }

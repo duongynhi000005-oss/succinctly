@@ -1545,6 +1545,15 @@ pub trait DocumentValue: Sized + Clone {
     /// Try to get as object fields.
     fn as_object(&self) -> Option<Self::Fields>;
 
+    /// The object's fields as a key-listing builtin sees them: the mapping's own entries, a
+    /// `<<` merge key among them as an ordinary key (#3556). [`as_object`](Self::as_object) is
+    /// the *value* view, where a merge is spliced in; yq's `keys`, `length`, `to_entries` and
+    /// `has` count the entries the mapping spells. Only a YAML mapping that holds a merge key
+    /// differs, so the default is `as_object`.
+    fn as_object_listed(&self) -> Option<Self::Fields> {
+        self.as_object()
+    }
+
     /// Try to get as array elements.
     fn as_array(&self) -> Option<Self::Elements>;
 

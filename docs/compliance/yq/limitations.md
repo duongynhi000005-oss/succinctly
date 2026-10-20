@@ -2890,9 +2890,36 @@ local leaves the local entry alone, because yq matches keys by their text and a 
 none. A yq *write* never expands a merge (it keeps `<<: *a` as written), so it loses nothing;
 succinctly's writes materialize the expansion, which is why this entry exists. succinctly keeps
 both entries on the streaming routes and refuses on the materializing ones, rather than copy
-yq's expansion into the user's file. How yq's key-list builtins treat a merge key at all
-(`keys`, `length`, `has`) is a separate gap, tracked in
-[#3556](https://github.com/rust-works/succinctly/issues/3556).
+yq's expansion into the user's file. How yq's key-list builtins treat a merge key at all is
+the next entry ([#3556](https://github.com/rust-works/succinctly/issues/3556)).
+
+**`keys`, `length` and `has` count the `<<` merge key itself
+([#3556](https://github.com/rust-works/succinctly/issues/3556)).** yq (v4.53.3, without
+`--yaml-fix-merge-anchor-to-spec`) splices a merge for value reads (`.p`, `.[]`, `map_values`,
+the JSON rendering of the mapping) but lists the mapping's own entries everywhere a key list is
+built, `<<` included. With `base: &base {p: 1, q: 2}` and `item: {<<: *base, r: 3}`:
+`.item | keys` is `["<<","r"]`, `length` is `2`, `has("p")` is `false` and `has("<<")` is
+`true`. `succinctly yq` does the same on every route that holds the mapping as a document
+node, in any of the five merge shapes (one source, a sequence of sources, an own key written
+around the merge key, an inline mapping source, a source that itself merges). It is a rule of
+the mode, so `succinctly jq` over a YAML document keeps the merged view
+(`["p","q","r"]`, `3`). The listing is `DocumentValue::as_object_listed`; `find`, iteration and
+the value reads still use the merged view.
+
+Still divergent, because the mapping is no longer a document node by the time the builtin runs
+and an owned object has no `<<` entry to list:
+
+- `to_entries`, and so `with_entries` and the `to_entries | from_entries` round trip, list the
+  merged members. A `<<` key from `to_entries` would have to survive `from_entries` as a merge,
+  which a computed `<<` key does not do in yq (`{"<<": {"p": 1}}` drops it from JSON output),
+  and the key carries no provenance here.
+- `pick(["p"])` matches the merged member (yq: `{}`), and `.. | length` counts the merged
+  members of a mapping it reaches.
+- A mapping that a write, `+`, `*`, `del`, `sort_keys`, `map_values` or `to_entries | ...`
+  materialized first (`.item | del(.r) | keys` is `["<<"]` in yq) lists the merged members.
+- The `<<` key of a `keys` result prints as `"<<"` in YAML output; yq prints `!!merge <<`
+  (the key node keeps its tag). JSON output is identical.
+- A complex key in a listed mapping is spelled `""`, as everywhere else ([#1753](https://github.com/rust-works/succinctly/issues/1753)).
 
 **`-i` refuses a file holding a complex key
 ([#3463](https://github.com/rust-works/succinctly/issues/3463)).** Every `-i` route wrote a
