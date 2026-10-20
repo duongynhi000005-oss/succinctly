@@ -750,7 +750,8 @@ Still open, each separate from this fix:
   purpose (rule 4(b), matching would lose data):** yq's *JSON* encoder drops every mapping entry whose key
   is `<<` -- from JSON input and from a constructed object alike, with a scalar or a mapping value
   (`{"<<":1,"a":2}` is `{"a":2}`, `-n '{"a":1} | .["<<"] = 5'` is `{"a":1}`) -- so a key and its value
-  vanish from the output. `succinctly yq` keeps the entry in JSON output (`{"<<":1,"a":2}`). The YAML
+  vanish from the output. `succinctly yq` keeps the entry in JSON output (`{"<<":1,"a":2}`) and in the
+  strings the JSON encoders build (`to_json`, `@json`). The YAML
   writer's quoting of a `<<` string is right for a JSON-sourced input; for a YAML input it stays an
   approximation (a computed `"<<"` is told from a plain `<<` of the document by its text only, so it
   prints bare, `- <<`, where yq prints `- "<<"`).

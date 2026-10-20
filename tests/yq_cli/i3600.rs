@@ -275,6 +275,12 @@ fn test_json_output_keeps_a_merge_spelled_key_3600() -> Result<()> {
             ".a",
             "{\"<<\":{\"y\":1},\"b\":2}\n",
         ),
+        // The string encoders keep it as well (yq: `"{\"a\":2}"`).
+        (
+            r#"{"<<":{"x":1},"a":2}"#,
+            "to_json(0)",
+            "\"{\\\"<<\\\":{\\\"x\\\":1},\\\"a\\\":2}\"\n",
+        ),
     ] {
         let (stdout, code) = run_yq_stdin(filter, doc, &["-p", "json", "-o", "json", "-I", "0"])?;
         assert_eq!(

@@ -5294,13 +5294,11 @@ impl<'a, W: AsRef<[u64]>> YamlFields<'a, W> {
     pub fn from_mapping_cursor(mapping_cursor: YamlCursor<'a, W>) -> Self {
         let key_cursor = mapping_cursor.first_child();
         // No `<<` anywhere in the text means no merge key to find, and finding that out
-        // otherwise reads every key of the mapping (#4102). A JSON document has none either:
-        // `"<<"` is an ordinary string key there, which yq neither expands nor hides from
-        // `keys` and `to_entries` (#3600).
-        if mapping_cursor.index.canonicalize_numbers()
-            || !mapping_cursor
-                .index
-                .may_have_merge_keys(mapping_cursor.text)
+        // otherwise reads every key of the mapping (#4102). A JSON-sourced index has none, and
+        // says so here too (#3600).
+        if !mapping_cursor
+            .index
+            .may_have_merge_keys(mapping_cursor.text)
         {
             return Self {
                 inner: FieldsInner::Direct(key_cursor),
@@ -10575,6 +10573,34 @@ fn looks_like_yaml_number(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::yaml::{YamlError, YamlIndex};
+
+    /// #3600: a JSON document has no merge key, so its mappings list `<<` as the ordinary key it
+    /// is, where the same text read as YAML merges it in.
+    #[test]
+    fn test_json_sourced_mapping_has_no_merge_key_3600() {
+        use crate::jq::document::DocumentValue;
+
+        let text = br#"{"<<":{"y":1},"a":2}"#;
+        let keys = |index: &YamlIndex| {
+            let root = index.root(text);
+            let mapping = root.first_child().expect("one document");
+            let fields = mapping.value().as_object().expect("a mapping");
+            let mut names = Vec::new();
+            let mut rest = fields.clone();
+            while let Some((field, next)) = rest.uncons() {
+                names.push(field.key().as_str().expect("a string key").to_string());
+                rest = next;
+            }
+            (names, fields.find("y").is_some())
+        };
+        let yaml = YamlIndex::build(text).unwrap();
+        assert_eq!(keys(&yaml), (vec!["y".to_string(), "a".to_string()], true));
+        let json = YamlIndex::build_json_sourced(text).unwrap();
+        assert_eq!(
+            keys(&json),
+            (vec!["<<".to_string(), "a".to_string()], false)
+        );
+    }
 
     /// #1881: the block-child step rounds `indent` up to the next multiple of the indent width.
     #[test]

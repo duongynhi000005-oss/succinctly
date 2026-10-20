@@ -101,6 +101,8 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// with the unrelated `JsonCursor` implementor) -- a field on the one
     /// struct already in scope everywhere it's needed avoids a much
     /// larger, cross-crate signature change for the same effect.
+    ///
+    /// Also read by [`Self::may_have_merge_keys`]: a JSON-sourced index has no merge key (#3600).
     canonicalize_numbers: bool,
     /// Whether the leading header the first document re-emits verbatim
     /// (#2795; `YamlCursor::stream_yaml_as_document`) keeps its `---`
@@ -1007,6 +1009,11 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// contain `<<`, and for them one pass over the bytes answers every mapping at once.
     #[must_use]
     pub(crate) fn may_have_merge_keys(&self, text: &[u8]) -> bool {
+        // A JSON document has no merge key: `"<<"` is an ordinary string key there, which yq
+        // neither expands nor hides from `keys` and `to_entries` (#3600).
+        if self.canonicalize_numbers {
+            return false;
+        }
         *self.may_have_merge_keys.get_or_init(|| {
             // `contains` is the standard library's byte search, which is what a document with
             // none of the byte pays; the loops below walk the occurrences of one that has some.
