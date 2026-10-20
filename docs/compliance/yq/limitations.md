@@ -5667,8 +5667,17 @@ Residual divergences remain, all in cases yq itself reaches through its node mod
   `{...}`, so a bare entry shows it: `[[1,2],[3,4]] as $z | {$z, $z}` is `1 2 3 4` in yq and `1 2 2 4`
   here. The mechanism is not the pointer comparison in `operator_union.go` that it first looks like
   (#4183).
-- **A parenthesized pair.** `{"x": 1, ("a": 2)}` parses in yq (`:` is an ordinary binary
-  operator); `succinctly yq` accepts a pair only directly inside the braces.
+- **A parenthesized pair (#4185).** `{"x": 1, ("a": 2)}` is `{"x":1,"a":2}` in yq (`:` is an
+  ordinary binary operator). `succinctly yq` flattens a parenthesised run of pairs at an entry
+  position into the object's own entries, in order (`{("a": 2, ("b": 3))}` is `{"a":2,"b":3}`);
+  a group holding a non-pair (`("a")`, `("a": 1, 2)`) or followed by an operator
+  (`("a": 2) | length`) is the parenthesised expression it always was. Still different: a pair
+  outside an object (`("a": 2)` alone is `[[{"a":2}]]` in yq, a sequence nested in a sequence, a
+  shape with no `Expr` here, so it stays a parse error), a chained pair (`{"x": 1, ("a": 2: 3)}`
+  is `{"x":1,"a":[[{"2":3}]]}` in yq and a parse error here), and a group mixing a bare entry with
+  a pair (`{("a","b": 3)}` prints nothing in yq, a parse error here). The group attempt parses
+  the text twice when it fails, so a parse draws on a budget of 256 attempts; past it a group is
+  parsed as the parenthesised expression it is.
 - **The `*` error text.** The error a failed multiply raises is succinctly's usual
   `object (...) and number (1) cannot be multiplied`, not yq's `cannot multiply !!map with
   !!int`; the exit status agrees (a message-only divergence shared with every other `*`).

@@ -207,6 +207,9 @@ const MAX_PATTERN_COMPUTED_KEYS: usize = 4096;
 /// brackets or parentheses stay guarded through the bracket's own depth unit.
 const MAX_EXPR_DEPTH: usize = 256;
 
+/// [`Parser::pair_group_budget`]'s starting value (#4185).
+const PAIR_GROUP_BUDGET: usize = 256;
+
 /// The variable [`join_expr`] binds `$idx` to. It contains a space, so no
 /// program can spell it and neither `stream`, `idx_expr` nor `join_expr` can
 /// capture or shadow it.
@@ -811,6 +814,15 @@ struct Parser<'a> {
     /// `limit`/`nth`/`skip` accept full first-argument expressions, so a valid
     /// comma argument no longer enters this fallback.
     shadow_retry_budget: usize,
+    /// #4185: how many more parenthesised pair-group attempts
+    /// ([`Self::try_parse_yq_pair_group`]) this parse may start.
+    ///
+    /// A failed attempt rewinds and parses the same text again, so attempts that
+    /// fail around other attempts that fail cost `2^depth`
+    /// (`{({(...), x: 1}, x: 1)}`). Past the budget a group is parsed as the
+    /// parenthesised expression it is, so a program that exhausts it loses only the
+    /// pair-group form.
+    pair_group_budget: usize,
     /// #2807: the wrong-arity call a [`Self::try_parse_builtin`] arm
     /// resolved in place, handed to its one caller alongside `Ok(None)`.
     ///
@@ -1204,6 +1216,7 @@ impl<'a> Parser<'a> {
             def_sites: Vec::new(),
             shadowable_defs,
             shadow_retry_budget: SHADOW_RETRY_BUDGET,
+            pair_group_budget: PAIR_GROUP_BUDGET,
             wrong_arity_call: None,
             last_primary_is_term: true,
             expd_operand: false,
@@ -2546,10 +2559,20 @@ impl<'a> Parser<'a> {
             // a token (`yq '{b: 2}'` is a lexer error). `--jq-extensions` keeps
             // the identifier key and `{x}` shorthand, so an identifier start
             // is the only thing that still takes the jq-grammar path there.
-            let entry = if self.mode == ParserMode::Yq
-                && !(self.jq_extensions && self.peek().is_some_and(is_ident_start_char))
-            {
-                self.parse_yq_object_entry()?
+            let yq_entry = self.mode == ParserMode::Yq
+                && !(self.jq_extensions && self.peek().is_some_and(is_ident_start_char));
+            // #4185: a parenthesised run of `key: value` pairs is flattened into the
+            // object's own entries.
+            let pair_group = if yq_entry && self.peek() == Some('(') {
+                self.try_parse_yq_pair_group(true)
+            } else {
+                None
+            };
+            let entry = if let Some(group) = pair_group {
+                entries.extend(group);
+                None
+            } else if yq_entry {
+                Some(self.parse_yq_object_entry()?)
             } else {
                 let (key, dollar_shorthand_value) = if self.peek() == Some('(') {
                     // Dynamic key: (expr)
@@ -2617,9 +2640,9 @@ impl<'a> Parser<'a> {
                     }
                 };
 
-                ObjectEntry { key, value }
+                Some(ObjectEntry { key, value })
             };
-            entries.push(entry);
+            entries.extend(entry);
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
@@ -2660,6 +2683,84 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Expr::Object(entries))
+    }
+
+    /// A parenthesised run of `key: value` pairs at an entry position of a yq-mode `{...}`
+    /// (#4185): `{"x": 1, ("a": 2, "b": 3)}` is `{"x":1,"a":2,"b":3}`.
+    ///
+    /// In yq `:` is an ordinary binary operator (`CREATE_MAP`), so a pair can sit inside
+    /// parentheses and the object collects whatever the group yields. Every pair inside
+    /// contributes one entry, in order, exactly as if the parentheses were not there, and
+    /// groups nest (`(("a": 2))`). The attempt is all-or-nothing: a group holding anything
+    /// that is not a pair (`("a")`, `(.a, .b)`, `("a": 1, 2)`), or that is followed by
+    /// anything but `,` or `}` (`("a": 2) | length`), is rewound untouched and parsed as the
+    /// parenthesised expression it always was, which is also where its error is reported.
+    /// A pair outside an object (`("a": 2)` alone) stays a parse error: yq answers a
+    /// one-element sequence nested in a sequence there, a shape with no `Expr`.
+    fn try_parse_yq_pair_group(&mut self, top: bool) -> Option<Vec<ObjectEntry>> {
+        if self.pair_group_budget == 0 {
+            return None;
+        }
+        self.pair_group_budget -= 1;
+        let saved_pos = self.pos;
+        let saved_depth = self.expr_depth;
+        self.expr_depth += 1;
+        let group = if self.expr_depth > MAX_EXPR_DEPTH {
+            None
+        } else {
+            self.parse_yq_pair_group_body()
+        };
+        // Only the outermost group must end the entry; a nested one is followed by `,` or `)`.
+        let group = group.filter(|_| {
+            !top || {
+                self.skip_ws();
+                matches!(self.peek(), Some(',' | '}'))
+            }
+        });
+        self.expr_depth = saved_depth;
+        if group.is_none() {
+            self.pos = saved_pos;
+        }
+        group
+    }
+
+    /// The body of [`Self::try_parse_yq_pair_group`]; a `None` makes the caller rewind.
+    fn parse_yq_pair_group_body(&mut self) -> Option<Vec<ObjectEntry>> {
+        self.next(); // (
+        self.skip_ws();
+        let mut group = Vec::new();
+        loop {
+            // A nested group that is not a pair group (`((.a) + 1: 2)`) is the start of an
+            // ordinary key expression, which `parse_yq_object_entry` reads from the rewound
+            // position.
+            let nested = if self.peek() == Some('(') {
+                self.try_parse_yq_pair_group(false)
+            } else {
+                None
+            };
+            if let Some(nested) = nested {
+                group.extend(nested);
+            } else {
+                let entry = self.parse_yq_object_entry().ok()?;
+                if matches!(entry.key, ObjectKey::Bare) {
+                    return None;
+                }
+                group.push(entry);
+            }
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => {
+                    self.next();
+                    self.skip_ws();
+                }
+                Some(')') => {
+                    self.next();
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        Some(group)
     }
 
     /// One entry of a yq-mode `{...}` (#2783): `key: value`, or a bare expression.
