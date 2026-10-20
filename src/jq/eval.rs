@@ -49708,26 +49708,21 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
     }
 }
 
-/// The branch of an `if . then A else B end` UPDATE that a step with state `state` runs (#4948), looking
-/// through `elif` chains: a truthy state runs `A`, any other `B`, and the branch not taken moves nothing.
-/// Any other UPDATE is returned as it is, and so is an `if` on a condition other than `.`, whose own
-/// navigation may move the register before the branch runs.
+/// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
+/// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
+/// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
+/// read as before; so does any `if` on a condition other than `.`, whose own navigation may move the register
+/// before a branch runs.
 fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
     let mut current = update;
     while let Expr::If {
-        cond,
-        then_branch,
-        else_branch,
+        cond, else_branch, ..
     } = unwrap_paren(current)
     {
-        if !matches!(unwrap_paren(cond), Expr::Identity) {
+        if state.is_truthy() || !matches!(unwrap_paren(cond), Expr::Identity) {
             break;
         }
-        current = if state.is_truthy() {
-            then_branch
-        } else {
-            else_branch
-        };
+        current = else_branch;
     }
     current
 }
