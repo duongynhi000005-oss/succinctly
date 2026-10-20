@@ -6109,7 +6109,22 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
     // The allowlist excludes effects and context-sensitive expressions.
     // The generic evaluator owns semantics, including typed/duplicate keys;
     // a mismatching trace must not supply a guessed tree.
-    if need_comments && reshape_presentation::needed(expr) {
+    if need_comments && reshape_presentation::navigation_construction(expr) {
+        // #865: a construction of plain reads is replayed from the nodes it names.
+        if let Ok(results) = &mut docs {
+            if results.len() == 1
+                && matches!(results[0].0, OwnedValue::Array(_) | OwnedValue::Object(_))
+            {
+                if let Some((traced, tree)) =
+                    reshape_presentation::trace_navigation_construction(expr, &cursor)
+                {
+                    if results[0].0 == traced {
+                        results[0].1 = tree;
+                    }
+                }
+            }
+        }
+    } else if need_comments && reshape_presentation::needed(expr) {
         if let Ok(results) = &mut docs {
             if results.len() == 1
                 && matches!(results[0].0, OwnedValue::Array(_) | OwnedValue::Object(_))

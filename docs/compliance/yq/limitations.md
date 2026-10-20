@@ -777,10 +777,20 @@ separate from this:
   the authoritative evaluator result. Mapping `+` keeps an existing left key's quoting and takes
   the right value's style; `*` keeps the left scalar style at existing keys. New fields take the
   right key/value style. The streaming `keys` writer also retains each source key's quoting.
-  Pinned by `yaml_reshape_style_*_3615` goldens. General construction, context-sensitive or
-  multi-output entry filters, merge flag variants, and typed/duplicate-key reshapes that cannot
-  be represented faithfully by the text-keyed side-tree still fall back to metadata-free output.
-  This is a scoped provenance fix, not evaluator-wide node identity.
+  Pinned by `yaml_reshape_style_*_3615` goldens. A construction of plain reads
+  ([#865](https://github.com/rust-works/succinctly/issues/865)) is replayed from the nodes it names:
+  `{"a": .a, "b": .b}` and `[.a, .b]` (any nesting, with literals, `length` of a read and
+  arithmetic on reads among the entries, and behind a path: `.c | [.]`) keep each node's quote
+  style, flow style, trailing comment and anchor, a computed entry takes what its left operand
+  had, and the constructed container has none, as in yq. The cost is that of the nodes read. yq's
+  own placement is followed: a standalone comment above a node stays with its key, and a non-empty
+  flow *mapping* is a block once it is not the first entry of a constructed mapping (so is every
+  mapping nested in it; sequences keep their style). Context-sensitive or multi-output entry
+  filters (`(.a, .b)`, `[.[]]`), any other computed entry, a computed or repeated key, a
+  construction a later stage reshapes (`{"a": .a} | .b = 1`) or that is wrapped in a `def`, merge
+  flag variants, and typed/duplicate-key reshapes that cannot be represented faithfully by the
+  text-keyed side-tree still fall back to metadata-free output. This is a scoped
+  provenance fix, not evaluator-wide node identity.
 - **`|=` with a constructed mapping** (`.m |= {"a": 7}`) matches pristine metadata by key, so the key
   keeps its quoting where yq's fresh node has none. A value's quoting and comment are carried the same way
   (`a: "x" # cm`), so this is the existing key-matching approximation (#870), not a new one.
@@ -5043,7 +5053,8 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
   - a node copied by a plain `=` from a static read of it (`.b = .a`, `.c.d = .a.x`) and a bare
     result (`-P '.a'`, a comment-only or bare `---` document) carry the spelling since #2875
     (`a:` copies as `c:`, not `c: null`; `-P '.a'` is an empty line, not `null`); a copy made by
-    anything else does not: a construction (`[.a]`, `{"x": .a}`, #865), `map(.)` over a mapping,
+    anything else does not: a construction wrapped in a `def` or built from several outputs (a
+    construction of plain reads keeps it since #865), `map(.)` over a mapping,
     and a source a later stage rewrites (`.c = .a | .a = 5`) all print the plain value where yq
     keeps the text. yq copies the whole node, so quoting, flow style and a trailing comment ride
     along there (`.c = .a` on `a: "x" # n` is `c: "x" # n`), which is still dropped here;
