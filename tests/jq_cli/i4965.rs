@@ -155,5 +155,33 @@ fn test_4965_strptime_leftover_input() -> Result<()> {
             r#"date "12/31/20x" does not match format "%D""#,
             5,
         ),
+        (
+            "null",
+            r#""abc" | strptime("")"#,
+            "",
+            r#"date "abc" does not match format """#,
+            5,
+        ),
+        (
+            "null",
+            r#""2020-01-01 x" | strptime("%Y-%m-%d") | map(.+1)?"#,
+            "",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#""2020-01-01 x" | strptime("%Y-%m-%d") | strftime("%Y")"#,
+            "\"2020\"\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r#""2020-01-01 x" | strptime("%Y-%m-%d") | .[0:8] | mktime"#,
+            "1577836800\n",
+            "",
+            0,
+        ),
     ])
 }
