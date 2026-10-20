@@ -92,6 +92,31 @@ const QUIRKS: &[(&str, &str, &str)] = &[
         "a: 1\nc: {k: {z: 1}, w: [1]}\nd:\n  e: {f: 1}\n",
         "[.a, .c]",
         "- 1\n- {k: {z: 1}, w: [1]}\n",
+    ), // The foot of a scalar's key stays behind with it, a comment trailing a flow mapping that
+    // becomes a block is dropped, other arithmetic keeps the left operand's presentation, a null
+    // left operand takes the right's, and the comment above a sequence element goes with it into
+    // an array and below the entry in a mapping.
+    (
+        "a:\n  b: x\n  # inner foot\nc: 1\n",
+        r#"{"x": .a.b}"#,
+        "x: x\n",
+    ),
+    (
+        "z: 1\na: {p: 1, q: 2} # c\n",
+        r#"{"p": .z, "y": .a}"#,
+        "p: 1\ny:\n  p: 1\n  q: 2\n",
+    ),
+    ("z: 5 # c\n", "[(.z - 1)]", "- 4 # c\n"),
+    ("a: x # c\n", r#"{"x": (.n + .a)}"#, "x: x # c\n"),
+    (
+        "# head\n- 'a' # t\n# mid\n- b\n",
+        "[.[0], .[1]]",
+        "- 'a' # t\n# mid\n- b\n",
+    ),
+    (
+        "# head\n- 'a' # t\n# mid\n- b\n",
+        r#"{"k": .[1]}"#,
+        "k: b\n# mid\n",
     ),
 ];
 

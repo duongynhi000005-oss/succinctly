@@ -53,7 +53,9 @@ fn unflow_mappings(value: &OwnedValue, tree: &mut CommentTree) {
         return;
     };
     if meta.style == "flow" && !fields.is_empty() {
+        // The comment that trailed the closing brace has no place in a block mapping: yq drops it.
         *meta = meta.with_style("");
+        meta.comment = None;
     }
     for (key, child) in children.iter_mut() {
         if let Some(field) = fields.get(key.as_str()) {
@@ -131,6 +133,9 @@ pub(super) fn navigation_construction(expr: &Expr) -> bool {
 struct Landed<C> {
     node: Option<C>,
     key: Option<C>,
+    /// The last step was an index: the node is an element of a sequence, whose standalone comments
+    /// are its own, where a mapping member's are its key's.
+    element: bool,
 }
 
 /// Follow the static path `expr` from `from`. `None` is a path this does not read, or a step
@@ -145,17 +150,23 @@ fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
                 return Some(Landed {
                     node: None,
                     key: None,
+                    element: false,
                 });
             };
             let found = node.value().as_object()?.find_cursor(name).ok()?;
             let key = found.as_ref().and_then(DocumentCursor::prev_sibling);
-            Some(Landed { node: found, key })
+            Some(Landed {
+                node: found,
+                key,
+                element: false,
+            })
         }
         Expr::Index { idx, .. } => {
             let Some(node) = from.node else {
                 return Some(Landed {
                     node: None,
                     key: None,
+                    element: false,
                 });
             };
             let elements = node.value().as_array()?;
@@ -168,6 +179,7 @@ fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
             Some(Landed {
                 node: found,
                 key: None,
+                element: true,
             })
         }
         _ => None,
@@ -183,13 +195,31 @@ fn landed_pair<C: DocumentCursor>(at: &Landed<C>) -> Option<ResultWithComments> 
     let (value, mut tree) =
         to_owned_with_comments::<_, YqSemantics>(&node.value(), Some(node)).ok()?;
     // A mapping member's standalone comments live on its key; the walk of a whole document merges
-    // them into the value's, and so does this.
+    // them into the value's, and so does this. A scalar leaves its key's foot behind with the key
+    // (a container's closes inside it), and the comment above any node but a sequence element
+    // goes with the key or the document (#865).
     if let Some(key) = &at.key {
         if key.document_has_standalone_comments() {
             let (head, foot) = (key.head_comment_raw(), key.foot_comment_raw());
             if !head.is_empty() || !foot.is_empty() {
+                let foot = if matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_)) {
+                    foot
+                } else {
+                    Vec::new()
+                };
                 *tree.meta_mut() = tree.meta().with_head_foot(head, foot);
             }
+        }
+    }
+    if !at.element {
+        drop_head_comment(&mut tree);
+    } else if node.document_has_standalone_comments() {
+        // A sequence element keeps the comment above it, which the walk of a lone scalar clears.
+        let head = node.head_comment_raw();
+        if !head.is_empty() {
+            *tree.meta_mut() = tree
+                .meta()
+                .with_head_foot(head, tree.meta().foot_comment().to_vec());
         }
     }
     Some((value, tree))
@@ -211,6 +241,7 @@ pub(super) fn trace_navigation_construction<C: DocumentCursor>(
                 Landed {
                     node: Some(*root),
                     key: None,
+                    element: false,
                 },
             )?;
             // An absent node is for the plain route to answer.
@@ -228,6 +259,7 @@ fn entry_pair<C: DocumentCursor>(e: &Expr, root: &C, depth: usize) -> Option<Res
     let start = || Landed {
         node: Some(*root),
         key: None,
+        element: false,
     };
     match e {
         Expr::Paren(inner) => entry_pair(inner, root, depth + 1),
@@ -242,10 +274,16 @@ fn entry_pair<C: DocumentCursor>(e: &Expr, root: &C, depth: usize) -> Option<Res
                 Expr::tracked_value(r.0.clone()),
             );
             let result = evaluated(&sum, &OwnedValue::Null)?;
-            let tree = if matches!(op, ArithOp::Add | ArithOp::Mul(_)) {
+            let tree = if matches!(op, ArithOp::Add | ArithOp::Mul(_)) && l.0 == OwnedValue::Null {
+                // `null + x` is `x`, node and all.
+                r.1.clone()
+            } else if matches!(op, ArithOp::Add | ArithOp::Mul(_)) {
                 merge_tree(&l, &r, &result, matches!(op, ArithOp::Mul(_)), depth + 1)?
-            } else {
+            } else if matches!(result, OwnedValue::Array(_) | OwnedValue::Object(_)) {
                 CommentTree::empty()
+            } else {
+                // A number computed from a node keeps the node's comment and style.
+                CommentTree::Leaf(l.1.meta().clone())
             };
             Some((result, tree))
         }
@@ -283,11 +321,7 @@ fn construct<C: DocumentCursor>(expr: &Expr, root: &C, depth: usize) -> Option<R
     if depth >= MAX_VALUE_TREE_DEPTH {
         return None;
     }
-    let entry = |e: &Expr| -> Option<ResultWithComments> {
-        let (value, mut tree) = entry_pair(e, root, depth + 1)?;
-        drop_head_comment(&mut tree);
-        Some((value, tree))
-    };
+    let entry = |e: &Expr| entry_pair(e, root, depth + 1);
     match expr {
         Expr::Object(entries) => {
             let mut values = IndexMap::new();
@@ -300,6 +334,12 @@ fn construct<C: DocumentCursor>(expr: &Expr, root: &C, depth: usize) -> Option<R
                     return None;
                 }
                 let (v, mut t) = entry(&e.value)?;
+                // What stood above a sequence element is printed below the entry it lands in.
+                if !t.meta().head_comment().is_empty() {
+                    let mut foot = t.meta().head_comment().to_vec();
+                    foot.extend(t.meta().foot_comment().iter().cloned());
+                    *t.meta_mut() = t.meta().with_head_foot(Vec::new(), foot);
+                }
                 if position > 0 {
                     unflow_mappings(&v, &mut t);
                 }
@@ -372,19 +412,7 @@ fn trace_at_depth(
     match expr {
         Expr::Identity => Some(input.clone()),
         Expr::Paren(inner) => next(inner, input),
-        Expr::Field(key) => {
-            // #865: a member that is there is read as it stands. Evaluating `.key` re-indexes the
-            // whole value, once per entry of a construction.
-            let read = match value {
-                OwnedValue::Object(fields) => fields.get(key.as_str()).cloned(),
-                _ => None,
-            };
-            let read = match read {
-                Some(read) => read,
-                None => evaluated(expr, value)?,
-            };
-            Some((read, tree.field(key).clone()))
-        }
+        Expr::Field(key) => Some((evaluated(expr, value)?, tree.field(key).clone())),
         Expr::Index { idx, .. } => {
             let OwnedValue::Array(items) = value else {
                 return None;

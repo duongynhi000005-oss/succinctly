@@ -785,7 +785,11 @@ separate from this:
   had, and the constructed container has none, as in yq. The cost is that of the nodes read. yq's
   own placement is followed: a standalone comment above a node stays with its key, and a non-empty
   flow *mapping* is a block once it is not the first entry of a constructed mapping (so is every
-  mapping nested in it; sequences keep their style). Context-sensitive or multi-output entry
+  mapping nested in it; sequences keep their style). Still different: the comment lines after a
+  sequence element read by index (`{"y": .[1]}` over `- a` / `# f` / `- c` / `# g`: yq prints `# g`, a
+  blank line and `# f` after the entry), the blank line yq keeps between a document's leading comment
+  and its first entry when the document is wrapped (`[.]`), and a comment inside a flow mapping that
+  becomes a block, which yq moves. Context-sensitive or multi-output entry
   filters (`(.a, .b)`, `[.[]]`), any other computed entry, a computed or repeated key, a
   construction a later stage reshapes (`{"a": .a} | .b = 1`) or that is wrapped in a `def`, merge
   flag variants, and typed/duplicate-key reshapes that cannot be represented faithfully by the
