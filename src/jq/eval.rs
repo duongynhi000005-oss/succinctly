@@ -62214,6 +62214,13 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         });
         marker && !fold
     };
+    // #4969: whether UPDATE holds a `?//` chain with a bare `$name` alternative, the retry target that binds
+    // the whole accumulator. Syntactic, so decided once.
+    let update_has_alt_chain = S::TAG == EvalTag::Jq
+        && any_subexpr(update, &mut |e| {
+            matches!(e, Expr::AsPattern { patterns, .. }
+                if patterns.len() > 1 && patterns.iter().any(|p| matches!(p, Pattern::Var(_))))
+        });
     // #4486: whether some comma item of UPDATE is a caught pure navigation, which emits nothing on
     // an accumulator it raises on ([`silence_failing_caught_navs`]).
     let update_has_caught_nav = update_navigates && comma_with_caught_navigation(update);
@@ -62647,19 +62654,32 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         .then(fold_body::acc_off_register);
                         // #4484: a navigating `reduce` source leaves jq's register on the element for
                         // the whole step, where a pattern step on the accumulator raises.
-                        let _source_moved = source_moves_register.then(|| {
-                            fold_body::source_moved(
-                                if source_is_plain_navigation {
-                                    Some(matches!(elem.value, OwnedValue::Null))
-                                } else if source_is_last_of_navigation && trackable {
-                                    // The entry node is the register.
-                                    Some(matches!(value, OwnedValue::Null))
-                                } else {
-                                    None
-                                },
-                                elem.register_path.clone(),
-                            )
-                        });
+                        // #4969: a source whose element is the register's own node (`..`'s first output, a
+                        // `.` in a comma) leaves the accumulator on it at the step the accumulator is already
+                        // at the register, so a pattern step on it passes as jq's does; the move marks below
+                        // are for an element that is some other node. Read only for an UPDATE holding a `?//`
+                        // chain with a bare `$name` alternative, whose retry onto it binds the whole
+                        // accumulator and made the mark unsound; every other shape keeps the wording it had.
+                        let elem_is_accumulator = update_has_alt_chain
+                            && acc_at_register
+                            && elem
+                                .register_path
+                                .as_ref()
+                                .is_some_and(|p| **p == *reg.path);
+                        let _source_moved =
+                            (source_moves_register && !elem_is_accumulator).then(|| {
+                                fold_body::source_moved(
+                                    if source_is_plain_navigation {
+                                        Some(matches!(elem.value, OwnedValue::Null))
+                                    } else if source_is_last_of_navigation && trackable {
+                                        // The entry node is the register.
+                                        Some(matches!(value, OwnedValue::Null))
+                                    } else {
+                                        None
+                                    },
+                                    elem.register_path.clone(),
+                                )
+                            });
                         // #4651: ...and a nested `reduce` that carries `.` through (its source cannot move
                         // the register and its INIT is `.`) runs on that accumulator, which the register
                         // is still not at.
