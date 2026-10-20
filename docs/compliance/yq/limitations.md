@@ -5576,9 +5576,8 @@ a comment on that bare `-` goes forward as the next node's head, as in yq. So do
 the properties themselves (`a:` / `  !!str # d` / `b: 1` prints `b: 1 # d`, #4851), and a tag or an
 anchor given on one line cannot be given again on the next (`a:` / `  !!str` / `  !!int` is refused,
 as in yq; the error reads `inconsistent indentation` where yq's reads `did not find expected key`).
-A comment after the properties is claimed by a block scalar header on the next line and prints after
-the text, where yq prints it on the header line (`a: !!str | # d`) -- the same placement a header
-comment gets on a bare key (`a:` / `  | # h`). When a comment is already pending from the line above
+A comment after the properties is claimed by a block scalar header on the next line and prints on the
+header line, as in yq (`a: !!str | # d`, #5001). When a comment is already pending from the line above
 (`- &x # c1` / `  !!str # c2` / `  v`), or the value line has a comment of its own (`!!str # d` /
 `v # e`), only the comment of the value's own line survives, where yq keeps both.
 Comment lines between a bare `-` and the properties (`k:` / `  - # c` / `    # x` / `    !!str` /
@@ -6270,6 +6269,13 @@ where yq keeps it above (`# c` / `a: 1`).
 container root rewritten to the other kind keeps the document's head comment and its foot, as in yq. Not
 matched: the head comment of a *non-first* document (`x: 1` / `---` / `# c` / `5` written `. = [1]` loses `# c`, which
 yq keeps), and a root with an explicit tag (`# c` / `!!null` written `.a = 1` prints a blank line after the comment).
+
+### A block scalar header's comment ([#5001](https://github.com/rust-works/succinctly/issues/5001))
+
+A comment after a block scalar's `|`/`>` indicator stays on the header line in the places the value is
+written where it stands: `.`, `-P`, and a write that leaves the scalar alone or replaces it. A copy of the scalar
+(`.b = .a`, `. as $v | {"z": $v}`, `pick`), a recursive merge over it (`. *d {"a": "n"}`) and a document whose
+root is a block scalar carry no such comment, or print an extra document, where yq keeps it ([#5003](https://github.com/rust-works/succinctly/issues/5003)).
 
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 

@@ -139,14 +139,12 @@ fn test_4851_d_a_repeated_property_kind_on_a_later_line_is_refused() -> Result<(
 }
 
 /// A comment after the properties is claimed by a block scalar header on the next line, not
-/// lost. It prints after the text, where yq prints it on the header line (`a: !!str | # d`); a
-/// header comment on a bare key does the same (`a:` / `  | # h`), a separate divergence recorded
-/// in `docs/compliance/yq/limitations.md`.
+/// lost. It prints on the header line, as yq does (`a: !!str | # d`, #5001).
 #[test]
 fn test_4851_e_a_commented_properties_line_before_a_block_scalar_header() -> Result<()> {
     let (out, code) = run_yq_stdin(".", "a:\n  !!str # d\n  |\n   text\n", &[])?;
     assert_eq!(code, 0);
-    assert_eq!(out, "a: !!str |\n  text # d\n");
+    assert_eq!(out, "a: !!str | # d\n  text\n");
     Ok(())
 }
 

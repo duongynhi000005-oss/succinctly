@@ -2276,7 +2276,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // #1485/#1881: same step as the container
                             // branch above.
                             let child_indent = deeper_yaml_indent(indent, indent_spaces, unit);
-                            write_deferred_value(
+                            let header_comment = write_deferred_value_with_header_comment(
                                 out,
                                 &value,
                                 &child_indent,
@@ -2311,6 +2311,8 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // lines at this key's own indent (matching
                             // `b: 1 # floated\n  # own`).
                             match value.line_comment_raw() {
+                                // On the header line already (a block scalar, #5001).
+                                Some(_) if header_comment => {}
                                 Some(comment) => write_line_comment(out, Some(comment))?,
                                 None => {
                                     let mut key_comments = key_cursor.line_comments_raw();
@@ -2540,7 +2542,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             }
                             out.write_char('-')?;
                             let child_indent = compact_yaml_indent(indent);
-                            write_deferred_value(
+                            let header_comment = write_deferred_value_with_header_comment(
                                 out,
                                 &cursor,
                                 &child_indent,
@@ -2557,8 +2559,9 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             // (#1079), and does the same for one whose only
                             // value is a tag or anchor on the next line
                             // (#2835).
-                            let own_comment = cursor.line_comment_raw();
-                            write_line_comment(out, own_comment)?;
+                            if !header_comment {
+                                write_line_comment(out, cursor.line_comment_raw())?;
+                            }
                             prev_had_foot = self.write_item_foot_comments_at(
                                 out,
                                 indent,
@@ -9508,6 +9511,69 @@ fn write_line_comment<Out: core::fmt::Write>(
     }
 }
 
+/// The same-line comment of `value` when it is a block scalar, where it belongs on the header line
+/// (`down: | # sql`) rather than after the last line, where it would be content of the string
+/// (#5001). `None` for a value without a comment or not written as a block scalar, whose comment
+/// the caller places after the value as it always did.
+fn block_scalar_header_comment<'v, W: AsRef<[u64]>>(
+    value: &'v YamlCursor<'_, W>,
+) -> Option<&'v str> {
+    // The comment is asked first: almost no node has one, and `style()` is the dearer question.
+    let comment = value.line_comment_raw()?;
+    matches!(value.style(), "literal" | "folded").then_some(comment)
+}
+
+/// [`write_deferred_value`], with the value's own same-line comment on its block scalar header
+/// when it has one (#5001); `true` when the comment has been written there, `false` when the
+/// caller still owes it after the value.
+fn write_deferred_value_with_header_comment<Out: core::fmt::Write, W: AsRef<[u64]>>(
+    out: &mut Out,
+    value: &YamlCursor<'_, W>,
+    child_indent: &str,
+    indent_spaces: usize,
+    unit: char,
+    sort_keys: bool,
+) -> Result<bool, StreamFailure> {
+    let Some(comment) = block_scalar_header_comment(value) else {
+        write_deferred_value(out, value, child_indent, indent_spaces, unit, sort_keys)?;
+        return Ok(false);
+    };
+    write_with_header_comment(out, comment, |buf| {
+        write_deferred_value(buf, value, child_indent, indent_spaces, unit, sort_keys)
+    })?;
+    Ok(true)
+}
+
+/// Write what `write` produces with `comment` on its block scalar header line (#5001).
+///
+/// The scalar's own writer cannot place it (the callers own the comment), so the value is
+/// buffered: when it opens with `|` or `>` (after any anchor or tag) the comment goes before the
+/// first line break, and a quoted fallback gets it after, as any other scalar does.
+fn write_with_header_comment<Out: core::fmt::Write>(
+    out: &mut Out,
+    comment: &str,
+    write: impl FnOnce(&mut String) -> Result<(), StreamFailure>,
+) -> Result<(), StreamFailure> {
+    let mut written = String::new();
+    write(&mut written)?;
+    let mut rest = written.trim_start_matches(' ');
+    while rest.starts_with(['&', '!']) {
+        match rest.split_once(' ') {
+            Some((_, after)) => rest = after,
+            None => break,
+        }
+    }
+    let at = if rest.starts_with(['|', '>']) {
+        written.find('\n').unwrap_or(written.len())
+    } else {
+        written.len()
+    };
+    out.write_str(&written[..at])?;
+    write_line_comment(out, Some(comment))?;
+    out.write_str(&written[at..])?;
+    Ok(())
+}
+
 /// Write every remaining entry of a mapping key's trailing-comment
 /// iterator as its own standalone `#` line at `indent`, immediately after
 /// the caller has already written the first entry inline via
@@ -10131,8 +10197,16 @@ where
                 // fresh normal step off `own_indent`, is the right value
                 // here.
                 out.write_char('-')?;
-                write_deferred_value(out, &cursor, &child_indent, indent_spaces, unit, sort_keys)?;
-                write_line_comment(out, cursor.line_comment_raw())?;
+                if !write_deferred_value_with_header_comment(
+                    out,
+                    &cursor,
+                    &child_indent,
+                    indent_spaces,
+                    unit,
+                    sort_keys,
+                )? {
+                    write_line_comment(out, cursor.line_comment_raw())?;
+                }
             }
         }
         Ok(())
