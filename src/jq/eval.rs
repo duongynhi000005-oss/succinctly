@@ -41246,6 +41246,21 @@ fn emptied_wrapper_inner(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// The one item of a comma that can emit, when every other item emits nothing ([`emits_nothing`]): `(FE),
+/// empty` and `empty, (FE)` store exactly the outputs `FE` does, so a fold UPDATE that is one of them is read as
+/// the bare item (#4800). Looks through parentheses and nested commas; any other expression is returned as
+/// it is, and so is a comma with two items that can emit (`(FE), 7`), whose siblings store values of their own.
+fn without_empty_siblings(expr: &Expr) -> &Expr {
+    let Expr::Comma(items) = unwrap_paren(expr) else {
+        return expr;
+    };
+    let mut emitting = items.iter().filter(|item| !emits_nothing(item));
+    match (emitting.next(), emitting.next()) {
+        (Some(only), None) => without_empty_siblings(only),
+        _ => expr,
+    }
+}
+
 /// What a fold UPDATE leaves behind when the `foreach` that heads it emits nothing (#4754).
 struct EmptiedUpdate<'a> {
     /// The `foreach`'s source.
@@ -41305,7 +41320,7 @@ fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
             _ => false,
         }
     }
-    match unwrap_paren(expr) {
+    match unwrap_paren(without_empty_siblings(expr)) {
         Expr::Foreach { input, .. } => Some((Vec::new(), input)),
         Expr::Pipe(stages) => {
             let at = stages
@@ -41447,7 +41462,7 @@ fn is_value_head(e: &Expr) -> bool {
 /// `null` an earlier empty step left behind emits it (#4776), which the fold's own walk does once
 /// it knows the step is empty.
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
-    match unwrap_paren(expr) {
+    match unwrap_paren(without_empty_siblings(expr)) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
             source: input,
             has_fallback: false,
@@ -41546,7 +41561,7 @@ fn sole_update_mark<S: EvalSemantics>(
     if S::TAG != EvalTag::Jq {
         return None;
     }
-    match unwrap_paren(body) {
+    match unwrap_paren(without_empty_siblings(body)) {
         Expr::Foreach { input, .. } => {
             Some(fold_body::sole_update_foreach(input, in_foreach, extract))
         }
