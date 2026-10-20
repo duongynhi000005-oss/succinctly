@@ -5606,7 +5606,7 @@ its head, and comment lines between the dash and such a value head it too
 ([#4268](https://github.com/rust-works/succinctly/issues/4268)); two shapes still differ, pinned by
 `test_4268_c` in `tests/yq_cli/i4268.rs`: a blank line between the own-line comment and the value
 (it is settled backwards as the previous item's foot), and a comment on the dash line together with
-one below it (this prints the own-line one first, yq the dash one).
+one below it (the printed order is the own-line one first, yq's the dash one first; the `head_comment` getter answers in yq's order).
 
 A block scalar whose `|`/`>` header is on a line of its own below the owning `-` or `key:`
 (`a:` / `  >` / `  text`) reads its text since #4259, and so does one with an anchor or tag in

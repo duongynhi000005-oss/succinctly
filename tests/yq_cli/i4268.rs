@@ -68,6 +68,8 @@ fn test_4268_b_the_getters_follow() -> Result<()> {
         ("- # c\n  [1]\n- 2\n", ".[0] | head_comment", "c\n"),
         ("- # c\n  [1]\n- 2\n", ".[1] | head_comment", "\n"),
         ("- # c\n  plain\n- 2\n", ".[0] | head_comment", "c\n"),
+        ("- # c\n  # f\n  z\n- y\n", ".[0] | head_comment", "c\nf\n"),
+        ("-   # t\n  # f\n  z\n", ".[0] | head_comment", "t\nf\n"),
     ];
     for (input, filter, expected) in getters {
         let (out, code) = run_yq_stdin(filter, input, &[])?;
@@ -80,7 +82,7 @@ fn test_4268_b_the_getters_follow() -> Result<()> {
 /// Shapes that still differ from yq, pinned with this tool's answer so a change is deliberate
 /// (recorded in `limitations.md`): a blank line between the comment and the value (the comment is
 /// settled backwards as the previous item's foot), and a comment on the dash line as well as one
-/// below it (this prints the own-line one first, yq the dash one).
+/// below it (the printed order is the own-line one first, yq's the dash one first; the `head_comment` getter has the yq order).
 #[test]
 fn test_4268_c_neighbouring_shapes_still_differ() -> Result<()> {
     let rows: &[(&str, &str)] = &[

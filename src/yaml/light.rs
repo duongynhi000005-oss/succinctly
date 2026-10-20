@@ -3082,7 +3082,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// as the item's line comment (the wrapper and a scalar value share one node), but it sits
     /// *before* the value, which is where yq reads a head comment from; an ordinary trailing
     /// comment (`- value # c`) follows the value and stays a line comment.
-    fn dash_comment_of_scalar_item(&self) -> Option<&str> {
+    fn dash_comment_of_scalar_item(&self) -> Option<(usize, &str)> {
         // The cheapest test first: almost no item's wrapper holds a comment.
         let wrapper = self.parent()?;
         let &(start, end) = self.index.get_line_comments(wrapper.bp_pos).first()?;
@@ -3100,7 +3100,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             return None;
         }
         let raw = core::str::from_utf8(&self.text[start as usize..end as usize]).ok()?;
-        Some(raw.strip_prefix("# ").unwrap_or(raw))
+        Some((start as usize, raw.strip_prefix("# ").unwrap_or(raw)))
     }
 
     /// The standalone `#` comment lines directly above this node — its
@@ -8110,7 +8110,17 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
                     .any(|b| !matches!(b, b' ' | b'\t'))
             });
         if !floated {
-            lines.extend(self.dash_comment_of_scalar_item().map(ToString::to_string));
+            if let Some((start, comment)) = self.dash_comment_of_scalar_item() {
+                // After the standalone block above the dash, before the own-line lines below it
+                // (`- # c` / `  # f` / `  z` is `c` then `f`): by position in the text.
+                let before = self
+                    .index
+                    .get_head_comments(self.bp_pos)
+                    .iter()
+                    .filter(|&&(at, _)| (at as usize) < start)
+                    .count();
+                lines.insert(before.min(lines.len()), comment.to_string());
+            }
         }
         lines
     }
