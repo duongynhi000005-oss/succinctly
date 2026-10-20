@@ -2953,7 +2953,7 @@ does (and answers `.item.z` the way it already did). Still divergent: yq's JSON 
 *inline-mapping* source out (`<<: {q: 1}` renders `{"k":0}`; `.item.q` and `.[]` still see it,
 [#4987](https://github.com/rust-works/succinctly/issues/4987)), which would discard merged keys for
 `succinctly jq` over YAML with no reference to match, so it needs the mode; `path` of a merged member
-names its anchor's location in yq (`["a","x"]`) and the mapping's own here (`["item","x"]`).
+names its anchor's location in yq (`["a","x"]`) and the mapping's own here (`["item","x"]`); `..` does not descend into a merged mapping's members at all in yq, and walks them here (in the iteration's order since #4983, the rendering's before). `to_entries`, `with_entries`, `paths` and `tostream` keep the rendering's order.
 
 Still divergent, because the mapping is no longer a document node by the time the builtin runs
 and an owned object has no `<<` entry to list:

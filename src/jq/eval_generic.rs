@@ -1387,7 +1387,7 @@ fn to_owned_cursor_at_depth<S: EvalSemantics, C: DocumentCursor, B: CursorWalkOu
             let key = if B::KEEPS_MEMBERS {
                 field.checked_key(&f, &map, &mut guard, is_first)?
             } else {
-                field.checked_key_lazy(&f, || value.as_object(), consumed, &mut ledger)?;
+                field.checked_key_lazy(&f, || value.as_object_rendered(), consumed, &mut ledger)?;
                 String::new()
             };
             let child = match embed_shared_nested::<_, B>(&field.value_cursor, depth + 1, nested) {
@@ -3057,7 +3057,7 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
             None,
         ),
     };
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let mut map = IndexMap::new();
         let mut comment_map = IndexMap::new();
         let mut key_comment_map = IndexMap::new();
@@ -3336,7 +3336,7 @@ fn to_owned_key_shape<V: DocumentValue, S: EvalSemantics>(
 ) -> Result<OwnedValue, EvalError> {
     if value.is_array() {
         Ok(OwnedValue::array())
-    } else if let Some(fields) = value.as_object() {
+    } else if let Some(fields) = value.as_object_rendered() {
         descriptor_key_shape::<V, S>(&fields)
     } else {
         to_owned::<S, _>(value)
@@ -3377,7 +3377,7 @@ fn to_owned_key_shape_cursor<C: DocumentCursor, S: EvalSemantics>(
     let value = cursor.value();
     if value.is_array() {
         Ok(OwnedValue::array())
-    } else if let Some(fields) = value.as_object() {
+    } else if let Some(fields) = value.as_object_rendered() {
         descriptor_key_shape::<C::Value, S>(&fields)
     } else {
         to_owned_cursor::<S, _>(cursor)
@@ -24006,7 +24006,7 @@ fn collect_paths_generic<S: EvalSemantics, V: DocumentValue>(
     mut nodes: Option<&mut Vec<(V, V::Cursor)>>,
 ) -> Result<(), EvalError> {
     guard_path_walk_depth(current_path.len())?;
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let checked = effective_fields_checked(&fields, S::COLLAPSE_DUPLICATE_KEYS)?;
         if checked.is_empty() {
             // #2731: closes the nested-`{,}` gap `empty_container_gap_error`
@@ -24122,7 +24122,7 @@ fn collect_tostream_generic<S: EvalSemantics, V: DocumentValue>(
     let closing = |current_path: &[OwnedValue]| {
         OwnedValue::Array(vec![OwnedValue::Array(current_path.to_vec().into())].into())
     };
-    if let Some(fields) = value.as_object() {
+    if let Some(fields) = value.as_object_rendered() {
         let checked = effective_fields_checked(&fields, false)?;
         if checked.is_empty() {
             empty_fields_tail_gap_ok(&fields, Some(cursor))?;
@@ -32235,7 +32235,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 // key that fails to materialize here fails identically in
                 // the fallback, so the strings stand in rather than raise.
                 let typed_keys = match family {
-                    MapFamily::WithEntries => value.as_object().and_then(|fields| {
+                    MapFamily::WithEntries => value.as_object_rendered().and_then(|fields| {
                         effective_key_values::<_, S>(&fields, S::COLLAPSE_DUPLICATE_KEYS).ok()
                     }),
                     MapFamily::Map | MapFamily::MapValues => None,
@@ -32895,7 +32895,7 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                     entries.push(OwnedValue::Object(entry.into()));
                 }
                 GenericResult::Owned(OwnedValue::array_from(entries))
-            } else if let Some(fields) = value.as_object() {
+            } else if let Some(fields) = value.as_object_rendered() {
                 // Up front, because `effective_fields` reports an unpaired
                 // trailing child as plain exhaustion -- the loop below would
                 // simply see one member fewer and never notice (#1194). The
@@ -33010,7 +33010,9 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
         // only the entry array's provenance changes. A body that reads path
         // context keeps its own routes (`map_family_positioned_builtin`
         // above, or the fallback), where `key` is the entry's index.
-        Builtin::WithEntries(f) if value.as_object().is_some() && !needs_path_context(f) => {
+        Builtin::WithEntries(f)
+            if value.as_object_rendered().is_some() && !needs_path_context(f) =>
+        {
             let entries = match eval_builtin::<S, V>(&Builtin::ToEntries, value, optional, cursor) {
                 GenericResult::Owned(entries) => entries,
                 other => return other,
