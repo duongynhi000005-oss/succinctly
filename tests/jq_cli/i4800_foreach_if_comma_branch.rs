@@ -814,3 +814,82 @@ fn test_foreach_if_comma_branch_stage_after_the_if_4800() -> Result<()> {
         ),
     ])
 }
+
+/// #4800: a comma branch behind a nested `if` on a condition other than `.`, and one under a `try`, keep the refusal too:
+/// the bare forms match jq, but the comma read the same way lets a `.a` EXTRACT's index error escape a `?` and a `try`
+/// where jq answers `[]`. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_foreach_if_comma_branch_nested_if_and_try_wrapper_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; if .a then (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) else . end; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; if .a then (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) else . end; .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a?))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a?)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a?))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a?)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+    ])
+}

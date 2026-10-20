@@ -41883,7 +41883,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             }
             (after.is_empty() && !guarded).then_some(emptied)
         }
-        e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
+        // A `try`/`?` around a comma branch keeps the refusal, as a stage after the `if` does ([`EmptiedUpdate::comma_branch`]).
+        e if emptied_wrapper_inner(e).is_some() => {
+            emptied_update(emptied_wrapper_inner(e)?).filter(|emptied| !emptied.comma_branch)
+        }
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
@@ -41908,13 +41911,15 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             // `if` on another condition (`if .a then (FE, empty) else . end`) and for a stage after the `if`, the
             // bare form matches jq but the comma form read the same way lets the `.a` EXTRACT's index error
             // escape a `?` and a `try` where jq answers `[]` (20 of a 15,200-row grid, all matching jq while the
-            // comma was refused), so those keep the refusal. Why the comma differs there is not isolated.
+            // comma was refused), so those keep the refusal, and so does a `try`/`?` around it. Why the comma
+            // differs there is not isolated.
             let comma_branch = matches!(unwrap_paren(then_branch), Expr::Comma(_));
-            if comma_branch && !on_dot {
-                return None;
-            }
             let mut emptied = emptied_update(then_branch)?;
             emptied.comma_branch |= comma_branch;
+            // After the recursion, so that a comma behind a nested `if` is refused under this one's condition too.
+            if emptied.comma_branch && !on_dot {
+                return None;
+            }
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
             if on_dot && !emptied.literal_head {
