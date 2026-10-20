@@ -25,6 +25,8 @@ mod i4800_first_bind_sibling;
 mod i4800_first_limit_if;
 mod i4800_foreach_beside_empty;
 mod i4800_foreach_beside_empty_stage;
+mod i4800_foreach_if_label_empty_siblings;
+mod i4800_foreach_label_empty_siblings;
 mod i4800_nth_dropped_binds;
 mod i4832;
 mod i4886;

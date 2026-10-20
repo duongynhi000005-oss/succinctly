@@ -41395,8 +41395,39 @@ fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
             heads.extend(inner_heads);
             Some((heads, source))
         }
+        Expr::Label { name, body } => plain_update_heads(label_sole_item(name, body)?),
         other => emptied_wrapper_inner(other).and_then(plain_update_heads),
     }
+}
+
+/// The one item a `label $name | BODY` scope runs, when its body is that item with nothing around it that
+/// changes what it emits (#4800): the bare body, or a comma whose other items emit nothing
+/// ([`emits_nothing`]) or are a `break $name` *behind* the item (it only ends the scope once the item has
+/// emitted). A `break $name` ahead of the item skips it, and one inside it ends it early, so neither is read.
+fn label_sole_item<'a>(name: &str, body: &'a Expr) -> Option<&'a Expr> {
+    fn is_break(item: &Expr, name: &str) -> bool {
+        matches!(unwrap_paren(item), Expr::Break(n) if n == name)
+    }
+    let item = match unwrap_paren(body) {
+        Expr::Comma(items) => {
+            let at = items
+                .iter()
+                .position(|item| !emits_nothing(item) && !is_break(item, name))?;
+            if items[..at].iter().any(|item| is_break(item, name)) {
+                return None;
+            }
+            if !items[at + 1..]
+                .iter()
+                .all(|item| emits_nothing(item) || is_break(item, name))
+            {
+                return None;
+            }
+            &items[at]
+        }
+        other => other,
+    };
+    let breaks_inside = any_subexpr(item, &mut |e| matches!(e, Expr::Break(n) if n == name));
+    (!breaks_inside).then_some(item)
 }
 
 /// The single value the value heads [`plain_update_heads`] found hand the `foreach` when the state is `state`:
@@ -41524,11 +41555,13 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             literal_head: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
-            // `label $l | (FE, break $l)`: the break emits nothing either.
+            // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
+            // purpose: a `break $l` ahead of the item is dropped here too, which 16 grid rows that matched jq
+            // (#4800) depend on, so the two are not folded into one helper.
             Expr::Comma(items) => {
                 let mut heads = items.iter().filter(|item| {
                     !matches!(unwrap_paren(item), Expr::Break(n) if n == name)
-                        && !matches!(unwrap_paren(item), Expr::Builtin(Builtin::Empty))
+                        && !emits_nothing(item)
                 });
                 let head = heads.next()?;
                 if heads.next().is_some() {
@@ -49747,9 +49780,19 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
 /// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
 /// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
 /// read as before; so does any `if` on a condition other than `.`, whose own navigation may move the register
-/// before a branch runs.
+/// before a branch runs. A comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l`
+/// scope whose one item is such an `if` ([`label_sole_item`]) are read as the bare `if` (#4800): neither changes
+/// what the `if` emits.
 fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
-    let mut current = update;
+    let sole = without_empty_siblings(update);
+    let sole = match unwrap_paren(sole) {
+        Expr::Label { name, body } => label_sole_item(name, body),
+        _ => Some(sole),
+    };
+    let mut current = match sole {
+        Some(item) if matches!(unwrap_paren(item), Expr::If { .. }) => item,
+        _ => update,
+    };
     while let Expr::If {
         cond, else_branch, ..
     } = unwrap_paren(current)
