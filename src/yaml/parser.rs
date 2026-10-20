@@ -1777,8 +1777,17 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// correctly once the sequence this item recurses into registers its
     /// own frame and reaches a genuine content node.
     fn attach_item_head_at(&mut self, bp: usize, column: usize) {
-        if self.floated_item_comment.is_some() {
-            return;
+        if let Some(floated) = self.floated_item_comment {
+            // A float from an earlier item of the sequence this item belongs to, still open,
+            // is the head of this item when it is a compact mapping or nested sequence, as
+            // it is for any other item that opens next: `- # c` / `- b: 1` heads `.[1]`
+            // (#2835). One from a sequence that has since closed is a foot that
+            // `settle_float_if_sequence_closed` places, so the guard above still holds.
+            if !self.sequence_still_open(floated.seq_serial) {
+                return;
+            }
+            self.floated_item_comment = None;
+            self.block_passed_absent_item = false;
         }
         // A block trailing an item whose value turned out absent, closed by
         // this very stem's own recursion (#2811 review): the sequence that

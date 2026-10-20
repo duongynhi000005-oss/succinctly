@@ -23603,21 +23603,14 @@ fn test_nested_double_float_keeps_the_comment_yq_drops_1079_float() -> Result<()
 /// Known residuals, pinned with real yq's answer in the comment so a change
 /// is deliberate:
 ///
-/// - a sibling item that is a compact mapping or a nested sequence -- real
-///   yq answers `.[1] | head_comment` directly; here the comment attaches
-///   to the first key / inner item instead, the same attribution #798's
-///   standalone-line capture already has for `- 1\n# h\n- b: 1\n` (#2811);
+/// - (a sibling item that is a compact mapping or a nested sequence is matched since #2835:
+///   `tests/yq_cli/i2835.rs`);
 /// - several floated comments in a sequence that closes to an outer item
 ///   or to end of input: real yq keeps only the last (`- k:\n  - # c\n
 ///   - # d\n- 2\n` has `d` on `.[0].k`'s foot and `c` nowhere); here the
 ///   rest go forward as the next node's head, per ADR-0018 rule 4.
 #[test]
 fn test_absent_item_comment_residuals_1079_float() -> Result<()> {
-    assert_yq_getter("- # c\n- b: 1\n", ".[1] | head_comment", "\n")?;
-    assert_yq_getter("- # c\n- b: 1\n", ".[1].b | key | head_comment", "c\n")?;
-    assert_yq_getter("- # c\n- - 1\n", ".[1] | head_comment", "\n")?;
-    assert_yq_getter("- # c\n- - 1\n", ".[1][0] | head_comment", "c\n")?;
-
     let input = "- k:\n  - # c\n  - # d\n- 2\n";
     assert_yq_getter(input, ".[0].k | key | foot_comment", "d\n")?;
     assert_yq_getter(input, ".[1] | head_comment", "c\n")?;
