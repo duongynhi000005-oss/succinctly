@@ -8139,12 +8139,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     }
 
     /// Whether the nearest earlier line that is neither blank nor a comment leaves its value for
-    /// the next line: a key written up to its colon (`a:`, `- k:`) or a bare `-`, a trailing
-    /// comment aside. The only place a block scalar header on a line of its own can belong
-    /// (#4259); a header anywhere else is not a value slot and keeps the path it always took.
+    /// the next line: a key written up to its colon (`a:`, `- k:`), with node properties after
+    /// the colon or not (`a: &x`, #4947), or a bare `-`, a trailing comment aside. The only place
+    /// a block scalar header on a line of its own can belong (#4259); a header anywhere else is
+    /// not a value slot and keeps the path it always took.
     fn previous_content_line_defers_its_value(&self) -> bool {
         self.previous_content_line().is_some_and(|(_, rest)| {
             line_ends_with_colon_before_comment(rest)
+                || line_ends_with_colon_after_properties(rest)
                 || (rest[0] == b'-' && line_is_bare_dash_before_comment(rest))
         })
     }
@@ -10482,6 +10484,29 @@ mod tests {
                 crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),
                 "{doc:?}"
             );
+        }
+    }
+
+    /// #4947: a block scalar header on a line of its own below a key that carries node
+    /// properties after its colon is that key's value, so the text under it is not a key and the
+    /// next sibling stays one.
+    #[test]
+    fn own_line_block_scalar_header_below_a_key_with_properties_4947() {
+        for (doc, json) in [
+            ("a: &x\n  |\n  text\nb: 1\n", r#"{"a":"text\n","b":1}"#),
+            ("a: !!str\n  >\n  text\nb: 1\n", r#"{"a":"text\n","b":1}"#),
+            (
+                "a: !!str &x\n  |-\n  text\n  more\nb: 1\n",
+                r#"{"a":"text\nmore","b":1}"#,
+            ),
+            (
+                "k:\n  a: &x\n    |\n    text\n  b: 1\nc: 2\n",
+                r#"{"k":{"a":"text\n","b":1},"c":2}"#,
+            ),
+        ] {
+            let docs = documents(doc.as_bytes());
+            assert_eq!(docs.len(), 1, "{doc:?}");
+            assert_eq!(docs[0].replace(' ', ""), json, "{doc:?}");
         }
     }
 }
