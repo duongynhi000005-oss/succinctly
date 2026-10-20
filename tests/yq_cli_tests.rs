@@ -59149,16 +59149,22 @@ mod issue_2091_def_and_binder_wrapped_writes {
     #[test]
     fn test_yaml_def_body_binds_at_definition_site_2091() -> Result<()> {
         let doc = "a: &x 1\nb: *x\nc: 2\n";
-        let (wrapped, code) = run_yq_stdin(
-            r#"def f: {"a": .c, "b": .a, "c": .b}; def g: f; def f: .a = 99; g"#,
-            doc,
-            &[],
-        )?;
+        let wrapped_filter = r#"def f: {"a": .c, "b": .a, "c": .b}; def g: f; def f: .a = 99; g"#;
+        let direct_filter = r#"{"a": .c, "b": .a, "c": .b}"#;
+        // The values are what this pins: `b` is 1, not clobbered by the aliased write.
+        let json = ["-o", "json", "-I", "0"];
+        let (wrapped, code) = run_yq_stdin(wrapped_filter, doc, &json)?;
         assert_eq!(code, 0);
         // `g` calls the `f` visible where `g` was written -- the reshaping
         // one -- so the result is that filter's own output, unsynced.
-        let (direct, _) = run_yq_stdin(r#"{"a": .c, "b": .a, "c": .b}"#, doc, &[])?;
+        let (direct, _) = run_yq_stdin(direct_filter, doc, &json)?;
         assert_eq!(wrapped, direct);
+        assert_eq!(wrapped, "{\"a\":2,\"b\":1,\"c\":1}\n");
+        // A direct construction keeps its nodes' anchor marks, as in yq v4.53.3 (#865); one
+        // wrapped in a definition is not replayed and prints plain.
+        let (direct, _) = run_yq_stdin(direct_filter, doc, &[])?;
+        assert_eq!(direct, "a: 2\nb: &x 1\nc: *x\n");
+        let (wrapped, _) = run_yq_stdin(wrapped_filter, doc, &[])?;
         assert_eq!(wrapped, "a: 2\nb: 1\nc: 1\n");
         Ok(())
     }

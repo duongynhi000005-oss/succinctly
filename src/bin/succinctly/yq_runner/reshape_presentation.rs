@@ -8,8 +8,10 @@ use super::{
     collect_write_targets, is_closed_literal, reconcile_presentation, CommentTree, Expr, IndexMap,
     NodeMeta, OwnedValue, ResultWithComments,
 };
-use succinctly::jq::eval_generic::{AnchorMark, KeyMeta};
-use succinctly::jq::{ArithOp, Builtin, MAX_VALUE_TREE_DEPTH};
+use succinctly::jq::document::{DocumentCursor, DocumentElements, DocumentFields, DocumentValue};
+use succinctly::jq::eval_generic::{to_owned_with_comments, AnchorMark, KeyMeta};
+use succinctly::jq::YqSemantics;
+use succinctly::jq::{ArithOp, Builtin, ObjectKey, MAX_VALUE_TREE_DEPTH};
 
 /// A deliberately small allowlist: no variables, environment reads, I/O,
 /// clock/random functions, path registers, user functions or control effects.
@@ -42,12 +44,327 @@ pub(super) fn supported(expr: &Expr) -> bool {
     }
 }
 
+/// yq prints a non-empty flow mapping read into a constructed mapping as a block once it is not
+/// the first entry, and so every mapping nested in it by mappings (`{"a": .a, "c": .c}` over
+/// `c: {k: {z: 1}, w: [1]}` is `c:` / `  k:` / `    z: 1` / `  w: [1]`): a sequence keeps its own
+/// style, and what it holds. An empty `{}` stays flow (#865).
+fn unflow_mappings(value: &OwnedValue, tree: &mut CommentTree) {
+    let (OwnedValue::Object(fields), CommentTree::Object(meta, children, _)) = (value, tree) else {
+        return;
+    };
+    if meta.style == "flow" && !fields.is_empty() {
+        // The comment that trailed the closing brace has no place in a block mapping: yq drops it.
+        *meta = meta.with_style("");
+        meta.comment = None;
+    }
+    for (key, child) in children.iter_mut() {
+        if let Some(field) = fields.get(key.as_str()) {
+            unflow_mappings(field, child);
+        }
+    }
+}
+
+/// The standalone comment above a node belongs to the key that introduces it (or to the document),
+/// not to the node, so a node taken into a construction leaves it behind; its foot stays (#865).
+fn drop_head_comment(tree: &mut CommentTree) {
+    let meta = tree.meta_mut();
+    if !meta.head_comment().is_empty() {
+        *meta = meta.with_head_foot(Vec::new(), meta.foot_comment().to_vec());
+    }
+}
+
+/// The operands of `[...]`: the branches of a top-level comma, or the one expression.
+fn array_operands(inner: &Expr) -> Vec<&Expr> {
+    match inner {
+        Expr::Comma(parts) => parts.iter().collect(),
+        other => vec![other],
+    }
+}
+
 fn static_path(expr: &Expr) -> bool {
     match expr {
         Expr::Identity | Expr::Field(_) | Expr::Index { .. } => true,
         Expr::Pipe(parts) => parts.iter().all(static_path),
         Expr::Paren(inner) => static_path(inner),
         _ => false,
+    }
+}
+
+/// Whether `expr` is a construction whose every entry is a static read of the document, a literal,
+/// the length of a static read, arithmetic on such entries or a construction of those (#865). Such
+/// a construction is replayed from the nodes it names ([`trace_navigation_construction`]), not
+/// from a presentation tree of the whole document: the cost is that of the nodes it reads.
+pub(super) fn navigation_construction(expr: &Expr) -> bool {
+    fn entry(expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(inner) => entry(inner),
+            Expr::Arithmetic { left, right, .. } => entry(left) && entry(right),
+            Expr::Pipe(parts) => match parts.split_last() {
+                Some((Expr::Builtin(Builtin::Length), path)) => path.iter().all(static_path),
+                _ => static_path(expr),
+            },
+            _ => is_closed_literal(expr) || static_path(expr) || navigation_construction(expr),
+        }
+    }
+    match expr {
+        // `.c | [.]`: the construction reads the node the path lands on.
+        Expr::Pipe(parts) => match parts.split_last() {
+            Some((last, path)) => {
+                !path.is_empty() && path.iter().all(static_path) && navigation_construction(last)
+            }
+            None => false,
+        },
+        Expr::Paren(inner) => navigation_construction(inner),
+        Expr::Object(entries) => {
+            !is_closed_literal(expr)
+                && entries
+                    .iter()
+                    .all(|e| matches!(e.key, ObjectKey::Literal(_)) && entry(&e.value))
+        }
+        Expr::Array(inner) => {
+            !is_closed_literal(expr) && array_operands(inner).iter().all(|e| entry(e))
+        }
+        _ => false,
+    }
+}
+
+/// What a static read lands on: the node, or `None` for a position the document does not hold,
+/// and the key node it was reached by when the last step was a member.
+struct Landed<C> {
+    node: Option<C>,
+    key: Option<C>,
+    /// The last step was an index: the node is an element of a sequence, whose standalone comments
+    /// are its own, where a mapping member's are its key's.
+    element: bool,
+}
+
+/// Follow the static path `expr` from `from`. `None` is a path this does not read, or a step
+/// that is not a node of the shape it expects (the plain route decides those).
+fn land<C: DocumentCursor>(expr: &Expr, from: Landed<C>) -> Option<Landed<C>> {
+    match expr {
+        Expr::Identity => Some(from),
+        Expr::Paren(inner) => land(inner, from),
+        Expr::Pipe(parts) => parts.iter().try_fold(from, |at, part| land(part, at)),
+        Expr::Field(name) => {
+            let Some(node) = from.node else {
+                return Some(Landed {
+                    node: None,
+                    key: None,
+                    element: false,
+                });
+            };
+            let found = node.value().as_object()?.find_cursor(name).ok()?;
+            let key = found.as_ref().and_then(DocumentCursor::prev_sibling);
+            Some(Landed {
+                node: found,
+                key,
+                element: false,
+            })
+        }
+        Expr::Index { idx, .. } => {
+            let Some(node) = from.node else {
+                return Some(Landed {
+                    node: None,
+                    key: None,
+                    element: false,
+                });
+            };
+            let elements = node.value().as_array()?;
+            let len = i64::try_from(elements.len()).ok()?;
+            let at = if *idx < 0 { len + *idx } else { *idx };
+            let found = usize::try_from(at)
+                .ok()
+                .filter(|i| i64::try_from(*i).is_ok_and(|i| i < len))
+                .and_then(|i| elements.get_cursor(i));
+            Some(Landed {
+                node: found,
+                key: None,
+                element: true,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The value and presentation of one landed read: an absent position is `null` with none, as yq
+/// reads it.
+fn landed_pair<C: DocumentCursor>(at: &Landed<C>) -> Option<ResultWithComments> {
+    let Some(node) = &at.node else {
+        return Some((OwnedValue::Null, CommentTree::empty()));
+    };
+    let (value, mut tree) =
+        to_owned_with_comments::<_, YqSemantics>(&node.value(), Some(node)).ok()?;
+    // A mapping member's standalone comments live on its key; the walk of a whole document merges
+    // them into the value's, and so does this. A scalar leaves its key's foot behind with the key
+    // (a container's closes inside it), and the comment above any node but a sequence element
+    // goes with the key or the document (#865).
+    if let Some(key) = &at.key {
+        if key.document_has_standalone_comments() {
+            let (head, foot) = (key.head_comment_raw(), key.foot_comment_raw());
+            if !head.is_empty() || !foot.is_empty() {
+                let foot = if matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_)) {
+                    foot
+                } else {
+                    Vec::new()
+                };
+                *tree.meta_mut() = tree.meta().with_head_foot(head, foot);
+            }
+        }
+    }
+    if !at.element {
+        drop_head_comment(&mut tree);
+    } else if node.document_has_standalone_comments() {
+        // A sequence element keeps the comment above it, which the walk of a lone scalar clears.
+        let head = node.head_comment_raw();
+        if !head.is_empty() {
+            *tree.meta_mut() = tree
+                .meta()
+                .with_head_foot(head, tree.meta().foot_comment().to_vec());
+        }
+    }
+    Some((value, tree))
+}
+
+/// Replay a construction for which [`navigation_construction`] holds, from the nodes it reads
+/// (#865): the value and the presentation of each entry, as [`trace`] builds them from a tree of
+/// the whole document, at the cost of the nodes the construction names.
+pub(super) fn trace_navigation_construction<C: DocumentCursor>(
+    expr: &Expr,
+    root: &C,
+) -> Option<ResultWithComments> {
+    match expr {
+        Expr::Paren(inner) => trace_navigation_construction(inner, root),
+        Expr::Pipe(parts) => {
+            let (last, path) = parts.split_last()?;
+            let at = land(
+                &Expr::Pipe(path.to_vec().into()),
+                Landed {
+                    node: Some(*root),
+                    key: None,
+                    element: false,
+                },
+            )?;
+            // An absent node is for the plain route to answer.
+            construct(last, &at.node?, 0)
+        }
+        _ => construct(expr, root, 0),
+    }
+}
+
+/// One entry of a navigation construction, with the presentation it brings.
+fn entry_pair<C: DocumentCursor>(e: &Expr, root: &C, depth: usize) -> Option<ResultWithComments> {
+    if depth >= MAX_VALUE_TREE_DEPTH {
+        return None;
+    }
+    let start = || Landed {
+        node: Some(*root),
+        key: None,
+        element: false,
+    };
+    match e {
+        Expr::Paren(inner) => entry_pair(inner, root, depth + 1),
+        Expr::Arithmetic {
+            op, left, right, ..
+        } => {
+            let l = entry_pair(left, root, depth + 1)?;
+            let r = entry_pair(right, root, depth + 1)?;
+            let sum = Expr::arithmetic(
+                *op,
+                Expr::tracked_value(l.0.clone()),
+                Expr::tracked_value(r.0.clone()),
+            );
+            let result = evaluated(&sum, &OwnedValue::Null)?;
+            let tree = if matches!(op, ArithOp::Add | ArithOp::Mul(_)) && l.0 == OwnedValue::Null {
+                // `null + x` is `x`, node and all.
+                r.1.clone()
+            } else if matches!(op, ArithOp::Add | ArithOp::Mul(_)) {
+                merge_tree(&l, &r, &result, matches!(op, ArithOp::Mul(_)), depth + 1)?
+            } else if matches!(result, OwnedValue::Array(_) | OwnedValue::Object(_)) {
+                CommentTree::empty()
+            } else {
+                // A number computed from a node keeps the node's comment and style.
+                CommentTree::Leaf(l.1.meta().clone())
+            };
+            Some((result, tree))
+        }
+        Expr::Pipe(parts) if matches!(parts.last(), Some(Expr::Builtin(Builtin::Length))) => {
+            let path = Expr::Pipe(parts[..parts.len() - 1].to_vec().into());
+            let at = land(&path, start())?;
+            let length = match &at.node {
+                None => 0,
+                Some(node) => node_length(node)?,
+            };
+            Some((OwnedValue::Int(length), CommentTree::empty()))
+        }
+        _ if is_closed_literal(e) => Some((evaluated(e, &OwnedValue::Null)?, CommentTree::empty())),
+        _ if static_path(e) => landed_pair(&land(e, start())?),
+        _ => construct(e, root, depth + 1),
+    }
+}
+
+/// `length` of a node, counted from the node without building it; `None` for a kind this does not
+/// count (the plain route decides those).
+fn node_length<C: DocumentCursor>(node: &C) -> Option<i64> {
+    let value = node.value();
+    if let Some(elements) = value.as_array() {
+        return i64::try_from(elements.len()).ok();
+    }
+    // The entries the mapping spells, a merge key's included, as yq's `length` counts them.
+    if let Some(fields) = value.as_object_listed() {
+        return i64::try_from(fields.len()).ok();
+    }
+    let text = value.as_str()?;
+    i64::try_from(text.chars().count()).ok()
+}
+
+fn construct<C: DocumentCursor>(expr: &Expr, root: &C, depth: usize) -> Option<ResultWithComments> {
+    if depth >= MAX_VALUE_TREE_DEPTH {
+        return None;
+    }
+    let entry = |e: &Expr| entry_pair(e, root, depth + 1);
+    match expr {
+        Expr::Object(entries) => {
+            let mut values = IndexMap::new();
+            let mut trees = IndexMap::new();
+            for (position, e) in entries.iter().enumerate() {
+                let ObjectKey::Literal(key) = &e.key else {
+                    return None;
+                };
+                if values.contains_key(key.as_str()) {
+                    return None;
+                }
+                let (v, mut t) = entry(&e.value)?;
+                // What stood above a sequence element is printed below the entry it lands in.
+                if !t.meta().head_comment().is_empty() {
+                    let mut foot = t.meta().head_comment().to_vec();
+                    foot.extend(t.meta().foot_comment().iter().cloned());
+                    *t.meta_mut() = t.meta().with_head_foot(Vec::new(), foot);
+                }
+                if position > 0 {
+                    unflow_mappings(&v, &mut t);
+                }
+                values.insert(key.clone(), v);
+                trees.insert(key.clone(), t);
+            }
+            Some((
+                OwnedValue::Object(values.into()),
+                CommentTree::Object(NodeMeta::empty(), trees, IndexMap::new()),
+            ))
+        }
+        Expr::Array(inner) => {
+            let mut values = Vec::new();
+            let mut trees = Vec::new();
+            for operand in array_operands(inner) {
+                let (v, t) = entry(operand)?;
+                values.push(v);
+                trees.push(t);
+            }
+            Some((
+                OwnedValue::Array(values.into_iter().collect()),
+                CommentTree::Array(NodeMeta::empty(), trees),
+            ))
+        }
+        _ => None,
     }
 }
 
