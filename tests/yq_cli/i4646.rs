@@ -30,6 +30,8 @@ fn run(filter: &str, files: &[Source]) -> Result<String> {
 const SEQ: &str = "a:\n  - 1\n  - b: 2\n";
 const MERGED: &str = "x: &k\n  p: 1\n  q: [3, 4]\ny:\n  <<: *k\n  r: 5\n---\nz: 1\n";
 const KEYS: &str = "k: 1\nl:\n  m: [1, 2]\n";
+const MERGE_ONE: &str = "x: &k\n  p: 1\n  q: [3, 4]\ny:\n  <<: *k\n  r: 5\n";
+const DUPLICATE: &str = "a: 1\nb: 2\na: 3\nc:\n  - x\n  - y\n  - z\n";
 
 /// (filter, files, expected stdout).
 const ROWS: &[(&str, &[Source], &str)] = &[
@@ -70,6 +72,20 @@ const ROWS: &[(&str, &[Source], &str)] = &[
         &[("f.yaml", KEYS), ("t.yaml", SEQ)],
         "[1,1,1,1]\n",
     ),
+    // The same mapping and sequence read again and out of order: the second lookup in a mapping
+    // is indexed (the last of equal keys wins), one with a merge key keeps the walk, and a
+    // sequence resumes after the element read last only when this is the next one.
+    (
+        "[(.y.p|line), (.y.r|line), (.y.p|line), (.y.q[1]|line), (.y.q[0]|line)]",
+        &[("m.yaml", MERGE_ONE)],
+        "[2,6,2,3,3]\n",
+    ),
+    (
+        "[(.a|line), (.b|line), (.a|line), (.c[2]|line), (.c[1]|line), (.c[2]|line)]",
+        &[("d.yaml", DUPLICATE)],
+        "[3,2,3,7,6,7]\n",
+    ),
+    ("[.c[] | line]", &[("d.yaml", DUPLICATE)], "[5,6,7]\n"),
     // A mapping key has a position of its own.
     (".l | key | [line,column]", &[("f.yaml", KEYS)], "[2,1]\n"),
     (".l | keys | .[] | [line,column]", &[("f.yaml", KEYS)], "[3,3]\n"),
@@ -112,5 +128,33 @@ fn test_eval_all_position_of_json_input_stays_zero_4646() -> Result<()> {
         &[("t.json", "{\"a\":[1,{\"b\":2}]}\n")],
     )?;
     assert_eq!(out, "[0,0]\n");
+    Ok(())
+}
+
+/// Reading the position of every element of a wide sequence and every member of a wide mapping is
+/// one step per node, not a walk of the container per node. At 4000 entries the walk took 8 s on a
+/// debug build, the steps 0.06 s; the bound leaves two orders of magnitude of slack.
+#[test]
+fn test_eval_all_position_of_every_node_of_a_wide_container_is_not_quadratic_4646() -> Result<()> {
+    let n: usize = 4000;
+    let dir = TempDir::new()?;
+    let sequence: String = (1..=n).map(|i| format!("- k{i}: {i}\n")).collect();
+    let mapping: String = (1..=n).map(|i| format!("k{i}: {i}\n")).collect();
+    for (name, text) in [("s.yaml", sequence), ("m.yaml", mapping)] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text)?;
+        let started = std::time::Instant::now();
+        let (stdout, stderr, code) = run_yq_files("[.[] | line] | .[-1]", &[path.as_path()], ARGV)?;
+        assert_eq!(
+            (stdout.trim(), code),
+            (n.to_string().as_str(), 0),
+            "{name}: {stderr}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "{name} took {:?}",
+            started.elapsed()
+        );
+    }
     Ok(())
 }

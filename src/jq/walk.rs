@@ -1456,6 +1456,16 @@ pub fn uses_cursor_metadata_builtins(expr: &Expr) -> bool {
     contains_builtin(expr, is_cursor_metadata_builtin)
 }
 
+/// Whether evaluating `expr` could read `line` or `column` anywhere in its tree (#4646).
+///
+/// Same expanded-program requirement as [`uses_cursor_metadata_builtins`], of which this is the
+/// subset the `--eval-all` source-position resolver answers.
+pub fn uses_position_builtins(expr: &Expr) -> bool {
+    contains_builtin(expr, |builtin| {
+        matches!(builtin, Builtin::Line | Builtin::Column)
+    })
+}
+
 /// Whether `builtin` reads a position, an anchor, a style or a comment off the
 /// cursor it is evaluated at -- the set [`uses_cursor_metadata_builtins`] looks
 /// for, and the set the generic evaluator hides a registered DOM document's

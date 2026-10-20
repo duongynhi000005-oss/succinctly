@@ -7604,9 +7604,7 @@ pub(crate) fn filename_of_file(file: i64) -> String {
         .unwrap_or_default()
 }
 
-/// One step of the path from a document's root to a node, as the position
-/// resolver of [`enter_source_positions_scope`](super::enter_source_positions_scope) is handed it
-/// (#4646).
+/// One step of the path from a document's root to a node (#4646).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourcePathStep {
     /// A mapping member, by the text of its key (`1` for the key `1`).
@@ -7615,54 +7613,109 @@ pub enum SourcePathStep {
     Element(usize),
 }
 
-/// Answers `(line, column)` of the node at `path` in document `document` of file `file`, as the
-/// *source text* has it, or `None` where the source has no such node (#4646).
+/// One link of a [`SourcePath`]: the step into a node, and the path to the node it was taken from.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourcePathLink {
+    /// The path to the node's parent.
+    pub parent: SourcePath,
+    /// How the node sits in its parent.
+    pub step: SourcePathStep,
+}
+
+/// A node's path from its document's root (#4646).
 ///
-/// `at_key` is set when the node is a mapping key rather than the value beside it: a key has a
-/// position of its own (`.l | key | line`).
-pub type SourcePositionFn = dyn Fn(usize, usize, &[SourcePathStep], bool) -> Option<(usize, usize)>;
+/// `None` is the root itself, otherwise the last step and the path before it. Nodes of one
+/// document share their prefixes, and a link is the same allocation for as long as the scope that
+/// made it lives, so its address names the node.
+pub type SourcePath = Option<Rc<SourcePathLink>>;
+
+/// Answers `(line, column)` of the node at `path` in document `document` of file `file` (#4646).
+///
+/// The position is the *source text's* (of the node's key, when `at_key` is set: a key has a
+/// position of its own), or `None` where the source has no such node.
+pub type SourcePositionFn = dyn Fn(usize, usize, &SourcePath, bool) -> Option<(usize, usize)>;
 
 /// The source-position resolver `--eval-all` installs, for the current thread (#4646).
 ///
-/// `--eval-all` evaluates each document through a reindexed copy (the owned-value bridge), so a
-/// cursor's own `line`/`column` index the regenerated bridge text. The CLI keeps the source it
-/// read each document from, and `line`/`column` ask it instead, by the node's path -- the same
-/// route a node of the streaming evaluator takes to the same source position. `std` only, like
-/// its siblings: without a thread-local nothing is installed and the bridge answers as before.
+/// `--eval-all` evaluates each document through a reindexed copy, so a cursor's own `line`/
+/// `column` index the regenerated bridge text. The CLI keeps the source it read each document
+/// from, and `line`/`column` ask it instead, by the node's path. The scope also holds the
+/// documents the bridge made (by the token of each) and the path of every node asked about, so a
+/// node's path is the path of its parent and one step, not a climb from the root each time. `std`
+/// only, like its siblings: without a thread-local nothing is installed and the bridge answers as
+/// before.
 #[cfg(feature = "std")]
 mod source_positions {
-    use super::SourcePositionFn;
+    use super::{SourcePath, SourcePositionFn};
     use alloc::rc::Rc;
     use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct State {
+        resolver: Option<Rc<SourcePositionFn>>,
+        /// Document token -> (file, document within it).
+        documents: HashMap<usize, (usize, usize)>,
+        /// (document token, node id) -> the node's path, and whether the node is a key.
+        paths: HashMap<(usize, usize), (SourcePath, bool)>,
+    }
 
     thread_local! {
-        static CURRENT: RefCell<Option<Rc<SourcePositionFn>>> = const { RefCell::new(None) };
+        static CURRENT: RefCell<State> = RefCell::new(State::default());
     }
 
-    pub(crate) fn current() -> Option<Rc<SourcePositionFn>> {
-        CURRENT.with(|c| c.borrow().clone())
+    pub(crate) fn resolver() -> Option<Rc<SourcePositionFn>> {
+        CURRENT.with(|c| c.borrow().resolver.clone())
     }
 
-    /// Restores the previous resolver when dropped.
-    pub struct Guard(Option<Rc<SourcePositionFn>>);
+    /// Restores what was installed before when dropped.
+    pub struct Guard(State);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            CURRENT.with(|c| *c.borrow_mut() = self.0.take());
+            CURRENT.with(|c| *c.borrow_mut() = core::mem::take(&mut self.0));
         }
     }
 
     pub(crate) fn enter(resolver: Option<Rc<SourcePositionFn>>) -> Guard {
-        Guard(CURRENT.with(|c| c.replace(resolver)))
+        let fresh = State {
+            resolver,
+            ..State::default()
+        };
+        Guard(CURRENT.with(|c| core::mem::replace(&mut *c.borrow_mut(), fresh)))
+    }
+
+    pub(crate) fn installed() -> bool {
+        CURRENT.with(|c| c.borrow().resolver.is_some())
+    }
+
+    pub(crate) fn register_document(token: usize, file: usize, document: usize) {
+        CURRENT.with(|c| {
+            c.borrow_mut().documents.insert(token, (file, document));
+        });
+    }
+
+    pub(crate) fn document_of(token: usize) -> Option<(usize, usize)> {
+        CURRENT.with(|c| c.borrow().documents.get(&token).copied())
+    }
+
+    pub(crate) fn known_path(token: usize, node: usize) -> Option<(SourcePath, bool)> {
+        CURRENT.with(|c| c.borrow().paths.get(&(token, node)).cloned())
+    }
+
+    pub(crate) fn remember_path(token: usize, node: usize, path: SourcePath, at_key: bool) {
+        CURRENT.with(|c| {
+            c.borrow_mut().paths.insert((token, node), (path, at_key));
+        });
     }
 }
 
 #[cfg(not(feature = "std"))]
 mod source_positions {
-    use super::SourcePositionFn;
+    use super::{SourcePath, SourcePositionFn};
     use alloc::rc::Rc;
 
-    pub(crate) fn current() -> Option<Rc<SourcePositionFn>> {
+    pub(crate) fn resolver() -> Option<Rc<SourcePositionFn>> {
         None
     }
 
@@ -7671,6 +7724,22 @@ mod source_positions {
     pub(crate) fn enter(_resolver: Option<Rc<SourcePositionFn>>) -> Guard {
         Guard
     }
+
+    pub(crate) fn installed() -> bool {
+        false
+    }
+
+    pub(crate) fn register_document(_token: usize, _file: usize, _document: usize) {}
+
+    pub(crate) fn document_of(_token: usize) -> Option<(usize, usize)> {
+        None
+    }
+
+    pub(crate) fn known_path(_token: usize, _node: usize) -> Option<(SourcePath, bool)> {
+        None
+    }
+
+    pub(crate) fn remember_path(_token: usize, _node: usize, _path: SourcePath, _at_key: bool) {}
 }
 
 /// Install `resolver` as the source-position resolver until the returned guard is dropped
@@ -7682,80 +7751,97 @@ pub(crate) fn enter_source_positions(resolver: Rc<SourcePositionFn>) -> SourcePo
 /// The RAII guard [`enter_source_positions`] returns.
 pub(crate) type SourcePositionsGuard = source_positions::Guard;
 
+/// Name the reindexed document `token` as document `document` of file `file`, so a cursor into it
+/// asks the resolver about that source (#4646). A no-op where no resolver is installed.
+pub(crate) fn register_source_document(token: usize, file: usize, document: usize) {
+    if source_positions::installed() {
+        source_positions::register_document(token, file, document);
+    }
+}
+
+/// The path from its document's root to the node `cursor` stands on, and whether that node is a
+/// mapping key; `None` for a node the resolver cannot be asked about (#4646).
+///
+/// Asking about one node records the path of every child of its parent at once, so the next
+/// node of the same parent (the next element, the next member) is a lookup, and a document read
+/// node by node costs a pass over each parent, not a scan of its members per node.
+fn source_path_of<S: EvalSemantics, C: DocumentCursor>(cursor: &C) -> Option<(SourcePath, bool)> {
+    let token = cursor.document_token();
+    if let Some(known) = source_positions::known_path(token, cursor.node_id()) {
+        return Some(known);
+    }
+    let Some(parent) = cursor.document_parent() else {
+        return Some((None, false));
+    };
+    let (parent_path, _) = source_path_of::<S, C>(&parent)?;
+    remember_children_paths::<S, C>(&parent, &parent_path, token);
+    source_positions::known_path(token, cursor.node_id())
+}
+
+/// Record the path of each child of `parent` (the node whose own path is `parent_path`): a
+/// member's key node and its value share one link, an element has its own. A member whose key
+/// is not a string or an integer is left out, and so is unanswerable.
+fn remember_children_paths<S: EvalSemantics, C: DocumentCursor>(
+    parent: &C,
+    parent_path: &SourcePath,
+    token: usize,
+) {
+    let value = parent.value();
+    if let Some(fields) = value.as_object() {
+        let retype = S::TAG == EvalTag::Yq;
+        let mut rest = fields;
+        while let Some((field, next)) = rest.uncons() {
+            rest = next;
+            let Some(CursorSlot::Value { key, key_cursor }) = member_slot(field.key_cursor, true)
+            else {
+                continue;
+            };
+            let Some(step) = member_step(retype_member_key(retype, key, &key_cursor)) else {
+                continue;
+            };
+            let link = Some(Rc::new(SourcePathLink {
+                parent: parent_path.clone(),
+                step,
+            }));
+            source_positions::remember_path(token, field.key_cursor.node_id(), link.clone(), true);
+            source_positions::remember_path(token, field.value_cursor.node_id(), link, false);
+        }
+    } else if let Some(elements) = value.as_array() {
+        let mut rest = elements;
+        let mut index = 0;
+        while let Some((element, next)) = rest.uncons_cursor() {
+            rest = next;
+            let link = Some(Rc::new(SourcePathLink {
+                parent: parent_path.clone(),
+                step: SourcePathStep::Element(index),
+            }));
+            source_positions::remember_path(token, element.node_id(), link, false);
+            index += 1;
+        }
+    }
+}
+
+/// The path step for a member whose key is `component` (a string, or an integer in yq mode).
+fn member_step(component: OwnedValue) -> Option<SourcePathStep> {
+    match component {
+        OwnedValue::String(key) => Some(SourcePathStep::Member(key.to_string())),
+        OwnedValue::Int(key) => Some(SourcePathStep::Member(key.to_string())),
+        _ => None,
+    }
+}
+
 /// `(line, column)` of `cursor`'s node in the source text it was read from, where a resolver is
-/// installed and the ambient origin names a document (#4646). `Some((0, 0))` when the resolver
-/// cannot find the node; `None` when there is nothing to ask, and the cursor answers for itself.
+/// installed and `cursor` stands in a document `--eval-all` registered (#4646). `Some((0, 0))`
+/// when the resolver cannot find the node; `None` when there is nothing to ask, and the cursor
+/// answers for itself.
 fn ambient_source_position<S: EvalSemantics, C: DocumentCursor>(
     cursor: &C,
 ) -> Option<(usize, usize)> {
-    let origin = node_origin::current()?;
-    let document = origin.document?;
-    let resolver = source_positions::current()?;
-    let found = (|| {
-        let (path, _, at_key, members) =
-            cursor_path_ancestors_members_for::<S, C>(cursor, true).ok()?;
-        let steps = path
-            .iter()
-            .zip(&members)
-            .map(|(component, member)| match (member, component) {
-                (true, OwnedValue::String(key)) => Some(SourcePathStep::Member(key.to_string())),
-                (true, OwnedValue::Int(key)) => Some(SourcePathStep::Member(key.to_string())),
-                (false, OwnedValue::Int(index)) => {
-                    usize::try_from(*index).ok().map(SourcePathStep::Element)
-                }
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        resolver(origin.file, document, &steps, at_key)
-    })();
+    let resolver = source_positions::resolver()?;
+    let (file, document) = source_positions::document_of(cursor.document_token())?;
+    let found = source_path_of::<S, C>(cursor)
+        .and_then(|(path, at_key)| resolver(file, document, &path, at_key));
     Some(found.unwrap_or((0, 0)))
-}
-
-/// `(line, column)` of the node `steps` leads to from `root` (#4646).
-///
-/// Answered by the ordinary yq evaluator over `root`'s own document, so a merge key, an alias and
-/// an integer key resolve as they do on the streaming route.
-pub fn source_position_at<C: DocumentCursor>(
-    root: C,
-    steps: &[SourcePathStep],
-    at_key: bool,
-) -> Option<(usize, usize)> {
-    let mut stages: Vec<Expr> = steps
-        .iter()
-        .map(|step| match step {
-            SourcePathStep::Member(key) => Some(Expr::Field(key.clone())),
-            SourcePathStep::Element(index) => Some(Expr::Index {
-                idx: i64::try_from(*index).ok()?,
-                key: None,
-            }),
-        })
-        .collect::<Option<_>>()?;
-    if at_key {
-        stages.push(Expr::Builtin(Builtin::Key));
-    }
-    stages.push(Expr::Array(Box::new(Expr::Comma(vec![
-        Expr::Builtin(Builtin::Line),
-        Expr::Builtin(Builtin::Column),
-    ]))));
-    let expr = Expr::Pipe(stages.into());
-    // The source is a document of its own: its `line`/`column` are its cursor's, not another
-    // question to the resolver this call is answering.
-    let _own_positions = source_positions::enter(None);
-    let owned = match eval_with_cursor_using::<YqSemantics, C>(&expr, root)
-        .materialize_lazy::<YqSemantics>()
-    {
-        GenericResult::Owned(v) => v,
-        _ => return None,
-    };
-    match owned {
-        OwnedValue::Array(pair) => match (pair.first()?, pair.get(1)?) {
-            (OwnedValue::Int(line), OwnedValue::Int(column)) => {
-                Some((usize::try_from(*line).ok()?, usize::try_from(*column).ok()?))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// The reindexed documents `succinctly yq`'s DOM route is evaluating, for the
@@ -42558,79 +42644,69 @@ mod tests {
         assert_eq!(owned, OwnedValue::Int(1));
     }
 
-    /// #4646: the position of a node found again by its path in the source document.
+    /// #4646: `line`/`column` ask the installed resolver for the node's path in the document its
+    /// cursor stands in, and fall back to `(0, 0)` where it has no answer; a cursor of a document
+    /// nobody registered answers for itself.
     #[test]
-    fn source_position_at_walks_a_path_to_the_source_node_4646() {
-        use crate::yaml::YamlIndex;
-        use alloc::string::ToString;
-
-        let yaml = b"a:\n  - 1\n  - b: 2\nc: 3\n";
-        let index = YamlIndex::build(yaml).unwrap();
-        let root = index.root(yaml).first_child().expect("one document");
-        let member = |key: &str| SourcePathStep::Member(key.to_string());
-        let steps = [member("a"), SourcePathStep::Element(1), member("b")];
-        assert_eq!(source_position_at(root, &steps, false), Some((3, 8)));
-        assert_eq!(source_position_at(root, &[], false), Some((1, 1)));
-        // A key has a position of its own, apart from the value beside it.
-        assert_eq!(
-            source_position_at(root, &[member("c")], false),
-            Some((4, 4))
-        );
-        assert_eq!(source_position_at(root, &[member("c")], true), Some((4, 1)));
-        // No such node: the evaluator reads an absent member as `null`, which has no position.
-        assert_eq!(
-            source_position_at(root, &[member("zz")], false),
-            Some((0, 0))
-        );
-    }
-
-    /// #4646: `line`/`column` ask the installed resolver for the node's path, and fall back to
-    /// `(0, 0)` where it has no answer; with no resolver the cursor answers for itself.
-    #[test]
-    #[cfg(feature = "std")] // the ambient origin the resolver is asked under needs a thread-local
+    #[cfg(feature = "std")] // the resolver and the document table live in a thread-local
     fn line_and_column_ask_the_installed_source_resolver_4646() {
         use crate::json::JsonIndex;
         use alloc::string::ToString;
         use core::cell::RefCell;
 
-        let json = br#"{"a":[1,{"b":2}]}"#;
+        let json = br#"{"a":[1,{"b":2}],"c":{"d":3}}"#;
         let index = JsonIndex::build(json);
         let root = index.root(json);
-        let expr = crate::jq::parse(".a[1].b | [line, column]").unwrap();
-        let run = || {
+        let line_column = |filter: &str| {
+            let expr = crate::jq::parse(filter).unwrap();
             let result = eval_with_cursor_using::<YqSemantics, _>(&expr, root);
             result.into_owned::<YqSemantics>().unwrap().unwrap()
         };
         let pair = |line: i64, column: i64| {
             OwnedValue::Array(vec![OwnedValue::Int(line), OwnedValue::Int(column)].into())
         };
+        let steps_of = |path: &SourcePath| {
+            let mut steps = Vec::new();
+            let mut link = path.clone();
+            while let Some(l) = link {
+                steps.push(l.step.clone());
+                link = l.parent.clone();
+            }
+            steps.reverse();
+            steps
+        };
 
         type Asked = (usize, usize, Vec<SourcePathStep>, bool);
         let asked: Rc<RefCell<Vec<Asked>>> = Rc::new(RefCell::new(Vec::new()));
-        let origin = NodeOrigin {
-            file: 3,
-            document: Some(2),
-            json_sourced: false,
-        };
         let log = Rc::clone(&asked);
-        let _positions = enter_source_positions(Rc::new(move |file, doc, steps, at_key| {
-            log.borrow_mut().push((file, doc, steps.to_vec(), at_key));
-            Some((7, 9))
+        let answer = Rc::new(RefCell::new(Some((7, 9))));
+        let reply = Rc::clone(&answer);
+        let _positions = enter_source_positions(Rc::new(move |file, doc, path, at_key| {
+            log.borrow_mut().push((file, doc, steps_of(path), at_key));
+            *reply.borrow()
         }));
-        assert_eq!(with_node_origin(origin, run), pair(7, 9));
+
+        // Not registered: the cursor answers for itself and the resolver is never asked.
+        assert_ne!(line_column(".a[1].b | [line, column]"), pair(7, 9));
+        assert!(asked.borrow().is_empty());
+
+        register_source_document(root.document_token(), 3, 2);
         let member = |key: &str| SourcePathStep::Member(key.to_string());
+        assert_eq!(line_column(".a[1].b | [line, column]"), pair(7, 9));
         let steps = vec![member("a"), SourcePathStep::Element(1), member("b")];
         assert_eq!(asked.borrow().first(), Some(&(3, 2, steps, false)));
+        // The root has an empty path; a key is asked about as a key, under its member's path.
+        assert_eq!(line_column("[line, column]"), pair(7, 9));
+        assert_eq!(asked.borrow().last(), Some(&(3, 2, Vec::new(), false)));
+        assert_eq!(line_column(".c | key | [line, column]"), pair(7, 9));
+        assert_eq!(
+            asked.borrow().last(),
+            Some(&(3, 2, vec![member("c")], true))
+        );
 
         // A resolver with no answer: the node has no counterpart in the source.
-        let _none = enter_source_positions(Rc::new(|_, _, _, _| None));
-        assert_eq!(with_node_origin(origin, run), pair(0, 0));
-        // No document number in the origin: nothing to ask, the cursor answers.
-        let own = NodeOrigin {
-            document: None,
-            ..origin
-        };
-        assert_ne!(with_node_origin(own, run), pair(0, 0));
+        *answer.borrow_mut() = None;
+        assert_eq!(line_column(".c.d | [line, column]"), pair(0, 0));
     }
 
     #[test]
