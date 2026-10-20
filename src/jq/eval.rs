@@ -85321,8 +85321,8 @@ fn builtin_strptime<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             };
 
             match parse_strptime(&input, &fmt) {
-                Ok(t) => {
-                    let result = vec![
+                Ok((t, remainder)) => {
+                    let mut result = vec![
                         OwnedValue::Int(t.year),
                         OwnedValue::Int(t.month - 1), // 0-indexed
                         OwnedValue::Int(t.day),
@@ -85332,6 +85332,9 @@ fn builtin_strptime<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                         OwnedValue::Int(t.weekday),
                         OwnedValue::Int(t.yearday),
                     ];
+                    if !remainder.is_empty() {
+                        result.push(OwnedValue::String(remainder.into()));
+                    }
                     QueryResult::Owned(OwnedValue::array_from(result))
                 }
                 Err(_) if optional => QueryResult::None,
@@ -85355,7 +85358,7 @@ struct BrokenDownTime {
 
 /// Parse a time string according to strptime format specifiers
 #[allow(clippy::type_complexity)] // STYLE-0004: return mirrors strptime's broken-down-time field set
-fn parse_strptime(input: &str, fmt: &str) -> Result<BrokenDownTime, String> {
+fn parse_strptime(input: &str, fmt: &str) -> Result<(BrokenDownTime, String), String> {
     let mut year: i64 = 1970;
     let mut month: i64 = 1;
     let mut day: i64 = 1;
@@ -85613,6 +85616,18 @@ fn parse_strptime(input: &str, fmt: &str) -> Result<BrokenDownTime, String> {
         }
     }
 
+    // #4965: jq fails unless strptime consumed the input up to its end or up to a white-space
+    // character (`end == NULL || (*end != '\0' && !isspace(*end))`), so text left after the format
+    // (`"2020-01-01x" | strptime("%Y-%m-%d")`) is a mismatch. What is left after white space is
+    // appended to the result as a string (`"2020-01-01 x"` gives a ninth element `" x"`).
+    if input_iter
+        .peek()
+        .is_some_and(|c| !matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
+    {
+        return Err("trailing input".to_string());
+    }
+    let remainder: String = input_iter.collect();
+
     // `%m`/`%d`/`%e`/`%D`/`%F` parse up to 2 digits with no range check of
     // their own (`parse_digits` just accepts `00`-`99`), so an out-of-range
     // month reaching `yearday_for_civil`'s `month_days[(month - 1) as
@@ -85646,16 +85661,19 @@ fn parse_strptime(input: &str, fmt: &str) -> Result<BrokenDownTime, String> {
     // broken_down_time_from_unix_secs uses (#912).
     let yearday = yearday_for_civil(year, month, day);
 
-    Ok(BrokenDownTime {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        weekday,
-        yearday,
-    })
+    Ok((
+        BrokenDownTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            weekday,
+            yearday,
+        },
+        remainder,
+    ))
 }
 
 /// Validate a just-parsed clock field (`%H`/`%I`/`%M`/`%S`, and their
