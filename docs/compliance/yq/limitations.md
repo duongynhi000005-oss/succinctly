@@ -5451,13 +5451,13 @@ of these shapes are unmodelled on both sides (yq keeps a `\n` inside the slot va
 reorders).
 
 A tag or anchor alone on the line under a bare `-` or `key:` names an empty node (#2835), and
-a comment on that bare `-` goes forward as the next node's head, as in yq. Three small
-differences remain, pinned by `test_own_line_properties_residuals_2835`: a comment after the
-properties (`a:` / `  !!str # d` / `b: 1`) stays on the item where yq moves it onto the next node
-(`b: 1 # d`); two own-line property lines in a row are accepted, the second naming the node,
-where yq rejects them with `did not find expected key`; and a block that settles past a
-sequence closing under a tagged empty item (`k:` / `  - # c` / `    # x` / `    !!str` / `z: 1`)
-prints a blank line before the next key that yq leaves out (the getters agree).
+a comment on that bare `-` goes forward as the next node's head, as in yq. So does a comment after
+the properties themselves (`a:` / `  !!str # d` / `b: 1` prints `b: 1 # d`, #4851), and a tag or an
+anchor given on one line cannot be given again on the next (`a:` / `  !!str` / `  !!int` is refused,
+as in yq; the error reads `inconsistent indentation` where yq's reads `did not find expected key`).
+One small difference remains, pinned by `test_own_line_properties_residuals_2835`: a block that
+settles past a sequence closing under a tagged empty item (`k:` / `  - # c` / `    # x` /
+`    !!str` / `z: 1`) prints a blank line before the next key that yq leaves out (the getters agree).
 
 A bare item's comment before a value that *does* follow (`- # note` / `  k: v`, #1079's other
 half) is the head comment of that value's first node in yq: the first key of a block mapping or the

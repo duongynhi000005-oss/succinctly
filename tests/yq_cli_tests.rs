@@ -23695,21 +23695,11 @@ fn test_comment_on_a_bare_dash_before_own_line_properties_goes_forward_2835() ->
     assert_yq_getter("- # c\n  !!str\n  x\n- 2\n", ".[0] | head_comment", "c\n")
 }
 
-/// Residuals next to #2835, pinned with real yq's answer in the comment so a change is
-/// deliberate: a comment after own-line properties (`!!str # d`) stays on the item here, where yq
-/// moves it onto whatever follows (`b: 1 # d`); and two own-line property lines in a row are
-/// accepted (the second names the node), where yq rejects them with `did not find expected key`.
+/// The residual left next to #2835, pinned with real yq's answer so a change is deliberate. (The
+/// comment after own-line properties and the two stacked property lines it also listed are
+/// matched since #4851: `tests/yq_cli/i4851.rs`.)
 #[test]
 fn test_own_line_properties_residuals_2835() -> Result<()> {
-    let (out, code) = run_yq_stdin(".", "a:\n  !!str # d\nb: 1\n", &[])?;
-    assert_eq!(code, 0);
-    assert_eq!(out, "a: !!str # d\nb: 1\n");
-    let (out, code) = run_yq_stdin(".", "- # c\n  !!str # d\n- 2\n", &[])?;
-    assert_eq!(code, 0);
-    assert_eq!(out, "- !!str # d\n# c\n- 2\n");
-    let (out, code) = run_yq_stdin(".", "a:\n  !!str\n  !!int\nb: 1\n", &[])?;
-    assert_eq!(code, 0);
-    assert_eq!(out, "a: !!int\nb: 1\n");
     // The foot of a sequence closing past a tagged item: the getters agree with yq, the printed
     // block gets a blank line yq leaves out.
     let input = "k:\n  - # c\n    # x\n    !!str\nz: 1\n";

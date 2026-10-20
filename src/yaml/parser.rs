@@ -8186,6 +8186,78 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         self.parse_block_scalar(parent)
     }
 
+    /// Whether the node properties that open the cursor's line, parsed from `start`, repeat a
+    /// kind (a tag, an anchor) that the lines above them already gave the same node (#4851): the
+    /// properties-only lines directly above, and the trailing properties of the dash or key line
+    /// that left its value for these lines (`k: !!map`, `- &x`). A tag and an anchor split
+    /// across lines are fine in either order. A line above that does not defer its value to the
+    /// cursor's line names a different node, and nothing is repeated.
+    fn own_line_properties_repeat_a_kind(&self, start: usize) -> bool {
+        fn kinds(properties: &[u8], seen: &mut [bool; 2]) -> [bool; 2] {
+            let mut found = [false; 2];
+            for token in properties.split(|&b| b == b' ' || b == b'\t') {
+                match token.first() {
+                    Some(b'!') => found[0] = true,
+                    Some(b'&') => found[1] = true,
+                    _ => {}
+                }
+            }
+            for (slot, hit) in seen.iter_mut().zip(found) {
+                *slot |= hit;
+            }
+            found
+        }
+        let mut above = [false; 2];
+        let current = kinds(&self.input[start..self.pos], &mut [false; 2]);
+        let mut end = start;
+        while end > 0 && self.input[end - 1] == b' ' {
+            end -= 1;
+        }
+        while end > 0 {
+            let mut prev_end = end - 1;
+            if prev_end > 0 && self.input[prev_end] == b'\n' && self.input[prev_end - 1] == b'\r' {
+                prev_end -= 1;
+            }
+            let mut prev_start = prev_end;
+            while prev_start > 0 && !is_line_break(self.input[prev_start - 1]) {
+                prev_start -= 1;
+            }
+            end = prev_start;
+            let line = &self.input[prev_start..prev_end];
+            let lead = line.iter().take_while(|&&b| b == b' ').count();
+            let rest = &line[lead..];
+            if rest.is_empty() || rest[0] == b'#' {
+                continue;
+            }
+            let code_end = (0..rest.len())
+                .find(|&i| rest[i] == b'#' && i > 0 && matches!(rest[i - 1], b' ' | b'\t'))
+                .unwrap_or(rest.len());
+            let code = &rest[..code_end];
+            if only_node_properties(rest) {
+                kinds(code, &mut above);
+                continue;
+            }
+            if Self::deferred_value_owner(lead, rest).is_none() {
+                return false;
+            }
+            // The owner's own trailing properties, up to its first token that is not one.
+            let mut trailing = code.len();
+            for token in code.split(|&b| b == b' ' || b == b'\t').rev() {
+                if token.is_empty() {
+                    trailing -= 1;
+                    continue;
+                }
+                if !matches!(token[0], b'&' | b'!') {
+                    break;
+                }
+                trailing -= token.len();
+            }
+            kinds(&code[trailing..], &mut above);
+            break;
+        }
+        (current[0] && above[0]) || (current[1] && above[1])
+    }
+
     /// Whether nothing but spaces sits between the start of the cursor's line and `start`, so
     /// the node properties parsed from `start` open the line (#4271).
     fn line_opens_with_properties_only(&self, start: usize) -> bool {
@@ -8353,9 +8425,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // order, for non-mapping-key cases
                     let properties_start = self.pos;
                     self.parse_node_properties()?;
+                    // A tag or an anchor already given to this node on an earlier line
+                    // cannot be given again (#4851): real yq stops with `did not find
+                    // expected key` / `'-' indicator` on `a:` / `  !!str` / `  !!int`.
+                    if self.type_stack.len() > 1
+                        && self.line_opens_with_properties_only(properties_start)
+                    {
+                        let repeats = self.own_line_properties_repeat_a_kind(properties_start);
+                        self.require_consistent_indentation(!repeats)?;
+                    }
                     // Check what follows
                     match self.peek() {
-                        Some(b'\n' | b'\r') | None => {
+                        Some(b'\n' | b'\r' | b'#') | None => {
+                            // A comment after the properties is deferred past them (#4851), as
+                            // it is for a property-prefixed item on the dash's own line (#784):
+                            // the properties end the line and the node they name is below.
+                            //
                             // Property with value on next line - will be parsed in next iteration,
                             // unless there is none (#2835): the properties open a line of their
                             // own under a bare `-` or `key:`, and the next content line stands
@@ -8364,6 +8449,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             // BP position and an anchor records it, so without it they land on a
                             // sibling's open, or on nothing, and a following mapping key is read
                             // as the value (`a:` / `  !!str` / `b: 1` lost `b`).
+                            if self.peek() == Some(b'#') {
+                                self.defer_line_comment();
+                                self.skip_to_eol();
+                            }
                             if self.type_stack.len() > 1
                                 && self.line_opens_with_properties_only(properties_start)
                                 && self.own_line_properties_have_no_value(indent)
@@ -10326,6 +10415,53 @@ mod tests {
             "[x, !Foo {a: 1}]\n",
             "a: [!!str null, !Foo {a: 1}]\n",
             "[&x !Foo {a: 1}, *x]\n",
+        ] {
+            assert!(
+                crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),
+                "{doc:?}"
+            );
+        }
+    }
+
+    /// #4851: a tag, or an anchor, given to a node on one line cannot be given again on a later
+    /// line of its own (real yq: `did not find expected key` / `'-' indicator`), whether the
+    /// first sits on the owner's line or on a properties-only line, and across blank lines,
+    /// comments and CRLF breaks. A tag with an anchor, in either order, and two nodes with one
+    /// property each are fine.
+    #[test]
+    fn own_line_properties_repeating_a_kind_are_refused_4851() {
+        for doc in [
+            "a:\n  !!str\n  !!int\nb: 1\n",
+            "a:\n  !!str\n    !!int\n    v\n",
+            "a:\n  &x\n  &y\n  v\n",
+            "a: !!str\n  !!int\nb: 1\n",
+            "a: &x\n  &y\nb: 1\n",
+            "a: !!map # c\n  !!str\n",
+            "- !!str\n  !!int\n- 2\n",
+            "-\n  !!str\n  !!int\n  v\n",
+            "- - &x\n    &y\n    b: 1\n",
+            "a:\n  !!str\n\n  !!int\nb: 1\n",
+            "a:\n  !!str\n  # c\n  !!int\nb: 1\n",
+            "a:\n  !!str\r\n  !!int\r\nb: 1\r\n",
+            "a:\n  !!str # c\n  !!int\nb: 1\n",
+        ] {
+            let err = crate::yaml::YamlIndex::build(doc.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, YamlError::InconsistentIndentation { .. }),
+                "{doc:?}: {err:?}"
+            );
+        }
+        for doc in [
+            "a:\n  !!str\n  &x\nb: 1\n",
+            "a:\n  &x\n  !!str\n  v\nb: 1\n",
+            "a: !!map\n  &x\n  b: 1\n",
+            "a: &x\n  !!map\n  b: 1\n",
+            "a:\n  !!str\nb:\n  !!str\n",
+            "a: !!str\n  x\nb: !!str\n  y\n",
+            "- !!str\n- !!int\n",
+            "x: 1\n  !!str\n",
+            "\"a b\": !!str\n  &x\n  v\n",
+            "a:\n  !!str # c\n  v\nb: 1\n",
         ] {
             assert!(
                 crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),
