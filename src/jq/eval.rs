@@ -38108,9 +38108,11 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
             _ => false,
         }
     }
-    // #4957: ...except for the bare `foreach` itself (not behind a `try` of its own, a pipe or an `if`) with an
-    // EXTRACT that cannot move the register: the fold states the register the bind moved the `foreach`'s
-    // emission onto ([`bare_bind_foreach_update_key`]), which a `null`/boolean EXTRACT is judged against.
+    // #4957: ...except for the bare `foreach` itself (a `try` or `?` around it is read, a pipe or an `if` is
+    // not) under an EXTRACT that cannot move the register: the fold states the register the bind moved the
+    // `foreach`'s emission onto ([`bare_bind_foreach_update_key`]), which a `null`/boolean EXTRACT is judged
+    // against. One that navigates (`try (.a | not) catch null`, `.. | select(. == null)`) runs against the
+    // moved register, which the resolver does not hand it: 5 of 30,000 random rows answered wrongly.
     outer_extract.map_or(true, |extract| {
         !may_emit_null_or_bool(extract)
             || (bare_bind_foreach_update_key(e).is_some() && cannot_move_register(extract))
@@ -63963,15 +63965,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // #4957: the register the inner bind moved onto its bound child. The
                             // `foreach` emitted, so the bind passed: `$x` is the step's register, and
                             // jq's register is now its child at the key (`path_intact` then the step).
-                            let inner_bind_moved = inner_bind_key
-                                .as_ref()
-                                .filter(|_| active_reg.trackable)
-                                .and_then(|key| {
-                                    let key = key.pattern_key();
-                                    let component = key.component::<S>(&active_reg.value).ok()?;
-                                    let child = key.child::<S>(&active_reg.value).ok()?;
-                                    Some((PathPrefix::extend(&active_reg.path, component), child))
-                                });
+                            let inner_bind_moved = inner_bind_key.as_ref().and_then(|key| {
+                                let key = key.pattern_key();
+                                let component = key.component::<S>(&active_reg.value).ok()?;
+                                let child = key.child::<S>(&active_reg.value).ok()?;
+                                Some((PathPrefix::extend(&active_reg.path, component), child))
+                            });
                             let mut emit = |branch: PathBranch<'a>| -> Demand {
                                 if let Some((path, child)) = inner_bind_moved
                                     .as_ref()
