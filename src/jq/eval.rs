@@ -37532,6 +37532,10 @@ fn emits_nothing(e: &Expr) -> bool {
         // cannot raise, so nothing depends on the state.
         Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
         Expr::FirstExpr(inner) => emits_nothing(inner),
+        // `empty | .`: the stage a path-mode pipe over a comma carries into each item (`(A, empty) | .` is
+        // `(A | .), (empty | .)`, #4800). Nothing after the first stage runs; a later one that emits nothing
+        // is not read, for the stages ahead of it may raise or read the state.
+        Expr::Pipe(stages) => stages.first().is_some_and(emits_nothing),
         // A count of numeric literals only (under arithmetic that cannot raise): any other is evaluated
         // first and may raise.
         Expr::Limit { n, expr } => match constant_number(n) {
