@@ -41531,7 +41531,9 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             literal_head: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
-            // `label $l | (FE, break $l)`: the break emits nothing either.
+            // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
+            // purpose: a `break $l` ahead of the item is dropped here too, which 16 grid rows that matched jq
+            // (#4800) depend on, so the two are not folded into one helper.
             Expr::Comma(items) => {
                 let mut heads = items.iter().filter(|item| {
                     !matches!(unwrap_paren(item), Expr::Break(n) if n == name)
