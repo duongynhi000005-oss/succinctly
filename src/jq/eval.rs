@@ -37934,16 +37934,18 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
 }
 
 /// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a comma item, a pipe whose later
-/// stages cannot move the register, or an `if` whose condition cannot, a bare `foreach` over a caught or
-/// plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source is one pattern of one
-/// bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and EXTRACT are all `.`.
+/// stages cannot move the register, or an `if` whose condition cannot, a `foreach` over a caught or plain
+/// bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (INIT; UPDATE; EXTRACT)`. Its source is one pattern
+/// of one bare variable over `.` or a `$name`, handing its input back.
 /// Such a `foreach` meets `.` on the register wherever the enclosing fold's accumulator still is, so its
 /// source destructures a `$x` the resolver can place against it (the bind is `jv_identical` to the register,
 /// or it is not and the pattern's step raises) instead of getting the loud refusal an unplaced body gets.
-/// Deliberately narrow: reading any nested `foreach` this way flipped 6 of 30,000 random nested-fold rows (a
-/// `?//` chain, a nested pattern, a `select` stage, an INIT/UPDATE/EXTRACT that does something) from a refusal
-/// to an answer jq refuses, because the resolver does not yet carry the register those sources move to the
-/// inner `foreach`'s emission.
+/// Deliberately narrow in the source: reading any nested `foreach` this way flipped 6 of 30,000 random
+/// nested-fold rows (a `?//` chain, a nested pattern, a `select` stage) from a refusal to an answer jq
+/// refuses, a second variable in the pattern 11 of 40,000 to a caught raise that answers where jq answers
+/// differently, and a body other than `.` (`$a`) 2 more, because the resolver does not yet carry the register
+/// those sources move to the inner `foreach`'s emission. INIT, UPDATE and EXTRACT are not restricted: 939
+/// more rows of three random grids matched jq with them free, and none worse.
 fn update_wraps_bare_bind_foreach(e: &Expr) -> bool {
     /// `$name as {k: $v} | .` / `$name as [$v] | .` (or `. as ..`): a one-variable pattern whose body hands the
     /// input back, behind any `try`/`?`.
@@ -37993,20 +37995,8 @@ fn update_wraps_bare_bind_foreach(e: &Expr) -> bool {
         };
         match unwrap_paren(e) {
             Expr::Foreach {
-                input,
-                patterns,
-                init,
-                update,
-                extract,
-            } => {
-                matches!(patterns.as_slice(), [Pattern::Var(_)])
-                    && matches!(unwrap_paren(init), Expr::Identity)
-                    && matches!(unwrap_paren(update), Expr::Identity)
-                    && extract.as_deref().map_or(true, |extract| {
-                        matches!(unwrap_paren(extract), Expr::Identity)
-                    })
-                    && bare_bind_source(input)
-            }
+                input, patterns, ..
+            } => matches!(patterns.as_slice(), [Pattern::Var(_)]) && bare_bind_source(input),
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
             Expr::Comma(items) => items.iter().any(|item| go(item, budget)),
             Expr::Pipe(stages) => match stages.split_first() {
@@ -63367,10 +63357,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // node at every step ([`update_returns_its_input`]), so the next step meets `.` on it again.
     let single_bind_update_on_register =
         first_step_on_register && update_is_single_bind_returning_input(update);
-    // #4957: ...and a UPDATE that is, or holds through a `try`, a comma, a pipe head or an `if`, a bare
-    // caught-bind `foreach` ([`update_wraps_bare_bind_foreach`]). Unlike the shapes above this does not need
-    // `first_step_on_register`: a source that moves the register still leaves the accumulator on it at the
-    // steps whose element is the root (`foreach (.,.a)`'s first), which `active_at_register` says per step.
+    // #4957: ...and a UPDATE that is, or holds through a `try`, a comma, a pipe head or an `if`, a `foreach` over
+    // a caught or plain one-variable bind ([`update_wraps_bare_bind_foreach`]). Unlike the shapes above this does
+    // not need `first_step_on_register`: a source that moves the register still leaves the accumulator on it at
+    // the steps whose element is the root (`foreach (.,.a)`'s first), which `active_at_register` says per step.
+    // The outermost fold only: one inside another fold's body was not measured.
     let bare_bind_foreach_update_on_register = S::TAG == EvalTag::Jq
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)

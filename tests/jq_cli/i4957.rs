@@ -488,7 +488,7 @@ fn test_4957_bare_caught_bind_foreach_update_spellings() -> Result<()> {
 }
 
 /// #4957: shapes the read does not take -- a pattern of two or more variables (its absent key lands on a `null` the
-/// resolver places differently from jq's), a `?//` chain, a nested pattern, a `select` stage, a source that computes --
+/// resolver places differently from jq's), a body other than `.`, a `?//` chain, a nested pattern, a `select` stage, a source that computes --
 /// refuse as they did, loudly, or answer as jq does. Reading them as the bare one-variable bind flipped these rows to
 /// a caught raise that printed `[]`/`"C"` where jq prints a path, or to an answer where jq refuses (11 and 6 of 40,000
 /// and 30,000 random rows). Each row is `(input, filter, jq 1.7.1's stdout, jq's exit code)`.
@@ -567,6 +567,18 @@ fn test_4957_shapes_outside_the_read_never_answer_where_jq_differs() -> Result<(
             r"[path(. as $x | foreach (..) as $i (.; foreach (select($x) | try ($i as {a:$a} ?// [$a] | $x)) as $y (.; try ($i); .a?); $i))]",
             "",
             5,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[del(. as $x | foreach (1,2) as $i (.; try (foreach (($x as {a:$a} | $a)) as $y (null; (., 1); $y)); .))?]",
+            "[{}]\n",
+            0,
+        ),
+        (
+            r#"{"a":[1,2]}"#,
+            r"[path(. as $x | foreach (1,2) as $i (.; try (foreach (try ($x as {b:$a} | $a)) as $y (.; $y; .)); .))?]",
+            "[[\"b\"],[\"b\"]]\n",
+            0,
         ),
     ];
     for (input, filter, jq_stdout, jq_code) in rows {
