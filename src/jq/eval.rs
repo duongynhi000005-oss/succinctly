@@ -63973,12 +63973,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     Some((PathPrefix::extend(&active_reg.path, component), child))
                                 });
                             let mut emit = |branch: PathBranch<'a>| -> Demand {
-                                if let Some((path, child)) =
-                                    inner_bind_moved.as_ref().filter(|_| {
-                                        extract.is_some()
-                                            && !branch.trackable
-                                            && is_null_or_bool(&branch.value)
-                                    })
+                                if let Some((path, child)) = inner_bind_moved
+                                    .as_ref()
+                                    .filter(|_| !branch.trackable && is_null_or_bool(&branch.value))
                                 {
                                     // #4957: a `null`/boolean EXTRACT emission is the register the inner bind
                                     // moved to its child, or a raise.
