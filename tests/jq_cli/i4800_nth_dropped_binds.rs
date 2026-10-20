@@ -246,6 +246,21 @@ fn test_foreach_update_nth_over_dropped_dot_binds_4800() -> Result<()> {
             "Cannot index array with string \"a\"",
             5,
         ),
+        // A dropped bind still runs its pattern step: an array pattern on an object raises, as in jq.
+        (
+            r#"{"a":null}"#,
+            r"path(foreach (1,2) as $i (.; nth(1; (. as [$q] | .), .a); .a))",
+            "",
+            "Cannot index object with number",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(foreach (1,2) as $i (.; nth(1; (. as [$q] | .), .a); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":null}"#,
             r"[path(foreach (1,2) as $i (.; nth(1; (. as {(empty):$q} | .), .a); .a))?]",

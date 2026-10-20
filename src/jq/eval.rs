@@ -42374,9 +42374,9 @@ fn resolve_nth_sink<'a, S: EvalSemantics>(
         let mut downstream_stopped = false;
         // #4800: the `n` items a comma drops, each of which hands `.` on once, are resolved one by
         // one with their emissions marked discarded, so a bind among them that jq path-checks
-        // nothing of is not refused for the register it was handed; what is left is `nth(0; ..)`.
-        let rest_owned;
-        let (expr, n) = match nth_dropped_dot_items(expr, n) {
+        // nothing of is not refused for the register it was handed; what is left is `nth(0; ..)`,
+        // whose first output is the first one any of the remaining items makes.
+        let (targets, n) = match nth_dropped_dot_items(expr, n) {
             Some(items) => {
                 for item in &items[..n] {
                     let _discarded = fold_body::emissions_discarded();
@@ -42389,46 +42389,48 @@ fn resolve_nth_sink<'a, S: EvalSemantics>(
                         keep.at_most(1),
                         &mut |_| Demand::Continue,
                     ) {
-                        ResolveFlow::Exhausted => {}
+                        // Nothing here stops the walk but a bounded consumer inside the item, which
+                        // is satisfied, not the downstream.
+                        ResolveFlow::Exhausted | ResolveFlow::Stopped => {}
                         other => return other,
                     }
                 }
-                let rest = &items[n..];
-                match rest {
-                    [only] => (only, 0),
-                    _ => {
-                        rest_owned = Expr::Comma(rest.to_vec());
-                        (&rest_owned, 0)
-                    }
-                }
+                (&items[n..], 0)
             }
-            None => (expr, n),
+            None => (core::slice::from_ref(expr), n),
         };
         // #3625: widened by the `n` it drops, then narrowed to the `n + 1` it
         // needs of a single leaf -- see the cap paragraph above. `n == 0`
         // leaves the caller's own cap as it was.
         let leaf_keep = keep.widened_by(n).at_most(n.saturating_add(1));
-        let flow = resolve_node_sink::<S>(
-            expr,
-            value,
-            trackable,
-            snapshot,
-            frame,
-            leaf_keep,
-            &mut |branch| {
-                if skipped < n {
-                    skipped += 1;
-                    return Demand::Continue;
-                }
-                // #4537: see `resolve_bounded_sink`.
-                downstream_stopped = sink(branch) == Demand::Stop;
-                Demand::Stop
-            },
-        );
-        match flow {
-            ResolveFlow::Exhausted => {}
-            ResolveFlow::Stopped if !downstream_stopped => {}
-            other => return other,
+        let mut delivered = false;
+        for target in targets {
+            let flow = resolve_node_sink::<S>(
+                target,
+                value,
+                trackable,
+                snapshot,
+                frame,
+                leaf_keep,
+                &mut |branch| {
+                    if skipped < n {
+                        skipped += 1;
+                        return Demand::Continue;
+                    }
+                    // #4537: see `resolve_bounded_sink`.
+                    delivered = true;
+                    downstream_stopped = sink(branch) == Demand::Stop;
+                    Demand::Stop
+                },
+            );
+            match flow {
+                ResolveFlow::Exhausted => {}
+                ResolveFlow::Stopped if !downstream_stopped => {}
+                other => return other,
+            }
+            if delivered {
+                break;
+            }
         }
     }
     flow_result(escape)
