@@ -23779,14 +23779,13 @@ fn test_blank_line_in_absence_lookahead_gap_does_not_panic_1079_float() -> Resul
     Ok(())
 }
 
-/// Residual: a property-prefixed item whose deferred value is a *scalar*
-/// still attaches nothing (real yq: `.[1] | head_comment` is `h`), so the
-/// block now travels on to the next item that does -- previously it was
-/// misfiled as `.[0]`'s foot. Pinned so the shape changes deliberately.
+/// A property-prefixed item whose deferred value is a *scalar* takes the block above it as its
+/// head (real yq: `.[1] | head_comment` is `h`). It used to attach nothing, so the block travelled
+/// on to the next item that did; the scalar's own open now claims it (#4268).
 #[test]
-fn test_standalone_block_above_anchored_deferred_scalar_item_residual_1079_float() -> Result<()> {
-    assert_yq_getter("- 1\n# h\n- &x\n  2\n- 3\n", ".[1] | head_comment", "\n")?;
-    assert_yq_getter("- 1\n# h\n- &x\n  2\n- 3\n", ".[2] | head_comment", "h\n")?;
+fn test_standalone_block_above_anchored_deferred_scalar_item_matches_yq_1079_float() -> Result<()> {
+    assert_yq_getter("- 1\n# h\n- &x\n  2\n- 3\n", ".[1] | head_comment", "h\n")?;
+    assert_yq_getter("- 1\n# h\n- &x\n  2\n- 3\n", ".[2] | head_comment", "\n")?;
     assert_yq_getter("- 1\n# h\n- &x\n  2\n- 3\n", ".[0] | foot_comment", "\n")
 }
 

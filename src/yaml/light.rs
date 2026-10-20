@@ -3096,7 +3096,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         }
         // A block mapping or sequence value keeps its comment on the dash line (#4231), not as
         // its head; a flow collection and a scalar take it as their head, as in yq.
-        if self.is_container() {
+        if self.is_container() && self.style() != "flow" {
             return None;
         }
         let raw = core::str::from_utf8(&self.text[start as usize..end as usize]).ok()?;
