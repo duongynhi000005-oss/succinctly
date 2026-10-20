@@ -1042,22 +1042,26 @@ fn substitute_json_utf8(
     succinctly::text::utf8::substitute_invalid_utf8_per_byte(&bytes)
 }
 
-/// Rewrites a `-p json` input that holds several top-level values as a multi-document stream
-/// (`v1\n---\nv2`), or answers `None` when it holds fewer than two or something other than a
-/// value start follows one (#2839).
+/// Where [`split_json_values`] cut a `-p json` input, and where it stopped.
+struct JsonValueSplit {
+    /// `(start, end)` of each top-level value, in order.
+    pieces: Vec<(usize, usize)>,
+    /// The offset of the first byte that does not start a value (or whose value never ends);
+    /// `None` when the whole input was consumed.
+    stopped_at: Option<usize>,
+}
+
+/// Cuts a `-p json` input into its top-level values (#2839).
 ///
 /// Real yq reads JSON with a decoder it calls until the input is drained, so `1 2`,
 /// `{"a":1}{"a":2}`, `[1][2]` and even `true: 1` / `1,2` are two values each, and the filter runs on
 /// each. A separator is whatever sits between two values; only whitespace, `,` and `:` are skipped
-/// here, anything else keeps the original error. Containers and strings are cut by bracket and
-/// string depth, a bare token must be a JSON literal, and each piece is then re-read by the strict
-/// JSON parser, which rejects a malformed one.
-///
-/// Called only after the single-value parse has failed, so well-formed input pays nothing.
-fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
+/// here, anything else stops the cut. Containers and strings are cut by bracket and string depth, a
+/// bare token must be a JSON literal, and each piece is meant to be re-read by the strict JSON
+/// parser, which rejects a malformed one.
+fn split_json_values(bytes: &[u8]) -> JsonValueSplit {
     let is_sep = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b',' | b':');
-    let mut out = Vec::with_capacity(bytes.len() + 16);
-    let mut values = 0usize;
+    let mut pieces = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
         if is_sep(bytes[i]) {
@@ -1065,6 +1069,10 @@ fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
             continue;
         }
         let start = i;
+        let stopped = JsonValueSplit {
+            pieces: Vec::new(),
+            stopped_at: Some(start),
+        };
         match bytes[i] {
             b'{' | b'[' => {
                 let mut depth = 0usize;
@@ -1078,7 +1086,7 @@ fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
                         }
                         b'{' | b'[' => depth += 1,
                         b'}' | b']' => {
-                            depth = depth.checked_sub(1)?;
+                            depth -= 1;
                             if depth == 0 {
                                 i += 1;
                                 break;
@@ -1089,7 +1097,7 @@ fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
                     i += 1;
                 }
                 if depth != 0 {
-                    return None;
+                    return JsonValueSplit { pieces, ..stopped };
                 }
             }
             b'"' => {
@@ -1098,7 +1106,7 @@ fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
                     i += if bytes[i] == b'\\' { 2 } else { 1 };
                 }
                 if i >= bytes.len() {
-                    return None;
+                    return JsonValueSplit { pieces, ..stopped };
                 }
                 i += 1;
             }
@@ -1115,54 +1123,154 @@ fn json_value_stream_to_documents(bytes: &[u8]) -> Option<Vec<u8>> {
                     || (matches!(token[0], b'-' | b'0'..=b'9')
                         && std::str::from_utf8(token).is_ok_and(|t| t.parse::<f64>().is_ok()));
                 if !is_literal {
-                    return None;
+                    return JsonValueSplit { pieces, ..stopped };
                 }
             }
-            _ => return None,
+            _ => return JsonValueSplit { pieces, ..stopped },
         }
-        if values > 0 {
-            out.extend_from_slice(b"\n---\n");
-        }
-        out.extend_from_slice(&bytes[start..i.min(bytes.len())]);
-        values += 1;
+        pieces.push((start, i.min(bytes.len())));
     }
-    (values > 1).then_some(out)
+    JsonValueSplit {
+        pieces,
+        stopped_at: None,
+    }
 }
 
-/// The streamed form of a JSON input that is *not* a single well-formed value, when it is one.
-///
-/// An input opening with a scalar (`"a": 1`, `true: 1`, `1 2`) may parse as a YAML mapping or
-/// fail, so it is cut into values first (a lone scalar or an unparsable cut is `None`, and costs
-/// one pass over a document that is usually short); an input opening with `{`/`[` is only cut
-/// after its single-value parse has failed (`parse_failed`), so a well-formed object or array
-/// pays nothing (#2839).
-fn json_value_stream_for(bytes: &[u8], parse_failed: bool) -> Option<Vec<u8>> {
-    let opens_container = bytes
-        .iter()
-        .find(|b| !b.is_ascii_whitespace())
-        .is_some_and(|b| matches!(b, b'{' | b'['));
-    (parse_failed || !opens_container)
-        .then(|| json_value_stream_to_documents(bytes))
-        .flatten()
+/// `pieces` of `bytes` as a multi-document stream (`v1\n---\nv2`).
+fn join_json_values(bytes: &[u8], pieces: &[(usize, usize)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 5 * pieces.len());
+    for (n, &(start, end)) in pieces.iter().enumerate() {
+        if n > 0 {
+            out.extend_from_slice(b"\n---\n");
+        }
+        out.extend_from_slice(&bytes[start..end]);
+    }
+    out
+}
+
+thread_local! {
+    /// The error that ended a `-p json` stream after at least one good value (#2839): real yq
+    /// prints the values it decoded before the bad one and then fails, so the good prefix is
+    /// evaluated normally and [`run_yq`] reports this once it is done.
+    static JSON_STREAM_TAIL_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether an earlier file's stream ended in a bad value, which stops yq from reading any further.
+fn json_stream_tail_error_pending() -> bool {
+    JSON_STREAM_TAIL_ERROR.with(|e| e.borrow().is_some())
+}
+
+/// A `-p json` input whose stream is good up to a bad value: the index over the good prefix, the
+/// prefix (the stream when it holds several values, the lone value otherwise) and what is wrong
+/// after it (#2839). `None` when not even the first value is good.
+fn salvage_json_value_prefix(
+    bytes: &[u8],
+    split: &JsonValueSplit,
+    plain_error: Option<&str>,
+) -> Option<(YamlIndex, Vec<u8>, String)> {
+    let pieces = &split.pieces;
+    let build = |k: usize| {
+        let prefix = join_json_values(bytes, &pieces[..k]);
+        YamlIndex::build_json_sourced(&prefix)
+            .ok()
+            .map(|i| (i, prefix))
+    };
+    // The usual failure is the end of the stream, so try the whole cut first.
+    let (good, (index, prefix)) = match build(pieces.len()) {
+        Some(found) => (pieces.len(), found),
+        None => {
+            // A prefix is good only if every value in it is, so this is monotone.
+            let (mut lo, mut hi) = (0usize, pieces.len() - 1);
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                if build(mid).is_some() {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            (lo, build(lo)?)
+        }
+    };
+    if good == 0 {
+        return None;
+    }
+    let message = match split.stopped_at {
+        // The single-value parse's own complaint names what is wrong better than an offset.
+        Some(_) if good == pieces.len() && plain_error.is_some() => {
+            plain_error.unwrap_or_default().to_owned()
+        }
+        Some(at) if good == pieces.len() => format!("unexpected content at byte offset {at}"),
+        _ => {
+            let (start, end) = pieces[good];
+            let reason = YamlIndex::build_json_sourced(&bytes[start..end])
+                .err()
+                .map_or_else(String::new, |e| format!(": {e}"));
+            format!("invalid value at byte offset {start}{reason}")
+        }
+    };
+    Some((index, prefix, message))
 }
 
 /// [`YamlIndex::build_json_sourced`], reading several top-level values as several documents
 /// (#2839). When the input was rewritten, the second element is the stream the index addresses;
 /// the caller must evaluate against it instead of `bytes`.
+///
+/// A stream that turns bad after a good value is cut there, and the error is left for
+/// [`run_yq`] to report after the good values have been evaluated -- see
+/// [`JSON_STREAM_TAIL_ERROR`].
 fn build_json_sourced_streaming(
     bytes: &[u8],
 ) -> Result<(YamlIndex, Option<Vec<u8>>), succinctly::yaml::YamlError> {
-    if let Some(stream) = json_value_stream_for(bytes, false) {
-        if let Ok(index) = YamlIndex::build_json_sourced(&stream) {
-            return Ok((index, Some(stream)));
+    let salvage = |split: &JsonValueSplit, plain_error: Option<&str>| {
+        salvage_json_value_prefix(bytes, split, plain_error).map(|(index, prefix, message)| {
+            JSON_STREAM_TAIL_ERROR.with(|e| *e.borrow_mut() = Some(message));
+            (index, Some(prefix))
+        })
+    };
+    let try_stream = |split: &JsonValueSplit| {
+        (split.stopped_at.is_none() && split.pieces.len() > 1)
+            .then(|| join_json_values(bytes, &split.pieces))
+            .and_then(|stream| {
+                YamlIndex::build_json_sourced(&stream)
+                    .ok()
+                    .map(|index| (index, Some(stream)))
+            })
+    };
+    // An input opening with a scalar (`"a": 1`, `true: 1`, `1 2`) may parse as a YAML mapping or
+    // fail, so it is cut into values first; one opening with `{`/`[` is only cut after its
+    // single-value parse has failed, so a well-formed object or array pays nothing.
+    let opens_container = bytes
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| matches!(b, b'{' | b'['));
+    if !opens_container {
+        let split = split_json_values(bytes);
+        if let Some(found) = try_stream(&split) {
+            return Ok(found);
+        }
+        // The single-value parse reads `1 {"a":` as a YAML mapping; yq prints `1` and fails.
+        if split.stopped_at.is_some() && !split.pieces.is_empty() {
+            if let Some(found) = salvage(&split, None) {
+                return Ok(found);
+            }
         }
     }
     match YamlIndex::build_json_sourced(bytes) {
         Ok(index) => Ok((index, None)),
-        Err(e) => match json_value_stream_for(bytes, true) {
-            Some(stream) => Ok((YamlIndex::build_json_sourced(&stream)?, Some(stream))),
-            None => Err(e),
-        },
+        Err(e) => {
+            let split = split_json_values(bytes);
+            if let Some(found) = try_stream(&split) {
+                return Ok(found);
+            }
+            if !split.pieces.is_empty() {
+                if let Some(found) = salvage(&split, Some(&e.to_string())) {
+                    return Ok(found);
+                }
+            }
+            Err(e)
+        }
     }
 }
 
@@ -1733,14 +1841,40 @@ fn json_nested_past_depth_limit<W: AsRef<[u64]>>(
 /// message and exit code are unchanged.
 fn parse_input_m2_parity(bytes: &[u8], format: InputFormat) -> Result<Vec<OwnedValue>> {
     if format == InputFormat::Json {
-        let index = JsonIndex::build(bytes);
-        let cursor = index.root(bytes);
-        if json_nested_past_depth_limit(cursor, 0, M2_PARSE_TIME_DEPTH_LIMIT) {
-            anyhow::bail!(nesting_depth_exceeded_message(M2_PARSE_TIME_DEPTH_LIMIT));
-        }
-        return parse_json_input_from_cursor(&cursor);
+        return parse_json_values(bytes, |value| {
+            let index = JsonIndex::build(value);
+            let cursor = index.root(value);
+            if json_nested_past_depth_limit(cursor, 0, M2_PARSE_TIME_DEPTH_LIMIT) {
+                anyhow::bail!(nesting_depth_exceeded_message(M2_PARSE_TIME_DEPTH_LIMIT));
+            }
+            parse_json_input_from_cursor(&cursor)
+        });
     }
     parse_input(bytes, format)
+}
+
+/// Reads every top-level value of a `-p json` input through `parse_value`, which reads one
+/// (#2839): a stream of several values is several documents, and anything after a value that is
+/// not itself a value is an error, where the single-value parse used to read the first value and
+/// drop the rest. Fails before returning any value, as yq's `--eval-all` and `--inplace` do.
+///
+/// An input of at most one value goes to `parse_value` whole, so its errors are unchanged.
+fn parse_json_values(
+    bytes: &[u8],
+    parse_value: impl Fn(&[u8]) -> Result<Vec<OwnedValue>>,
+) -> Result<Vec<OwnedValue>> {
+    let split = split_json_values(bytes);
+    if let (Some(at), false) = (split.stopped_at, split.pieces.is_empty()) {
+        anyhow::bail!("YAML parse error: unexpected content at byte offset {at}");
+    }
+    if split.pieces.len() < 2 {
+        return parse_value(bytes);
+    }
+    let mut values = Vec::with_capacity(split.pieces.len());
+    for &(start, end) in &split.pieces {
+        values.extend(parse_value(&bytes[start..end])?);
+    }
+    Ok(values)
 }
 
 /// Materialize a JSON document from its already-built root cursor -- the one
@@ -1767,10 +1901,10 @@ fn parse_json_input_from_cursor<W: AsRef<[u64]> + Clone>(
 /// Parse input bytes according to the specified format.
 fn parse_input(bytes: &[u8], format: InputFormat) -> Result<Vec<OwnedValue>> {
     match format {
-        InputFormat::Json => {
-            let index = JsonIndex::build(bytes);
-            parse_json_input_from_cursor(&index.root(bytes))
-        }
+        InputFormat::Json => parse_json_values(bytes, |value| {
+            let index = JsonIndex::build(value);
+            parse_json_input_from_cursor(&index.root(value))
+        }),
         InputFormat::Yaml | InputFormat::Auto => {
             // Parse as YAML (Auto defaults to YAML when no extension hint)
             let index =
@@ -8844,8 +8978,18 @@ fn discard_yq_partial_prefix<V: DocumentValue>(result: GenericResult<V>) -> Gene
 /// any other panic is re-raised unchanged.
 pub fn run_yq(args: YqCommand) -> Result<i32> {
     silence_depth_guard_panic_line();
+    JSON_STREAM_TAIL_ERROR.with(|e| *e.borrow_mut() = None);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_yq_inner(args)));
     match outcome {
+        // #2839: the good values of a `-p json` stream are out; now the bad one.
+        Ok(Ok(exit_codes::SUCCESS)) => match JSON_STREAM_TAIL_ERROR.with(|e| e.borrow_mut().take())
+        {
+            Some(message) => {
+                eprintln!("Error: YAML parse error: {message}");
+                Ok(exit_codes::YQ_FAILURE)
+            }
+            None => Ok(exit_codes::SUCCESS),
+        },
         Ok(result) => result,
         Err(payload) => {
             let Some(message) = depth_guard_panic_message(&*payload) else {
@@ -10032,6 +10176,10 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         } else {
             let run_input_format = resolve_run_input_format(args.input_format, &input_files);
             'm2_files: for (file_index, file_path) in input_files.iter().enumerate() {
+                // #2839: yq stops reading at a stream's bad value, so later files are never read.
+                if json_stream_tail_error_pending() {
+                    break;
+                }
                 // #2427: `file_index` is a per-file constant on this path -- each
                 // file is evaluated independently, so there is no combined
                 // array whose top-level index could stand in for it. Real yq
@@ -10432,6 +10580,10 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             let mut global_doc_index: usize = 0;
             let source_file_indices = gathered_file_indices(&input_files);
             'files: for (source_idx, (bytes, format, _)) in input_sources.iter().enumerate() {
+                // #2839: see the `'m2_files` loop.
+                if json_stream_tail_error_pending() {
+                    break;
+                }
                 let file_index = source_file_indices
                     .get(source_idx)
                     .copied()

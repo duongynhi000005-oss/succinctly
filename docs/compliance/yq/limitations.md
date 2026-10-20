@@ -1400,11 +1400,15 @@ validate:
   (`"a": 1`, `true: 1`, `1 2`) is cut into its values first, and one that opens with `{`/`[` is cut
   only after its single-value parse has failed (so a well-formed object or array pays nothing),
   each value (whitespace, `,` or `:` between them) re-read as one document. `1 2`, `{"a":1}{"a":2}`,
-  `[1][2]`, `1,2`, `"a": 1` and `true: 1` match yq on stdin and on a file. Two gaps remain: a stream
-  whose *later* value is malformed (`1 2 ]`, `{"a":1} x`) fails outright where yq prints the
-  values before it and then errors, and `--slurp`/`--eval-all`/`--inplace` read JSON through a
-  different path and do not stream. The index addresses the rewritten `v1\n---\nv2` text, so a byte offset,
-  `line` or `column` of a streamed value counts the inserted separators.
+  `[1][2]`, `1,2`, `"a": 1` and `true: 1` match yq on stdin and on a file. A stream whose *later* value
+  is bad (`1 2 ]`, `{"a":1} x`, `1 {"a":`, `1 [1,,2]`) prints the values before it and then fails, as
+  yq does -- the good prefix is evaluated as usual and the error comes last, so a filter error on a
+  good value wins, and a later file is never read. `--eval-all`, `--slurp` and `--inplace` read every
+  value of a stream and fail before printing or writing anything when one is bad, as yq's do (they
+  used to read the first value and drop the rest silently). The error *text* is succinctly's own, as
+  for every other `-p json` parse error. One gap remains: the index addresses the rewritten
+  `v1\n---\nv2` text, so a byte offset, `line` or `column` of a streamed value counts the inserted
+  separators.
 - `?` (the explicit-key indicator), in *both* the block-context and flow-mapping (`{? "a":
   1}`) spellings — a structural rejection of the marker itself, not a key-grammar check, so
   it stays in scope even though mapping-key *text* grammar (#2777) does not.
