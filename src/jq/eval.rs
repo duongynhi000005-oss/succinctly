@@ -52869,6 +52869,26 @@ fn is_last_of_navigation(e: &Expr) -> bool {
     }
 }
 
+/// Whether a fold SOURCE is `..` cut to its first output (`first(..)`, `limit(1; ..)`, `nth(0; ..)`): the
+/// single element is the ambient `.` itself, which moved nothing, so jq's register is wherever the INIT left
+/// it (#4986). A source that keeps going moves the register from the second output on.
+fn is_first_of_recursive_descent(e: &Expr) -> bool {
+    let descent = |inner: &Expr| {
+        matches!(
+            unwrap_paren(inner),
+            Expr::RecursiveDescent | Expr::Builtin(Builtin::Recurse | Builtin::RecurseDown)
+        )
+    };
+    match unwrap_paren(e) {
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => descent(inner),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr)) => {
+            is_nth_zero(n) && descent(expr)
+        }
+        Expr::Limit { n, expr } => constant_number(n) == Some(1.0) && descent(expr),
+        _ => false,
+    }
+}
+
 /// Whether a fold's accumulator or state may stay on the register through a
 /// whole-array slice (#3504, #3742): a plain variable pattern (a destructuring
 /// bind navigates, and after a failed `?//` alternative jq's state is `null`)
@@ -62323,6 +62343,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         });
         marker && !fold
     };
+    // #4986: see [`is_first_of_recursive_descent`]. Syntactic, so decided once.
+    let source_is_first_of_descent = is_first_of_recursive_descent(input);
     // #4969: whether UPDATE holds a `?//` chain with a bare `$name` alternative, the retry target that binds
     // the whole accumulator. Syntactic, so decided once.
     let update_has_alt_chain = S::TAG == EvalTag::Jq
@@ -62771,10 +62793,13 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // accumulator and made the mark unsound; every other shape keeps the wording it had.
                         let elem_is_accumulator = update_has_alt_chain
                             && acc_at_register
-                            && elem
+                            && (elem
                                 .register_path
                                 .as_ref()
-                                .is_some_and(|p| **p == *reg.path);
+                                .is_some_and(|p| **p == *reg.path)
+                                // #4986: `first(..)` hands on the ambient `.` with no position of its own, and
+                                // moved nothing: the register is wherever INIT left it, with the accumulator.
+                                || (elem.register_path.is_none() && source_is_first_of_descent));
                         let _source_moved =
                             (source_moves_register && !elem_is_accumulator).then(|| {
                                 fold_body::source_moved(
