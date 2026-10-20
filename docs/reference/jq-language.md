@@ -242,7 +242,7 @@ below and [ADR-0019](../adrs/adr-0019.md).
   builtins (#396). Distinct from `tojsonstream`/`fromjsonstream` above, which predate
   these and use a different (non-standard) event shape; both pairs are kept for
   compatibility. `truncate_stream(f)` takes a single argument, not `depth; f` — the
-  depth comes from `.`, matching jq's own `def truncate_stream(stream): . as $n | stream | ...`.
+  depth comes from `.` and `stream` runs on `null`, matching jq 1.7.1's own `def truncate_stream(stream): . as $n | null | stream | ...` (#4971).
 - [x] `map(f)` / `map_values(f)`
 - [x] `IN(s)` / `IN(src; s)` — SQL-style membership test (#722). `IN(src; s)` is
   a cartesian equality check between `src`'s and `s`'s outputs, both run

@@ -78883,6 +78883,38 @@ fn builtin_tostream<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     )
 }
 
+/// One event of jq's `fromstream` (#4971):
+/// `if $i | length == 2 then setpath(["e"]; $i[0] | length == 0) | setpath(["x"] + $i[0]; $i[1])
+/// else setpath(["e"]; $i[0] | length == 1) end`, with the accumulator `x` and the new `e`.
+fn fromstream_generic_event<S: EvalSemantics>(
+    x: OwnedValue,
+    event: &OwnedValue,
+) -> Result<(OwnedValue, bool), EvalError> {
+    let length = jq_length_of::<S>(event)?;
+    let first = jq_first_element(event)?;
+    if length == 2.0 {
+        let ended = jq_length_of::<S>(&first)? == 0.0;
+        let path: Vec<OwnedValue> = match &first {
+            OwnedValue::Array(items) => items.iter().cloned().collect(),
+            OwnedValue::Null => Vec::new(),
+            other => {
+                return Err(EvalError::binary_op(
+                    &OwnedValue::array_from(vec![OwnedValue::String("x".into())]),
+                    other,
+                    BinOp::Add,
+                ))
+            }
+        };
+        let leaf = match event {
+            OwnedValue::Array(items) => items.get(1).cloned().unwrap_or(OwnedValue::Null),
+            _ => OwnedValue::Null,
+        };
+        Ok((set_value_at_path::<S>(x, &path, leaf)?, ended))
+    } else {
+        Ok((x, jq_length_of::<S>(&first)? == 1.0))
+    }
+}
+
 /// Builtin: fromstream(f) - reconstruct values from a stream of tostream-style events
 ///
 /// Mirrors jq's own `builtin.jq` definition: an accumulator `x` built up via
@@ -78928,21 +78960,13 @@ fn builtin_fromstream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         if e {
             x = OwnedValue::Null;
         }
-        let OwnedValue::Array(parts) = &event else {
-            return QueryResult::Error(EvalError::new("Invalid streaming format"));
-        };
-        match parts.as_slice() {
-            [OwnedValue::Array(path), leaf_value] => {
-                e = path.is_empty();
-                x = match set_value_at_path::<S>(x, path, leaf_value.clone()) {
-                    Ok(v) => v,
-                    Err(err) => return QueryResult::Error(err),
-                };
+        // jq's own definition, event by event (#4971).
+        match fromstream_generic_event::<S>(x, &event) {
+            Ok((next, ended)) => {
+                x = next;
+                e = ended;
             }
-            [OwnedValue::Array(path)] => {
-                e = path.len() == 1;
-            }
-            _ => return QueryResult::Error(EvalError::new("Invalid streaming format")),
+            Err(err) => return QueryResult::Error(err),
         }
         if e {
             outputs.push(x.clone());
@@ -78960,14 +78984,14 @@ fn builtin_fromstream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ///
 /// jq's real signature takes a single filter argument: the depth comes from
 /// `.` (the value piped into `truncate_stream` itself), not a second
-/// argument, and `stream` is evaluated against that same `.` — matching
-/// jq-1.7.1's `def truncate_stream(stream): . as $n | stream | ...`.
+/// argument, and `stream` runs on `null`, not on that `.` -- jq-1.7.1's
+/// `def truncate_stream(stream): . as $n | null | stream | ..` (#4971).
 ///
-/// jq's own definition compares the path length against `$n` with the
-/// generic `>` operator, not a numeric type check, so a non-numeric `.` at
-/// the call site (e.g. `null | truncate_stream(...)`) does not error — every
-/// event's length sorts above `null` in jq's ordering, so every event is
-/// kept unmodified. [`compare_values`] reuses that same ordering here.
+/// The path length is compared against `$n` with the generic `>` operator,
+/// not a numeric type check, so a `null` depth keeps every event; a kept
+/// event's path is sliced `[$n:]` (a negative depth counts from the end, a
+/// boolean one raises `Array/string slice indices must be integers`).
+/// [`compare_values`] reuses jq's ordering here.
 fn builtin_truncate_stream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     stream_expr: &Expr,
     value: StandardJson<'a, W>,
@@ -78992,7 +79016,8 @@ fn builtin_truncate_stream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // prefix of events is processed below like any other, and the control
     // is re-attached to whatever it produced via `partial()` at the end,
     // instead of being silently dropped.
-    let (events, control) = match eval_single::<W, S>(stream_expr, value, optional) {
+    // #4971: jq 1.7.1 defines it as `. as $n | null | stream | ..`, so `stream` runs on `null`, not on the depth.
+    let (events, control) = match eval_single::<W, S>(stream_expr, StandardJson::Null, optional) {
         QueryResult::Error(e) => return QueryResult::Error(e),
         QueryResult::Break(label) => return QueryResult::Break(label),
         // See the matching arm in `builtin_fromstream`.
@@ -79017,29 +79042,38 @@ fn builtin_truncate_stream<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         result => (result.collect_owned::<S>(), None),
     };
 
+    // `if (.[0]|length) > $n then setpath([0]; .[0][$n:]) else empty end` over every event (#4971).
+    let null = OwnedValue::Null;
     let mut outputs = Vec::new();
     for event in events {
-        let OwnedValue::Array(mut parts) = event else {
-            return QueryResult::Error(EvalError::new("Invalid streaming format"));
+        let first = match &event {
+            OwnedValue::Array(items) => items.first().unwrap_or(&null),
+            OwnedValue::Null => &null,
+            other => {
+                return QueryResult::Error(EvalError::cannot_index_with_type(
+                    other.type_name(),
+                    "number",
+                ))
+            }
         };
-        let Some(OwnedValue::Array(path)) = parts.first() else {
-            return QueryResult::Error(EvalError::new("Invalid path in streaming format"));
+        let path_len = match jq_length_of::<S>(first) {
+            Ok(n) => OwnedValue::Float(n),
+            Err(e) => return QueryResult::Error(e),
         };
-        let path_len = OwnedValue::Int(path.len() as i64);
-        if compare_values::<S>(&path_len, &depth) == core::cmp::Ordering::Greater {
-            // Reachable non-number depths here are only null/bool (jq order:
-            // null < bool < number < ...), never string/array/object, since
-            // a number never sorts above those. Both null and bool slice as
-            // offset 0 — null matches jq's own `.[null:]` semantics; a
-            // boolean depth is what real jq refuses with "Array/string slice
-            // indices must be integers", which succinctly does not reproduce
-            // here (out of scope: `truncate_stream` is always called with an
-            // integer depth in practice).
-            let offset = depth.as_f64().map_or(0, |f| f.max(0.0) as usize);
-            let truncated = path[offset.min(path.len())..].to_vec();
-            parts[0] = OwnedValue::array_from(truncated);
-            outputs.push(OwnedValue::Array(parts));
+        if compare_values::<S>(&path_len, &depth) != core::cmp::Ordering::Greater {
+            continue;
         }
+        let sliced = match jq_slice_from(first, &depth) {
+            Ok(v) => v,
+            Err(e) => return QueryResult::Error(e),
+        };
+        outputs.push(match event {
+            OwnedValue::Array(mut parts) if !parts.is_empty() => {
+                parts[0] = sliced;
+                OwnedValue::Array(parts)
+            }
+            _ => OwnedValue::array_from(vec![sliced]),
+        });
     }
 
     match control {
@@ -86482,39 +86516,138 @@ fn builtin_load<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 
 // Phase 17: Combinations
 
+/// jq's `length` over any value as a number (#4971), through [`owned_value_jq_length`].
+fn jq_length_of<S: EvalSemantics>(value: &OwnedValue) -> Result<f64, EvalError> {
+    owned_value_jq_length::<S>(value).map(|n| n.as_f64().unwrap_or(0.0))
+}
+
+/// `value[0]` as a stream event's first element reads it (#4971): an array's first element (`null` when it has
+/// none), `null` for `null`, jq's `Cannot index <type> with number` for anything else.
+fn jq_first_element(value: &OwnedValue) -> Result<OwnedValue, EvalError> {
+    match value {
+        OwnedValue::Array(items) => Ok(items.first().cloned().unwrap_or(OwnedValue::Null)),
+        OwnedValue::Null => Ok(OwnedValue::Null),
+        other => Err(EvalError::cannot_index_with_type(
+            other.type_name(),
+            "number",
+        )),
+    }
+}
+
+/// `value[depth:]` as `truncate_stream` slices an event's path (#4971): `null` slices to `null`, an array or a
+/// string from `depth` (`null` is 0, a negative one counts from the end, a fraction truncates after that), and
+/// anything else is jq's `Cannot index <type> with object`; a `depth` that is neither `null` nor a number is
+/// `Array/string slice indices must be integers`.
+fn jq_slice_from(value: &OwnedValue, depth: &OwnedValue) -> Result<OwnedValue, EvalError> {
+    let len = match value {
+        OwnedValue::Null => return Ok(OwnedValue::Null),
+        OwnedValue::Array(items) => items.len(),
+        OwnedValue::String(s) => s.chars().count(),
+        other => {
+            return Err(EvalError::cannot_index_with_type(
+                other.type_name(),
+                "object",
+            ))
+        }
+    };
+    let start = match depth {
+        OwnedValue::Null => 0.0,
+        other => match (other.type_name(), other.as_f64()) {
+            ("number", Some(d)) => d,
+            _ => {
+                return Err(EvalError::new(
+                    "Array/string slice indices must be integers",
+                ))
+            }
+        },
+    };
+    let len_f = len as f64;
+    let start = if start < 0.0 { start + len_f } else { start };
+    let start = start.clamp(0.0, len_f) as usize;
+    Ok(match value {
+        OwnedValue::Array(items) => OwnedValue::array_from(items[start..].to_vec()),
+        OwnedValue::String(s) => {
+            OwnedValue::String(s.chars().skip(start).collect::<String>().into())
+        }
+        _ => OwnedValue::Null,
+    })
+}
+
+/// What jq's own definitions of `bsearch` and `combinations` do with a non-array input (#4971): both open with
+/// `if length == 0 then ..`, and `length` is total over `null`, a number (its absolute value), a string and an
+/// object, so a zero one takes the empty branch (`Ok`); any other reaches `.[0]`/`$in[..]`, which raises
+/// `Cannot index <type> with number`, and a boolean has no length at all.
+fn empty_length_or_index_error<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    value: &StandardJson<'_, W>,
+) -> Result<(), EvalError> {
+    let zero = match value {
+        StandardJson::Null => true,
+        StandardJson::Bool(b) => return Err(EvalError::has_no_length(&OwnedValue::Bool(*b))),
+        StandardJson::Object(fields) => fields.is_empty(),
+        other => {
+            // A string or a number (an array never gets here): small, and its kind needs the decode.
+            let owned = to_owned_lossy::<S, _>(other);
+            match &owned {
+                OwnedValue::String(s) => s.is_empty(),
+                n => n.as_f64().is_some_and(|n| n == 0.0),
+            }
+        }
+    };
+    if zero {
+        Ok(())
+    } else {
+        Err(EvalError::cannot_index_with_type(
+            type_name(value),
+            "number",
+        ))
+    }
+}
+
+/// The values `.[0][]` iterates for one element of `combinations`' input (#4971): an array's elements or an
+/// object's values, and jq's `Cannot iterate over ..` for anything else.
+fn combinations_row<S: EvalSemantics>(element: &OwnedValue) -> Result<Vec<OwnedValue>, EvalError> {
+    match element {
+        OwnedValue::Array(items) => Ok(items.iter().cloned().collect()),
+        OwnedValue::Object(map) => Ok(map.values().cloned().collect()),
+        other => Err(EvalError::cannot_iterate_with(S::TAG, other)),
+    }
+}
+
 /// Builtin: combinations - generate all combinations from array of arrays
 /// Input: [[1,2], [3,4]] -> outputs [1,3], [1,4], [2,3], [2,4]
 fn builtin_combinations<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'_, W>,
     optional: bool,
 ) -> QueryResult<'_, W> {
-    // Input must be an array of arrays
+    // jq: `def combinations: if length == 0 then [] else .[0][] as $x | (.[1:] | combinations) as $w | [$x] + $w end`.
+    // The elements are read in order, and the first one that is empty (no output at all) or not iterable (the
+    // error) decides: later elements are never reached (#4971).
     let arrays = match &value {
         StandardJson::Array(elements) => {
             let mut arrays: Vec<Vec<OwnedValue>> = Vec::new();
             for elem in *elements {
-                match elem {
+                // #1755: to_owned, not to_owned_lossy -- an undecodable element must raise, not silently
+                // become "" and take part in the product. #1953: a non-decode-failure error respects `optional`.
+                let owned = match elem {
                     StandardJson::Array(inner) => {
-                        // #1755: to_owned, not to_owned_lossy -- an
-                        // undecodable element must raise, not silently
-                        // become "" and take part in the product.
-                        // #1953: a non-decode-failure error respects
-                        // `optional`, the same as the sibling `_ if
-                        // optional` arms in this same match.
-                        let inner_values: Vec<OwnedValue> =
-                            to_owned_vec_or_suppress!(inner, optional);
-                        arrays.push(inner_values);
+                        OwnedValue::array_from(to_owned_vec_or_suppress!(inner, optional))
                     }
-                    _ if optional => return QueryResult::None,
-                    _ => {
-                        return QueryResult::Error(EvalError::type_error("array", type_name(&elem)))
-                    }
+                    other => to_owned_lossy::<S, _>(&other),
+                };
+                match combinations_row::<S>(&owned) {
+                    Ok(row) if row.is_empty() => return QueryResult::None,
+                    Ok(row) => arrays.push(row),
+                    Err(_) if optional => return QueryResult::None,
+                    Err(e) => return QueryResult::Error(e),
                 }
             }
             arrays
         }
-        _ if optional => return QueryResult::None,
-        _ => return QueryResult::Error(EvalError::type_error("array", type_name(&value))),
+        _ => match empty_length_or_index_error::<W, S>(&value) {
+            Ok(()) => return QueryResult::Owned(OwnedValue::array()),
+            Err(_) if optional => return QueryResult::None,
+            Err(e) => return QueryResult::Error(e),
+        },
     };
 
     // If any array is empty, return no results
@@ -86620,17 +86753,26 @@ fn builtin_combinations_n<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         n = next;
     }
 
-    // Input must be an array
-    // #1755: to_owned, not to_owned_lossy -- an undecodable element must
-    // raise, not silently become "" and take part in the product.
-    let base_array: Vec<OwnedValue> = match &value {
-        StandardJson::Array(elements) => {
-            // #1953: a non-decode-failure error respects `optional`, the
-            // same as the sibling `_ if optional` arm below.
-            to_owned_vec_or_suppress!(*elements, optional)
+    // `. as $dot | [range(n)] | map($dot) | combinations`: with `n == 0` that is `[] | combinations`, which is `[]`
+    // for any `$dot`; otherwise `$dot` is each element, and `.[0][]` iterates an array's elements or an object's
+    // values and raises on anything else (#4971).
+    // #1755: to_owned, not to_owned_lossy -- an undecodable element must raise, not silently become "" and take
+    // part in the product.
+    let base_array: Vec<OwnedValue> = if n == 0 {
+        Vec::new()
+    } else {
+        let owned = match &value {
+            StandardJson::Array(elements) => {
+                // #1953: a non-decode-failure error respects `optional`, the same as the arm below.
+                OwnedValue::array_from(to_owned_vec_or_suppress!(*elements, optional))
+            }
+            other => to_owned_lossy::<S, _>(other),
+        };
+        match combinations_row::<S>(&owned) {
+            Ok(row) => row,
+            Err(_) if optional => return QueryResult::None,
+            Err(e) => return QueryResult::Error(e),
         }
-        _ if optional => return QueryResult::None,
-        _ => return QueryResult::Error(EvalError::type_error("array", type_name(&value))),
     };
 
     // n=0 returns single empty array
@@ -89072,13 +89214,16 @@ fn bsearch_one_target<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 ) -> QueryResult<'_, W> {
     let elements_iter = match value {
         StandardJson::Array(a) => a,
-        // `null | length` is `0` in jq, so `null` takes the same `length == 0`
-        // branch as `[]` and answers "not found" rather than erroring (#420).
-        // It is the only non-array for which this applies: every other
-        // non-array's `length` itself errors in jq, matching the guard below.
-        StandardJson::Null => return QueryResult::Owned(OwnedValue::Int(-1)),
-        _ if optional => return QueryResult::None,
-        _ => return QueryResult::Error(EvalError::new("bsearch requires array")),
+        // jq defines `bsearch` over `length`, which is total: `null`, `0`, `""` and `{}` have length 0 and take
+        // the `length == 0` branch as `[]` does (#420, #4971); any other non-array reaches `.[0]`/`$in[..]`
+        // and raises `Cannot index <type> with number`, and a boolean has no length.
+        other => {
+            return match empty_length_or_index_error::<W, S>(&other) {
+                Ok(()) => QueryResult::Owned(OwnedValue::Int(-1)),
+                Err(_) if optional => QueryResult::None,
+                Err(e) => QueryResult::Error(e),
+            }
+        }
     };
 
     // Collect array elements.
@@ -120906,28 +121051,28 @@ mod tests {
         bsearch_is!(br"null", "bsearch(1)", -1);
     }
 
-    /// Every other non-array still errors, because jq's own `length` errors
-    /// on them too — `null` (#420) is the only exception.
+    /// A non-zero-length non-array reaches jq's own `.[0]`, which raises `Cannot index <type> with number`, and
+    /// a boolean has no length (#4971); `null`, `0`, `""` and `{}` take the `length == 0` branch instead.
     #[test]
     fn test_bsearch_non_array_errors() {
         query!(br"5", "bsearch(1)",
             QueryResult::Error(e) => {
-                assert!(e.to_string().contains("bsearch requires array"));
+                assert!(e.to_string().contains("Cannot index number with number"));
             }
         );
         query!(br#""abc""#, "bsearch(1)",
             QueryResult::Error(e) => {
-                assert!(e.to_string().contains("bsearch requires array"));
+                assert!(e.to_string().contains("Cannot index string with number"));
             }
         );
         query!(br#"{"a": 1}"#, "bsearch(1)",
             QueryResult::Error(e) => {
-                assert!(e.to_string().contains("bsearch requires array"));
+                assert!(e.to_string().contains("Cannot index object with number"));
             }
         );
         query!(br"false", "bsearch(1)",
             QueryResult::Error(e) => {
-                assert!(e.to_string().contains("bsearch requires array"));
+                assert!(e.to_string().contains("boolean (false) has no length"));
             }
         );
     }

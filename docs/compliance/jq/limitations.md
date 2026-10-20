@@ -9454,6 +9454,13 @@ A NUL byte inside the string ends C `strptime` in jq and is scanned past here (a
 yq's `to_unix` keeps its own lenient ISO 8601 parser (`builtin_fromdate`): its yq oracle has not been captured for the
 forms above, so it is not changed here.
 
+### `truncate_stream` with a `NaN` depth slices from 0 (#4971)
+
+`nan | truncate_stream(stream)` compares each path length against `NaN` as jq's ordering does and slices the path
+`[$n:]`; jq's own slice does `(int)` on the `NaN` start, which is undefined in C and platform-dependent. The binary
+starts the slice at 0. Every other depth (a negative or fractional number, `null`, a boolean) is checked against
+`/usr/bin/jq` 1.7.1 in `tests/jq_cli/i4971.rs`.
+
 ### A non-string `strflocaltime`/`strftime` format raises where jq aborts (#3046)
 
 `0 | strflocaltime(1)` and `0 | strftime(1)` kill jq 1.7.1 on an assertion
