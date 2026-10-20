@@ -63408,7 +63408,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
         && cannot_move_register(init)
-        && update_wraps_bare_bind_foreach(update, extract.as_deref());
+        && update_wraps_bare_bind_foreach(update, extract);
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
