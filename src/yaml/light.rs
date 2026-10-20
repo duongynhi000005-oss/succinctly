@@ -6231,11 +6231,13 @@ impl<'a> YamlString<'a> {
     /// Whether this source scalar may hold U+2028 or U+2029, by a scan of its source bytes for the
     /// lead byte `0xE2` (a single- or un-quoted scalar has no escape that spells either, so the
     /// bytes are all there is; every other style is `false`). A cheap filter ahead of a decode
-    /// that would otherwise run for every flow item (#4865).
+    /// that would otherwise run for every flow item (#4865). The scan covers the scalar's own
+    /// span, never the whole document buffer `text` it sits in: a scan to the end of `text`
+    /// made `sort_by` over N block records O(N^2) (#4939).
     #[must_use]
     pub(crate) fn may_hold_unicode_line_separator(&self) -> bool {
         match self {
-            Self::SingleQuoted { text, .. } | Self::Unquoted { text, .. } => text.contains(&0xE2),
+            Self::SingleQuoted { .. } | Self::Unquoted { .. } => self.raw_bytes().contains(&0xE2),
             _ => false,
         }
     }
@@ -17900,5 +17902,36 @@ plain: hello
                 "a: 1\n# m1\n# m2\nb: 2"
             );
         }
+    }
+
+    /// #4939: the U+2028/U+2029 prefilter looks at the scalar's own bytes, not at the rest of the
+    /// document buffer it sits in (a scan to the end of the buffer made `sort_by` over N block
+    /// records O(N^2)).
+    #[test]
+    fn test_may_hold_unicode_line_separator_scans_only_the_scalar_span_4939() {
+        let text = b"a: xy\nb: 'p'\nc: \xe2\x80\xa8\n";
+        let plain = YamlString::Unquoted {
+            text,
+            start: 3,
+            end: 5,
+            base_indent: 0,
+            json_sourced: false,
+        };
+        let single = YamlString::SingleQuoted { text, start: 9 };
+        assert!(!plain.may_hold_unicode_line_separator());
+        assert!(!single.may_hold_unicode_line_separator());
+
+        // The same scalars, with the separator inside their own span.
+        let text = b"a: x\xe2\x80\xa8y\nb: '\xe2\x80\xa9'\n";
+        let plain = YamlString::Unquoted {
+            text,
+            start: 3,
+            end: 8,
+            base_indent: 0,
+            json_sourced: false,
+        };
+        let single = YamlString::SingleQuoted { text, start: 12 };
+        assert!(plain.may_hold_unicode_line_separator());
+        assert!(single.may_hold_unicode_line_separator());
     }
 }
