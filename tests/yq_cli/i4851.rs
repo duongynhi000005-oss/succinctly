@@ -149,3 +149,96 @@ fn test_4851_e_a_commented_properties_line_before_a_block_scalar_header() -> Res
     assert_eq!(out, "a: !!str |\n  text # d\n");
     Ok(())
 }
+
+/// Comment lines between a bare `-` and properties that stand alone on the next line head
+/// whatever opens after the empty node, as the dash line's own comment does; they used to be
+/// placed by the column they were written at, which made them the sequence owner's foot and
+/// printed a blank line after them that yq does not.
+#[test]
+fn test_4851_d_comment_lines_before_own_line_properties_head_the_next_node() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        (
+            "k:\n  - # c\n    # x\n    !!str\nz: 1\n",
+            "k:\n  - !!str\n# c\n# x\nz: 1\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\nz: 1\n",
+            "k:\n  - !!str\n# x\nz: 1\n",
+        ),
+        (
+            "k:\n  - # c\n    # x\n    &y\nz: 1\n",
+            "k:\n  - &y\n# c\n# x\nz: 1\n",
+        ),
+        (
+            "k:\n  - # c\n    # x\n    # y\n    !!str\nz: 1\n",
+            "k:\n  - !!str\n# c\n# x\n# y\nz: 1\n",
+        ),
+        (
+            "k:\n  - # c\n    # x\n    !!str\nz: 1\ny: 2\n",
+            "k:\n  - !!str\n# c\n# x\nz: 1\ny: 2\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\n  - 3\nz: 1\n",
+            "k:\n  - !!str\n  # x\n  - 3\nz: 1\n",
+        ),
+        (
+            "- k:\n    -\n      # x\n      !!str\n  z: 1\n- 2\n",
+            "- k:\n    - !!str\n  # x\n  z: 1\n- 2\n",
+        ),
+        ("-\n  # x\n  !!str\n- 2\n", "- !!str\n# x\n- 2\n"),
+        (
+            "k:\n  -\n    # x\n\n    !!str\nz: 1\n",
+            "k:\n  - !!str\n# x\n\nz: 1\n",
+        ),
+        (
+            "k:\n  - 1\n  -\n    # x\n    !!str\nz: 1\n",
+            "k:\n  - 1\n  - !!str\n# x\nz: 1\n",
+        ),
+    ];
+    for (input, expected) in rows {
+        let (out, code) = run_yq_stdin(".", input, &[])?;
+        assert_eq!(code, 0, "{input:?}");
+        assert_eq!(&out, expected, "{input:?}");
+    }
+    // The getters follow: the block heads `z`, and is not `k`'s foot.
+    let getters: &[(&str, &str, &str)] = &[
+        (
+            "k:\n  - # c\n    # x\n    !!str\nz: 1\n",
+            ".z | key | head_comment",
+            "c\nx\n",
+        ),
+        (
+            "k:\n  - # c\n    # x\n    !!str\nz: 1\n",
+            ".k | key | foot_comment",
+            "\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\nz: 1\n",
+            ".z | key | head_comment",
+            "x\n",
+        ),
+        (
+            "k:\n  -\n    # x\n    !!str\nz: 1\n",
+            ".k | key | foot_comment",
+            "\n",
+        ),
+    ];
+    for (input, filter, expected) in getters {
+        let (out, code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(code, 0, "{input:?} {filter}");
+        assert_eq!(&out, expected, "{input:?} {filter}");
+    }
+    Ok(())
+}
+
+/// At the end of the document yq drops the comments before an empty node's properties
+/// (`k:` / `  - # c` / `    # x` / `    !!str` prints no `# c` / `# x`), and this keeps them as
+/// the document's foot: matching would discard them (recorded in `limitations.md`).
+#[test]
+fn test_4851_e_comments_before_own_line_properties_at_the_end_of_the_document_are_kept(
+) -> Result<()> {
+    let (out, code) = run_yq_stdin(".", "k:\n  - # c\n    # x\n    !!str\n", &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "k:\n  - !!str\n# c\n# x\n");
+    Ok(())
+}

@@ -5531,9 +5531,12 @@ the text, where yq prints it on the header line (`a: !!str | # d`) -- the same p
 comment gets on a bare key (`a:` / `  | # h`). When a comment is already pending from the line above
 (`- &x # c1` / `  !!str # c2` / `  v`), or the value line has a comment of its own (`!!str # d` /
 `v # e`), only the comment of the value's own line survives, where yq keeps both.
-One small difference remains, pinned by `test_own_line_properties_residuals_2835`: a block that
-settles past a sequence closing under a tagged empty item (`k:` / `  - # c` / `    # x` /
-`    !!str` / `z: 1`) prints a blank line before the next key that yq leaves out (the getters agree).
+Comment lines between a bare `-` and the properties (`k:` / `  - # c` / `    # x` / `    !!str` /
+`z: 1`) head whatever opens after the empty node, as the dash line's own comment does (#4851), where
+they used to be placed by their column: the foot of `k`, printed with a blank line after it. One
+small difference remains, pinned by `test_4851_e` in `tests/yq_cli/i4851.rs`: at the
+end of the document (`k:` / `  - # c` / `    !!str` and nothing after it) yq drops the comments
+outright and this keeps them as the document's foot, since matching would discard them.
 
 A bare item's comment before a value that *does* follow (`- # note` / `  k: v`, #1079's other
 half) is the head comment of that value's first node in yq: the first key of a block mapping or the
