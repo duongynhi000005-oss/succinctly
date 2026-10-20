@@ -741,7 +741,19 @@ Still open, each separate from this fix:
 
 - **A string with a `\n` that ends in U+2028/U+2029 or has one in its last line** (`"a\n\u2028"`, `"\na\u2028"`). yq writes a literal block with the break raw and no indentation after it (output it reads back differently); this route double-quotes it with `\L`. 16 of the 1,844 strings in the differential above, all with a U+2028 beside the end.
 - **An explicit key with a container value inside a sequence item at `-I` other than 2** (`[{"a\nb":{"c":1}}]` at `-I4`). yq puts the value's first key one column after the `:` there (`: c: 1`), where it pads to the indent step everywhere else (`:   c: 1`, which this route matches); ours pads to the step in both.
-- **A JSON object key `<<` on the DOM route** ([#3600](https://github.com/rust-works/succinctly/issues/3600)). yq keeps it in YAML output as the string key `"<<": 1`; a write, `del`, `sort_keys` or `-P` here drops the entry.
+- **A JSON object key `<<`** ([#3600](https://github.com/rust-works/succinctly/issues/3600)). A JSON
+  document has no merge key: `"<<"` is an ordinary string key there, which yq neither expands nor hides
+  from `keys`, `to_entries` or `length`, and writes quoted (`"<<": 1`) in YAML. `succinctly yq` resolved it
+  as a YAML merge key whatever the source, so a write, `del`, `sort_keys` or `-P` dropped the entry and
+  `.a.y` read a merged-in member; a JSON-sourced index (`YamlIndex::mark_json_sourced`) now lists its
+  mappings as written. Pinned by `tests/yq_cli/i3600.rs` over the whole sweep. **Still different, on
+  purpose (rule 4(b), matching would lose data):** yq's *JSON* encoder drops every mapping entry whose key
+  is `<<` -- from JSON input and from a constructed object alike, with a scalar or a mapping value
+  (`{"<<":1,"a":2}` is `{"a":2}`, `-n '{"a":1} | .["<<"] = 5'` is `{"a":1}`) -- so a key and its value
+  vanish from the output. `succinctly yq` keeps the entry in JSON output (`{"<<":1,"a":2}`). The YAML
+  writer's quoting of a `<<` string is right for a JSON-sourced input; for a YAML input it stays an
+  approximation (a computed `"<<"` is told from a plain `<<` of the document by its text only, so it
+  prints bare, `- <<`, where yq prints `- "<<"`).
 
 The DOM route ([#3588](https://github.com/rust-works/succinctly/issues/3588)) is closed. `-P`, every write
 or reshaping filter (`del(.a)`, `.a = "1"`, `sort_keys(.)`, `with_entries(.)`, `style="flow"`) and a
