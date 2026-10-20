@@ -17,6 +17,14 @@ const QUIET: &[(&str, &str, &str)] = &[
     (r#"{"b":1}"#, "del(.a.b[(0,1):2])", "{\"b\":1}\n"),
     (r#"{"b":1}"#, "del(.a[select(false):2])", "{\"b\":1}\n"),
     (r#"{"a":null}"#, "del(.a.b[(0,1):2])", "{\"a\":null}\n"),
+    // yq looks at no bound for such a target, not even to run it.
+    (r#"{"a":1}"#, "del(.a.b[error(\"y\"):2])", "{\"a\":1}\n"),
+    (r#"{"b":1}"#, "del(.a[error(\"y\"):2])", "{\"b\":1}\n"),
+    (
+        r#"{"a":[{"x":1}]}"#,
+        "del(.a[]?.q[(0,1):2])",
+        "{\"a\":[{\"x\":1}]}\n",
+    ),
     // An index into a mapping or a scalar, and a field of a scalar, are not nodes either.
     (
         r#"{"a":{"c":{}}}"#,

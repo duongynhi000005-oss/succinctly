@@ -4191,8 +4191,12 @@ nothing and `{"a":[1,2,3]} | .a.b[(0,1):2] | key` reports the target's own error
 does not hold (`{"b":1} | del(.a[(0,1):2])`, `{"a":null} | del(.a.b[(0,1):2])`) leaves the document alone,
 because the slice resolver, told it is resolving a `del()` target (`yq_delete_context`), checks the target's
 path against the document (`names_document_node`) where a write would have created the key. That check reads
-`.field` and `.[n]` steps only; a target path with any other step (a slice, an optional, a computed key) keeps the
-old answer, the count error.
+`.field` and `.[n]` steps (through a `?`) only; a target path with any other step (a slice, a computed key) keeps the
+old answer, the count error. Still different: yq pads a sequence a `del()` target indexes past its end with `null`
+as a side effect (`{"a":[1]} | del(.a[3].b[(0,1):2])` prints `{"a":[1,null,null,null]}`, and `.a[0].b` through an
+empty sequence or a `null` prints `[null]`), which is not reproduced (this prints the document as it was, or still
+raises the count error for the `[0].b` shapes); and a negative index before the start of a sequence raises
+`index [-5] out of range` in yq and the count error here.
 
 The same three sites keep their *eager* shape in yq mode after
 [#2546](https://github.com/rust-works/succinctly/issues/2546) made jq mode's bound pull

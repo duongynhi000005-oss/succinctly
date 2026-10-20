@@ -66254,6 +66254,69 @@ fn untrackable_branch_escape(
     }
 }
 
+/// Whether `path`, followed from `root`, ends at a node a `del()` can reach (#4461).
+///
+/// A field of a mapping that does not hold it, a field or an index into a scalar, a field of a
+/// `null` and an index into a mapping are not nodes in yq: `del()` finds nothing there and no
+/// bound is ever looked at. Everything else is one, including what a write would create and
+/// yq's reads pad: an index into a `null`, a field of a sequence (which fails on its own), and
+/// an index past the end of a sequence, which reads as a `null` the next step is checked
+/// against (`.a[3].b` on `[1]` is no node, `.a[3]` is one). A negative index before the start
+/// of a sequence is a node here and raises its own error in yq. A component this does not read
+/// (a slice, a computed step) answers `true`, the answer before this existed; an optional is
+/// read through.
+fn names_document_node(root: &OwnedValue, path: &PathPrefix) -> bool {
+    let padding = OwnedValue::Null;
+    let mut components = Vec::new();
+    let mut at = path;
+    while let PathPrefix::Node {
+        parent, component, ..
+    } = at
+    {
+        components.push(component);
+        at = parent;
+    }
+    let mut current = root;
+    for component in components.into_iter().rev() {
+        let mut step = component;
+        while let Expr::Optional(inner) = step {
+            step = inner;
+        }
+        let (Expr::Field(_) | Expr::Index { .. }) = step else {
+            return true;
+        };
+        current = match (step, current) {
+            (Expr::Field(name), OwnedValue::Object(fields)) => match fields.get(name.as_str()) {
+                Some(next) => next,
+                None => return false,
+            },
+            (Expr::Index { .. }, OwnedValue::Object(_)) | (Expr::Field(_), OwnedValue::Null) => {
+                return false
+            }
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+                if *idx < -len {
+                    return true;
+                }
+                let at = if *idx < 0 { len + *idx } else { *idx };
+                usize::try_from(at)
+                    .ok()
+                    .and_then(|i| items.get(i))
+                    .unwrap_or(&padding)
+            }
+            (
+                _,
+                OwnedValue::Bool(_)
+                | OwnedValue::Int(_)
+                | OwnedValue::Float(_)
+                | OwnedValue::String(_),
+            ) => return false,
+            _ => return true,
+        };
+    }
+    true
+}
+
 /// Resolve `target` (`E`) for one pair of a computed index (`E[K]`) or slice
 /// (`E[S:T]`).
 ///
@@ -66284,58 +66347,6 @@ fn untrackable_branch_escape(
 /// `target_is_passthrough` escape running *between* the resolve and the
 /// reserve, so hoisting the reserve would swap which error surfaced -- went
 /// with it.
-/// Whether `path`, followed from `root`, ends at a node a `del()` can reach (#4461).
-///
-/// A field of a mapping that does not hold it, a field or an index into a scalar, a field of a
-/// `null` and an index into a mapping are not nodes in yq: `del()` finds nothing there and no
-/// bound is ever looked at. Everything else is one, including what a write would create and
-/// yq's reads pad: an index past the end of a sequence, an index into a `null`, a field of a
-/// sequence (which fails on its own). A component this does not read (a slice, an optional, a
-/// computed step) answers `true`, the answer before this existed.
-fn names_document_node(root: &OwnedValue, path: &PathPrefix) -> bool {
-    let mut components = Vec::new();
-    let mut at = path;
-    while let PathPrefix::Node {
-        parent, component, ..
-    } = at
-    {
-        components.push(component);
-        at = parent;
-    }
-    let mut current = root;
-    for component in components.into_iter().rev() {
-        let (Expr::Field(_) | Expr::Index { .. }) = component else {
-            return true;
-        };
-        current = match (component, current) {
-            (Expr::Field(name), OwnedValue::Object(fields)) => match fields.get(name.as_str()) {
-                Some(next) => next,
-                None => return false,
-            },
-            (Expr::Index { .. }, OwnedValue::Object(_)) | (Expr::Field(_), OwnedValue::Null) => {
-                return false
-            }
-            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
-                let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
-                let at = if *idx < 0 { len + *idx } else { *idx };
-                match usize::try_from(at).ok().and_then(|i| items.get(i)) {
-                    Some(next) => next,
-                    None => return true,
-                }
-            }
-            (
-                _,
-                OwnedValue::Bool(_)
-                | OwnedValue::Int(_)
-                | OwnedValue::Float(_)
-                | OwnedValue::String(_),
-            ) => return false,
-            _ => return true,
-        };
-    }
-    true
-}
-
 fn resolve_target_for_pair<'a, S: EvalSemantics>(
     target: &Expr,
     value: &'a OwnedValue,
@@ -67170,6 +67181,20 @@ fn resolve_slice_expr_sink<'a, S: EvalSemantics>(
     // produces another bound re-invokes the sink, whose `begin` drops the
     // stale stash; one that produces nothing or raises never does, and
     // `settle`/`take` recognise it from the bound's own `Flow`.
+    // #4461: `del()` of a target the document does not hold has no node to slice, where a write
+    // would have created one, and yq looks at no bound for it -- not to count it, and not to
+    // evaluate it. The target is asked first, as the read routes do.
+    if S::TAG == EvalTag::Yq && yq_delete_context::active() {
+        let (branches, escape) =
+            resolve_target_for_pair::<S>(target, value, trackable, snapshot, frame, keep);
+        if escape.is_none()
+            && branches
+                .iter()
+                .all(|b| !names_document_node(value, &b.path))
+        {
+            return ResolveFlow::Exhausted;
+        }
+    }
     let stash = StashedEscape::new();
     let start_direct_retry = start.as_deref().is_some_and(direct_pattern_retry);
     let end_direct_retry = end.as_deref().is_some_and(direct_pattern_retry);
@@ -67188,15 +67213,6 @@ fn resolve_slice_expr_sink<'a, S: EvalSemantics>(
             return stash.stop(Control::from(control));
         }
         if branches.is_empty() {
-            return Demand::Continue;
-        }
-        // #4461: `del()` of a key the document does not hold has no node to slice, where a write
-        // would have created one.
-        if yq_delete_context::active()
-            && branches
-                .iter()
-                .all(|b| !names_document_node(value, &b.path))
-        {
             return Demand::Continue;
         }
         stash.stop(Control::Error(count_error.clone()))
