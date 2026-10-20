@@ -3234,7 +3234,7 @@ fn reconcile_presentation_at_depth(
         // equal `.a`'s by coincidence, wrongly keeping `*x`.
         (OwnedValue::Object(_) | OwnedValue::Array(_), _)
         | (_, OwnedValue::Object(_) | OwnedValue::Array(_)) => {
-            kind_changed_leaf(pristine_tree, targets)
+            kind_changed_leaf(pristine_tree, targets, depth == 0)
         }
         // Both scalars, any variant/value: same node, only its value
         // changed - its own comment, style and anchor mark survive. Real
@@ -3273,7 +3273,11 @@ fn grown_container_meta(meta: &NodeMeta, grown: bool) -> NodeMeta {
 /// Out of line so `reconcile_presentation_at_depth`'s recursive frame stays small (its
 /// #1005 depth-guard test overflows under coverage instrumentation otherwise).
 #[inline(never)]
-fn kind_changed_leaf(pristine_tree: &CommentTree, targets: &[RelTarget<'_>]) -> CommentTree {
+fn kind_changed_leaf(
+    pristine_tree: &CommentTree,
+    targets: &[RelTarget<'_>],
+    is_document_root: bool,
+) -> CommentTree {
     let is_write_target = targets.iter().any(|(steps, ..)| steps.is_empty());
     let anchor = match &pristine_tree.meta().anchor {
         mark @ Some(AnchorMark::Declares(_)) => mark.clone(),
@@ -3281,11 +3285,20 @@ fn kind_changed_leaf(pristine_tree: &CommentTree, targets: &[RelTarget<'_>]) -> 
         _ => None,
     };
     let tag = pristine_tree.meta().tag().filter(|tag| is_custom_tag(tag));
-    CommentTree::Leaf(
-        NodeMeta::empty_with_anchor(anchor)
-            .with_tag(tag.map(str::to_string))
-            .with_preamble(pristine_tree.meta().preamble().map(str::to_string)),
-    )
+    let meta = NodeMeta::empty_with_anchor(anchor)
+        .with_tag(tag.map(str::to_string))
+        .with_preamble(pristine_tree.meta().preamble().map(str::to_string));
+    // The comments around a document stay around whatever it is rewritten to (#4099):
+    // `# c` / `null` written `.a = 1` is `# c` / `a: 1`, and so is a comment-only file.
+    let meta = if is_document_root {
+        meta.with_head_foot(
+            pristine_tree.meta().head_comment().to_vec(),
+            pristine_tree.meta().foot_comment().to_vec(),
+        )
+    } else {
+        meta
+    };
+    CommentTree::Leaf(meta)
 }
 
 /// The tree for a scalar a write may have changed (see [`written_scalar_meta`]); out of
