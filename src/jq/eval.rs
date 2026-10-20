@@ -69926,6 +69926,83 @@ fn resolve_del_path_branches<'a, S: EvalSemantics>(
     }
 }
 
+/// The navigation a `del()` target derives its value from, when yq deletes that node (#4476).
+///
+/// yq builds a derived value as a replacement of the node it derives from (`CopyAsReplacement`:
+/// `Parent = n.Parent; Key = n.Key`), so `del(.b | tostring)` deletes `.b` and
+/// `del(.arr[] | tostring)` empties `.arr`. succinctly's untracked branches carry no provenance, so
+/// such a target refused with `Invalid path expression`. This rewrites a pipe of navigation that
+/// ends in `tostring`, `length`, `not` or `@json` to the navigation: the stages whose result
+/// does not depend on the input's type (each answers every node, which `+`, `@uri` and the other
+/// formats do not: `.b + [1]` is a type error in yq, and dropping it here would turn that error
+/// into a delete). Anything else (a constructor, `map`, arithmetic, `select`) is left to the
+/// general rule. `None` when nothing in `expr` has that shape.
+fn yq_slot_keeping_del_target(expr: &Expr) -> Option<Expr> {
+    let deriving_stage = |stage: &Expr| {
+        matches!(
+            unwrap_paren(stage),
+            Expr::Builtin(Builtin::ToString | Builtin::Length | Builtin::ToJson | Builtin::Type)
+                | Expr::Not
+                | Expr::Format(FormatType::Json)
+        )
+    };
+    match expr {
+        Expr::Paren(inner) => yq_slot_keeping_del_target(inner).map(|r| Expr::Paren(Box::new(r))),
+        Expr::Optional(inner) => {
+            yq_slot_keeping_del_target(inner).map(|r| Expr::Optional(Box::new(r)))
+        }
+        Expr::Comma(branches) => {
+            let rewritten: Vec<Option<Expr>> =
+                branches.iter().map(yq_slot_keeping_del_target).collect();
+            if rewritten.iter().all(Option::is_none) {
+                return None;
+            }
+            Some(Expr::Comma(
+                branches
+                    .iter()
+                    .zip(rewritten)
+                    .map(|(original, new)| new.unwrap_or_else(|| original.clone()))
+                    .collect(),
+            ))
+        }
+        Expr::Pipe(stages) => {
+            let navigation = |e: &Expr| del_target_shape(e) == DelTargetShape::Navigation;
+            let split = stages.iter().position(|s| !navigation(s))?;
+            if split == 0 || !stages[split..].iter().all(deriving_stage) {
+                return None;
+            }
+            // Without a step down from the root the derived value can be the document itself
+            // (`. | tostring`, `.. | tostring`), which has no parent in yq: it stops the delete
+            // instead of going, and the rewrite would delete the document.
+            let steps_down = stages[..split].iter().any(del_target_steps_down);
+            if !steps_down {
+                return None;
+            }
+            Some(Expr::pipe(stages[..split].to_vec()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `del()` navigation step goes below the root (a key, an index, `.[]`, a slice), so the
+/// nodes it yields have a parent in yq. `.`, `..` and the like do not.
+fn del_target_steps_down(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Pipe(inner) => inner.iter().any(del_target_steps_down),
+        // Every member must: a root among them is parentless and stops the delete.
+        Expr::Comma(inner) => inner.iter().all(del_target_steps_down),
+        Expr::Optional(inner) => del_target_steps_down(inner),
+        Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::ArrayKey(_)
+        | Expr::Iterate
+        | Expr::IndexExpr { .. }
+        | Expr::Slice { .. }
+        | Expr::SliceExpr { .. } => true,
+        _ => false,
+    }
+}
+
 /// What yq's back-to-front `del()` loop (#1865) makes of one `del()` target, judged from its
 /// syntax alone because the resolved branch no longer says how it was produced.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83000,6 +83077,21 @@ fn builtin_del<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // installed (never in jq mode).
     let del_pre = alias_identity::active().then(|| result.clone());
     let del_redirect = alias_identity::Redirect::SINGLE;
+
+    // #4476: a value derived from a navigated node keeps that node's slot in yq, so it is the
+    // node that goes: `del(.b | tostring)` deletes `.b`.
+    let slot_keeping_path_expr: Expr;
+    let path_expr: &Expr = if S::TAG == EvalTag::Yq {
+        match yq_slot_keeping_del_target(path_expr) {
+            Some(rewritten) => {
+                slot_keeping_path_expr = rewritten;
+                &slot_keeping_path_expr
+            }
+            None => path_expr,
+        }
+    } else {
+        path_expr
+    };
 
     // yq's comma-grouped chained-slice del() pre-rewrite (#1223):
     // `resolve_dynamic_indexes`'s own generic navigation raises a hard type

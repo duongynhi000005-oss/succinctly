@@ -2347,13 +2347,18 @@ error in any target still wins.
 The order rule applies when every target is plain navigation or a parentless value, judged from
 its syntax (`del_target_shape`): a literal, a constructor, or a pipe ending in one. A lone
 parentless target therefore deletes nothing, as in yq (`del(1)`, `del(.a | 1)`, `del(.. | 1)`).
-Any other target -- a derived value (`del(.b | tostring)`, `del(.a, .b + 1)`), a bound variable
+A pipe of navigation that ends in `tostring`, `length`, `not`, `@json`, `tojson` or `type` deletes the navigation, as
+yq's derived value keeps its source's slot (`del(.b | tostring)` deletes `.b`, `del(.arr[] |
+tostring)` empties `.arr`, [#4476](https://github.com/rust-works/succinctly/issues/4476)): those
+stages answer every node, so the rewrite cannot hide a type error. Any other target -- arithmetic
+(`del(.a, .b + 1)`, an error in yq when the types differ, which the rewrite would turn into a delete),
+a derived document root (`del(.. | tostring)` is `{}` in yq: the root has no parent; a comma group with a root member is refused whole), a bound variable
 (`del(.a, (.b as $y | $y))`), `select(false)`, a builtin -- still refuses, because succinctly's
 "untracked" is wider than yq's "has no path". yq's `$var` keeps node identity, so
 `del(.a as $y | $y)` deletes `.a`
 ([#2643](https://github.com/rust-works/succinctly/issues/2643)); yq's `tojson` and `tostring`
 keep their input's path, so `del(.a | tojson)` and `del(.b | tostring)` delete the slot. Ordering
-them would turn those refusals into silently dropped deletes. `del(.x[], 1)` on `{"x": null}`
+the rest would turn those refusals into silently dropped deletes. `del(.x[], 1)` on `{"x": null}`
 vivifies `.x` to `[]` before the loop stops, as yq's matching pass does.
 
 The one untracked target succinctly does skip is a `null`/`true`/`false` literal
