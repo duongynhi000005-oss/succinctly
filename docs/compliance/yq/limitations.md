@@ -6228,6 +6228,16 @@ subtree, since the alias table names positions from the document root; `..` over
 stop, listing `m.<<` where this lists the merged `m.p`/`m.q`, and which it writes through to the
 anchor: `.m.p |= . + 1` also changes `base.p` there); and `recurse(f; cond)`.
 
+### An empty input among several ([#4099](https://github.com/rust-works/succinctly/issues/4099))
+
+An input with no bytes at all is one empty document when it is the run's only input (`printf '' | yq '.a'`
+is `null`, `.a = 1` is `a: 1`). With several inputs yq skips an empty one and reads the rest
+(`yq '.a' empty.yaml one.yaml` prints `1`; with every input empty, `null` once), and `filename` of the one empty
+document is `""`. `succinctly yq` does neither: an empty file among others is still `YAML parse error: empty
+input` (exit 1), and the empty file's `filename` is its name. A file holding only comments, `---` or a line
+break is a document and is read as one. A write to a comment-only file prints the write without the comment, where
+yq keeps it above (`# c` / `a: 1`).
+
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in

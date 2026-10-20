@@ -897,6 +897,19 @@ fn yaml_to_owned_value<W: AsRef<[u64]> + Clone>(cursor: YamlCursor<'_, W>) -> Re
     to_owned_yaml_cursor::<YqSemantics, _>(&cursor).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// A run whose only input has no bytes at all reads one empty document, as in yq (`printf '' |
+/// yq '.a'` is `null`, `.a = 1` is `a: 1`): the same as an input holding a line break, which is
+/// what it is read as (#4099). With several inputs yq skips an empty one and reads the rest, which
+/// is not done here (an empty file among others is still an error), and a source that read
+/// nothing because stdin was already drained is not this.
+fn empty_sole_input_is_one_document(bytes: Vec<u8>, sole_input: bool) -> Vec<u8> {
+    if sole_input && bytes.is_empty() {
+        b"\n".to_vec()
+    } else {
+        bytes
+    }
+}
+
 /// Read input from stdin as bytes.
 fn read_stdin() -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
@@ -1336,7 +1349,7 @@ fn gather_input_sources(
     let mut sources = Vec::new();
     let resolved_format = resolve_run_input_format(input_format, input_files);
     if input_files.is_empty() {
-        let raw_bytes = read_stdin()?;
+        let raw_bytes = empty_sole_input_is_one_document(read_stdin()?, true);
         let (input_bytes, format, body) =
             apply_front_matter(raw_bytes, resolved_format, front_matter, "<stdin>")?;
         let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
@@ -1350,7 +1363,8 @@ fn gather_input_sources(
             if is_drained_stdin_file_argument(path) {
                 continue;
             }
-            let raw_bytes = read_file(path)?;
+            let raw_bytes =
+                empty_sole_input_is_one_document(read_file(path)?, input_files.len() == 1);
             let (input_bytes, format, body) =
                 apply_front_matter(raw_bytes, resolved_format, front_matter, file_path)?;
             let input_bytes = substitute_json_utf8(input_bytes, format, output_format);
@@ -9769,7 +9783,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         let mut yaml_doc_streamed = false;
 
         if input_files.is_empty() {
-            let yaml_bytes = read_stdin()?;
+            let yaml_bytes = empty_sole_input_is_one_document(read_stdin()?, true);
             let fmt = resolve_input_format(args.input_format, None);
             // #1616: a `-p json` document's invalid UTF-8, for JSON output.
             let yaml_bytes = substitute_json_utf8(yaml_bytes, fmt, args.output_format);
@@ -9961,7 +9975,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                 // below) -- `flush_then_err` keeps this error as the
                 // reported one even if the flush also fails.
                 let yaml_bytes = match read_file(path) {
-                    Ok(bytes) => bytes,
+                    Ok(bytes) => empty_sole_input_is_one_document(bytes, input_files.len() == 1),
                     Err(e) => return flush_then_err(&mut writer, e),
                 };
                 // #4394: the first file's extension decides for all of them.
@@ -10737,7 +10751,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             if is_drained_stdin_file_argument(path) {
                 continue;
             }
-            let raw_bytes = read_file(path)?;
+            let raw_bytes =
+                empty_sole_input_is_one_document(read_file(path)?, input_files.len() == 1);
             // #4394: the first file's extension decides for all of them.
             let resolved_format = run_input_format;
             let (input_bytes, format, front_matter_body) =
