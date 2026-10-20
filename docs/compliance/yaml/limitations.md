@@ -27,7 +27,7 @@ path:
 | Dimension                              | Result              | Meaning                                        |
 |----------------------------------------|---------------------|------------------------------------------------|
 | **Load** (valid YAML, output compared) | **266/279 = 95.3%** | Parses and produces the JSON the suite expects |
-| **Reject** (invalid YAML, must fail)   | **71/94 = 75.5%**   | Refused by the loader or the opt-in validator  |
+| **Reject** (invalid YAML, must fail)   | **72/94 = 76.6%**   | Refused by the loader or the opt-in validator  |
 | **Parse** (valid YAML, no JSON form)   | **29/29 = 100.0%**  | Parses without error                           |
 
 The **Reject** figure is what the conformance harness rejects with the opt-in
@@ -81,15 +81,15 @@ pass ([`src/yaml/validate.rs`](../../../src/yaml/validate.rs)) before indexing �
 the 76** documents below with zero false positives on the valid corpus (a guardrail test,
 `validator_accepts_all_valid_cases`, enforces that). The conformance harness treats a
 must-fail case as handled if the loader *or* the validator rejects it, which is why the
-Reject figure above is 71/94 rather than 18/94.
+Reject figure above is 72/94 rather than 18/94.
 
-The 23 documents the validator does not yet reject (marked `lax:*` in the manifest) need
+The 22 documents the validator does not yet reject (marked `lax:*` in the manifest) need
 deeper structural analysis — cross-line anchor binding, block-scalar content indentation,
 flow multi-line implicit keys, malformed tag syntax — and are tracked in
 [#223](https://github.com/rust-works/succinctly/issues/223) (`lax:tags` under #224, see
 below).
 
-The 23 documents still lax today (neither the loader nor the validator rejects them) break
+The 22 documents still lax today (neither the loader nor the validator rejects them) break
 down as:
 
 | Category           | Cases | What is not checked                                     |
@@ -97,7 +97,7 @@ down as:
 | `lax:mapping`      | 2     | Mapping and implicit-key rules                          |
 | `lax:indentation`  | 5     | Indentation consistency                                 |
 | `lax:flow`         | 3     | Flow collection syntax                                  |
-| `lax:anchors`      | 4     | Anchor and alias rules, incl. an unindented tag target (#224) |
+| `lax:anchors`      | 3     | Anchor and alias rules, incl. an unindented tag target (#224) |
 | `lax:documents`    | 3     | Directive and document-marker placement, incl. a mid-stream `%TAG` (#224) |
 | `lax:tags`         | 1     | Malformed tag syntax (disallowed flow indicators) — #224 |
 | `lax:comments`     | 2     | Comment placement                                       |
@@ -117,7 +117,7 @@ mirroring the JSON side's `succinctly json validate` / `sjq --validate`. Validat
 separate pass run before indexing, so the default path pays nothing for it — see
 [`src/yaml/validate.rs`](../../../src/yaml/validate.rs). The 78 cases above were its
 acceptance criteria; it rejects 53 of them today and the default loader rejects 2 more since #4463
-(each `lax:*` line removed from the manifest is a case now rejected), with the 23 harder cases still
+(each `lax:*` line removed from the manifest is a case now rejected; `4JVG`, two anchors on one scalar across lines, left it with #4851), with the 22 harder cases still
 tracked in #223 (`lax:tags` under #224).
 
 ### What "accepted" means: the text is kept, not dropped

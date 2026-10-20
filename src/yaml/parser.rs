@@ -7388,6 +7388,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // block scalar's own line comment first (#710) — `self.last_open_bp_pos`
         // is still this node's bp_pos here since no content/children are
         // parsed yet.
+        // A comment deferred past properties on the line above (#4851) is claimed first, so it
+        // precedes the header's own, as on a mapping key (see `take_pending_head_comment`).
+        self.take_pending_head_comment(self.last_open_bp_pos);
         self.maybe_capture_line_comment(self.last_open_bp_pos);
         self.skip_to_eol();
         self.skip_line_break();
@@ -8186,6 +8189,64 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         self.parse_block_scalar(parent)
     }
 
+    /// Whether the node properties that open the cursor's line, parsed from `start`, repeat a
+    /// kind (a tag, an anchor) that the lines above them already gave the same node (#4851): the
+    /// properties-only lines directly above, and the trailing properties of the dash or key line
+    /// that left its value for these lines (`k: !!map`, `- &x`). A tag and an anchor split
+    /// across lines are fine in either order. A line above that does not defer its value to the
+    /// cursor's line names a different node, and nothing is repeated.
+    fn own_line_properties_repeat_a_kind(&self, start: usize) -> bool {
+        fn kinds(properties: &[u8], seen: &mut [bool; 2]) -> [bool; 2] {
+            let mut found = [false; 2];
+            for token in properties.split(|&b| b == b' ' || b == b'\t') {
+                match token.first() {
+                    Some(b'!') => found[0] = true,
+                    Some(b'&') => found[1] = true,
+                    _ => {}
+                }
+            }
+            for (slot, hit) in seen.iter_mut().zip(found) {
+                *slot |= hit;
+            }
+            found
+        }
+        let mut above = [false; 2];
+        let current = kinds(&self.input[start..self.pos], &mut [false; 2]);
+        let mut end = start;
+        while end > 0 && self.input[end - 1] == b' ' {
+            end -= 1;
+        }
+        while end > 0 {
+            let mut prev_end = end - 1;
+            if prev_end > 0 && self.input[prev_end] == b'\n' && self.input[prev_end - 1] == b'\r' {
+                prev_end -= 1;
+            }
+            let mut prev_start = prev_end;
+            while prev_start > 0 && !is_line_break(self.input[prev_start - 1]) {
+                prev_start -= 1;
+            }
+            end = prev_start;
+            let line = &self.input[prev_start..prev_end];
+            let lead = line.iter().take_while(|&&b| b == b' ').count();
+            let rest = &line[lead..];
+            if rest.is_empty() || rest[0] == b'#' {
+                continue;
+            }
+            let (_, properties) = split_trailing_properties(rest);
+            if only_node_properties(rest) {
+                kinds(properties, &mut above);
+                continue;
+            }
+            if Self::deferred_value_owner(lead, rest).is_none() {
+                return false;
+            }
+            // The owner's own trailing properties.
+            kinds(properties, &mut above);
+            break;
+        }
+        (current[0] && above[0]) || (current[1] && above[1])
+    }
+
     /// Whether nothing but spaces sits between the start of the cursor's line and `start`, so
     /// the node properties parsed from `start` open the line (#4271).
     fn line_opens_with_properties_only(&self, start: usize) -> bool {
@@ -8353,9 +8414,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // order, for non-mapping-key cases
                     let properties_start = self.pos;
                     self.parse_node_properties()?;
+                    // A tag or an anchor already given to this node on an earlier line
+                    // cannot be given again (#4851): real yq stops with `did not find
+                    // expected key` / `'-' indicator` on `a:` / `  !!str` / `  !!int`.
+                    if self.type_stack.len() > 1
+                        && self.line_opens_with_properties_only(properties_start)
+                    {
+                        let repeats = self.own_line_properties_repeat_a_kind(properties_start);
+                        self.require_consistent_indentation(!repeats)?;
+                    }
                     // Check what follows
                     match self.peek() {
-                        Some(b'\n' | b'\r') | None => {
+                        Some(b'\n' | b'\r' | b'#') | None => {
+                            // A comment after the properties is deferred past them (#4851), as
+                            // it is for a property-prefixed item on the dash's own line (#784):
+                            // the properties end the line and the node they name is below.
+                            //
                             // Property with value on next line - will be parsed in next iteration,
                             // unless there is none (#2835): the properties open a line of their
                             // own under a bare `-` or `key:`, and the next content line stands
@@ -8364,6 +8438,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             // BP position and an anchor records it, so without it they land on a
                             // sibling's open, or on nothing, and a following mapping key is read
                             // as the value (`a:` / `  !!str` / `b: 1` lost `b`).
+                            if self.peek() == Some(b'#') {
+                                self.defer_line_comment();
+                                self.skip_to_eol();
+                            }
                             if self.type_stack.len() > 1
                                 && self.line_opens_with_properties_only(properties_start)
                                 && self.own_line_properties_have_no_value(indent)
@@ -8599,20 +8677,26 @@ fn trim_spaces_end(bytes: &[u8]) -> &[u8] {
     &bytes[..len]
 }
 
-/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
-/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
-/// (#4530).
-fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
-    // A `#` opens a comment only outside a quoted key (`"x # y":`), and a quote opens one only
-    // at the start of a token (`it's` does not).
+/// `line` (already without its leading spaces) split into the code before its node properties and
+/// those properties: a trailing comment is set aside, then the `&anchor` / `!tag` tokens at the
+/// end of what is left (`k: &x !!seq`, `- &x`), up to the first token that is not one. The code
+/// comes back without the whitespace before the properties. A `#` opens a comment only outside a
+/// quoted key (`"x # y":`), a quote opens one only at the start of a token (`it's` does not), and
+/// a property never starts inside one, so `"a: !x":` has none.
+fn split_trailing_properties(line: &[u8]) -> (&[u8], &[u8]) {
     let mut quote = None;
     let mut code_end = line.len();
+    // The first byte past the last closing quote: no property token starts before it.
+    let mut outside_from = 0;
     let mut i = 0;
     while i < line.len() {
         let b = line[i];
         match quote {
             Some(b'"') if b == b'\\' => i += 1,
-            Some(q) if b == q => quote = None,
+            Some(q) if b == q => {
+                quote = None;
+                outside_from = i + 1;
+            }
             Some(_) => {}
             None if matches!(b, b'"' | b'\'')
                 && (i == 0 || matches!(line[i - 1], b' ' | b'\t')) =>
@@ -8628,18 +8712,33 @@ fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
         i += 1;
     }
     let mut code = trim_spaces_end(&line[..code_end]);
-    while let Some(token_start) = code
-        .iter()
-        .rposition(|&b| matches!(b, b' ' | b'\t'))
-        .map(|at| at + 1)
-    {
+    let mut properties_start = code.len();
+    loop {
+        let separator = code.iter().rposition(|&b| matches!(b, b' ' | b'\t'));
+        let token_start = separator.map_or(0, |at| at + 1);
         let token = &code[token_start..];
-        if !matches!(token.first(), Some(b'&' | b'!')) {
+        // The first token of the line has nothing before it to make it a property of a key, so
+        // it is one only if it does not end in the key's colon (`&x:`).
+        let is_property = matches!(token.first(), Some(b'&' | b'!'))
+            && (separator.is_some() || token.last() != Some(&b':'));
+        if token_start < outside_from || !is_property {
             break;
         }
+        properties_start = token_start;
         code = trim_spaces_end(&code[..token_start]);
+        if separator.is_none() {
+            break;
+        }
     }
-    code.last() == Some(&b':')
+    let properties = &line[properties_start.min(code_end)..code_end];
+    (code, properties)
+}
+
+/// Whether `line` (already without its leading spaces) ends in a `:` once a trailing comment and
+/// any node properties after it (`k: &x`, `k: !!seq`) are set aside -- a key waiting for its value
+/// (#4530).
+fn line_ends_with_colon_after_properties(line: &[u8]) -> bool {
+    split_trailing_properties(line).0.last() == Some(&b':')
 }
 
 /// Whether `line` (already without its leading spaces) is a `-` and nothing else, a trailing
@@ -10326,6 +10425,58 @@ mod tests {
             "[x, !Foo {a: 1}]\n",
             "a: [!!str null, !Foo {a: 1}]\n",
             "[&x !Foo {a: 1}, *x]\n",
+        ] {
+            assert!(
+                crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),
+                "{doc:?}"
+            );
+        }
+    }
+
+    /// #4851: a tag, or an anchor, given to a node on one line cannot be given again on a later
+    /// line of its own (real yq: `did not find expected key` / `'-' indicator`), whether the
+    /// first sits on the owner's line or on a properties-only line, and across blank lines,
+    /// comments and CRLF breaks. A tag with an anchor, in either order, and two nodes with one
+    /// property each are fine.
+    #[test]
+    fn own_line_properties_repeating_a_kind_are_refused_4851() {
+        for doc in [
+            "a:\n  !!str\n  !!int\nb: 1\n",
+            "a:\n  !!str\n    !!int\n    v\n",
+            "a:\n  &x\n  &y\n  v\n",
+            "a: !!str\n  !!int\nb: 1\n",
+            "a: &x\n  &y\nb: 1\n",
+            "a: !!map # c\n  !!str\n",
+            "k: &x !!map\n  &y\n  b: 1\n",
+            "- !x &y\n  !z\n  v\n",
+            "- !!str\n  !!int\n- 2\n",
+            "-\n  !!str\n  !!int\n  v\n",
+            "- - &x\n    &y\n    b: 1\n",
+            "a:\n  !!str\n\n  !!int\nb: 1\n",
+            "a:\n  !!str\n  # c\n  !!int\nb: 1\n",
+            "a:\n  !!str\r\n  !!int\r\nb: 1\r\n",
+            "a:\n  !!str # c\n  !!int\nb: 1\n",
+        ] {
+            let err = crate::yaml::YamlIndex::build(doc.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, YamlError::InconsistentIndentation { .. }),
+                "{doc:?}: {err:?}"
+            );
+        }
+        for doc in [
+            "a:\n  !!str\n  &x\nb: 1\n",
+            "a:\n  &x\n  !!str\n  v\nb: 1\n",
+            "a: !!map\n  &x\n  b: 1\n",
+            "a: &x\n  !!map\n  b: 1\n",
+            "a:\n  !!str\nb:\n  !!str\n",
+            "a: !!str\n  x\nb: !!str\n  y\n",
+            "- !!str\n- !!int\n",
+            "x: 1\n  !!str\n",
+            "\"a b\": !!str\n  &x\n  v\n",
+            "a:\n  !!str # c\n  v\nb: 1\n",
+            "\"a: !x\":\n  !!str\n  v\n",
+            "'k: &a':\n  &b\n  v\n",
+            "- \"a: &x\":\n    &y\n    v\n",
         ] {
             assert!(
                 crate::yaml::YamlIndex::build(doc.as_bytes()).is_ok(),
