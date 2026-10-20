@@ -683,3 +683,43 @@ fn test_4986_reduce_update_alt_chain_over_first_of_descent_with_a_navigating_ini
         ),
     ])
 }
+
+/// #4986: the same single element where the ambient `.` is no longer the root: after a navigation, a bind, a
+/// `?` or another `first(..)`. The element is still the ambient `.` and moved nothing, so the register is
+/// wherever the stages before the `reduce` and its INIT left it. The last rows are the controls: a source
+/// that goes on (`limit(2; ..)`, `(first(..), .a)`, `(.a, first(..))`) or `last(..)` moves the register and
+/// keeps answering as before. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+fn test_4986_reduce_update_alt_chain_over_first_of_descent_after_other_stages_and_controls(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | .c | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\",\"c\"]\n", "", 0),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | .c | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.a as $x | .b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.a as $x | .b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | (. as $y | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a)))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | (. as $y | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a)))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "del(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "del(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "{\"b\":{},\"c\":null}\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b? | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b? | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | first(..) | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | first(..) | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a)) |= 9", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "(.b | reduce first(..) as $i (.c; . as {a:$a} ?// $a | $a)) |= 9", "{\"b\":{\"c\":9},\"c\":null}\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | reduce limit(1;..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression with result 2", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | reduce limit(1;..) as $i (.c; . as {a:$a} ?// $a | $a))", "[\"b\",\"c\"]\n", "", 0),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(reduce last(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to iterate through {\"a\":{\"b\":1},\"b\":{\"c\":{\"a\"...", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(reduce last(..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to iterate through {\"b\":{\"c\":null},\"c\":null}", 5),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(reduce (first(..), .a) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1},\"b\":{\"c\":{\"a\"...", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(reduce (first(..), .a) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"b\":{\"c\":null},\"c\":null}", 5),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(.b | reduce (first(..), .a) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"c\":{\"a\":2},\"a\":3}", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(.b | reduce (first(..), .a) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"c\":null}", 5),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "path(reduce limit(2;..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to iterate through {\"a\":{\"b\":1},\"b\":{\"c\":{\"a\"...", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "path(reduce limit(2;..) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to iterate through {\"b\":{\"c\":null},\"c\":null}", 5),
+        ("{\"a\":{\"b\":1},\"b\":{\"c\":{\"a\":2},\"a\":3},\"c\":{\"a\":{\"b\":1}}}", "del(reduce (.a, first(..)) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1},\"b\":{\"c\":{\"a\"...", 5),
+        ("{\"b\":{\"c\":null},\"c\":null}", "del(reduce (.a, first(..)) as $i (.c; . as {a:$a} ?// $a | $a))", "", "Invalid path expression near attempt to access element \"a\" of {\"b\":{\"c\":null},\"c\":null}", 5),
+    ])
+}

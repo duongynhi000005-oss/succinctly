@@ -52872,6 +52872,9 @@ fn is_last_of_navigation(e: &Expr) -> bool {
 /// Whether a fold SOURCE is `..` cut to its first output (`first(..)`, `limit(1; ..)`, `nth(0; ..)`): the
 /// single element is the ambient `.` itself, which moved nothing, so jq's register is wherever the INIT left
 /// it (#4986). A source that keeps going moves the register from the second output on.
+///
+/// The `..` and the single-output spellings are listed here as in [`is_register_navigation`] and
+/// [`is_last_of_navigation`]; a new spelling of `first`/`limit`/`nth` has to be added to all three.
 fn is_first_of_recursive_descent(e: &Expr) -> bool {
     let descent = |inner: &Expr| {
         matches!(
