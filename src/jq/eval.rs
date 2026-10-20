@@ -49756,9 +49756,19 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
 /// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
 /// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
 /// read as before; so does any `if` on a condition other than `.`, whose own navigation may move the register
-/// before a branch runs.
+/// before a branch runs. A comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l`
+/// scope whose one item is such an `if` ([`label_sole_item`]) are read as the bare `if` (#4800): neither changes
+/// what the `if` emits.
 fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
-    let mut current = update;
+    let sole = without_empty_siblings(update);
+    let sole = match unwrap_paren(sole) {
+        Expr::Label { name, body } => label_sole_item(name, body),
+        _ => Some(sole),
+    };
+    let mut current = match sole {
+        Some(item) if matches!(unwrap_paren(item), Expr::If { .. }) => item,
+        _ => update,
+    };
     while let Expr::If {
         cond, else_branch, ..
     } = unwrap_paren(current)
