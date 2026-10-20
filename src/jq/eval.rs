@@ -37749,6 +37749,24 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
             {
                 takes_first(expr, labels)
             }
+            // `nth(k; ..)` over a comma drops its first `k` items, each of which hands `.` on once,
+            // and delivers the next, so what it stores is that item's: the register's node when it
+            // is a bind or `.`. The items past it are never run (#4800).
+            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+                if constant_number(n)
+                    .is_some_and(|k| k.fract() == 0.0 && (1.0..1e6).contains(&k)) =>
+            {
+                let k = constant_number(n)? as usize;
+                let Expr::Comma(items) = unwrap_paren(expr) else {
+                    return None;
+                };
+                if items.len() <= k || !items[..k].iter().all(emits_the_input_once) {
+                    return None;
+                }
+                items[..=k]
+                    .iter()
+                    .try_fold(false, |any, item| Some(binds(item, labels)? || any))
+            }
             // Either branch stores the register's node, so the condition decides nothing the state
             // shows; one that cannot move the register runs as a value and leaves it where it was.
             Expr::If {
@@ -42354,34 +42372,110 @@ fn resolve_nth_sink<'a, S: EvalSemantics>(
         };
         let mut skipped = 0usize;
         let mut downstream_stopped = false;
+        // #4800: the `n` items a comma drops, each of which hands `.` on once, are resolved one by
+        // one with their emissions marked discarded, so a bind among them that jq path-checks
+        // nothing of is not refused for the register it was handed; what is left is `nth(0; ..)`,
+        // whose first output is the first one any of the remaining items makes.
+        let (targets, n) = match nth_dropped_dot_items(expr, n) {
+            Some(items) => {
+                for item in &items[..n] {
+                    let _discarded = fold_body::emissions_discarded();
+                    match resolve_node_sink::<S>(
+                        item,
+                        value,
+                        trackable,
+                        snapshot,
+                        frame,
+                        keep.at_most(1),
+                        &mut |_| Demand::Continue,
+                    ) {
+                        // Nothing here stops the walk but a bounded consumer inside the item, which
+                        // is satisfied, not the downstream.
+                        ResolveFlow::Exhausted | ResolveFlow::Stopped => {}
+                        other => return other,
+                    }
+                }
+                (&items[n..], 0)
+            }
+            None => (core::slice::from_ref(expr), n),
+        };
         // #3625: widened by the `n` it drops, then narrowed to the `n + 1` it
         // needs of a single leaf -- see the cap paragraph above. `n == 0`
         // leaves the caller's own cap as it was.
         let leaf_keep = keep.widened_by(n).at_most(n.saturating_add(1));
-        let flow = resolve_node_sink::<S>(
-            expr,
-            value,
-            trackable,
-            snapshot,
-            frame,
-            leaf_keep,
-            &mut |branch| {
-                if skipped < n {
-                    skipped += 1;
-                    return Demand::Continue;
-                }
-                // #4537: see `resolve_bounded_sink`.
-                downstream_stopped = sink(branch) == Demand::Stop;
-                Demand::Stop
-            },
-        );
-        match flow {
-            ResolveFlow::Exhausted => {}
-            ResolveFlow::Stopped if !downstream_stopped => {}
-            other => return other,
+        let mut delivered = false;
+        for target in targets {
+            let flow = resolve_node_sink::<S>(
+                target,
+                value,
+                trackable,
+                snapshot,
+                frame,
+                leaf_keep,
+                &mut |branch| {
+                    if skipped < n {
+                        skipped += 1;
+                        return Demand::Continue;
+                    }
+                    // #4537: see `resolve_bounded_sink`.
+                    delivered = true;
+                    downstream_stopped = sink(branch) == Demand::Stop;
+                    Demand::Stop
+                },
+            );
+            match flow {
+                ResolveFlow::Exhausted => {}
+                ResolveFlow::Stopped if !downstream_stopped => {}
+                other => return other,
+            }
+            if delivered {
+                break;
+            }
         }
     }
     flow_result(escape)
+}
+
+/// The items of `nth(n; ITEMS)`'s comma when the `n` it drops each hand `.` on exactly once: `.`, or a
+/// bind of `.` to one pattern of literal keys whose body is such a shape (`. as {a:$q} | .`), which
+/// emits once or raises in its pattern's own steps, never nothing. Dropping them leaves the item `nth`
+/// delivers, which is then `nth(0; ..)` over the rest. `n == 0`, a comma too short to deliver and a
+/// dropped item of any other shape answer `None`: that body is resolved whole, as it was (#4800).
+fn nth_dropped_dot_items(expr: &Expr, n: usize) -> Option<&[Expr]> {
+    let Expr::Comma(items) = unwrap_paren(expr) else {
+        return None;
+    };
+    (n >= 1 && items.len() > n && items[..n].iter().all(emits_the_input_once)).then_some(items)
+}
+
+/// Whether `e` emits `.` exactly once, or raises: `.`, a `Paren` or pipe of such, or a bind of `.` to
+/// one pattern whose keys are literals and whose body is such a shape. A computed key may emit
+/// nothing (`{(empty): $q}`) or more than once, so it is not read.
+fn emits_the_input_once(e: &Expr) -> bool {
+    fn literal_keys(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(_) => true,
+            Pattern::Array(items) => items.iter().all(literal_keys),
+            Pattern::Object(entries) => entries.iter().all(|entry| {
+                matches!(entry.key, ObjectKey::Literal(_)) && literal_keys(&entry.pattern)
+            }),
+        }
+    }
+    match e {
+        Expr::Identity => true,
+        Expr::Paren(inner) => emits_the_input_once(inner),
+        Expr::Pipe(stages) => stages.iter().all(emits_the_input_once),
+        Expr::AsPattern {
+            expr,
+            patterns,
+            body,
+        } => {
+            matches!(unwrap_paren(expr), Expr::Identity)
+                && matches!(patterns.as_slice(), [pattern] if literal_keys(pattern))
+                && emits_the_input_once(body)
+        }
+        _ => false,
+    }
 }
 
 /// `path(skip(n; expr))` (#3611) -- `limit`'s twin: `n` is the OUTER loop, one
