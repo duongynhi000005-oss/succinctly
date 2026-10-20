@@ -40,3 +40,4 @@ mod i4922;
 mod i4926;
 mod i4939;
 mod i4947;
+mod i4959;

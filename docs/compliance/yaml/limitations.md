@@ -26,7 +26,7 @@ path:
 
 | Dimension                              | Result              | Meaning                                        |
 |----------------------------------------|---------------------|------------------------------------------------|
-| **Load** (valid YAML, output compared) | **266/279 = 95.3%** | Parses and produces the JSON the suite expects |
+| **Load** (valid YAML, output compared) | **265/279 = 95.0%** | Parses and produces the JSON the suite expects |
 | **Reject** (invalid YAML, must fail)   | **72/94 = 76.6%**   | Refused by the loader or the opt-in validator  |
 | **Parse** (valid YAML, no JSON form)   | **29/29 = 100.0%**  | Parses without error                           |
 
@@ -605,6 +605,14 @@ into a known failure, because the two oracles contradict each other there. `l-em
 `"\n"`); `yq` v4.53.3 does not (giving `""`). We follow `yq`, which is the compatibility
 target the golden fixtures and the `yq-drift` CI job pin. The net effect on the ledger is one
 case either way.
+
+[#4959](https://github.com/rust-works/succinctly/issues/4959) moved a second case the same way:
+`L24T/01`, a clip-chomped `|` whose last line is a line of spaces at the end of the input with
+**no break after it**. The spec's `b-chomped-last` accepts end-of-input as the final break
+(`"x\n \n"`); `yq` gives `"x\n "`, and so does every literal block that ends the input without a
+break (`a: |` / `  x` / `  y` is `"x\ny"` in `yq`, not `"x\ny\n"`). The decoder used to add the
+missing break, which is right by the suite and wrong by `yq`; it now follows `yq`, and `L24T/01`
+joined the known failures.
 
 Three `|+` / `>+` families still diverge from `yq`, none of them specific to content-less
 blocks and all of them predating #344 — an A/B of the fix over 432 block-scalar shapes moved
