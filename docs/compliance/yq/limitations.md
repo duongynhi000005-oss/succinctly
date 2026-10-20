@@ -6191,8 +6191,20 @@ positions, so `echo '{"a":1}' | yq -p json '.a | [line,column]'` and the same ov
 JSON-sourced (`YamlIndex::mark_json_sourced`) answers `0` from `YamlCursor::line`/`column`. The decoder is
 picked once per run, from the *first* file's extension, for every file, as in yq (`yq '.a | line' t.json t.yaml` is
 `[0,0]` twice, `t.yaml t.json` is `[1,6]` twice; an explicit `-p` is not looked at per file;
-[#4394](https://github.com/rust-works/succinctly/issues/4394)). `--eval-all` is the exception: it still reports
-`[1,6]` for a JSON input (yq: `[0,0]`), tracked as #4544.
+[#4394](https://github.com/rust-works/succinctly/issues/4394)). `--eval-all` answers `[0,0]` for a JSON input too
+(#4544).
+
+`--eval-all` evaluates each document through a reindexed copy of its value, so the cursor a node stands on indexes
+the regenerated text, not the file ([#4646](https://github.com/rust-works/succinctly/issues/4646)). For YAML input
+`line` and `column` are therefore asked of the source instead: the node's path from its document's root is followed
+again on the document's own index (`yq_runner/source_positions.rs`, installed around the run when the filter reads
+`line` or `column`), so a merge key, an alias, an integer key and a mapping key (`.l | key | line`) answer as they do
+on the streaming route, and a stream's second document counts from its own origin. A node with no counterpart in the
+source answers `[0,0]`: a value the filter rebuilt (sliced, mapped, sorted, constructed or assigned, `.a[1:] | .[0] |
+line`), which the streaming route answers `0` for as well, except that it still reads a plain collect (`[.a[]] | .[1] |
+line` is `3` there, `0` under `--eval-all`). yq keeps the position through all of these. Still different: yq numbers the
+lines of a file that **opens with a comment** one too high when it is not the first file of the run (`# c` / `k: 1` as
+the second file reports `.k` on line 2 where the same file alone reports 1), which is not reproduced.
 
 ### Comment after a sequence item's dash on collecting routes ([#4256](https://github.com/rust-works/succinctly/issues/4256))
 

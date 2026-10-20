@@ -31225,6 +31225,23 @@ pub fn enter_file_index_scope(file_index: usize) -> FileIndexScope {
     ))
 }
 
+/// Make `line`/`column` of a node read under `--eval-all` answer the position in the source text
+/// `resolver` names, until the returned guard is dropped (#4646).
+///
+/// `--eval-all` evaluates each document through a reindexed copy, whose own cursor indexes the
+/// regenerated text; `resolver(file, document, path)` is asked instead, and answers
+/// `(line, column)` of the node at `path` in the document the caller read (of its key when the
+/// flag is set), or `None` where the source has no such node.
+#[must_use = "the scope ends when the guard is dropped"]
+pub fn enter_source_positions_scope(
+    resolver: alloc::rc::Rc<super::eval_generic::SourcePositionFn>,
+) -> SourcePositionsScope {
+    SourcePositionsScope(super::eval_generic::enter_source_positions(resolver))
+}
+
+/// The scope [`enter_source_positions_scope`] opens; dropping it closes the scope.
+pub struct SourcePositionsScope(#[allow(dead_code)] super::eval_generic::SourcePositionsGuard);
+
 /// Make `filename` answer `names[file_index]` for every evaluation until the
 /// returned guard is dropped (#2648).
 ///
@@ -31286,6 +31303,17 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         Ok(docs) => docs,
         Err(e) => return QueryResult::Error(e), // patchcov: coverage tolerate-line reason="unreachable via --eval-all: every document here comes straight from parse_input, whose own MAX_NESTING_DEPTH (256) guard already rejects anything deep enough to reach MAX_VALUE_TREE_DEPTH (384) here -- confirmed live, a 300-level document fails parse_input's guard before ever reaching this reindex (#3261)"
     };
+    // #4646: a cursor into one of these throwaway documents asks the position resolver (if one
+    // is installed) about the source it stands for.
+    for ((_, file, document, _), doc) in documents.iter().zip(&docs) {
+        if let Some(doc) = doc {
+            super::eval_generic::register_source_document(
+                super::document::DocumentCursor::document_token(&doc.root()),
+                *file,
+                *document,
+            );
+        }
+    }
     let inputs: Vec<YqDocument<_>> = documents
         .iter()
         .zip(&docs)
@@ -31301,7 +31329,11 @@ pub fn eval_documents_together<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         .collect();
 
     let result = super::eval_generic::eval_yq_documents_together::<S, _>(expr, &inputs);
-    detach_from_temp_document::<_, S>(generic_to_query_result::<_, S>(result))
+    let result = detach_from_temp_document::<_, S>(generic_to_query_result::<_, S>(result));
+    // The throwaway documents are dropped on return, and a later one could be allocated where
+    // one stood (#4646).
+    super::eval_generic::forget_source_documents();
+    result
 }
 
 // =============================================================================

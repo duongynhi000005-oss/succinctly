@@ -50,6 +50,7 @@ use crate::output::{
 };
 
 mod reshape_presentation;
+mod source_positions;
 
 /// yq's diagnostics carry no `(at <file>:<line>)` marker, so the yq paths have
 /// no location to report — unlike jq, whose marker names the input value (#355).
@@ -9071,6 +9072,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
         if gathered.1.is_none() {
             let all_docs = eval_all_documents(&gathered.0, &input_files, args.document)?;
             let reported = sink.report_count();
+            let _positions = source_positions::enter(&program.expr, &gathered.0, &input_files);
             let query_result: QueryResult<'_, Vec<u64>> =
                 jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
             let results = query_result_to_owned_values(query_result, &mut sink);
@@ -10198,6 +10200,8 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
             Some(results) => results,
             None => {
                 let all_docs = eval_all_documents(&input_sources, &input_files, args.document)?;
+                let _positions =
+                    source_positions::enter(&program.expr, &input_sources, &input_files);
                 let query_result: QueryResult<'_, Vec<u64>> =
                     jq::eval_documents_together::<Vec<u64>, YqSemantics>(&program.expr, &all_docs);
                 query_result_to_owned_values(query_result, &mut sink)
