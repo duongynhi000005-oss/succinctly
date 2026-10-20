@@ -8,8 +8,8 @@ use anyhow::Result;
 /// bare `FE` is, behind the value heads and stages the bare form is read behind. Before, the comma made the
 /// UPDATE "not a plain `foreach`" and it was refused naming the state (`Invalid path expression with result
 /// {"a":null}`), where jq answers `["a"]`/nothing, and a `?` turned the refusal into `[]`. Every row
-/// captured from jq 1.7.1 (stdout, first stderr line, exit code), both routes, over `path`, `[path(..)?]`, `del` and `|=`.
-/// An `if` around the comma is read like the bare form since #4948 stopped the bare form's `.a` index error escaping a `?`.
+/// captured from jq 1.7.1 (stdout, first stderr line, exit code), both routes, over `path`, `[path(..)?]`, `del` and `|=`; an `if` around the comma is not read like the bare form and keeps what it answered (`[]` under a `?`),
+/// since the bare form lets its `.a` index error escape the `?` ([`emptied_update`]).
 #[test]
 fn test_caught_foreign_marker_destructure_foreach_beside_an_empty_comma_item_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
