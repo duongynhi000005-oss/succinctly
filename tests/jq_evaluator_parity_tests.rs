@@ -452,7 +452,7 @@ fn test_formats_non_finite_parity_124() {
         (b"1e400", "@uri", r#""1E%2B400""#),
         (b"1e400", "@html", r#""1E+400""#),
         (b"1e400", "@yaml", r#"".inf\n""#),
-        (b"1e400", "@props", r#"".inf""#),
+        (b"1e400", "@props", r#"".inf\n""#),
         (b"[1e400]", "@csv", r#""1E+400""#),
         (b"[1e400]", "@tsv", r#""1E+400""#),
         (b"[1e400]", "@sh", r#""1E+400""#),

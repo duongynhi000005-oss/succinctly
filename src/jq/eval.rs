@@ -21906,10 +21906,20 @@ fn format_yaml(value: &OwnedValue) -> Result<String, EvalError> {
 /// `{arr: [1, 2, 3]}` → `arr.0 = 1\narr.1 = 2\narr.2 = 3`
 ///
 /// Non-objects are converted to strings.
+///
+/// Every line ends with a newline, the last one included (`{"a":1} | @props` is
+/// `"a = 1\n"`, and a bare `"x" | @props` is `"x\n"`), as yq's own properties encoder
+/// writes it (#1076); a value with no lines (`{}`, `[]`) is the empty string. `@yaml` ends
+/// the same way (#1183).
 fn format_props(value: &OwnedValue) -> Result<String, EvalError> {
     let mut lines = Vec::new();
     format_props_recursive(value, String::new(), &mut lines, 0);
-    Ok(lines.join("\n"))
+    let mut out = String::new();
+    for line in &lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Recursively format a value into Java properties lines.
@@ -115251,56 +115261,56 @@ mod tests {
         // Simple object
         query!(br#"{"database": "postgres", "port": 5432}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "database = postgres\nport = 5432");
+                assert_eq!(s, "database = postgres\nport = 5432\n");
             }
         );
 
         // Nested object
         query!(br#"{"nested": {"a": 1, "b": 2}, "top": "value"}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "nested.a = 1\nnested.b = 2\ntop = value");
+                assert_eq!(s, "nested.a = 1\nnested.b = 2\ntop = value\n");
             }
         );
 
         // Array
         query!(br#"{"arr": [1, 2, 3]}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "arr.0 = 1\narr.1 = 2\narr.2 = 3");
+                assert_eq!(s, "arr.0 = 1\narr.1 = 2\narr.2 = 3\n");
             }
         );
 
         // Deeply nested
         query!(br#"{"a": {"b": {"c": 42}}}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "a.b.c = 42");
+                assert_eq!(s, "a.b.c = 42\n");
             }
         );
 
         // Top-level scalar
         query!(br#""just a string""#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "just a string");
+                assert_eq!(s, "just a string\n");
             }
         );
 
         // Null
         query!(br"null", "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "null");
+                assert_eq!(s, "null\n");
             }
         );
 
         // Boolean values
         query!(br#"{"enabled": true, "disabled": false}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "enabled = true\ndisabled = false");
+                assert_eq!(s, "enabled = true\ndisabled = false\n");
             }
         );
 
         // Special characters in values (preserved)
         query!(br#"{"key": "value=with=equals"}"#, "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "key = value=with=equals");
+                assert_eq!(s, "key = value=with=equals\n");
             }
         );
 
@@ -115314,24 +115324,24 @@ mod tests {
         // Top-level array
         query!(br"[1, 2, 3]", "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "0 = 1\n1 = 2\n2 = 3");
+                assert_eq!(s, "0 = 1\n1 = 2\n2 = 3\n");
             }
         );
 
         // #1064: NaN/Infinity spell YAML-native, not jq's bare NaN/inf.
         query!(br"null", "nan | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".nan");
+                assert_eq!(s, ".nan\n");
             }
         );
         query!(br"null", "infinite | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf");
+                assert_eq!(s, ".inf\n");
             }
         );
         query!(br"null", "-infinite | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf");
+                assert_eq!(s, "-.inf\n");
             }
         );
 
@@ -115340,12 +115350,12 @@ mod tests {
         // match arm in props_value_to_string.
         query!(br"1e400", "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf");
+                assert_eq!(s, ".inf\n");
             }
         );
         query!(br"-1e400", "@props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf");
+                assert_eq!(s, "-.inf\n");
             }
         );
     }
