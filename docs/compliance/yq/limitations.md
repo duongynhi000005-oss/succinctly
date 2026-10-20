@@ -6245,6 +6245,21 @@ subtree, since the alias table names positions from the document root; `..` over
 stop, listing `m.<<` where this lists the merged `m.p`/`m.q`, and which it writes through to the
 anchor: `.m.p |= . + 1` also changes `base.p` there); and `recurse(f; cond)`.
 
+### An empty input ([#4099](https://github.com/rust-works/succinctly/issues/4099))
+
+An input with no bytes at all reads no document in yq, and a run that read none evaluates once against one
+empty document (`printf '' | yq '.a'` is `null`, `.a = 1` is `a: 1`; `yq '.a' empty.yaml one.yaml` prints
+`1`; `yq '.a' e1.yaml e2.yaml`, both empty, prints `null` once with `file_index` 0). `succinctly yq` reads that
+document as an input of one line break (`null` for JSON), so it answers like yq wherever a line-break document
+does, and differs where one does not: `[.]`, `{"a": .}` and `. as $x | [$x]` print `- null` / `a: null` where yq
+prints a bare `-` / `a:`, `line` is `1` where yq has `0`, `@yaml` is `null` where yq's is empty, and `filename`
+is the file's name (`-` for stdin) where yq's is empty. Not covered: `--front-matter` on an empty input keeps its
+`no front matter found` error (yq prints `null`); `-` cannot be known to be empty before it is read, so an
+empty stdin mixed with empty files reads nothing at all; and `-i` over several files edits the file each
+document came from, where yq writes the result into the first file. A file holding only comments, `---` or a line
+break is a document and is read as one. A write to a comment-only file prints the write without the comment,
+where yq keeps it above (`# c` / `a: 1`).
+
 ### `line` and `column` residuals ([#4363](https://github.com/rust-works/succinctly/issues/4363))
 
 A node that carries an `&anchor` or `!tag` reports the position of its first property token, as in
