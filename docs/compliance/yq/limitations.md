@@ -4209,13 +4209,19 @@ verdict is raised only once the target produced a node: an error the target rais
 (`([1,2],[3,4],error("x"))[(0,1):(1,2)]` is `Error: x`), a target with no node never checks
 (`5 | .a[(0,1):2]` prints nothing), and a bound generator's own `error(...)` outranks the count
 (`.[(0,1,error("y")):3]` is `Error: y`). jq mode keeps its generator model and streams each
-bound's slice. Two residuals, both a target that produces no node in yq: `del()` through a key
-that is absent from the document still raises the count error where yq leaves the document
-alone (`{"b":1} | del(.a[(0,1):2])`), because the write-path resolver reports an absent key as
-a `null` branch it cannot tell from a present one (#4197's empty-bound rule has the same
-edge); and the lazily-pulled path-context walks (`key`, `parent`) raise it as soon as the bound
-is evaluated, without asking the target (`{"a":1} | .a.b[(0,1):2] | key` prints nothing in yq).
-Both need the target consulted first, as the read, `=` and `|=` routes do.
+bound's slice. A target that produces no node in yq is no error here either
+([#4461](https://github.com/rust-works/succinctly/issues/4461)): the lazily-pulled path-context walks
+(`key`, `parent`, `path`) step the target before they pull a bound, so `{"a":1} | .a.b[(0,1):2] | key` prints
+nothing and `{"a":[1,2,3]} | .a.b[(0,1):2] | key` reports the target's own error; `del()` of a key the document
+does not hold (`{"b":1} | del(.a[(0,1):2])`, `{"a":null} | del(.a.b[(0,1):2])`) leaves the document alone,
+because the slice resolver, told it is resolving a `del()` target (`yq_delete_context`), checks the target's
+path against the document (`names_document_node`) where a write would have created the key. That check reads
+`.field` and `.[n]` steps (through a `?`) only; a target path with any other step (a slice, a computed key) keeps the
+old answer, the count error. Still different: yq pads a sequence a `del()` target indexes past its end with `null`
+as a side effect (`{"a":[1]} | del(.a[3].b[(0,1):2])` prints `{"a":[1,null,null,null]}`, and `.a[0].b` through an
+empty sequence or a `null` prints `[null]`), which is not reproduced (this prints the document as it was, or still
+raises the count error for the `[0].b` shapes); and a negative index before the start of a sequence raises
+`index [-5] out of range` in yq and the count error here.
 
 The same three sites keep their *eager* shape in yq mode after
 [#2546](https://github.com/rust-works/succinctly/issues/2546) made jq mode's bound pull
