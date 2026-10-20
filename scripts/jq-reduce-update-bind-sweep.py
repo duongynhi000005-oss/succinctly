@@ -15,7 +15,9 @@ MSGDIFF (same stdout and exit code, different error wording), ACCEPT_WRONG (jq r
 answered: the dangerous one, `del`/`=`/`|=` write through it), REFUSE_WRONG (the safe direction) and
 DIFF. With `--base`, exit status 1 when a row that matched jq on the base no longer does (a lost match:
 a refuse-only fallback leaked under `try` before, #3186/#3267) or a row that was not an ACCEPT_WRONG on
-the base is one on `--bin`. A wrong accept both builds share is the documented residual and does not fail.
+the base is one on `--bin`. A wrong accept both builds share is the documented residual and does not
+fail. Without `--base` the run only reports (a timeout of `--bin` still fails it): the residual has no
+reference to be told apart from. A timeout is its own class and never a match, whichever side hung.
 
 Usage: scripts/jq-reduce-update-bind-sweep.py --bin BIN [--base BIN] [--jq JQ] [--jobs N] [--show N]
                                               [--sample K] [--dump FILE]
@@ -91,6 +93,10 @@ def run(cmd, doc, expr):
 
 
 def classify(jq, build):
+    if jq[0] == "TIMEOUT":
+        return "ORACLE_TIMEOUT"
+    if build[0] == "TIMEOUT":
+        return "TIMEOUT"
     if (jq[0], jq[1]) == (build[0], build[1]):
         return "MATCH" if (jq[2] == build[2] or jq[1] == 0) else "MSGDIFF"
     if jq[1] != 0 and build[1] == 0:
@@ -130,11 +136,12 @@ def main():
             counts[(kb, kc)] += 1
             if (a.base and kb != kc) or kc in ("ACCEPT_WRONG", "DIFF"):
                 shown[(kb, kc)].append((row, jq, base, cand))
+            # A hang is never the documented residual, with or without a base to compare against.
+            if kc == "TIMEOUT" and kb != "TIMEOUT":
+                failed = True
             if a.base and (
                 (kb == "MATCH" and kc != "MATCH") or (kb != "ACCEPT_WRONG" and kc == "ACCEPT_WRONG")
             ):
-                failed = True
-            if not a.base and kc == "ACCEPT_WRONG":
                 failed = True
     print(("base -> candidate" if a.base else "candidate") + " (vs jq):")
     for (kb, kc), n in sorted(counts.items(), key=lambda kv: -kv[1]):
@@ -144,10 +151,11 @@ def main():
         for (doc, expr), jq, base, cand in items[: a.show]:
             print(f"  doc={doc}  {expr}\n     jq={jq}" + (f"\n     base={base}" if base else "") + f"\n     bin={cand}")
     if a.dump:
-        json.dump(
-            {f"{kb}->{kc}": [list(item[0]) for item in items] for (kb, kc), items in shown.items()},
-            open(a.dump, "w"),
-        )
+        with open(a.dump, "w") as out:
+            json.dump(
+                {f"{kb}->{kc}": [list(item[0]) for item in items] for (kb, kc), items in shown.items()},
+                out,
+            )
     if failed:
         print("\nFAIL: a lost match or a new wrong accept (see above)", file=sys.stderr)
     return 1 if failed else 0

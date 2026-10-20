@@ -37962,18 +37962,23 @@ fn update_returns_its_input(e: &Expr) -> bool {
 /// Whether `e` hands its outputs on unchanged through the wrappers a `reduce` UPDATE's bind chain may sit
 /// in (#4932), judging each leaf with `leaf`: a comma, a `label`, a `first`/`limit` (constant nonzero
 /// count)/`nth(0; ..)`, and an `if` whose condition cannot move the register and whose branches are each
-/// such a shape. None of them catches anything, so a raise in a leaf is the wrapper's raise too. One
-/// walk for [`foreign_bind_chain_returning_dot`] and [`is_single_output_bind`], so the wrappers they
-/// read through cannot drift apart.
+/// such a shape. None of them but the last wrapper below catches anything, so a raise in a leaf is the
+/// wrapper's raise too. One walk for [`foreign_bind_chain_returning_dot`] and [`is_single_output_bind`],
+/// so the wrappers they read through cannot drift apart.
 ///
 /// #4934: and a `try`/`?` with no handler. That one does catch: a bind step that raises makes the UPDATE
 /// empty and the next state `null`, whether it raises depends on the register being where the bind's
 /// source is, and the answer is the resolver's, not this walk's -- reading the wrapper through is what
 /// carries the register into the body ([`FoldRegister::resolve_sink`]'s `carries`), where it was
 /// withheld and a refusal of a step jq passes (a `null` `$x` against a `null` register) was swallowed
-/// as the step's raise, leaving a `null` state that a `null` document's register accepts. The claim a
-/// caller draws from a `true` is only ever for an UPDATE that emitted something
-/// (`update_hands_state_on`'s `last.is_some()`), so a caught raise hands nothing on.
+/// as the step's raise, leaving a `null` state that a `null` document's register accepts. So a `true`
+/// does not say the body emits once, or at all, and each consumer holds that itself:
+/// - `update_hands_state_on` claims the accumulator is handed on only for an UPDATE that emitted
+///   (`last.is_some()`), so a caught raise hands nothing on;
+/// - `carries` only puts the register in front of the body, which then resolves each step against it as
+///   it would without the `try`, the empty UPDATE being the resolver's own derivation;
+/// - `update_tail_unchecked` marks the body ([`fold_body::state_handed_on`]) so that the `.` a bind ends on
+///   goes unchecked, which a raise before it never reaches.
 fn hands_outputs_on(e: &Expr, leaf: &dyn Fn(&Expr) -> bool) -> bool {
     match unwrap_paren(e) {
         Expr::Comma(items) => items.iter().all(|item| hands_outputs_on(item, leaf)),
@@ -50919,6 +50924,10 @@ fn fans_out(expr: &Expr) -> bool {
 /// those is here: the chain is one sequence of path-checked steps on the carried register, the shape
 /// a pipe of the same stages already is (a pipe is skipped by `fans_out`), so a body that is one
 /// refuses and answers exactly where the pipe does.
+///
+/// "Run once" is about the walk's siblings, not about emitting: a handler-less `try`/`?` around the
+/// chain (#4934) is read through too, and its body may raise and so emit nothing. That is the
+/// resolver's to derive once the register is carried in (see [`hands_outputs_on`]).
 fn is_single_output_bind(expr: &Expr) -> bool {
     let plain_source = |source: &Expr| {
         matches!(
