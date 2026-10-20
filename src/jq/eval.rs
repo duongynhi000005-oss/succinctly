@@ -21949,19 +21949,47 @@ fn format_props_recursive(value: &OwnedValue, prefix: String, out: &mut String, 
         }
         _ => {
             // Scalar value - output as "key = value"
-            let value_str = props_value_to_string(value);
-            if !prefix.is_empty() {
-                out.push_str(&prefix);
+            if prefix.is_empty() {
+                // Top-level scalar without key: yq prints the text as it is, unescaped (#4977)
+                out.push_str(&props_value_to_string(value, false));
+            } else {
+                out.push_str(&props_escape(&prefix, true));
                 out.push_str(" = ");
+                out.push_str(&props_value_to_string(value, true));
             }
-            out.push_str(&value_str);
             out.push('\n');
         }
     }
 }
 
-/// Convert a scalar value to its properties string representation
-fn props_value_to_string(value: &OwnedValue) -> String {
+/// yq's properties encoder escaping (#4977): the Java `.properties` rules of the library it uses, captured
+/// from yq v4.53.3 over every control character, backslash, space, `:`, `=`, `#`, `!` and non-ASCII, for a
+/// key and a value separately.
+///
+/// Both: backslash, tab, newline, carriage return and form feed become `\\`, `\t`, `\n`, `\r`, `\f`
+/// (written as the two characters). A key also escapes every space and `:` (`a\ b`, `a\:b`); a value
+/// escapes only a *leading* space (`\  x`, the rest stay). Everything else is written as it is: other
+/// controls (U+0000, U+001B), `=`, `#`, `!`, `.` and non-ASCII (`é`, an emoji) included.
+fn props_escape(text: &str, is_key: bool) -> String {
+    let mut out = string_with_capacity(text.len());
+    for (i, c) in text.chars().enumerate() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{c}' => out.push_str("\\f"),
+            ' ' if is_key || i == 0 => out.push_str("\\ "),
+            ':' if is_key => out.push_str("\\:"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Convert a scalar value to its properties string representation; `escape` applies [`props_escape`] to a
+/// string (a keyed value does, a top-level scalar does not).
+fn props_value_to_string(value: &OwnedValue, escape: bool) -> String {
     match value {
         OwnedValue::Null => "null".to_string(),
         OwnedValue::Bool(true) => "true".to_string(),
@@ -21987,11 +22015,8 @@ fn props_value_to_string(value: &OwnedValue) -> String {
         // convention is the correct one regardless of which binary calls
         // it, not jq's `format_number_jq_compat` reformatting.
         OwnedValue::NumberLiteral(_, literal) => literal.to_string(),
-        OwnedValue::String(s) => {
-            // A line break becomes a space. yq escapes it as `\n` instead, with the rest of the
-            // properties escapes (#4977).
-            s.replace(['\n', '\r'], " ")
-        }
+        OwnedValue::String(s) if escape => props_escape(s, false),
+        OwnedValue::String(s) => s.to_string(),
         // Objects and arrays should not reach here, but handle gracefully
         OwnedValue::Object(_) | OwnedValue::Array(_) => value.to_json(),
     }
