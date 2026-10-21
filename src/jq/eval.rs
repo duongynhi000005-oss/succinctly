@@ -64898,7 +64898,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 Expr::Comma(items) => Some(items.as_slice()),
                                 _ => None,
                             })
-                            .unwrap_or(core::slice::from_ref(&bound_update));
+                            .unwrap_or_else(|| core::slice::from_ref(&bound_update));
                         let mut flow = ResolveFlow::Exhausted;
                         for (index, item) in comma_items.iter().enumerate() {
                             in_bind_item.set(comma_bind_item.map_or(true, |at| at == index));
