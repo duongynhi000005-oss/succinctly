@@ -54405,11 +54405,27 @@ fn caught_foreign_destructure<S: EvalSemantics>(
         return false;
     }
     let bind = unwrap_paren(inner);
-    let Expr::AsPattern { expr, patterns, .. } = bind else {
-        return false;
-    };
-    let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
-        return false;
+    // #5017: ...or `$x | . as P | ..`, the destructure of the marker's value spelled through `.`, which
+    // [`foreign_register_markers_with`] reads as the destructure of the marker it is.
+    let (marker, patterns) = match bind {
+        Expr::AsPattern { expr, patterns, .. } => {
+            let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
+                return false;
+            };
+            (marker, patterns)
+        }
+        Expr::Pipe(stages) => match (
+            stages.first().map(unwrap_paren),
+            stages.get(1).map(unwrap_paren),
+        ) {
+            (Some(Expr::TrackedVar(marker)), Some(Expr::AsPattern { expr, patterns, .. }))
+                if matches!(unwrap_paren(expr), Expr::Identity) =>
+            {
+                (marker, patterns)
+            }
+            _ => return false,
+        },
+        _ => return false,
     };
     // #4777: in the body of a `reduce` whose source moved the register, `$x` is foreign on the steps
     // whose element is another node. The verdict is read per step, from the position of that step's
@@ -60609,7 +60625,8 @@ impl FoldSourceAmbient<'_> {
     /// struct, so [`fold_source_ambient`]'s two constructors can't drift
     /// out of sync with it.
     fn relocate_base<'r>(&self, reg_path: &'r Rc<PathPrefix>) -> Option<&'r Rc<PathPrefix>> {
-        ((self.trackable || self.register_null_off_root) && reg_path.depth() > 0)
+        ((self.trackable || self.register_null_off_root || self.init_moved_off_entry)
+            && reg_path.depth() > 0)
             .then_some(reg_path)
     }
 }
@@ -60767,7 +60784,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             frame: match (register_null_off_root, init_moved_off_entry) {
                 (true, true) => reg.frame.with_register(Some(&OwnedValue::Null)),
                 (true, false) => frame.with_register(Some(&OwnedValue::Null)),
-                (false, true) => reg.frame.clone(),
+                (false, true) => reg.frame.with_register(Some(&reg.value)),
                 (false, false) => frame.clone(),
             },
             register_non_null: reg.register_is_non_null(),
