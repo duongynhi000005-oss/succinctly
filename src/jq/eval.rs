@@ -64017,6 +64017,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #3742: jq's `foreach` hands UPDATE's result back as the next state through
     // the same buffer-sharing slice `reduce` does (#3504).
     let slice_ok = fold_slice_ok(patterns, input);
+    // #5004: the most INIT forks and source items this `foreach` can run, where their shapes say
+    // ([`source_output_bound`]): the step that reaches both is its last, and the only one a `try`'s handler is placed
+    // on ([`fold_body::update_try_entry`]). Jq mode only, as that placement is.
+    let run_bounds = (S::TAG == EvalTag::Jq)
+        .then(|| Some((source_output_bound(init)?, source_output_bound(input)?)))
+        .flatten();
     // #2979: see `resolve_reduce`'s identical hoist.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
@@ -64100,9 +64106,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         // (#3293): a `?//` in the source that retries past that stop and then
         // produces nothing or raises supersedes it, as it does `aborted`.
         let mut downstream_stopped: Option<u64> = None;
-        // #5004: how many source items this run has driven, against the most its source can emit
-        // ([`source_output_bound`]): a step that reaches the bound is the run's last.
-        let source_bound = source_output_bound(input);
+        // #5004: how many source items this fork has driven, against `run_bounds`.
         let mut steps = 0usize;
         let source_may_alias = fold_source_may_alias_register::<S>(input);
         let source_flow = drive_foreach_source::<S>(input, &ambient, relocate_base, &mut |elem| {
@@ -64629,15 +64633,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                         // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
                         // register, or retries an alternative on the body's raise, in ways the step does not report.
-                        // And only on the run's last step: a step before it that placed its handler would let
-                        // the run reach later steps `main` never reached (it refused at this one), whose handler
-                        // the reading may not cover. Unseeded there, a refusal of a frozen `$x`/`$i` is read as
-                        // exact, which a `try`/`?` around the fold swallows (#5012). Asked per step, and only where
-                        // a reading holds (the bodies copy the nested `foreach`, as `bind.apply` already copies the
-                        // whole UPDATE for the step).
-                        let bare_step = matches!(patterns, [Pattern::Var(_)])
-                            && active_reg.trackable
-                            && source_bound == Some(steps);
+                        let bare_step =
+                            matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
+                        // And only on the `foreach`'s last step, of its last INIT fork: a step before it that placed
+                        // its handler would let the `foreach` reach later steps `main` never reached (it refused at
+                        // this one), whose handler the reading may not cover. Unseeded there, a refusal of a frozen
+                        // `$x`/`$i` is read as exact, which a `try`/`?` around the fold swallows (#5012). What runs
+                        // after the `foreach`'s outputs is newly reached, as after any refusal turned into an answer.
+                        let last_step = run_bounds == Some((fork_index + 1, steps));
+                        // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
+                        // `bind.apply` already copies the whole UPDATE for the step).
+                        let seedable_step = bare_step && last_step;
                         let mut entry_tries = None;
                         // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                         // register onto, not the state the last step left. Where the pattern lands on a
@@ -64654,7 +64660,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             && match emitting_handler_count(&bound_update) {
                                                 0 => true,
                                                 emitting => {
-                                                    entry_tries = bare_step
+                                                    entry_tries = seedable_step
                                                         .then(|| update_entry_tries(&bound_update))
                                                         .flatten();
                                                     entry_tries.as_ref().is_some_and(
@@ -64671,7 +64677,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
                         // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
                         // grids turned 33 of 40,000 rows into wrong answers).
-                        let _update_try_entry = (bare_step && _register.is_some())
+                        let _update_try_entry = (seedable_step && _register.is_some())
                             .then(|| {
                                 entry_tries
                                     .take()
@@ -65112,15 +65118,17 @@ fn entry_handler_mark(
         .then(fold_body::entry_handler_delivering)
 }
 
-/// The most items a `foreach` source can emit, where its shape says (#5004): a comma of items that each yield at
-/// most one value ([`yields_at_most_one_value`]) emits at most as many as it has items, whether or not one raises or
-/// is empty. A run that has driven that many is on its last step, whatever the document. `None` for any other source
-/// (`.[]`, `..`, a `foreach`), whose last step cannot be known before the next item is asked for.
+/// The most outputs a `foreach` source or INIT can emit, where its shape says (#5004): a comma of items that each
+/// yield at most one value ([`yields_at_most_one_value`], or such an item behind a `?`, which only drops outputs) emits
+/// at most as many as it has items, whether or not one raises or is empty. A `foreach` that has driven that many is on
+/// its last step, whatever the document. `None` for any other shape (`.[]`, `..`, a `foreach`), whose last output
+/// cannot be known before the next one is asked for.
 fn source_output_bound(source: &Expr) -> Option<usize> {
-    match unwrap_paren(source) {
+    match unwrap_bind_source(source) {
         Expr::Comma(items) => items.iter().try_fold(0usize, |bound, item| {
             Some(bound + source_output_bound(item)?)
         }),
+        Expr::Optional(inner) => source_output_bound(inner),
         item => yields_at_most_one_value(item).then_some(1),
     }
 }

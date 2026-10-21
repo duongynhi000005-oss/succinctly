@@ -526,8 +526,8 @@ fn test_foreach_update_try_handler_beside_a_handler_inside_the_nested_foreach_50
 }
 
 /// #5004: the handler is placed on the run's last step, which a source whose shape bounds its output count names
-/// before the next item is asked for: `(.a,$x)` and `((.a,.a),.)` emit at most two and three items, and their step on
-/// the root is the last one (`source_output_bound`). Rows captured from jq 1.7.1, both routes.
+/// before the next item is asked for: `(.a,$x)`, `((.a,.a),.)` and `(.a?,.)` emit at most two, three and two items,
+/// and their step on the root is the last one (`source_output_bound`). Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_foreach_update_try_handler_on_the_last_step_of_a_bounded_source_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -587,14 +587,29 @@ fn test_foreach_update_try_handler_on_the_last_step_of_a_bounded_source_5004() -
             "",
             0,
         ),
+        (
+            r#"{"a":null}"#,
+            r#"[path(. as $x | foreach (.a?,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; error("x"))) catch (.); $i))]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"del(. as $x | foreach (.a?,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; error("x"))) catch (.); $i))"#,
+            "null\n",
+            "",
+            0,
+        ),
     ])
 }
 
 /// #5004: a step that is not provably the run's last keeps `main`'s refusal, loud. Placing its handler would let the
 /// run reach later steps `main` never reached (it refused at this one), where the reading may not cover the step: run
 /// unseeded there, the handler's `$i`/`$x` is refused as exact (#5012), which a `try`/`?` around the fold swallows,
-/// and `try del(..) catch "c"` answered `"c"` for jq's `null`. So a source with no bound (`.[]?`), and any step before
-/// the bound, stay as on `main` (jq answers each of these; the messages are `main`'s). Both routes.
+/// and `try del(..) catch "c"` answered `"c"` for jq's `null`. So a source with no bound (`.[]?`, `..`), any step
+/// before the bound, and the last step of an INIT fork that is not the last (`(.,null)`) stay as on `main` (jq answers
+/// most of these; the messages are `main`'s). Both routes.
 #[test]
 fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004() -> Result<()> {
     for (input, filter, message) in [
@@ -627,6 +642,91 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004()
             r#"{"a":{"a":null}}"#,
             r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch $i; $i))",
             "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"(. as $x | foreach (.a,.) as $i (null; null | (try (foreach ($x as {a:$a} | .) as $y (null; empty; error($x))) catch $__loc__); $i)) = 9"#,
+            "Invalid path expression with result [null]",
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (0; null | (try (foreach (($x as {a:$a} | .)?) as $y (.; .a?; empty)) catch 7); $i))?]"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r#"try path(. as $x | foreach (..) as $i (null; select(true) | (try (foreach (($x as {a:$a} | .)?) as $y (.; .a?; .)) catch 7); $i)) catch "C""#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r#"try path(. as $x | foreach ((.,.)) as $i (.; not | (try (foreach ($x as {a:$a} | .) as $y (.; .; error)) catch "h"); $i | .a)) catch "C""#,
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"a\":true}}",
+        ),
+        (
+            r#"{"a":{"b":2}}"#,
+            r#"del(. as $x | foreach ((.,.)) as $i (null; (try (foreach (try ($x as {a:$a} | .)) as $y (0; .; error($x))) catch null) | .; $x))"#,
+            "Invalid path expression with result {\"a\":{\"b\":2}}",
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch (.); $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; error("x"))) catch select(false)) catch 7; $i)) |= 9"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r#"path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch 7; $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch select(false)) catch (.); $i))?]"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)) catch select(false)) catch 7; $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))?]"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i)) |= 9"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"del(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch (.); $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch 7; $i))?]"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; error("x"))) catch 7; $i))"#,
+            "Invalid path expression near attempt to access element \"a\" of null",
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(. as $x | foreach (.a,.) as $i ((.,null); try (foreach (try ($x as {a:$a} | .)) as $y (.; .; error("x"))) catch (.); $i))"#,
+            "Invalid path expression with result {\"a\":null}",
         ),
     ] {
         for (stdout, stderr, code) in [
