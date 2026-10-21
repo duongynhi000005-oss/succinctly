@@ -1711,6 +1711,22 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_separated_block_before_a_dedent_is_the_previous_keys_foot_5056() {
+        // Measured: `.a.c | key | foot_comment` == "C\n\nD\n" (yq's own trailing line aside), `.d`'s head
+        // and `.a`'s foot empty.
+        let yaml = b"a:\n  c: 1\n\n  # C\n\n  # D\n\nd: 1\n";
+        let (_, c_foot) = nested_key_head_foot(yaml, "a", "c");
+        assert_eq!(c_foot, ["# C", "", "# D"]);
+        let (_, a_foot) = field_key_head_foot(yaml, "a");
+        assert!(a_foot.is_empty(), "{a_foot:?}");
+        let (d_head, _) = field_key_head_foot(yaml, "d");
+        assert!(d_head.is_empty(), "{d_head:?}");
+        // At the next key's own column it still heads that key.
+        let (d_head, _) = field_key_head_foot(b"a:\n  b:\n    c: 1\n\n# C\n\nd: 1\n", "d");
+        assert_eq!(d_head, ["# C"]);
+    }
+
+    #[test]
     fn a_leading_block_attaches_to_the_document_not_its_first_key_798() {
         // Measured: `. | head_comment` == "lead"; `.a | key | head_comment` empty.
         let yaml = b"# lead\na: 1\n";

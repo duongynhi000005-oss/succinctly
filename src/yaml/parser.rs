@@ -1213,6 +1213,21 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // on the first document's own foot, not `.b`'s head, #798).
                 self.drain_pending_into_foot(old_root);
                 return;
+            } else if let (Some((_, next_column)), Some(prev)) = (next, self.last_head_foot_bp) {
+                // #5056: a blank line above the block detached it from `PREV`, but a node that
+                // dedents out of `PREV`'s block still hands it back unless the comment sits at
+                // that node's own column -- the adjacent arm's #2811 rule below, which the blank
+                // line below the block keeps from being asked (`b:` / `  s:` / `  - n: a` /
+                // `    u: x` / blank / `  # C` / blank / `d: 1` is `u`'s foot, measured).
+                // Not when `PREV` already has a foot: a second block after it is placed by
+                // yq's own sequence-item quirks, which neither arm models.
+                let prev_has_foot = self.comments.get(&prev).is_some_and(|c| !c.foot.is_empty());
+                if next_column < prev_indent && column != next_column && !prev_has_foot {
+                    // Its blocks keep one blank line between them, as a document's foot does (#5052).
+                    self.mark_blank_runs_in_pending();
+                    self.drain_pending_into_foot(prev);
+                    return;
+                }
             }
         } else if let (Some((_, next_column)), Some(prev)) = (next, self.last_head_foot_bp) {
             // Adjacent to a node that dedents out of `PREV`'s block, the
