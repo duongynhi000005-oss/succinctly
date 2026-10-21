@@ -314,7 +314,7 @@ struct BalancedParens<W, S> {
 
 The three levels cost about 39% of the parenthesis bitmap (3 bytes per 8-byte word at L0, 4 bytes per 256
 at L1, 8 bytes per 8,192 at L2); the struct's rank directory adds another 18.75%. See
-[balanced-parens.md](../architecture/balanced-parens.md) for the full table.
+[balanced-parens.md](../architecture/balanced-parens.md#space-overhead) for the full table.
 
 **Query: find_close(pos)**
 
@@ -494,11 +494,11 @@ Fewer levels / larger blocks:
 ## Key Lessons
 
 1. **O(1) is achievable**: Hierarchical structures give constant-time queries
-2. **Space overhead is small**: 3-6% for practical implementations
+2. **Space overhead is a design choice**: ~3% for the sparse select and cumulative indices, 25% for the rank directory, ~39% for the balanced-parentheses min-excess levels
 3. **Simpler can be faster**: Cache effects dominate for moderate sizes
 4. **Match structure to access pattern**: Random vs sequential needs different designs
 5. **Pack auxiliary data**: Bit-packing reduces memory traffic
-6. **Symmetric operations need symmetric indices**: Forward scan uses min, backward uses max
+6. **One index can serve both directions**: `find_close` scans forward with a block's minimum excess; `enclose` scans backward with the same minimum (a block reaches at most `bx - mn` from its end, #4102), so no second index is needed. A separate reverse max-excess index for `find_open` was measured but never merged
 
 ---
 

@@ -15,7 +15,9 @@ Tracks updates to the knowledge wiki pages in `docs/`.
   Structure" section now describes the real per-word / 32-word / 1,024-word min-excess levels and field types
   and the `find_close` state machine; "Indexed find_open" became "find_open and enclose": `find_open` is a
   linear backward scan, `enclose` is indexed (#4102), and the 16-492x reverse-index numbers are marked as
-  measured on an unmerged branch. The RangeMax rows of both tables are gone
+  measured on an unmerged branch. The RangeMax rows of both tables are gone, and Key Lessons 2 ("3-6%") and 6
+  ("symmetric operations need symmetric indices") no longer say what the code contradicts; the RangeMin rows'
+  `~39%` came from #5026
 - [plan/sve2-optimizations.md](plan/sve2-optimizations.md) — "Indexed find_open" moved from the merged
   algorithmic optimizations to a "measured on a branch, not merged" row
 
