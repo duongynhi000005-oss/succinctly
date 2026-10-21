@@ -645,12 +645,12 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004()
         ),
         (
             r#"{"a":[null]}"#,
-            r#"(. as $x | foreach (.a,.) as $i (null; null | (try (foreach ($x as {a:$a} | .) as $y (null; empty; error($x))) catch $__loc__); $i)) = 9"#,
+            r"(. as $x | foreach (.a,.) as $i (null; null | (try (foreach ($x as {a:$a} | .) as $y (null; empty; error($x))) catch $__loc__); $i)) = 9",
             "Invalid path expression with result [null]",
         ),
         (
             r#"{"a":[null]}"#,
-            r#"[path(. as $x | foreach (.,.a) as $i (0; null | (try (foreach (($x as {a:$a} | .)?) as $y (.; .a?; empty)) catch 7); $i))?]"#,
+            r"[path(. as $x | foreach (.,.a) as $i (0; null | (try (foreach (($x as {a:$a} | .)?) as $y (.; .a?; empty)) catch 7); $i))?]",
             "Invalid path expression near attempt to access element \"a\" of null",
         ),
         (
@@ -665,12 +665,12 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004()
         ),
         (
             r#"{"a":{"b":2}}"#,
-            r#"del(. as $x | foreach ((.,.)) as $i (null; (try (foreach (try ($x as {a:$a} | .)) as $y (0; .; error($x))) catch null) | .; $x))"#,
+            r"del(. as $x | foreach ((.,.)) as $i (null; (try (foreach (try ($x as {a:$a} | .)) as $y (0; .; error($x))) catch null) | .; $x))",
             "Invalid path expression with result {\"a\":{\"b\":2}}",
         ),
         (
             r#"{"a":[null]}"#,
-            r#"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch (.); $i))"#,
+            r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch (.); $i))",
             "Invalid path expression near attempt to access element \"a\" of null",
         ),
         (
@@ -680,7 +680,7 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004()
         ),
         (
             r#"{"a":{"a":true}}"#,
-            r#"path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch 7; $i))"#,
+            r"path(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (null; try (.a) catch 7; .)) catch select(false)) catch 7; $i))",
             "Invalid path expression near attempt to access element \"a\" of null",
         ),
         (
@@ -690,7 +690,7 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_not_placed_5004()
         ),
         (
             r#"{"a":{"a":null}}"#,
-            r#"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)) catch select(false)) catch 7; $i))"#,
+            r"del(. as $x | foreach (.,.a) as $i (null; try (try (foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)) catch select(false)) catch 7; $i))",
             "Invalid path expression near attempt to access element \"a\" of null",
         ),
         (
