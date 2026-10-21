@@ -224,34 +224,30 @@ fn test_foreach_update_if_with_a_navigating_else_keeps_the_rows_that_matched_503
     ])
 }
 
-/// #5034: where the `else` is still not read, the answer is what it was (jq's is in each comment). A `reduce` UPDATE
-/// and a `foreach` EXTRACT keep their reading of `if . then FE else .a end` ([`EmptiedUpdate::else_beyond_dot`] is
-/// honoured only by a `foreach` UPDATE): jq raises `near attempt to access element "a" of null` for the `reduce`
-/// (`path`; `[path(..)?]` is `[]`) and prints nothing for the EXTRACT, and succinctly answers `[]`, `[[]]` and refuses
-/// naming the state. Recorded in `limitations.md`; these rows move when those readings do.
+/// #5034, #5044: where the `if` is still not read, the answer is what it was (jq's is in each comment). A `foreach`
+/// EXTRACT keeps its reading of `if . then FE else .a end` ([`EmptiedUpdate::else_beyond_dot`] is not honoured there):
+/// jq prints nothing, succinctly refuses naming the state. The mirrored `if C then B else FE end` is read only in a
+/// `reduce` UPDATE ([`EmptiedUpdate::mirrored`]): in a `foreach` UPDATE it answers `"C"` under a `try` where jq's
+/// `del` leaves the document, because the step after an emptied one cannot be placed at the register the bind moved
+/// (7 of 12,000 grid rows that matched jq turned into refusals when it was read). Recorded in `limitations.md`; these
+/// rows move when those readings do.
 #[test]
-fn test_foreach_update_if_with_a_navigating_else_keeps_other_folds_reading_5034() -> Result<()> {
+fn test_foreach_update_if_with_a_navigating_else_keeps_the_extract_and_mirrored_foreach_reading_5034(
+) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
-        (
-            r#"{"a":1,"b":2}"#,
-            r"path(. as $x | reduce (.a,.b) as $i (.; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))",
-            "[]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":1,"b":2}"#,
-            r"[path(. as $x | reduce (.a,.b) as $i (.; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))?]",
-            "[[]]\n",
-            "",
-            0,
-        ),
         (
             r#"{"a":1,"b":2}"#,
             r"path(. as $x | foreach (.a,.b) as $i (.; .; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))",
             "",
             "Invalid path expression with result",
             5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"try del(. as $x | foreach (null,.a) as $i (.; if .a then .b else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end; .a)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
         ),
     ])
 }

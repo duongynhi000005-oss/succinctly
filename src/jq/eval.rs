@@ -41777,20 +41777,68 @@ struct EmptiedUpdate<'a> {
     /// such an UPDATE is read only there ([`emptied_update_read`]); in a `reduce` UPDATE, a `foreach` EXTRACT, behind a
     /// head stage, a `// empty`, a `catch` or a `first`/`limit`/`nth` it keeps the refusal.
     beyond_bare_if: bool,
-    /// Whether an `if` around the `foreach` has an `else` branch other than `.` (`if . then FE else .a end`, #5034).
-    /// The `else` runs only on a step whose state took it, and that step never drives the `foreach`'s source, so for
-    /// the marks a source drive reads the UPDATE is empty exactly when the `foreach` is. A reader that takes the
-    /// `else` as `.` (the `reduce` UPDATE's first step, [`emptied_update_read`]) does not hold for it.
+    /// Whether an `if` around the `foreach` has an arm other than `.` beside it (`if . then FE else .a end`, #5034,
+    /// #5044). The other arm runs only on a step whose state took it, and that step never drives the `foreach`'s
+    /// source, so for the marks a source drive reads the UPDATE is empty exactly when the `foreach` is. Read in a
+    /// `foreach` or a `reduce` UPDATE and not in a `foreach` EXTRACT ([`emptied_update_read`]): there 16 of 12,000 grid
+    /// rows that matched jq turned into refusals.
     else_beyond_dot: bool,
+    /// Whether the `foreach` is what the `else` of an `if` is (`if C then B else FE end`, #5044), read only in a `reduce`
+    /// UPDATE ([`emptied_update_read`]): in a `foreach` UPDATE the step after an emptied one cannot be placed at the
+    /// register the bind moved (7 of 12,000 grid rows that matched jq turned into refusals), and in an EXTRACT the
+    /// reading is not measured.
+    mirrored: bool,
+}
+
+/// The fold body an UPDATE-shaped expression is read in, which decides how much of [`emptied_update`] is read
+/// ([`emptied_update_read`], #5044).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FoldBody {
+    /// A `foreach` UPDATE: the comma branch beyond a bare `if .` and the `else` beyond `.` are read; the mirrored
+    /// `foreach` in the `else` is not (7 of 12,000 grid rows that matched jq turned into refusals).
+    ForeachUpdate,
+    /// A `reduce` UPDATE with INIT `.`: the `else` beyond `.` and the mirrored `foreach` in the `else` are read.
+    ReduceUpdate,
+    /// A `reduce` UPDATE whose INIT is not `.`: as [`FoldBody::ReduceUpdate`] without those two arms. With `null`, `{}`,
+    /// `1`, `.a` or `$x` for INIT the state is a value the register may share a kind with (or a node of it), and a stage
+    /// after the `reduce` meets a `null` the resolver cannot tell from the register's (51 of 12,000 grid rows that
+    /// matched jq turned into refusals).
+    ReduceUpdateOtherInit,
+    /// A `foreach` EXTRACT: only the arms read before #5034 (16 of 12,000 grid rows that matched jq turned into
+    /// refusals when the `else` beyond `.` was read).
+    ForeachExtract,
+}
+
+impl FoldBody {
+    /// The body of a `reduce` whose INIT is `init`.
+    fn reduce_update(init: &Expr) -> Self {
+        if matches!(unwrap_paren(init), Expr::Identity) {
+            Self::ReduceUpdate
+        } else {
+            Self::ReduceUpdateOtherInit
+        }
+    }
+
+    fn in_foreach(self) -> bool {
+        matches!(self, Self::ForeachUpdate | Self::ForeachExtract)
+    }
+
+    fn is_extract(self) -> bool {
+        self == Self::ForeachExtract
+    }
 }
 
 /// [`emptied_update`], for a fold body: a comma branch read beyond the bare `if .`
-/// ([`EmptiedUpdate::beyond_bare_if`]) only in a `foreach` UPDATE (`foreach_update`) whose `if` [`taken_if_branch`]
-/// finds (#4800).
-fn emptied_update_read(expr: &Expr, foreach_update: bool) -> Option<EmptiedUpdate<'_>> {
+/// ([`EmptiedUpdate::beyond_bare_if`]) only in a `foreach` UPDATE whose `if` [`taken_if_branch`] finds (#4800), an
+/// `else` beyond `.` ([`EmptiedUpdate::else_beyond_dot`]) in a `foreach` or `reduce` UPDATE (#5034, #5044), and the
+/// `foreach` in the `else` ([`EmptiedUpdate::mirrored`]) in a `reduce` UPDATE (#5044).
+fn emptied_update_read(expr: &Expr, body: FoldBody) -> Option<EmptiedUpdate<'_>> {
     emptied_update(expr).filter(|emptied| {
-        (!emptied.beyond_bare_if || foreach_update && taken_if_item(expr).is_some())
-            && (!emptied.else_beyond_dot || foreach_update)
+        (!emptied.beyond_bare_if
+            || body == FoldBody::ForeachUpdate && taken_if_item(expr).is_some())
+            && (!emptied.else_beyond_dot
+                || matches!(body, FoldBody::ForeachUpdate | FoldBody::ReduceUpdate))
+            && (!emptied.mirrored || body == FoldBody::ReduceUpdate)
     })
 }
 
@@ -42064,8 +42112,9 @@ fn is_value_head(e: &Expr) -> bool {
 /// `null` an earlier empty step left behind emits it (#4776), which the fold's own walk does once
 /// it knows the step is empty. The `if` may have an `else` other than `.` when it holds no fold of its own
 /// (`if . then FE else .a end`, #5034): the `else` runs only on a step that never drives the `foreach`'s source,
-/// which [`EmptiedUpdate::else_beyond_dot`] records for [`emptied_update_read`] to withhold from every reader but a
-/// `foreach` UPDATE.
+/// which [`EmptiedUpdate::else_beyond_dot`] records for [`emptied_update_read`] to withhold from a `foreach`
+/// EXTRACT. The mirrored `if C then B else FE end` is read the same way, in a `reduce` UPDATE only
+/// ([`EmptiedUpdate::mirrored`], #5044).
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(without_empty_siblings(expr)) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
@@ -42076,6 +42125,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             comma_branch: false,
             beyond_bare_if: false,
             else_beyond_dot: false,
+            mirrored: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
@@ -42178,6 +42228,27 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             }
             Some(emptied)
         }
+        // The mirrored `if C then B else FE end` (#5044): the `then` holds no fold and the `foreach` is what the
+        // `else` is (or the `else` is an `elif` chain that has it). The source is driven only on a step that took
+        // the `else`, so for the marks a source drive reads the UPDATE is empty exactly when the `foreach` is, as in
+        // the `then` form; `truthy` stays unset, for the condition gates nothing the `else` runs on.
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } if !any_subexpr(then_branch, &mut |e| {
+            matches!(e, Expr::Foreach { .. } | Expr::Reduce { .. })
+        }) =>
+        {
+            let on_dot = matches!(unwrap_paren(cond), Expr::Identity);
+            if !on_dot && !is_pure_of_dot(cond) {
+                return None;
+            }
+            let mut emptied = emptied_update(else_branch)?;
+            emptied.else_beyond_dot = true;
+            emptied.mirrored = true;
+            Some(emptied)
+        }
         _ => None,
     }
 }
@@ -42185,11 +42256,8 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
 /// The [`fold_body`] mark for the body of a fold (a `reduce` UPDATE, or a `foreach` UPDATE or
 /// EXTRACT with `in_foreach`) that is empty exactly when a `foreach` in it is (#4709, #4724,
 /// #4754, #4776): the `foreach` itself, or a wrapper [`emptied_update`] sees through.
-fn sole_update_mark<S: EvalSemantics>(
-    body: &Expr,
-    in_foreach: bool,
-    extract: bool,
-) -> Option<fold_body::SoleGuard> {
+fn sole_update_mark<S: EvalSemantics>(body: &Expr, fold: FoldBody) -> Option<fold_body::SoleGuard> {
+    let (in_foreach, extract) = (fold.in_foreach(), fold.is_extract());
     if S::TAG != EvalTag::Jq {
         return None;
     }
@@ -42198,7 +42266,7 @@ fn sole_update_mark<S: EvalSemantics>(
             Some(fold_body::sole_update_foreach(input, in_foreach, extract))
         }
         e => {
-            let emptied = emptied_update_read(e, in_foreach && !extract)?;
+            let emptied = emptied_update_read(e, fold)?;
             // #4778, #4782, #4797: what the state decides, the stages after a fallback and a literal
             // stage ahead are read for a `reduce` UPDATE and a `foreach` UPDATE or EXTRACT alike: the
             // step is empty exactly when the `foreach` is, whichever of them surround it.
@@ -63004,6 +63072,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     let update_of_stating_fold = S::TAG == EvalTag::Jq && fold_body::foreach_body_stating_here();
     let leaves_in_place = S::TAG == EvalTag::Jq
         && (reduce_leaves_register_in_place(input, init, update)
+            // #5044: ...or an UPDATE that is empty with a `foreach` it holds, whose source the resolver follows: jq
+            // backtracks the UPDATE, so the state it ends on (`null`, an emptied step's) is no node of the register
+            // the `reduce` entered with, and a stage after it raises jq's own catchable error, not a guess.
+            || (cannot_move_register(init)
+                && register_movement_tracked(input)
+                && emptied_update_read(update, FoldBody::reduce_update(init)).is_some())
             // ...whose own UPDATE moves the register only by a bind, which it backtracks.
             || (update_of_stating_fold
                 && patterns_all_bare(patterns)
@@ -63106,7 +63180,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // hands it a value that is not the accumulator.
     let foreach_update_on_register = first_step_on_register
         && (matches!(unwrap_paren(update), Expr::Foreach { .. })
-            || emptied_update_read(update, false).is_some_and(|emptied| !emptied.literal_head));
+            || emptied_update_read(update, FoldBody::reduce_update(init))
+                .is_some_and(|emptied| !emptied.literal_head));
     // #4440: an UPDATE that is a `?//` bind of `.` runs its alternatives with `.` on the accumulator,
     // which is on the register at the first step as for the UPDATEs above.
     let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);
@@ -63533,7 +63608,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // empty `foreach` leaves the whole UPDATE empty whatever they are. A comma beside
                         // it (`foreach ..., 1`) is not that, and stays unmarked.
                         let _sole_update_foreach =
-                            sole_update_mark::<S>(&substituted, false, false);
+                            sole_update_mark::<S>(&substituted, FoldBody::reduce_update(init));
                         // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
                         // read the register the step left.
                         let _register_folds = (S::TAG == EvalTag::Jq)
@@ -64548,7 +64623,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 .then(fold_body::acc_off_register);
                                 // #4776: and an EXTRACT that is such a `foreach` emits nothing for the step.
                                 let _sole_extract_foreach =
-                                    sole_update_mark::<S>(ext_expr, true, true);
+                                    sole_update_mark::<S>(ext_expr, FoldBody::ForeachExtract);
                                 let _foreach_body = fold_body::foreach_body();
                                 // #4779: ...and the `foreach`es EXTRACT is made of read the register
                                 // this step left, as an UPDATE of that shape reads its fold's.
@@ -64686,7 +64761,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                         // emits, so an inner source that is empty leaves this one emitting nothing.
                         let _sole_update_foreach =
-                            sole_update_mark::<S>(&bound_update, true, false);
+                            sole_update_mark::<S>(&bound_update, FoldBody::ForeachUpdate);
                         // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
                         // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                         // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
