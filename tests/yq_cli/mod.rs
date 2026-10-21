@@ -68,4 +68,5 @@ mod i5053_foot;
 mod i5056;
 mod i5058;
 mod i5062;
+mod i5064;
 mod i865;
