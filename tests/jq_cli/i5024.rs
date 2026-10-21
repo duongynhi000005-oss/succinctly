@@ -401,31 +401,31 @@ fn test_5024_collect_piped_into_a_generator_or_variable_never_answers_where_jq_d
     let rows: &[(&str, &str, &str, i32)] = &[
         (
             r#"{"a":[1]}"#,
-            r#"[del(. as $x | foreach (.,.a?) as $i ([.a] | paths; $i; .a?))?]"#,
+            r"[del(. as $x | foreach (.,.a?) as $i ([.a] | paths; $i; .a?))?]",
             "[]\n",
             0,
         ),
         (
             r#"{"a":[1]}"#,
-            r#"[del(. as $x | foreach (.,.a?) as $i ([.a] | paths; $x; $i))?]"#,
+            r"[del(. as $x | foreach (.,.a?) as $i ([.a] | paths; $x; $i))?]",
             "[]\n",
             0,
         ),
         (
             r#"{"a":1,"b":2}"#,
-            r#"(. as $x | foreach (.) as $i ([.a] | tostream; $i; .a?)) |= 5"#,
+            r"(. as $x | foreach (.) as $i ([.a] | tostream; $i; .a?)) |= 5",
             "",
             5,
         ),
         (
-            r#"null"#,
-            r#"(. as $x | foreach (.a?,.) as $i ([.a] | tostream; $x; $i)) |= 5"#,
+            r"null",
+            r"(. as $x | foreach (.a?,.) as $i ([.a] | tostream; $x; $i)) |= 5",
             "",
             5,
         ),
         (
-            r#"null"#,
-            r#"[path(. as $x | foreach (.,.a?) as $i ([.a] | $x | .a?; .; $x))?]"#,
+            r"null",
+            r"[path(. as $x | foreach (.,.a?) as $i ([.a] | $x | .a?; .; $x))?]",
             "[[\"a\"],[\"a\",\"a\"]]\n",
             0,
         ),
