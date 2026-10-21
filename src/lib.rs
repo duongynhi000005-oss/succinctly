@@ -35,7 +35,7 @@
 //!
 //! Popcount strategies (mutually exclusive, for benchmarking):
 //! - Default: Uses Rust's `count_ones()` which auto-vectorizes
-//! - `simd` - Use explicit SIMD intrinsics (NEON on ARM, POPCNT on x86)
+//! - `simd` - Use explicit SIMD intrinsics (NEON on ARM, AVX-512 VPOPCNTDQ on x86_64, runtime-detected)
 //! - `portable-popcount` - Use portable bitwise algorithm (no intrinsics)
 //!
 //! Other features:

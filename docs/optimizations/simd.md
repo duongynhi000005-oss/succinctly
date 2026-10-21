@@ -1000,6 +1000,30 @@ rank/select index building, popcount is interleaved with loads, shifts and store
 ratios are an upper bound on what the strategy contributes end-to-end — consistent with
 this project's recurring "micro-benchmarks mislead" finding.
 
+### Per-word popcounts on baseline x86_64 (#5035)
+
+The numbers above are the *bulk* kernel (`popcount_words`). The query hot paths popcount one word at a
+time, and those calls are `u64::count_ones()` with no dispatch of their own: `popcount_word`
+(`BitVec::rank1`'s partial word), `scan_select`'s prologue and scalar block scan (`src/bits/scan.rs`, every
+`select1`), the per-word calls in `src/trees/bp.rs` (rank, select) and the JSON/YAML cumulative indexes.
+On aarch64 that is NEON `cnt`. On x86_64 it lowers to the `POPCNT` instruction **only when the `popcnt`
+target feature is enabled at compile time**; no build here sets `target-cpu` or `target-feature`, and the
+baseline `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin` targets lack it, so each call is a
+19-instruction broadword sequence (four 64-bit constants and an `imul`, rustc 1.99.0):
+
+```bash
+printf '#[no_mangle] pub fn pc(x:u64)->u32{x.count_ones()}\n' > pc.rs
+rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu --emit asm -o - pc.rs | grep -c popcnt   # 0
+rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu -C target-feature=+popcnt \
+      --emit asm -o - pc.rs | grep -c popcnt                                                          # 1
+```
+
+(rustc 1.99.0; the same on `x86_64-apple-darwin`.) Whether `+popcnt` moves the end-to-end benchmarks
+(`jq_bench`/`yq_bench`, rank/select micro-benchmarks) has not been measured; it needs an interleaved A/B on an
+x86_64 box (default build vs `RUSTFLAGS="-C target-feature=+popcnt"`) and is tracked on #5035. Per-call
+runtime dispatch on a single word would cost more than it saves, so the options are a documented `RUSTFLAGS`,
+release binaries built with `+popcnt`, or `#[target_feature(enable = "popcnt")]` clones of the hot loops.
+
 ### Reproduce
 
 ```bash

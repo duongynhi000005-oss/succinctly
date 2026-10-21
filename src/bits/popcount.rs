@@ -1,11 +1,11 @@
-#![allow(unsafe_code)] // hardware popcount intrinsics (NEON/POPCNT)
+#![allow(unsafe_code)] // hardware popcount intrinsics (NEON, AVX-512 VPOPCNTDQ)
 //! Popcount implementations with compile-time switching.
 //!
 //! This module provides different popcount strategies that can be selected
 //! via feature flags for benchmarking:
 //!
 //! - Default: Uses Rust's `count_ones()` which auto-vectorizes
-//! - `simd`: Uses explicit SIMD intrinsics (NEON/POPCNT/AVX-512)
+//! - `simd`: Uses explicit SIMD intrinsics (NEON on ARM, AVX-512 VPOPCNTDQ on x86_64 when the CPU has it)
 //! - `portable-popcount`: Uses portable bitwise algorithm (no intrinsics)
 //!
 //! Feature priority (when multiple enabled): portable-popcount > simd > default
@@ -25,7 +25,9 @@ pub fn popcount_word(word: u64) -> u32 {
 
     #[cfg(all(feature = "simd", not(feature = "portable-popcount")))]
     {
-        // On both x86_64 and aarch64, count_ones compiles to efficient instructions
+        // aarch64: NEON `cnt`. x86_64: the `POPCNT` instruction only when the build enables the
+        // `popcnt` target feature (`-C target-cpu=native`); this repo's builds set none, so the
+        // baseline x86_64 target gets a 19-instruction broadword sequence (#5035).
         word.count_ones()
     }
 
@@ -259,7 +261,7 @@ unsafe fn popcount_words_avx512vpopcntdq(words: &[u64]) -> usize {
 ///
 /// Dispatches to:
 /// - AVX-512 VPOPCNTDQ (8x u64 parallel) if available
-/// - Scalar POPCNT otherwise
+/// - A `count_ones()` loop otherwise (`POPCNT` only if the build enables that target feature, else broadword)
 #[cfg(all(
     feature = "simd",
     target_arch = "x86_64",
@@ -275,7 +277,9 @@ fn popcount_words_x86(words: &[u64]) -> usize {
         }
     }
 
-    // Fallback: scalar POPCNT (count_ones compiles to POPCNT on x86_64)
+    // Fallback: a `count_ones()` loop. `count_ones` lowers to `POPCNT` on x86_64 only when the build
+    // enables the `popcnt` target feature (`-C target-cpu=native`); the baseline target gets the
+    // broadword sequence (#5035, docs/optimizations/simd.md).
     let mut total = 0usize;
     for &word in words {
         total += word.count_ones() as usize;
