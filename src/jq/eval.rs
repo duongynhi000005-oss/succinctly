@@ -38007,13 +38007,19 @@ fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>
 /// in a comma whose other items emit nothing (`(FE, empty)`, [`without_empty_siblings`], #4800). Where
 /// that bind passes, jq's register moves to the bound child, and the `foreach` emits its state with the
 /// register there. A source with a handler (`catch .`) emits whether the bind passed or not, so it is refused.
-/// A pipe whose head is such a `foreach` and whose later stages are [`plain_beside_bind_foreach`] (`FE | .`) hands
-/// that emission on unchanged, so it has the same key. An `if` around the `foreach` does not (which arm ran
-/// decides whether the bind moved the register): `update_wraps_bare_bind_foreach` reads it without a key.
+/// A pipe whose head is such a `foreach` and whose later stages cannot move the register (`FE | .`, and, #5018,
+/// `FE | null`: a stage that computes a value leaves the register on the bound child) hands that emission on, so
+/// it has the same key. An `if` around the `foreach` does not (which arm ran decides whether the bind moved the
+/// register): `update_wraps_bare_bind_foreach` reads it without a key.
 fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
+    bare_bind_foreach_update_key_within(update, WRAPPED_CHAIN_DEPTH)
+}
+
+fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<PatternKey<'_>> {
+    let budget = budget.checked_sub(1)?;
     match unwrap_paren(without_empty_siblings(update)) {
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
-            bare_bind_foreach_update_key(expr)
+            bare_bind_foreach_update_key_within(expr, budget)
         }
         Expr::Foreach {
             input,
@@ -38029,21 +38035,39 @@ fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
             }))
         .then(|| bare_bind_source_key(input, true))
         .flatten(),
-        // #4957: a pipe whose later stages leave the register where it is and emit no `null` or boolean
-        // (`FE | .`) hands the `foreach`'s emission on unchanged.
+        // #4957: a pipe whose later stages leave the register where it is (`FE | .`) hands the `foreach`'s
+        // emission on unchanged. #5018: and one that emits a `null` or boolean (`FE | null`) leaves the register
+        // where the bind put it, so what the EXTRACT is judged against does not depend on the tail's value.
         Expr::Pipe(stages) => {
             let (head, tail) = stages.split_first()?;
             tail.iter()
-                .all(plain_beside_bind_foreach)
-                .then(|| bare_bind_foreach_update_key(head))
+                .all(cannot_move_register)
+                .then(|| bare_bind_foreach_update_key_within(head, budget))
                 .flatten()
         }
         _ => None,
     }
 }
 
-/// A pipe tail or `if` arm beside a bare caught-bind `foreach` that is not the `foreach`: it leaves the register
-/// where it is and emits no `null` or boolean. Not for a comma sibling: `(FE), null` and `(FE), []` answered
+/// Whether a pipe stage after the bare `foreach` of [`bare_bind_foreach_update_key`] may emit a `null` or a boolean
+/// (#5018): the stage, not the `foreach`'s own source, so a source grammar widened later does not switch the
+/// read on for shapes it never covered.
+fn bare_bind_foreach_update_tail_emits_null_or_bool(update: &Expr) -> bool {
+    match unwrap_paren(without_empty_siblings(update)) {
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+            bare_bind_foreach_update_tail_emits_null_or_bool(expr)
+        }
+        Expr::Pipe(stages) => stages.split_first().is_some_and(|(head, tail)| {
+            tail.iter().any(may_emit_null_or_bool)
+                || bare_bind_foreach_update_tail_emits_null_or_bool(head)
+        }),
+        _ => false,
+    }
+}
+
+/// An `if` arm or a pipe tail of the wrapped read that is not the `foreach`: it leaves the register where it is
+/// and emits no `null` or boolean (a pipe tail that emits one is read through the bind key instead, #5018, under an
+/// EXTRACT that cannot move the register). Not for a comma sibling: `(FE), null` and `(FE), []` answered
 /// wrongly when read (4 of 100,000 random rows), so those keep their refusal.
 fn plain_beside_bind_foreach(e: &Expr) -> bool {
     cannot_move_register(e) && !may_emit_null_or_bool(e)
@@ -38053,7 +38077,10 @@ fn plain_beside_bind_foreach(e: &Expr) -> bool {
 /// `plain`, or an `if` whose condition cannot move the register and whose other arm is `plain`, a bare
 /// `foreach` over a caught or plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source
 /// is one pattern of one bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and
-/// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean.
+/// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean,
+/// unless the UPDATE is the bare `foreach` (alone, behind `try`/`?`, or piped into stages that cannot move the
+/// register) and the EXTRACT cannot move the register either ([`bare_bind_foreach_update_key`]: the EXTRACT's
+/// emission is then judged against the register the bind moved, #5014, #5020, #5018).
 /// Such a `foreach` meets `.` on the register wherever the enclosing fold's accumulator still is, so its
 /// source destructures a `$x` the resolver can place against it (the bind is `jv_identical` to the register,
 /// or it is not and the pattern's step raises) instead of getting the loud refusal an unplaced body gets.
@@ -38063,7 +38090,7 @@ fn plain_beside_bind_foreach(e: &Expr) -> bool {
 /// `foreach`'s emission): reading any nested `foreach` this way, 6 of 30,000 rows (a `?//` chain, a nested
 /// pattern, a `select` stage); a second variable in the pattern, 11 of 40,000; a body other than `.`, 2 more;
 /// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
-/// or boolean EXTRACT, and a comma sibling that emits a value beside the `foreach` (`(FE), null`, `(FE), []`), 4 of
+/// or boolean EXTRACT behind an `if`, and a comma sibling that emits a value beside the `foreach` (`(FE), null`, `(FE), []`), 4 of
 /// 100,000. A comma whose other items emit nothing (`(FE, empty)`) is the `foreach` alone
 /// ([`without_empty_siblings`], #4800).
 fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> bool {
@@ -38107,17 +38134,16 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
             _ => false,
         }
     }
-    // #4957: ...except for the bare `foreach` itself (a `try`, `?` or a pipe of plain tail stages around it is
-    // read, an `if` is not) under an EXTRACT that cannot move the register: the fold states the register the bind moved the
-    // `foreach`'s emission onto ([`bare_bind_foreach_update_key`]), which a `null`/boolean EXTRACT is judged
-    // against. One that navigates (`try (.a | not) catch null`, `.. | select(. == null)`) runs against the
-    // moved register, which the resolver does not hand it: 5 of 30,000 random rows answered wrongly.
-    // `go` runs first: its depth budget bounds the key walk's recursion.
-    go(e, WRAPPED_CHAIN_DEPTH)
-        && outer_extract.map_or(true, |extract| {
-            !may_emit_null_or_bool(extract)
-                || (bare_bind_foreach_update_key(e).is_some() && cannot_move_register(extract))
-        })
+    // #4957: ...or the bare `foreach` itself (alone, behind a `try`/`?`, or piped into stages that cannot move the
+    // register; an `if` is not) under an EXTRACT that cannot move the register: the fold states the register the
+    // bind moved the `foreach`'s emission onto ([`bare_bind_foreach_update_key`]), which a `null`/boolean EXTRACT is
+    // judged against, whatever value a pipe tail computes (#5018). One that navigates (`try (.a | not) catch null`,
+    // `.. | select(. == null)`) runs against the moved register, which the resolver does not hand it: 5 of 30,000
+    // random rows answered wrongly.
+    (go(e, WRAPPED_CHAIN_DEPTH)
+        && outer_extract.map_or(true, |extract| !may_emit_null_or_bool(extract)))
+        || (outer_extract.map_or(true, cannot_move_register)
+            && bare_bind_foreach_update_key(e).is_some())
 }
 
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
@@ -63594,7 +63620,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
-        .filter(|_| extract.is_some_and(may_emit_null_or_bool));
+        .filter(|_| {
+            extract.is_some_and(may_emit_null_or_bool)
+                || bare_bind_foreach_update_tail_emits_null_or_bool(update)
+        });
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
