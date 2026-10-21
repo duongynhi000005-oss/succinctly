@@ -217,7 +217,8 @@ struct PendingBlock {
     blank_before: bool,
     /// The column of the block a blank line just settled onto `PREV` as its foot, when this block is the
     /// next one of the same run (#5053): go-yaml ended the blocks at that column with the first, so this one
-    /// is evaluated against the blocks still open outside it.
+    /// is evaluated against the blocks still open outside it, whatever its own column (a block deeper than
+    /// the first, which captures no frames of its own, takes them for this).
     follows_foot_at: Option<usize>,
 }
 
@@ -1051,8 +1052,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             } else {
                 self.blank_line_precedes(start as usize)
             };
-            self.capture_pending_block(column, after_split, blank_before);
-            self.pending_block.follows_foot_at = follows_foot_at;
+            self.capture_pending_block(column, after_split, blank_before, follows_foot_at);
         }
         self.pending_head_lines.push((start, end));
     }
@@ -1070,16 +1070,24 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// ([`Self::positional_foot_target`], called only from
     /// [`Self::settle_dedented_block`]) is reached only from call sites that
     /// independently re-check `column < prev_indent` before calling, so
-    /// this widening changes nothing for them.
-    fn capture_pending_block(&mut self, column: usize, after_split: bool, blank_before: bool) {
+    /// this widening changes nothing for them. A block that follows one a blank line settled
+    /// (`follows_foot_at`, #5053) takes the frames at any column, for
+    /// [`Self::outer_key_of_settled_foot`]; no other consumer reads a deeper block's frames.
+    fn capture_pending_block(
+        &mut self,
+        column: usize,
+        after_split: bool,
+        blank_before: bool,
+        follows_foot_at: Option<usize>,
+    ) {
         let prev_indent = self.innermost_block_indent();
         self.pending_block.column = column;
         self.pending_block.prev_indent = prev_indent;
         self.pending_block.after_split = after_split;
         self.pending_block.blank_before = blank_before;
-        self.pending_block.follows_foot_at = None;
+        self.pending_block.follows_foot_at = follows_foot_at;
         self.pending_block.frames.clear();
-        if column > prev_indent {
+        if column > prev_indent && follows_foot_at.is_none() {
             return;
         }
         // `indent_stack[0]` is the virtual root (sentinel indent), never a
@@ -1235,6 +1243,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.drain_pending_into_foot(old_root);
                 return;
             } else if let Some((_, next_column)) = next {
+                // A blank line after the run's second block changes nothing: it is still the foot of the key
+                // that owns the blocks the first one closed (#5053).
+                if let Some(owner) = self.outer_key_of_settled_foot(next_column) {
+                    self.drain_pending_into_owner_foot(owner);
+                    return;
+                }
                 if self.detached_block_to_prev_before_dedent(next_column) {
                     return;
                 }
@@ -1256,7 +1270,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 } else if let Some(owner) = self.outer_key_of_settled_foot(next_column) {
                     // The run's first block already closed the blocks at its column as `PREV`'s foot, so this
                     // one is the foot of the key that owns them (#5053).
-                    self.drain_pending_into_foot(owner);
+                    self.drain_pending_into_owner_foot(owner);
                 } else {
                     self.drain_pending_into_foot(prev);
                 }
@@ -1282,13 +1296,21 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
+    /// Drain the pending blocks into the foot of the key that owns the blocks a run's first block closed
+    /// (#5053), keeping the blank line between them as a document's foot does (#5052).
+    fn drain_pending_into_owner_foot(&mut self, owner: usize) {
+        self.mark_blank_runs_in_pending();
+        self.drain_pending_into_foot(owner);
+    }
+
     /// The key whose value block the run's first block closed, for the block after it (#5053): the last key of
     /// the open mapping the following node (at `next_column`) belongs to, when it dedents past the closed column. `a:` /
     /// `  b: 1` / `  # A` / blank / `  # B` / `c: 2` is `# A` on `.a.b`'s key and `# B` on `.a`'s.
     fn outer_key_of_settled_foot(&self, next_column: usize) -> Option<usize> {
         let closed_at = self.pending_block.follows_foot_at?;
-        // This block sits at the column the first one closed, and the node after it dedents past that column.
-        if next_column >= closed_at || self.pending_block.column != closed_at {
+        // The node after this block dedents past the column the first one closed, and this block is not at or
+        // left of that node's own column (a block there is placed by that column, not moved).
+        if next_column >= closed_at || self.pending_block.column <= next_column {
             return None;
         }
         // The mapping the following node belongs to: the key it follows owns the blocks that closed.
@@ -2029,8 +2051,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // placed by column, the same dedent-aware rule
                 // `flush_pending_head_lines_with_root`'s own dedent branch
                 // already applies in-document/at EOF (#2811 review).
-                let target = self.positional_boundary_foot_target().unwrap_or(old_root);
-                if target == old_root {
+                // ...except a second block of a run after a blank line, which is the foot of the key that owns
+                // the blocks the first closed (`outer_key_of_settled_foot`, #5053).
+                let owner = self.outer_key_of_settled_foot(0);
+                let target = owner
+                    .or_else(|| self.positional_boundary_foot_target())
+                    .unwrap_or(old_root);
+                if owner.is_some() || target == old_root {
                     self.mark_blank_runs_in_pending();
                 }
                 self.drain_pending_into_foot(target);
@@ -2050,11 +2077,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 }
                 // A second block of the run, after a blank line, is the foot of the key that owns the blocks
                 // the first closed, as in a mapping (`outer_key_of_settled_foot`, #5053).
-                let target = self
-                    .outer_key_of_settled_foot(0)
+                let owner = self.outer_key_of_settled_foot(0);
+                let target = owner
                     .or_else(|| self.positional_boundary_foot_target())
                     .unwrap_or(old_root);
-                if target == old_root {
+                if owner.is_some() || target == old_root {
                     self.mark_blank_runs_in_pending();
                 }
                 self.drain_pending_into_foot(target);
