@@ -58186,6 +58186,9 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // holding a container bound elsewhere than it names is not the register, whatever the document is.
     // Through a `?//` chain too: jq names the last alternative's step where the resolver names the
     // first's, but read by value the chain answered and a write went through.
+    // #5030: ...and on a `null` ambient too (a stage that navigated to a missing key, `.a as $x | .nope |
+    // reduce ($x as {b:$b} | .) ..`): a container marker is provably not that `null`, and a `null` one is
+    // identical to it by kind, which [`foreign_register_markers_with`] already reads.
     // #5030: on such an ambient a `try`/`?` around the fold that destructures (`try reduce ($x as P | .) ..`)
     // does not hide the marker: the resolver this routes to runs the `try` as jq does, catching the inner
     // raise and leaving the source empty, where the by-value drive answered and `del` deleted `.a`.
@@ -58202,10 +58205,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
             source
         };
         S::TAG == EvalTag::Jq
-            && ((fold_body::depth() == 0
-                && ambient.trackable
-                && !matches!(ambient.value, OwnedValue::Null)
-                && try_free())
+            && ((fold_body::depth() == 0 && ambient.trackable && try_free())
                 || ambient.frame_names_register)
             && !foreign_register_markers_with::<S>(
                 marker_scan,
