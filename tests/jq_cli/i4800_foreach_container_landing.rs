@@ -1,7 +1,7 @@
 //! #4800: the caught foreign-`$x` `foreach` of a `foreach` UPDATE over a moving source, where the pattern's step lands on
 //! a container. `FE` is `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`.
 
-use crate::{assert_path_rows_both_routes_3749, run_jq_full};
+use crate::assert_path_rows_both_routes_3749;
 use anyhow::Result;
 
 /// #4800: on `{"a":{"a":null}}` the step whose element is the root moves jq's register onto `{"a":null}` and leaves
@@ -696,29 +696,40 @@ fn test_caught_foreign_foreach_landing_on_a_container_behind_a_catch_empty_4800(
     ])
 }
 
-/// #4800: a handler that emits is not read through. jq runs it after backtracking to its `try`, so its output carries
-/// the register the `try` entered with (the root here, so jq's `$i` is `[]` and `[path(..)?]` is `[[]]`); the
-/// container reading does not state that, and read through the handler it answered `[]`, dropping jq's path. It keeps
-/// the refusal it had before (`has_emitting_handler`): loud, not a wrong answer.
+/// #4800, #5004: a handler that emits is read through too. jq runs it after backtracking to its `try`, so its output
+/// carries the register the `try` entered with: the root here, so jq's `$i` is `[]` and `[path(..)?]` is `[[]]`.
+/// #4800 kept this shape refused (`has_emitting_handler`), since the container reading did not state that register;
+/// #5004 seeds the handler with it (`foreach_update_try_entry`), so the rows match jq.
 #[test]
-fn test_caught_foreign_foreach_landing_behind_an_emitting_handler_stays_refused_4800() -> Result<()>
-{
-    let filter = r"[path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i))?]";
-    let input = r#"{"a":{"a":null}}"#;
-    for (stdout, stderr, code) in [
-        run_jq_full(&["-c", filter], Some(input))?,
-        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
-    ] {
-        assert_eq!(
-            (stdout.as_str(), code),
-            ("", 5),
-            "{filter}: stderr {stderr:?}"
-        );
-        assert!(
-            stderr
-                .contains(r#"Invalid path expression near attempt to access element "a" of null"#),
-            "{filter}: {stderr:?}"
-        );
-    }
-    Ok(())
+fn test_caught_foreign_foreach_landing_behind_an_emitting_handler_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .a)) catch (.); $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+    ])
 }
