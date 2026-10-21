@@ -81,6 +81,18 @@ const ROWS: &[(&str, &[&str], &str, &str)] = &[
         "[(.d | key | head_comment), (.b | key | foot_comment)]",
         "[\"\",\"\"]\n",
     ),
+    (
+        "a:\n  b:\n    c: 1\n\n  # C\n\n  # D\n\n---\nz: 1\n",
+        &[],
+        ".",
+        "a:\n  b:\n    c: 1\n    # C\n\n    # D\n---\nz: 1\n",
+    ),
+    (
+        "a: 1\n\n# A\n\n# B\n\n---\nb: 2\n",
+        &[],
+        ".",
+        "a: 1\n# A\n\n# B\n---\nb: 2\n",
+    ),
 ];
 
 #[test]
