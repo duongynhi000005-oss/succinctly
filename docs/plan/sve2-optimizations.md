@@ -31,11 +31,11 @@ This document analyzes all current x86 and ARM NEON optimizations in the Succinc
 
 ### ⚠️ Measured on a branch, not merged
 
-| Optimization      | Location                         | Speedup | Date       |
+| Optimization      | Location                         | Speedup | Measured   |
 |-------------------|----------------------------------|---------|------------|
 | Indexed find_open | `trees/bp.rs` (unmerged branch)  | 16-492x | 2026-01-23 |
 
-*Note: Indexed find_open uses hierarchical max-excess indices and byte lookup tables (scalar code, no SIMD). It lives only on branch `newhoggy/optimise-enclose-and-find_open` (`93963776a`) and never landed on `main`: `BalancedParens::find_open` is still the linear backward scan, and only `enclose` is indexed (#4102). See [hierarchical-structures.md](../optimizations/hierarchical-structures.md#find_open-and-enclose).*
+*Note: These numbers were measured on a branch and are not part of the shipped speedups above. Indexed find_open uses hierarchical max-excess indices and byte lookup tables (scalar code, no SIMD). It lives only on branch `newhoggy/optimise-enclose-and-find_open` (`93963776a`) and never landed on `main`: `BalancedParens::find_open` is still the linear backward scan, and only `enclose` is indexed (#4102). See [hierarchical-structures.md](../optimizations/hierarchical-structures.md#find_open-and-enclose).*
 
 ### ❌ Rejected Optimizations
 

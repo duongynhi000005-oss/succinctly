@@ -327,7 +327,8 @@ Find the matching close paren for the open at position `pos`:
    excess can reach zero inside the block; if not it adds the block's total excess and skips it whole, and
    if so it descends one level.
 
-**Result**: 40x speedup on tree navigation.
+**Result**: reported as a 40x speedup on tree navigation when the index was added (the benchmark is not preserved
+here and was not re-measured for this page).
 
 ### SIMD-Accelerated Index Construction (January 2026)
 
@@ -336,8 +337,8 @@ On ARM, the L1 index building can be accelerated using NEON SIMD
 `build_l1_index_sse41`/`build_l2_index_sse41` on x86_64):
 
 ```rust
-// Process 8 words at a time
-unsafe fn build_l1_neon(l0_min: &[i8], l0_excess: &[i16]) -> (Vec<i16>, Vec<i16>) {
+// Process 8 words at a time (simplified from `build_l1_index_neon(l0_min_excess, l0_word_excess, num_l1)`)
+unsafe fn build_l1_index_neon(l0_min: &[i8], l0_excess: &[i16]) -> (Vec<i16>, Vec<i16>) {
     // 1. Load 8 min_excess values (i8 → i16)
     let min_lo = vmovl_s8(vld1_s8(min_ptr));
 
@@ -354,8 +355,6 @@ unsafe fn build_l1_neon(l0_min: &[i8], l0_excess: &[i16]) -> (Vec<i16>, Vec<i16>
     let block_min = vminvq_s16(adjusted);
 }
 ```
-
-(A sketch of the shape; the real function is `build_l1_index_neon` in `bp.rs`.)
 
 **Result**: 2.8x faster L1 index construction on ARM (Graviton 4).
 
