@@ -183,3 +183,41 @@ fn test_fold_source_register_marker_piped_into_a_destructure_5030() -> Result<()
         ),
     ])
 }
+
+/// #5030 (review): the walks through a `reduce` that decide a fold body's loud refusal do not read a listed marker in
+/// a comma, an `if` branch or a `limit` as the register on every output. Inside another fold's UPDATE, `($x, $x) | .
+/// as [$q]` raises jq's own catchable error and `try` catches it; reading the marker as the register there refused
+/// with an error no `try` catches. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_body_marker_in_a_comma_or_branch_is_not_the_register_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r#"try path(. as $x | foreach 1 as $i (.; .; foreach (($x, $x) | . as [$q] | .) as $y (.; 1; .))) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(try (.a.b as $x | foreach 1 as $i (.; foreach (($x, $x) | . as {a:$q} | 1) as $y (null; .; empty); .)))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1],"b":[2]}"#,
+            r#"try del(. as $x | reduce .a as $i (.; foreach (limit(1; $x) | . as $w | $w as {b:$q} | .) as $y (null; .b?; empty))) catch "D""#,
+            "\"D\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"try path(. as $x | foreach 1 as $i (.; .; foreach ((if true then $x else $x end) | . as [$q] | .) as $y (.; 1; .))) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+    ])
+}
