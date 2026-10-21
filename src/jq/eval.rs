@@ -43958,8 +43958,11 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                     };
                     let update_entry =
                         match foreach_update_try_entry::<S>(expr, catch.as_deref(), frame) {
-                            Some(None) => return guessed_try_entry_refusal(value),
-                            named => named.flatten(),
+                            Some(TryEntryVerdict::Refuse) => {
+                                return guessed_try_entry_refusal(value)
+                            }
+                            Some(TryEntryVerdict::Seed(register)) => Some(register),
+                            None => None,
                         };
                     let entry_register = entry_register.or(update_entry.as_ref());
                     let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
@@ -43985,8 +43988,11 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 ResolveFlow::Escaped(EvalEscape::Break(_)) => {
                     let update_entry =
                         match foreach_update_try_entry::<S>(expr, catch.as_deref(), frame) {
-                            Some(None) => return guessed_try_entry_refusal(value),
-                            named => named.flatten(),
+                            Some(TryEntryVerdict::Refuse) => {
+                                return guessed_try_entry_refusal(value)
+                            }
+                            Some(TryEntryVerdict::Seed(register)) => Some(register),
+                            None => None,
                         };
                     let entry_register = entry_register.or(update_entry.as_ref());
                     let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
@@ -64673,11 +64679,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
                         // grids turned 33 of 40,000 rows into wrong answers).
                         // A later step of the same shape that the reading does not cover keeps the
-                        // refusal it had, loud: its handler would run unseeded, and a refusal of what it
-                        // hands EXTRACT is read as exact, which a `try`/`?` around the fold swallows where an
-                        // earlier step's refusal used to end the run (#5012).
+                        // refusal it had, loud: its handler would run unseeded, and a refusal of a frozen
+                        // `$x`/`$i` EXTRACT emits there is read as exact, which a `try`/`?` around the fold
+                        // swallows where an earlier step's refusal used to end the run (#5012). Only where the
+                        // emission can be one (an EXTRACT naming a marker, or none, which emits the UPDATE's
+                        // output): an EXTRACT of `empty` or a constant refuses nothing jq does not.
                         let seeded = bare_step && _register.is_some();
-                        let _update_try_entry = (seeded || (bare_step && handler_seeded))
+                        let unseeded_refuses = bare_step
+                            && handler_seeded
+                            && bound_extract.as_ref().map_or(true, mentions_marker);
+                        let _update_try_entry = (seeded || unseeded_refuses)
                             .then(|| {
                                 entry_tries
                                     .take()
@@ -65105,11 +65116,19 @@ fn foreach_update_try_entry<S: EvalSemantics>(
     body: &Expr,
     catch: Option<&Expr>,
     frame: &Frame,
-) -> Option<Option<OwnedValue>> {
+) -> Option<TryEntryVerdict> {
     if S::TAG != EvalTag::Jq || catch.is_none() || frame.register_loss.is_lost() {
         return None;
     }
     fold_body::update_try_entry_for(body)
+}
+
+/// What [`fold_body::update_try_entry`] names for a `try` around the `foreach` a fold UPDATE is made of (#5004).
+pub(crate) enum TryEntryVerdict {
+    /// Seed the handler with this register, the one the step entered its UPDATE with.
+    Seed(OwnedValue),
+    /// Refuse, as a guess ([`guessed_try_entry_refusal`]).
+    Refuse,
 }
 
 /// The refusal of a `try` around a `foreach` UPDATE's `foreach` on a step whose handler is not seeded, after an
@@ -74581,9 +74600,9 @@ mod fold_body {
     /// What [`update_try_entry`] named for the `try` whose body is `body`, in the body being resolved: the same
     /// node, or an equal copy of one. Every other `try` the body resolves is inside one of those bodies, so never
     /// equal to one; what runs downstream of the body's outputs does not see the mark
-    /// ([`hide_update_try_entry_at`]). `Some(None)` for a step whose handler must not run unseeded; a register
-    /// handed out records that a handler was seeded ([`update_try_entry_seeded`]).
-    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<Option<super::OwnedValue>> {
+    /// ([`hide_update_try_entry_at`]). [`super::TryEntryVerdict::Refuse`] for a step whose handler must not run
+    /// unseeded; a register handed out records that a handler was seeded ([`update_try_entry_seeded`]).
+    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<super::TryEntryVerdict> {
         let key = super::expr_key(body);
         UPDATE_TRY_ENTRY.with(|a| {
             let mut mark = a.borrow_mut();
@@ -74595,7 +74614,10 @@ mod fold_body {
                         .any(|(address, copy)| *address == key || copy == body)
             })?;
             *seeded |= register.is_some();
-            Some(register.clone())
+            Some(match register {
+                Some(register) => super::TryEntryVerdict::Seed(register.clone()),
+                None => super::TryEntryVerdict::Refuse,
+            })
         })
     }
 
@@ -74887,7 +74909,7 @@ mod fold_body {
         TryEntryGuard
     }
 
-    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<Option<super::OwnedValue>> {
+    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<super::TryEntryVerdict> {
         None
     }
 
