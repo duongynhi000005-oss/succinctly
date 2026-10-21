@@ -717,7 +717,10 @@ fn test_foreach_if_dot_comma_branch_comma_parens_first_empty_4800() -> Result<()
     ])
 }
 
-/// #4800: An `if` on a condition other than `.` keeps the refusal of its comma branch: the bare form matches jq here, but the comma read the same way lets a `.a` EXTRACT's index error escape a `?` and a `try` where jq answers `[]`. Rows captured from jq 1.7.1, both routes.
+/// #4800: An `if` on a condition other than `.` around a comma branch. These rows once matched only because the comma
+/// was refused: read like the bare form, the `.a` EXTRACT's index error on the `null` state of the second step escaped a
+/// `?` and a `try` where jq answers `[]`, until `taken_if_branch` read that step's `else` branch. Rows captured from jq
+/// 1.7.1, both routes.
 #[test]
 fn test_foreach_if_comma_branch_if_on_a_condition_other_than_dot_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -752,7 +755,8 @@ fn test_foreach_if_comma_branch_if_on_a_condition_other_than_dot_4800() -> Resul
     ])
 }
 
-/// #4800: A stage after the `if` keeps the refusal of its comma branch, for the same reason. Rows captured from jq 1.7.1, both routes.
+/// #4800: A stage after the `if` around a comma branch, for the same reason (the `if` is now found at the head of the
+/// pipe). Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_foreach_if_comma_branch_stage_after_the_if_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -815,9 +819,8 @@ fn test_foreach_if_comma_branch_stage_after_the_if_4800() -> Result<()> {
     ])
 }
 
-/// #4800: a comma branch behind a nested `if` on a condition other than `.`, and one under a `try`, keep the refusal too:
-/// the bare forms match jq, but the comma read the same way lets a `.a` EXTRACT's index error escape a `?` and a `try`
-/// where jq answers `[]`. Rows captured from jq 1.7.1, both routes.
+/// #4800: a comma branch behind a nested `if` on a condition other than `.`, and one under a `try`, for the same reason
+/// (the `if` is now found behind the `try`). Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_foreach_if_comma_branch_nested_if_and_try_wrapper_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

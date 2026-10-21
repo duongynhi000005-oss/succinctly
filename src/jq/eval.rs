@@ -38067,14 +38067,16 @@ fn bare_bind_foreach_update_tail_emits_null_or_bool(update: &Expr) -> bool {
 
 /// An `if` arm or a pipe tail of the wrapped read that is not the `foreach`: it leaves the register where it is
 /// and emits no `null` or boolean (a pipe tail that emits one is read through the bind key instead, #5018, under an
-/// EXTRACT that cannot move the register). Not for a comma sibling: `(FE), null` and `(FE), []` answered
-/// wrongly when read (4 of 100,000 random rows), so those keep their refusal.
+/// EXTRACT that cannot move the register). A `select(true)` hands its input on and is read too (#4800). Not for a
+/// comma sibling: `(FE), null` and `(FE), []` answered wrongly when read (4 of 100,000 random rows), so those keep
+/// their refusal.
 fn plain_beside_bind_foreach(e: &Expr) -> bool {
-    cannot_move_register(e) && !may_emit_null_or_bool(e)
+    (cannot_move_register(e) && !may_emit_null_or_bool(e)) || is_select_true(e)
 }
 
 /// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a pipe whose later stages are
-/// `plain`, or an `if` whose condition cannot move the register and whose other arm is `plain`, a bare
+/// `plain`, or an `if` whose condition cannot move the register (or is a pure function of `.`, `if .a`: jq runs
+/// the condition in a subexp, #4800) and whose other arm is `plain`, a bare
 /// `foreach` over a caught or plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source
 /// is one pattern of one bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and
 /// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean,
@@ -38126,7 +38128,7 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
                 else_branch,
             } => {
                 let (in_then, in_else) = (go(then_branch, budget), go(else_branch, budget));
-                cannot_move_register(cond)
+                (cannot_move_register(cond) || is_pure_of_dot(cond))
                     && (in_then || plain_beside_bind_foreach(then_branch))
                     && (in_else || plain_beside_bind_foreach(else_branch))
                     && (in_then || in_else)
@@ -41647,9 +41649,6 @@ struct EmptiedUpdate<'a> {
     /// value that is not the state, and leaves jq's register where it was. It may emit several values
     /// (`{a:(1,2)} | FE`, #4797): the `foreach` then runs once per value, each run as empty as the first.
     literal_head: bool,
-    /// Whether the `foreach` sits in a comma branch of the `if` (`if . then (FE, empty) else . end`, #4800): read
-    /// like the bare `if`, except that a stage after the `if` is not (see the `If` arm).
-    comma_branch: bool,
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
@@ -41671,6 +41670,12 @@ fn is_pure_of_dot(e: &Expr) -> bool {
         Expr::Compare { left, right, .. } => is_pure_of_dot(left) && is_pure_of_dot(right),
         _ => false,
     }
+}
+
+/// Whether `stage` is `select(true)`, which hands its input on untouched and moves no register (#4800).
+fn is_select_true(stage: &Expr) -> bool {
+    matches!(unwrap_paren(stage), Expr::Builtin(Builtin::Select(cond))
+        if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))))
 }
 
 /// Whether `stage` hands its input on untouched, or emits nothing: `.` or `select(.)`.
@@ -41918,7 +41923,6 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             has_fallback: false,
             truthy: false,
             literal_head: false,
-            comma_branch: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
@@ -41955,9 +41959,6 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(stages.get(skipped)?)?;
             emptied.literal_head |= literal_head;
             let after = &stages[skipped + 1..];
-            if emptied.comma_branch && !after.is_empty() {
-                return None;
-            }
             let guarded = stages[..skipped]
                 .iter()
                 .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
@@ -41968,16 +41969,17 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if plain {
                 return Some(emptied);
             }
-            if after.iter().all(is_pure_of_dot) {
-                // #4778: the fallback is the state once the stages around it have run on it.
+            if after
+                .iter()
+                .all(|stage| is_pure_of_dot(stage) || is_select_true(stage))
+            {
+                // #4778: the fallback is the state once the stages around it have run on it. A `select(true)`
+                // hands it on as it is (#4800).
                 return Some(emptied);
             }
             (after.is_empty() && !guarded).then_some(emptied)
         }
-        // A `try`/`?` around a comma branch keeps the refusal, as a stage after the `if` does ([`EmptiedUpdate::comma_branch`]).
-        e if emptied_wrapper_inner(e).is_some() => {
-            emptied_update(emptied_wrapper_inner(e)?).filter(|emptied| !emptied.comma_branch)
-        }
+        e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
@@ -41997,20 +41999,10 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if !on_dot && !is_pure_of_dot(cond) {
                 return None;
             }
-            // A comma branch (`if . then (FE, empty) else . end`) is read like the bare `FE` (#4800), but only
-            // under the condition `.` and with nothing after the `if` ([`EmptiedUpdate::comma_branch`]). For an
-            // `if` on another condition (`if .a then (FE, empty) else . end`) and for a stage after the `if`, the
-            // bare form matches jq but the comma form read the same way lets the `.a` EXTRACT's index error
-            // escape a `?` and a `try` where jq answers `[]` (20 of a 15,200-row grid, all matching jq while the
-            // comma was refused), so those keep the refusal, and so does a `try`/`?` around it. Why the comma
-            // differs there is not isolated.
-            let comma_branch = matches!(unwrap_paren(then_branch), Expr::Comma(_));
+            // A comma branch (`if . then (FE, empty) else . end`) is read like the bare `FE` (#4800), under any
+            // condition and with any stage or `try`/`?` around the `if`: the index error that once escaped a `?`
+            // there came from the step whose state took the `else` branch, which [`taken_if_branch`] now reads.
             let mut emptied = emptied_update(then_branch)?;
-            emptied.comma_branch |= comma_branch;
-            // After the recursion, so that a comma behind a nested `if` is refused under this one's condition too.
-            if emptied.comma_branch && !on_dot {
-                return None;
-            }
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
             if on_dot && !emptied.literal_head {
@@ -50157,30 +50149,70 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
 /// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
 /// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
 /// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
-/// read as before; so does any `if` on a condition other than `.`, whose own navigation may move the register
-/// before a branch runs. A comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l`
-/// scope whose one item is such an `if` ([`label_sole_item`]) are read as the bare `if` (#4800): neither changes
-/// what the `if` emits.
-fn taken_if_branch<'e>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
-    let sole = without_empty_siblings(update);
-    let sole = match unwrap_paren(sole) {
-        Expr::Label { name, body } => label_sole_item(name, body),
-        _ => Some(sole),
+/// read as before. A condition that is a pure function of `.` ([`is_pure_of_dot`]: `.a`, `length > 0`) is read
+/// the same way once evaluated on the state (#4800): jq runs an `if`'s condition in a subexp, so it moves no
+/// register either, and only one that emits a single falsy value takes the `else` branch (one that raises keeps
+/// the whole `if`). A comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l` scope
+/// whose one item is such an `if` ([`label_sole_item`]) are read as the bare `if` (#4800): neither changes what
+/// the `if` emits.
+fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
+    fn falsy_on<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> bool {
+        match unwrap_paren(cond) {
+            Expr::Identity => !state.is_truthy(),
+            cond if is_pure_of_dot(cond) => {
+                let mut outputs = Vec::new();
+                let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |out| {
+                    outputs.push(out);
+                    Demand::Continue
+                });
+                matches!((flow, outputs.as_slice()), (Flow::Exhausted, [out]) if !out.is_truthy())
+            }
+            _ => false,
+        }
+    }
+    /// The `if` the UPDATE is, and whether it was found behind a handler-less `try`/`?` or at the head of a pipe
+    /// whose later stages leave the register where it is ([`neutral_leaves_register`]), which add no movement of
+    /// their own (#4800): the branch the state took is then the only one that can move the register.
+    fn sole_if(e: &Expr, budget: u8) -> Option<(&Expr, bool)> {
+        let budget = budget.checked_sub(1)?;
+        let sole = without_empty_siblings(e);
+        match unwrap_paren(sole) {
+            Expr::If { .. } => Some((sole, false)),
+            Expr::Label { name, body } => label_sole_item(name, body)
+                .filter(|item| matches!(unwrap_paren(item), Expr::If { .. }))
+                .map(|item| (item, false)),
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
+                sole_if(expr, budget).map(|(item, _)| (item, true))
+            }
+            Expr::Pipe(stages) => stages
+                .split_first()
+                .filter(|(_, tail)| {
+                    tail.iter()
+                        .all(|stage| neutral_leaves_register(stage) || is_select_true(stage))
+                })
+                .and_then(|(head, _)| sole_if(head, budget))
+                .map(|(item, _)| (item, true)),
+            _ => None,
+        }
+    }
+    let Some((item, wrapped)) = sole_if(update, WRAPPED_CHAIN_DEPTH) else {
+        return update;
     };
-    let mut current = match sole {
-        Some(item) if matches!(unwrap_paren(item), Expr::If { .. }) => item,
-        _ => update,
-    };
+    let mut current = item;
     while let Expr::If {
         cond, else_branch, ..
     } = unwrap_paren(current)
     {
-        if state.is_truthy() || !matches!(unwrap_paren(cond), Expr::Identity) {
+        if !falsy_on::<S>(cond, state) {
             break;
         }
         current = else_branch;
     }
-    current
+    if wrapped && core::ptr::eq(current, item) {
+        update
+    } else {
+        current
+    }
 }
 
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
@@ -63957,7 +63989,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
                         let update_taken = if S::TAG == EvalTag::Jq {
-                            taken_if_branch(&bound_update, &entry_state)
+                            taken_if_branch::<S>(&bound_update, &entry_state)
                         } else {
                             &bound_update
                         };
