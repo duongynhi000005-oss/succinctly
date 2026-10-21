@@ -69060,6 +69060,20 @@ fn resolve_seq_from_seed<'a, S: EvalSemantics>(
     // bespoke message for it — still a hard error either way, never the
     // silent wrong-success #843 is about.
     let Some(last_dynamic) = flat.iter().rposition(needs_fanout_pass) else {
+        // #5023: a pipe of no-ops (`.|.`) over an untracked seed hands the seed on as a bare `.` does,
+        // register statement and all. The #530 refusal below is the terminal's check of a value that
+        // is not the register; a fold's UPDATE stores its output unchecked, so raising here refused
+        // `foreach (.) as $i (null; (.|.); $x)` where jq answers from the EXTRACT. The consumer's own
+        // terminal check judges the seed. jq mode only: yq's scalar-write no-op convention keeps its raise.
+        // A seed off the root (#2649: a bind's body after a pattern step moved the register) is not the
+        // register, so the empty chain's refusal stays: it is what `reduce (select(.a) | . as {a:$a} | .)`
+        // is refused by.
+        if flat.is_empty() && !seed.trackable && seed.path.depth() == 0 && S::TAG == EvalTag::Jq {
+            return match sink(seed) {
+                Demand::Continue => ResolveFlow::Exhausted,
+                Demand::Stop => ResolveFlow::Stopped,
+            };
+        }
         // The seed's own value and trackability, not the enclosing node's:
         // for the root seed those are the same thing, and for a non-root one
         // (#2649) the untracked-seed refusals below are exactly the ones jq

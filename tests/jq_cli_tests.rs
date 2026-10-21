@@ -86984,9 +86984,9 @@ fn test_foreach_update_comma_with_a_bare_builtin_sibling_3960() -> Result<()> {
 
 /// #3960, what the fix leaves. A sibling that can hand its input (or an element of it) back by
 /// pointer (`ltrimstr`, `min`; `abs` answers since #4041), one that is `explode | map(..) |
-/// implode` in jq so raises a path error on a derived input (`ascii_downcase?`, #2743), and a pipe
-/// of non-navigating stages (`(.|.)`) still refuse loudly, where jq writes. Update the
-/// expectations when those are fixed.
+/// implode` in jq so raises a path error on a derived input (`ascii_downcase?`, #2743) still
+/// refuse loudly, where jq writes. A pipe of non-navigating stages (`(.|.)`) answers since #5023
+/// (the last row below). Update the expectations when the others are fixed.
 /// Every row captured from jq 1.7.1 with `-c`: `del` writes `{"a":{"c":[1,2]},"z":0}` in all but
 /// `ascii_downcase?`, which leaves the document alone.
 #[test]
@@ -87018,9 +87018,9 @@ fn test_foreach_update_comma_bare_builtin_exclusions_characterize_3960() -> Resu
         (
             doc,
             r"del(foreach .a as $v (0; (($v | .b?), (.|.)); try ($v | .b?)))",
+            "{\"a\":{\"c\":[1,2]},\"z\":0}\n",
             "",
-            "Invalid path expression with result 0",
-            5,
+            0,
         ),
         // A boolean register: jq reads a result equal to it as the register itself
         // (`jv_identical`). A bool-returning builtin next to a navigating sibling answers since
