@@ -54405,11 +54405,30 @@ fn caught_foreign_destructure<S: EvalSemantics>(
         return false;
     }
     let bind = unwrap_paren(inner);
-    let Expr::AsPattern { expr, patterns, .. } = bind else {
-        return false;
-    };
-    let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
-        return false;
+    // #5017: ...or `$x | . as P | ..`, the destructure of the marker's value spelled through `.`, which
+    // [`foreign_register_markers_with`] reads as the destructure of the marker it is.
+    let (marker, patterns) = match bind {
+        Expr::AsPattern { expr, patterns, .. } => {
+            let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
+                return false;
+            };
+            (marker, patterns)
+        }
+        // Through `.` stages and nested pipes, as [`leading_destructure_of_marker`] reads them.
+        Expr::Pipe(stages) => {
+            let mut rest = flatten_pipe_stages(stages)
+                .into_iter()
+                .filter(|stage| !is_identity_stage(stage));
+            match (rest.next().map(unwrap_paren), rest.next().map(unwrap_paren)) {
+                (Some(Expr::TrackedVar(marker)), Some(Expr::AsPattern { expr, patterns, .. }))
+                    if is_identity_pipe(expr) =>
+                {
+                    (marker, patterns)
+                }
+                _ => return false,
+            }
+        }
+        _ => return false,
     };
     // #4777: in the body of a `reduce` whose source moved the register, `$x` is foreign on the steps
     // whose element is another node. The verdict is read per step, from the position of that step's
@@ -60609,7 +60628,8 @@ impl FoldSourceAmbient<'_> {
     /// struct, so [`fold_source_ambient`]'s two constructors can't drift
     /// out of sync with it.
     fn relocate_base<'r>(&self, reg_path: &'r Rc<PathPrefix>) -> Option<&'r Rc<PathPrefix>> {
-        ((self.trackable || self.register_null_off_root) && reg_path.depth() > 0)
+        ((self.trackable || self.register_null_off_root || self.init_moved_off_entry)
+            && reg_path.depth() > 0)
             .then_some(reg_path)
     }
 }
@@ -60767,7 +60787,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             frame: match (register_null_off_root, init_moved_off_entry) {
                 (true, true) => reg.frame.with_register(Some(&OwnedValue::Null)),
                 (true, false) => frame.with_register(Some(&OwnedValue::Null)),
-                (false, true) => reg.frame.clone(),
+                (false, true) => register_frame(reg),
                 (false, false) => frame.clone(),
             },
             register_non_null: reg.register_is_non_null(),
@@ -60805,7 +60825,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         trackable: at_register,
         snapshot: Snapshot::No,
         frame: if init_moved_off_entry {
-            reg.frame.clone()
+            register_frame(reg)
         } else {
             frame.unknown()
         },
@@ -60828,6 +60848,16 @@ fn init_moved_register_frame<S: EvalSemantics>(source_trackable: bool, reg: &Fol
         && !source_trackable
         && reg.trackable
         && reg.path.depth() > 0
+        && !reg.frame.register_loss.is_lost()
+}
+
+/// The frame SOURCE runs in where INIT moved the register ([`init_moved_register_frame`], #5017): the
+/// register's own, carrying its value, so a `$x` bound at INIT's node re-establishes against it, and what the
+/// register frame knows of its kind ([`Frame::with_live_non_null`]) kept.
+fn register_frame(reg: &FoldRegister) -> Frame {
+    reg.frame
+        .with_register(Some(&reg.value))
+        .with_live_non_null(reg.frame.live_non_null)
 }
 
 /// Whether a destructured binding keeps the origin its pattern walk gave it
