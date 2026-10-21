@@ -86986,7 +86986,7 @@ fn test_foreach_update_comma_with_a_bare_builtin_sibling_3960() -> Result<()> {
 /// pointer (`ltrimstr`, `min`; `abs` answers since #4041), one that is `explode | map(..) |
 /// implode` in jq so raises a path error on a derived input (`ascii_downcase?`, #2743) still
 /// refuse loudly, where jq writes. A pipe of non-navigating stages (`(.|.)`) answers since #5023
-/// (the last row below). Update the expectations when the others are fixed.
+/// (the fourth row, which now expects jq's write). Update the expectations when the others are fixed.
 /// Every row captured from jq 1.7.1 with `-c`: `del` writes `{"a":{"c":[1,2]},"z":0}` in all but
 /// `ascii_downcase?`, which leaves the document alone.
 #[test]
