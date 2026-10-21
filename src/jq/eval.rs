@@ -37952,26 +37952,26 @@ fn may_emit_null_or_bool(e: &Expr) -> bool {
 /// `. as ..`), behind any `try`/`?` or a `catch .`. A one-variable pattern whose body hands the input back; its
 /// step is the key `k` or the position `0` that jq's register moves to when the bind passes.
 ///
-/// `handler_free` is whether a `catch .` is refused: with one the source emits whether the bind passed or not
+/// `refuse_handler` is whether a `catch .` is refused: with one the source emits whether the bind passed or not
 /// (the error message stands in as its element, with the register back at the `try`'s entry), so that an
 /// emission says nothing of where the register is.
-fn bare_bind_source_key(e: &Expr, handler_free: bool) -> Option<BindKey> {
+fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>> {
     /// One bare variable in an object or array pattern: a second entry lands on the `null` an absent
     /// key or index reads as, which the resolver's walk places differently from jq's (a caught raise
     /// answered `[]` or `"C"` where jq answers a path, 11 of 40,000 random rows).
-    fn flat(pattern: &Pattern) -> Option<BindKey> {
+    fn flat(pattern: &Pattern) -> Option<PatternKey<'_>> {
         match pattern {
             Pattern::Object(entries) => match entries.as_slice() {
                 [entry] if entry.bind.is_none() && matches!(entry.pattern, Pattern::Var(_)) => {
                     match &entry.key {
-                        ObjectKey::Literal(key) => Some(BindKey::Field(key.clone())),
+                        ObjectKey::Literal(key) => Some(PatternKey::Field(key)),
                         _ => None,
                     }
                 }
                 _ => None,
             },
             Pattern::Array(items) => {
-                matches!(items.as_slice(), [Pattern::Var(_)]).then_some(BindKey::Position(0))
+                matches!(items.as_slice(), [Pattern::Var(_)]).then_some(PatternKey::Position(0))
             }
             Pattern::Var(_) => None,
         }
@@ -37980,11 +37980,11 @@ fn bare_bind_source_key(e: &Expr, handler_free: bool) -> Option<BindKey> {
         Expr::Try { expr, catch } => catch
             .as_deref()
             .map_or(true, |handler| {
-                !handler_free && matches!(unwrap_paren(handler), Expr::Identity)
+                !refuse_handler && matches!(unwrap_paren(handler), Expr::Identity)
             })
-            .then(|| bare_bind_source_key(expr, handler_free))
+            .then(|| bare_bind_source_key(expr, refuse_handler))
             .flatten(),
-        Expr::Optional(inner) => bare_bind_source_key(inner, handler_free),
+        Expr::Optional(inner) => bare_bind_source_key(inner, refuse_handler),
         Expr::AsPattern {
             expr,
             patterns,
@@ -38006,7 +38006,7 @@ fn bare_bind_source_key(e: &Expr, handler_free: bool) -> Option<BindKey> {
 /// caught or plain bind of one variable (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Where
 /// that bind passes, jq's register moves to the bound child, and the `foreach` emits its state with the
 /// register there. A source with a handler (`catch .`) emits whether the bind passed or not, so it is refused.
-fn bare_bind_foreach_update_key(update: &Expr) -> Option<BindKey> {
+fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
     match unwrap_paren(update) {
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
             bare_bind_foreach_update_key(expr)
@@ -38029,21 +38029,6 @@ fn bare_bind_foreach_update_key(update: &Expr) -> Option<BindKey> {
     }
 }
 
-/// The key of a [`bare_bind_source_key`] bind, owned.
-enum BindKey {
-    Field(String),
-    Position(i64),
-}
-
-impl BindKey {
-    fn pattern_key(&self) -> PatternKey<'_> {
-        match self {
-            Self::Field(key) => PatternKey::Field(key),
-            Self::Position(position) => PatternKey::Position(*position),
-        }
-    }
-}
-
 /// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a pipe whose later stages are
 /// `plain`, or an `if` whose condition cannot move the register and whose other arm is `plain`, a bare
 /// `foreach` over a caught or plain bind (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Its source
@@ -38060,9 +38045,6 @@ impl BindKey {
 /// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
 /// or boolean EXTRACT, and a comma sibling beside the `foreach` (`(FE), null`, `(FE), []`), 4 of 100,000.
 fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> bool {
-    fn bare_bind_source(e: &Expr) -> bool {
-        bare_bind_source_key(e, false).is_some()
-    }
     /// An arm, pipe tail or comma item that is not the `foreach`: it leaves the register where it is and emits
     /// no `null` or boolean.
     fn plain(e: &Expr) -> bool {
@@ -38086,7 +38068,7 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
                     && extract.as_deref().map_or(true, |extract| {
                         matches!(unwrap_paren(extract), Expr::Identity)
                     })
-                    && bare_bind_source(input)
+                    && bare_bind_source_key(input, false).is_some()
             }
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
             // The arms that are not the `foreach` must leave the register where it is: a sibling that navigates
@@ -63965,8 +63947,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // #4957: the register the inner bind moved onto its bound child. The
                             // `foreach` emitted, so the bind passed: `$x` is the step's register, and
                             // jq's register is now its child at the key (`path_intact` then the step).
+                            // The bound source (`$x`, `.`, `$i`) is the register's own node whenever the bind passed, so its
+                            // child is the register value's.
                             let inner_bind_moved = inner_bind_key.as_ref().and_then(|key| {
-                                let key = key.pattern_key();
                                 let component = key.component::<S>(&active_reg.value).ok()?;
                                 let child = key.child::<S>(&active_reg.value).ok()?;
                                 Some((PathPrefix::extend(&active_reg.path, component), child))
