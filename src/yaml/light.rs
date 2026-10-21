@@ -8148,12 +8148,11 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
         // #5053: the first document's leading block, in a header with a CRLF break, keeps its `\r`s and turns
         // each blank CRLF line into `# \r`, as the verbatim header [`write_yq_header`] prints it on the
         // streaming route.
-        if let Some(&(first_start, _)) = ranges.first() {
-            let header_end = self.header_end();
-            if (first_start as usize) < header_end {
-                if let Some(lines) = crlf_header_head_lines(&self.text[..header_end]) {
-                    return lines;
-                }
+        let header_end = self.header_end();
+        let in_header = matches!(ranges.first(), Some(&(first_start, _)) if (first_start as usize) < header_end);
+        if in_header {
+            if let Some(lines) = crlf_header_head_lines(&self.text[..header_end]) {
+                return lines;
             }
         }
         let mut lines = head_comment_lines_with_blanks(self.text, ranges);
@@ -9647,25 +9646,6 @@ fn blank_line_before(text: &[u8], at: usize) -> bool {
         .all(|b| matches!(b, b' ' | b'\t' | b'\r'))
 }
 
-/// Build a node's standalone head comment lines as owned strings, inserting
-/// an empty (`""`) entry wherever [`blank_line_between`] finds a blank line
-/// separating two lines of the block -- the DOM route's own analogue of
-/// [`write_head_comment_lines`]'s live text scan (#2795 review). Consumed by
-/// `DocumentCursor::head_comment_raw`'s `YamlCursor` impl, which is what
-/// actually seeds `NodeMeta::head_comment` in `to_owned_with_comments_at_depth`
-/// (`eval_generic.rs`); `yq_runner.rs`'s `prepend_head_comment_lines` already
-/// treats an empty entry as a bare blank line (matching
-/// `append_own_comment_line`'s same convention), so without this the DOM
-/// route silently dropped every interior blank line a head block had
-/// (`a:\n  # h1\n\n  # h2\n  b: 1` lost the blank under `-P`, kept it under
-/// plain streaming -- confirmed live against pinned yq v4.53.3, undocumented
-/// until this fix).
-///
-/// No `skip_before` parameter, unlike [`write_head_comment_lines`]: the DOM
-/// route never reproduces the verbatim header (`write_yq_header` is
-/// streaming-only, a separate documented gap), so it has nothing to skip --
-/// every head line, including the first document's leading block, goes
-/// through this same structured path.
 /// The comment lines of a first-document header (`header`: [`yq_header_len`]'s bytes) as yq prints them when a line
 /// break in it is `\r\n`, or `None` for a header without one (#5053): every comment line keeps its `\r` where its break
 /// is CRLF, and a blank line with a CRLF break is `# \r` -- the `\r` is comment text to go-yaml -- where one with a
@@ -9707,6 +9687,25 @@ fn crlf_header_head_lines(header: &[u8]) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Build a node's standalone head comment lines as owned strings, inserting
+/// an empty (`""`) entry wherever [`blank_line_between`] finds a blank line
+/// separating two lines of the block -- the DOM route's own analogue of
+/// [`write_head_comment_lines`]'s live text scan (#2795 review). Consumed by
+/// `DocumentCursor::head_comment_raw`'s `YamlCursor` impl, which is what
+/// actually seeds `NodeMeta::head_comment` in `to_owned_with_comments_at_depth`
+/// (`eval_generic.rs`); `yq_runner.rs`'s `prepend_head_comment_lines` already
+/// treats an empty entry as a bare blank line (matching
+/// `append_own_comment_line`'s same convention), so without this the DOM
+/// route silently dropped every interior blank line a head block had
+/// (`a:\n  # h1\n\n  # h2\n  b: 1` lost the blank under `-P`, kept it under
+/// plain streaming -- confirmed live against pinned yq v4.53.3, undocumented
+/// until this fix).
+///
+/// No `skip_before` parameter, unlike [`write_head_comment_lines`]: the DOM
+/// route never reproduces the verbatim header (`write_yq_header` is
+/// streaming-only, a separate documented gap), so it has nothing to skip --
+/// every head line, including the first document's leading block, goes
+/// through this same structured path.
 fn head_comment_lines_with_blanks(text: &[u8], ranges: &[(u32, u32)]) -> Vec<String> {
     let mut out = Vec::with_capacity(ranges.len());
     let mut prev_end: Option<usize> = None;
