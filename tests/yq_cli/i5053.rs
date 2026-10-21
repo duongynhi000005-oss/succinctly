@@ -70,6 +70,25 @@ const ROWS: &[(&str, &str, &[&str], &str)] = &[
         &[],
         "a: 1\n# A\n---\nb: 2\n",
     ),
+    // Controls with a comment-only document around the marker, which keep the ordinary path.
+    (
+        "a: 1\n---\n# A\n\n---\nb: 2\n",
+        ".",
+        &[],
+        "a: 1\n# A\n---\n\n---\nb: 2\n",
+    ),
+    (
+        "a: 1\n\n# A\n\n---\n# B\n\n---\nc: 3\n",
+        ".",
+        &[],
+        "a: 1\n# B\n---\n\n---\nc: 3\n",
+    ),
+    (
+        "a: 1\n---\n# O\n\n...\n---\n",
+        ".",
+        &[],
+        "a: 1\n# O\n---\n\n---\n\n",
+    ),
 ];
 
 #[test]

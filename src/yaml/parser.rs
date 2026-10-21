@@ -1904,8 +1904,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// foot, measured, #2811) -- this runs before `last_head_foot_bp` is
     /// reset below, so `PREV` is still the closing document's own last key.
     /// A block detached from `PREV` too (a blank line on each side) is the closing document's foot as well,
-    /// placed like one flush against the marker (`a: 1\n\n# A\n\n---\nb: 2\n`, #5053). With no closing
-    /// document it takes the ordinary path (delegated to [`Self::flush_pending_head_lines`]).
+    /// placed like one flush against the marker (`a: 1\n\n# A\n\n---\nb: 2\n`, #5053), when the closing document
+    /// opened a node and the one after the marker has content ([`Self::next_document_has_content`]). Otherwise,
+    /// and with no closing document, it takes the ordinary path (delegated to [`Self::flush_pending_head_lines`]).
     ///
     /// `old_root_bp` is `None` for the very first document (nothing to
     /// reach back to), in which case this always defers to the ordinary
@@ -1967,15 +1968,52 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             if self.attached_prev().is_some() {
                 self.flush_pending_head_lines_with_root(None, old_root);
-            } else {
-                // Detached from `PREV` by a blank line as well (#5053): yq keeps the block as the closing
-                // document's foot, placed as one flush against the marker is, not as the next document's head.
+                return;
+            }
+            // Detached from `PREV` by a blank line as well (#5053): yq keeps the block as the closing
+            // document's foot, placed as one flush against the marker is, not as the next document's head.
+            // Only when the closing document opened a node (`last_head_foot_bp`): a comment-only document
+            // keeps the ordinary path, which reaches back across the marker in its own way (#798).
+            if self.last_head_foot_bp.is_some() && self.next_document_has_content() {
                 let target = self.positional_boundary_foot_target().unwrap_or(old_root);
                 self.drain_pending_into_foot(target);
+                return;
             }
-            return;
         }
         self.flush_pending_head_lines(next);
+    }
+
+    /// Whether the document opening at `self.pos` has a content line: past blank lines and comment-only
+    /// lines, something other than the next `---`/`...` marker or the end of input (#5053). yq places a
+    /// block that reaches back across a marker differently when the document after it is comment-only.
+    fn next_document_has_content(&self) -> bool {
+        let mut pos = self.pos;
+        while pos < self.input.len() {
+            let rest = &self.input[pos..];
+            let indent = rest
+                .iter()
+                .take_while(|&&b| Self::is_inline_whitespace(b))
+                .count();
+            match rest.get(indent) {
+                None => return false,
+                Some(&b) if is_line_break(b) => {}
+                Some(b'#') => {}
+                Some(_) => {
+                    let line = &rest[indent..];
+                    let marker = indent == 0
+                        && (line.starts_with(b"---") || line.starts_with(b"..."))
+                        && line
+                            .get(3)
+                            .map_or(true, |&b| Self::is_inline_whitespace(b) || is_line_break(b));
+                    return !marker;
+                }
+            }
+            pos += rest
+                .iter()
+                .position(|&b| is_line_break(b))
+                .map_or(rest.len(), |at| at + line_break_len(rest, at));
+        }
+        false
     }
 
     /// Whether a wholly blank line (empty or inline whitespace only) lies in `[from, to)`:
