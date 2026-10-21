@@ -2,6 +2,25 @@
 
 Tracks updates to the knowledge wiki pages in `docs/`.
 
+## 2026-10-21 — The balanced-parentheses section of hierarchical-structures.md described an index `bp.rs` does not have (issue #5036)
+
+**Sources ingested:**
+- `BalancedParens`, `build_bp_index`, `find_close`, `find_close_from`, `find_open`, `enclose_indexed`,
+  `word_max_excess_rev` and the `build_l1_index_*`/`build_l2_index_*` builders in `src/trees/bp.rs`
+- `git log -S l0_max_excess_rev --all -- src`: the reverse max-excess index exists only on the unmerged branch
+  `newhoggy/optimise-enclose-and-find_open` (`93963776a`), while its docs commit (`73fdcb2e8`) reached `main`
+
+**Pages corrected:**
+- [optimizations/hierarchical-structures.md](optimizations/hierarchical-structures.md) — the "RangeMin
+  Structure" section now describes the real per-word / 32-word / 1,024-word min-excess levels and field types
+  and the `find_close` state machine; "Indexed find_open" became "find_open and enclose": `find_open` is a
+  linear backward scan, `enclose` is indexed (#4102), and the 16-492x reverse-index numbers are marked as
+  measured on an unmerged branch. The RangeMax rows of both tables are gone, and Key Lessons 2 ("3-6%") and 6
+  ("symmetric operations need symmetric indices") no longer say what the code contradicts; the RangeMin rows'
+  `~39%` came from #5026
+- [plan/sve2-optimizations.md](plan/sve2-optimizations.md) — "Indexed find_open" moved from the merged
+  algorithmic optimizations to a "measured on a branch, not merged" row
+
 ## 2026-10-11 — The #3343 prefilter at the other batch sort sites (issue #4169)
 
 **Sources ingested:**

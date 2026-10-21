@@ -29,13 +29,13 @@ This document analyzes all current x86 and ARM NEON optimizations in the Succinc
 | SVE2-BITPERM BDEP select | `util/broadword.rs` | 5-17x micro, 2-5% e2e | 2026-01-23 |
 | SSE4.1 PHMINPOSUW BP L1/L2 | `trees/bp.rs` | 1-3% (large data) | 2026-01-24 |
 
-### ✅ Algorithmic Optimizations (non-SIMD)
+### ⚠️ Measured on a branch, not merged
 
-| Optimization | Location | Speedup | Date |
-|--------------|----------|---------|------|
-| Indexed find_open | `trees/bp.rs` | 16-492x | 2026-01-23 |
+| Optimization      | Location                         | Speedup | Measured   |
+|-------------------|----------------------------------|---------|------------|
+| Indexed find_open | `trees/bp.rs` (unmerged branch)  | 16-492x | 2026-01-23 |
 
-*Note: Indexed find_open uses hierarchical max-excess indices and byte lookup tables (scalar code, no SIMD).*
+*Note: These numbers were measured on a branch and are not part of the shipped speedups above. Indexed find_open uses hierarchical max-excess indices and byte lookup tables (scalar code, no SIMD). It lives only on branch `newhoggy/optimise-enclose-and-find_open` (`93963776a`) and never landed on `main`: `BalancedParens::find_open` is still the linear backward scan, and only `enclose` is indexed (#4102). See [hierarchical-structures.md](../optimizations/hierarchical-structures.md#find_open-and-enclose).*
 
 ### ❌ Rejected Optimizations
 
