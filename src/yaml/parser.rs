@@ -1999,13 +1999,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 Some(&b) if is_line_break(b) => {}
                 Some(b'#') => {}
                 Some(_) => {
-                    let line = &rest[indent..];
-                    let marker = indent == 0
-                        && (line.starts_with(b"---") || line.starts_with(b"..."))
-                        && line
-                            .get(3)
-                            .map_or(true, |&b| Self::is_inline_whitespace(b) || is_line_break(b));
-                    return !marker;
+                    return indent != 0
+                        || !(Self::marker_prefix(rest, b"---")
+                            || Self::marker_prefix(rest, b"..."));
                 }
             }
             pos += rest
@@ -2984,33 +2980,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
     /// Check if we're at a document start marker (`---`).
     fn is_document_start(&self) -> bool {
-        if self.pos + 2 >= self.input.len() {
-            return false;
-        }
-        let slice = &self.input[self.pos..self.pos + 3];
-        if slice != b"---" {
-            return false;
-        }
-        // Must be followed by white space (space or tab), a line break, or EOF.
-        // The tab is not optional: `doc_marker_char` (validate.rs), the strict
-        // validator's copy of this same check, already includes it, and
-        // dropping it here meant `---\tfoo` was silently parsed as content
-        // instead of a document boundary (#434).
-        Self::is_ws_break_or_eoi(self.peek_at(3))
+        Self::marker_prefix(&self.input[self.pos.min(self.input.len())..], b"---")
+    }
+
+    /// Whether `text` starts with `marker` (`---` or `...`) as a document marker: followed by white space
+    /// (space or tab), a line break, or EOF, and with the three bytes present. The tab is not optional:
+    /// `doc_marker_char` (validate.rs), the strict validator's copy of this same check, already includes
+    /// it, and dropping it meant `---\tfoo` was silently parsed as content instead of a document boundary
+    /// (#434). One rule for [`Self::is_document_start`], [`Self::is_document_end`] and
+    /// [`Self::next_document_has_content`].
+    fn marker_prefix(text: &[u8], marker: &[u8; 3]) -> bool {
+        text.len() >= 3 && text[..3] == marker[..] && Self::is_ws_break_or_eoi(text.get(3).copied())
     }
 
     /// Check if we're at a document end marker (`...`).
     fn is_document_end(&self) -> bool {
-        if self.pos + 2 >= self.input.len() {
-            return false;
-        }
-        let slice = &self.input[self.pos..self.pos + 3];
-        if slice != b"..." {
-            return false;
-        }
-        // Must be followed by white space (space or tab), a line break, or EOF.
-        // See `is_document_start` for why the tab isn't optional (#434).
-        Self::is_ws_break_or_eoi(self.peek_at(3))
+        Self::marker_prefix(&self.input[self.pos.min(self.input.len())..], b"...")
     }
 
     /// Skip past a document marker (`---` or `...`).
