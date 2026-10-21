@@ -43956,14 +43956,7 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                     } else {
                         CaughtPayload::Value
                     };
-                    let update_entry =
-                        match foreach_update_try_entry::<S>(expr, catch.as_deref(), frame) {
-                            Some(TryEntryVerdict::Refuse) => {
-                                return guessed_try_entry_refusal(value)
-                            }
-                            Some(TryEntryVerdict::Seed(register)) => Some(register),
-                            None => None,
-                        };
+                    let update_entry = foreach_update_try_entry::<S>(expr, catch.as_deref(), frame);
                     let entry_register = entry_register.or(update_entry.as_ref());
                     let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
                     // The handler runs past the `try`s the mark names: a `try` inside it with an equal body is not
@@ -43986,14 +43979,7 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 // | label $out | try (break $out) catch .b) = 1` on
                 // `{"a":null}` wrote where jq refuses).
                 ResolveFlow::Escaped(EvalEscape::Break(_)) => {
-                    let update_entry =
-                        match foreach_update_try_entry::<S>(expr, catch.as_deref(), frame) {
-                            Some(TryEntryVerdict::Refuse) => {
-                                return guessed_try_entry_refusal(value)
-                            }
-                            Some(TryEntryVerdict::Seed(register)) => Some(register),
-                            None => None,
-                        };
+                    let update_entry = foreach_update_try_entry::<S>(expr, catch.as_deref(), frame);
                     let entry_register = entry_register.or(update_entry.as_ref());
                     let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
                     // The handler runs past the `try`s the mark names: a `try` inside it with an equal body is not
@@ -64114,11 +64100,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         // (#3293): a `?//` in the source that retries past that stop and then
         // produces nothing or raises supersedes it, as it does `aborted`.
         let mut downstream_stopped: Option<u64> = None;
-        // #5004: whether a step of this run has run a `catch` handler seeded at its `try`'s entry
-        // ([`fold_body::update_try_entry`]).
-        let mut handler_seeded = false;
+        // #5004: how many source items this run has driven, against the most its source can emit
+        // ([`source_output_bound`]): a step that reaches the bound is the run's last.
+        let source_bound = source_output_bound(input);
+        let mut steps = 0usize;
         let source_may_alias = fold_source_may_alias_register::<S>(input);
         let source_flow = drive_foreach_source::<S>(input, &ambient, relocate_base, &mut |elem| {
+            steps += 1;
             downstream_stopped = None;
             aborted.begin();
             if let Some(control) = charge_budget(&mut budget, "foreach") {
@@ -64641,10 +64629,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                         // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
                         // register, or retries an alternative on the body's raise, in ways the step does not report.
-                        // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`,
-                        // as `bind.apply` already copies the whole UPDATE for the step).
-                        let bare_step =
-                            matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
+                        // And only on the run's last step: a step before it that placed its handler would let
+                        // the run reach later steps `main` never reached (it refused at this one), whose handler
+                        // the reading may not cover. Unseeded there, a refusal of a frozen `$x`/`$i` is read as
+                        // exact, which a `try`/`?` around the fold swallows (#5012). Asked per step, and only where
+                        // a reading holds (the bodies copy the nested `foreach`, as `bind.apply` already copies the
+                        // whole UPDATE for the step).
+                        let bare_step = matches!(patterns, [Pattern::Var(_)])
+                            && active_reg.trackable
+                            && source_bound == Some(steps);
                         let mut entry_tries = None;
                         // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                         // register onto, not the state the last step left. Where the pattern lands on a
@@ -64678,17 +64671,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
                         // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
                         // grids turned 33 of 40,000 rows into wrong answers).
-                        // A later step of the same shape that the reading does not cover keeps the
-                        // refusal it had, loud: its handler would run unseeded, and a refusal of a frozen
-                        // `$x`/`$i` EXTRACT emits there is read as exact, which a `try`/`?` around the fold
-                        // swallows where an earlier step's refusal used to end the run (#5012). Only where the
-                        // emission can be one (an EXTRACT naming a marker, or none, which emits the UPDATE's
-                        // output): an EXTRACT of `empty` or a constant refuses nothing jq does not.
-                        let seeded = bare_step && _register.is_some();
-                        let unseeded_refuses = bare_step
-                            && handler_seeded
-                            && bound_extract.as_ref().map_or(true, mentions_marker);
-                        let _update_try_entry = (seeded || unseeded_refuses)
+                        let _update_try_entry = (bare_step && _register.is_some())
                             .then(|| {
                                 entry_tries
                                     .take()
@@ -64697,10 +64680,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             })
                             .flatten()
                             .map(|tries| {
-                                fold_body::update_try_entry(
-                                    tries,
-                                    seeded.then(|| active_reg.value.clone()),
-                                )
+                                fold_body::update_try_entry(tries, active_reg.value.clone())
                             });
                         // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
                         // read the register the step left.
@@ -64729,8 +64709,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 demand
                             },
                         );
-                        handler_seeded |=
-                            _update_try_entry.is_some() && fold_body::update_try_entry_seeded();
                         // The sink answered `Stop`: its own verdict is in `outcome`,
                         // and a flow that merely ended early (a bounded consumer
                         // *inside* UPDATE) is a success for this step.
@@ -65116,29 +65094,11 @@ fn foreach_update_try_entry<S: EvalSemantics>(
     body: &Expr,
     catch: Option<&Expr>,
     frame: &Frame,
-) -> Option<TryEntryVerdict> {
+) -> Option<OwnedValue> {
     if S::TAG != EvalTag::Jq || catch.is_none() || frame.register_loss.is_lost() {
         return None;
     }
     fold_body::update_try_entry_for(body)
-}
-
-/// What [`fold_body::update_try_entry`] names for a `try` around the `foreach` a fold UPDATE is made of (#5004).
-pub(crate) enum TryEntryVerdict {
-    /// Seed the handler with this register, the one the step entered its UPDATE with.
-    Seed(OwnedValue),
-    /// Refuse, as a guess ([`guessed_try_entry_refusal`]).
-    Refuse,
-}
-
-/// The refusal of a `try` around a `foreach` UPDATE's `foreach` on a step whose handler is not seeded, after an
-/// earlier step of the run seeded one (#5004): a guess, so no `try`/`?` around the fold catches it, as none caught the
-/// earlier step's refusal before #5004 placed its handler. Run unseeded, the handler hands EXTRACT a value whose
-/// refusal reads as exact (#5012), and a `try` around the fold then answered where jq answers differently.
-fn guessed_try_entry_refusal(value: &OwnedValue) -> ResolveFlow {
-    ResolveFlow::Escaped(EvalEscape::Error(
-        EvalError::invalid_path_expression_guessed(value),
-    ))
 }
 
 /// Marks a handler seeded with the register [`foreach_update_try_entry`] found (`update_entry`) as stating it to the
@@ -65150,6 +65110,19 @@ fn entry_handler_mark(
 ) -> Option<fold_body::EntryHandlerGuard> {
     (update_entry.is_some() && entry_register == update_entry)
         .then(fold_body::entry_handler_delivering)
+}
+
+/// The most items a `foreach` source can emit, where its shape says (#5004): a comma of items that each yield at
+/// most one value ([`yields_at_most_one_value`]) emits at most as many as it has items, whether or not one raises or
+/// is empty. A run that has driven that many is on its last step, whatever the document. `None` for any other source
+/// (`.[]`, `..`, a `foreach`), whose last step cannot be known before the next item is asked for.
+fn source_output_bound(source: &Expr) -> Option<usize> {
+    match unwrap_paren(source) {
+        Expr::Comma(items) => items.iter().try_fold(0usize, |bound, item| {
+            Some(bound + source_output_bound(item)?)
+        }),
+        item => yields_at_most_one_value(item).then_some(1),
+    }
 }
 
 /// Whether a `foreach` source is one destructure of a `$x` marker by one pattern, whose body hands its input on
@@ -74164,14 +74137,12 @@ mod terminal_retry {
 mod fold_body {
     use std::cell::{Cell, RefCell};
 
-    /// The [`update_try_entry`] mark: the body depth, the `try` bodies it names (address and copy), the register
-    /// those `try`s are entered with (`None`: refuse instead, [`update_try_entry`]), and whether a handler was seeded
-    /// from it.
+    /// The [`update_try_entry`] mark: the body depth, the `try` bodies it names (address and copy), and the
+    /// register those `try`s are entered with.
     type TryEntry = (
         u32,
         alloc::vec::Vec<(usize, super::Expr)>,
-        Option<super::OwnedValue>,
-        bool,
+        super::OwnedValue,
     );
 
     thread_local! {
@@ -74577,17 +74548,13 @@ mod fold_body {
     /// Names the register a `foreach` UPDATE about to be entered starts from (`register`, the step's own), for
     /// the `try`s around the `foreach` that UPDATE is made of, by each one's body (`tries`, its address and a copy:
     /// a pipe hands its stages on copied, [`super::update_entry_try_bodies`], #5004): jq restores that register
-    /// when such a `try` catches, so its handler's output carries it. `None` names the `try`s of a step whose
-    /// handler is not to be run unseeded: one of them that catches refuses, as a guess. Only
-    /// [`update_try_entry_for`] reads it.
+    /// when such a `try` catches, so its handler's output carries it. Only [`update_try_entry_for`] reads it.
     pub(crate) fn update_try_entry(
         tries: alloc::vec::Vec<(usize, super::Expr)>,
-        register: Option<super::OwnedValue>,
+        register: super::OwnedValue,
     ) -> TryEntryGuard {
-        let previous = UPDATE_TRY_ENTRY.with(|a| {
-            a.borrow_mut()
-                .replace((depth() + 1, tries, register, false))
-        });
+        let previous =
+            UPDATE_TRY_ENTRY.with(|a| a.borrow_mut().replace((depth() + 1, tries, register)));
         TryEntryGuard(previous)
     }
 
@@ -74597,33 +74564,24 @@ mod fold_body {
         }
     }
 
-    /// What [`update_try_entry`] named for the `try` whose body is `body`, in the body being resolved: the same
-    /// node, or an equal copy of one. Every other `try` the body resolves is inside one of those bodies, so never
-    /// equal to one; what runs downstream of the body's outputs does not see the mark
-    /// ([`hide_update_try_entry_at`]). [`super::TryEntryVerdict::Refuse`] for a step whose handler must not run
-    /// unseeded; a register handed out records that a handler was seeded ([`update_try_entry_seeded`]).
-    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<super::TryEntryVerdict> {
+    /// The register [`update_try_entry`] named for the `try` whose body is `body`, in the body being resolved: the
+    /// same node, or an equal copy of one. Every other `try` the body resolves is inside one of those bodies, so
+    /// never equal to one; what runs downstream of the body's outputs, or inside the handler, does not see the mark
+    /// ([`hide_update_try_entry_at`]).
+    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<super::OwnedValue> {
         let key = super::expr_key(body);
         UPDATE_TRY_ENTRY.with(|a| {
-            let mut mark = a.borrow_mut();
-            let (_, _, register, seeded) = mark.as_mut().filter(|(at, tries, ..)| {
-                depth() > 0
-                    && *at == depth()
-                    && tries
-                        .iter()
-                        .any(|(address, copy)| *address == key || copy == body)
-            })?;
-            *seeded |= register.is_some();
-            Some(match register {
-                Some(register) => super::TryEntryVerdict::Seed(register.clone()),
-                None => super::TryEntryVerdict::Refuse,
-            })
+            a.borrow()
+                .as_ref()
+                .filter(|(at, tries, _)| {
+                    depth() > 0
+                        && *at == depth()
+                        && tries
+                            .iter()
+                            .any(|(address, copy)| *address == key || copy == body)
+                })
+                .map(|(_, _, register)| register.clone())
         })
-    }
-
-    /// Whether the current [`update_try_entry`] mark has seeded a handler, read by the step that set it.
-    pub(crate) fn update_try_entry_seeded() -> bool {
-        UPDATE_TRY_ENTRY.with(|a| a.borrow().as_ref().is_some_and(|(.., seeded)| *seeded))
     }
 
     /// Restores an [`update_try_entry`] mark [`hide_update_try_entry_at`] took.
@@ -74904,17 +74862,13 @@ mod fold_body {
 
     pub(crate) fn update_try_entry(
         _tries: alloc::vec::Vec<(usize, super::Expr)>,
-        _register: Option<super::OwnedValue>,
+        _register: super::OwnedValue,
     ) -> TryEntryGuard {
         TryEntryGuard
     }
 
-    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<super::TryEntryVerdict> {
+    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<super::OwnedValue> {
         None
-    }
-
-    pub(crate) fn update_try_entry_seeded() -> bool {
-        false
     }
 
     pub(crate) struct EntryHandlerGuard;
