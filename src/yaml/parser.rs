@@ -1903,8 +1903,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// dedented (`a:` / `  b: 1` / `# c` / blank / `---` is `.a`'s key's
     /// foot, measured, #2811) -- this runs before `last_head_foot_bp` is
     /// reset below, so `PREV` is still the closing document's own last key.
-    /// With no `PREV` it takes the ordinary path (delegated to
-    /// [`Self::flush_pending_head_lines`]).
+    /// A block detached from `PREV` too (a blank line on each side) is the closing document's foot as well,
+    /// placed like one flush against the marker (`a: 1\n\n# A\n\n---\nb: 2\n`, #5053). With no closing
+    /// document it takes the ordinary path (delegated to [`Self::flush_pending_head_lines`]).
     ///
     /// `old_root_bp` is `None` for the very first document (nothing to
     /// reach back to), in which case this always defers to the ordinary
@@ -1966,8 +1967,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             if self.attached_prev().is_some() {
                 self.flush_pending_head_lines_with_root(None, old_root);
-                return;
+            } else {
+                // Detached from `PREV` by a blank line as well (#5053): yq keeps the block as the closing
+                // document's foot, placed as one flush against the marker is, not as the next document's head.
+                let target = self.positional_boundary_foot_target().unwrap_or(old_root);
+                self.drain_pending_into_foot(target);
             }
+            return;
         }
         self.flush_pending_head_lines(next);
     }
