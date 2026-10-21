@@ -69,4 +69,5 @@ mod i5056;
 mod i5058;
 mod i5062;
 mod i5064;
+mod i5067;
 mod i865;

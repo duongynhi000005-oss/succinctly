@@ -8718,6 +8718,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         _ => {
                             // Scalar value - only doc_root if not inside a container
                             self.attach_document_root_node(indent);
+                            // The block scalar of a document-root node with properties
+                            // (`&x |`, `!!str >`) takes the same parser (#5067).
+                            if self.type_stack.len() <= 1
+                                && !self.json_strict
+                                && matches!(self.peek(), Some(b'|' | b'>'))
+                            {
+                                return self.parse_block_scalar(0);
+                            }
                             self.set_ib();
                             self.write_bp_open();
                             // type_stack.len() == 1 means we're inside only the virtual root sequence
@@ -8819,6 +8827,15 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
                     self.attach_document_root_node(indent);
+                    // A document-root block scalar is read by the block-scalar parser, as
+                    // `--- |` is, not by the plain-scalar scanner below: that scan ends at a
+                    // `: ` in the content and takes what follows as a further node (#5067).
+                    if self.type_stack.len() <= 1
+                        && !self.json_strict
+                        && matches!(self.peek(), Some(b'|' | b'>'))
+                    {
+                        return self.parse_block_scalar(0);
+                    }
                     self.set_ib();
                     self.write_bp_open();
                     // Only use doc_root mode if we're not inside any container
