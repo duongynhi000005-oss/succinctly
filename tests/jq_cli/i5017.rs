@@ -212,3 +212,42 @@ fn test_fold_entered_on_a_register_frame_reads_a_foreign_destructure_5017() -> R
         ),
     ])
 }
+
+/// #5017: the boundary of that reading. An INIT that navigated through a `$r` marker and then computed can move the
+/// register, so a fold behind a computed stage is not read as running on the frame's register there (the wrong reading
+/// classed a `$x` at `.a` as foreign and changed jq's answer). A later INIT fork that cannot move the register is read
+/// as the first one is: `(1,2)`/`(0,0)` forks raise, or empty a caught destructure, as jq does. Rows captured from jq
+/// 1.7.1, both routes.
+#[test]
+fn test_fold_entered_on_a_register_frame_boundary_and_later_forks_5017() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"try path(. as $r | .a as $x | null | reduce ($x as [$q] | .) as $w ($r | first(.a, .b) | tostring; .)) catch .",
+            "\"Cannot index object with number\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $r | .a as $x | 1 | reduce (try ($x as {b:$q} | .)) as $y ($r | .a | tostring; $x | .c))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach (reduce (select(. == null) | $x as {b:$q} | .) as $w ((1,2); .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.a as $x | 1 | foreach (try ($x as {b:$q} | .)) as $y ((0,0); .; .))",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+    ])
+}
