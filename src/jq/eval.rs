@@ -37935,7 +37935,8 @@ fn update_is_single_bind_returning_input(update: &Expr) -> bool {
 
 /// An expression that may emit a `null` or a boolean: a literal, `not`, a comparison, `and`/`or`. jq's
 /// `jv_identical` holds those equal by kind, so an emission of one is accepted or refused by the node the
-/// register sits on after the inner `foreach`'s bind moved it, which the resolver does not carry yet.
+/// register sits on after the inner `foreach`'s bind moved it, which a bare caught-bind UPDATE states
+/// ([`bare_bind_foreach_update_key`]) and a bind behind other stages does not yet.
 fn may_emit_null_or_bool(e: &Expr) -> bool {
     any_subexpr(e, &mut |x| {
         matches!(
@@ -38079,8 +38080,8 @@ fn plain_beside_bind_foreach(e: &Expr) -> bool {
 /// is one pattern of one bare variable over `.` or a `$name`, handing its input back; its INIT, UPDATE and
 /// EXTRACT are all `.`, and the enclosing fold's EXTRACT (`outer_extract`) may not emit a `null` or a boolean,
 /// unless the UPDATE is the bare `foreach` (alone, behind `try`/`?`, or piped into stages that cannot move the
-/// register) and the EXTRACT cannot move the register either ([`bare_bind_foreach_update_key`]: the EXTRACT's
-/// emission is then judged against the register the bind moved, #5014, #5020, #5018).
+/// register), whose emission is restated at the register the bind moved ([`bare_bind_foreach_update_key`], #5014,
+/// #5020, #5018, #5015): EXTRACT, a navigating or `null`/boolean one included, runs from there.
 /// Such a `foreach` meets `.` on the register wherever the enclosing fold's accumulator still is, so its
 /// source destructures a `$x` the resolver can place against it (the bind is `jv_identical` to the register,
 /// or it is not and the pattern's step raises) instead of getting the loud refusal an unplaced body gets.
@@ -38135,15 +38136,12 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
         }
     }
     // #4957: ...or the bare `foreach` itself (alone, behind a `try`/`?`, or piped into stages that cannot move the
-    // register; an `if` is not) under an EXTRACT that cannot move the register: the fold states the register the
-    // bind moved the `foreach`'s emission onto ([`bare_bind_foreach_update_key`]), which a `null`/boolean EXTRACT is
-    // judged against, whatever value a pipe tail computes (#5018). One that navigates (`try (.a | not) catch null`,
-    // `.. | select(. == null)`) runs against the moved register, which the resolver does not hand it: 5 of 30,000
-    // random rows answered wrongly.
+    // register; an `if` is not): the fold restates the `foreach`'s emission at the register the bind moved onto
+    // ([`bare_bind_foreach_update_key`]), and EXTRACT, a `null`/boolean one included, runs from there, whatever
+    // value a pipe tail computes (#5018, #5015).
     (go(e, WRAPPED_CHAIN_DEPTH)
         && outer_extract.map_or(true, |extract| !may_emit_null_or_bool(extract)))
-        || (outer_extract.map_or(true, cannot_move_register)
-            && bare_bind_foreach_update_key(e).is_some())
+        || bare_bind_foreach_update_key(e).is_some()
 }
 
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
@@ -63643,10 +63641,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && patterns_all_bare(patterns)
         && cannot_move_register(init)
         && update_wraps_bare_bind_foreach(update, extract);
-    // #4957: ...and where that UPDATE is the bare `foreach` itself, the key its bind steps to. A `null` or
-    // boolean EXTRACT is judged against the register the bind moved there (the child of the step's register),
-    // not the accumulator's: the bind's step moves it, the `foreach` emits its state with the register there,
-    // and the EXTRACT's emission is that register's or a raise ([`computed_at_register`]).
+    // #4957: ...and where that UPDATE is the bare `foreach` itself, the key its bind steps to. EXTRACT runs from the
+    // register the bind moved there (the child of the step's register), not from the accumulator's: the bind's
+    // step moves it and the `foreach` emits its state with the register there, so a `null` or boolean EXTRACT
+    // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015).
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
@@ -64074,29 +64072,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 && active_reg.trackable
                                 && active_reg.path.depth() > 0)
                                 .then_some(&active_reg);
-                            // #4957: the register the inner bind moved onto its bound child. The
-                            // `foreach` emitted, so the bind passed: `$x` is the step's register, and
-                            // jq's register is now its child at the key (`path_intact` then the step).
-                            // The bound source (`$x`, `.`, `$i`) is the register's own node whenever the bind passed, so its
-                            // child is the register value's.
-                            let inner_bind_moved = inner_bind_key.as_ref().and_then(|key| {
-                                let component = key.component::<S>(&active_reg.value).ok()?;
-                                let child = key.child::<S>(&active_reg.value).ok()?;
-                                Some((PathPrefix::extend(&active_reg.path, component), child))
-                            });
                             let mut emit = |branch: PathBranch<'a>| -> Demand {
-                                if let Some((path, child)) = inner_bind_moved
-                                    .as_ref()
-                                    .filter(|_| !branch.trackable && is_null_or_bool(&branch.value))
-                                {
-                                    // #4957: a `null`/boolean EXTRACT emission is the register the inner bind
-                                    // moved to its child, or a raise.
-                                    sink(computed_at_register(
-                                        branch.value.into_owned(),
-                                        Rc::clone(path),
-                                        BranchRegister::Unmoved(Cow::Owned(child.clone())),
-                                    ))
-                                } else if update_unmoved && !branch.trackable {
+                                if update_unmoved && !branch.trackable {
                                     sink(branch.with_register(BranchRegister::Unmoved(
                                         Cow::Borrowed(value),
                                     )))
@@ -64131,8 +64108,33 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     outcome = Some(FoldStepOutcome::Return(aborted.stop(control)));
                                     return Demand::Stop;
                                 }
+                                // #4957: the register the inner bind moved onto its bound child. The `foreach` emitted,
+                                // so the bind passed: the bound source (`$x`, `.`, `$i`) is the step's register, and jq's
+                                // register is now its child at the key (`path_intact`, then the step). The branch states
+                                // it, as an UPDATE that navigated and then computed does ([`FoldRegister::advance`]), so
+                                // EXTRACT runs from there.
+                                let moved_update_branch;
+                                let mut bind_moved = false;
+                                let extract_branch = match inner_bind_key.as_ref().and_then(|key| {
+                                    let component = key.component::<S>(&active_reg.value).ok()?;
+                                    let child = key.child::<S>(&active_reg.value).ok()?;
+                                    Some((PathPrefix::extend(&active_reg.path, component), child))
+                                }) {
+                                    Some((path, child)) => {
+                                        bind_moved = true;
+                                        moved_update_branch = PathBranch::passthrough(
+                                            path,
+                                            Cow::Owned(update_branch.value.clone().into_owned()),
+                                            false,
+                                            Snapshot::No,
+                                        )
+                                        .with_register(BranchRegister::Unmoved(Cow::Owned(child)));
+                                        &moved_update_branch
+                                    }
+                                    None => update_branch,
+                                };
                                 let extract_reg = active_reg.advance::<S>(
-                                    update_branch,
+                                    extract_branch,
                                     // #4948: only the branch of an `if . then .. else .. end` the state took ran.
                                     update_taken,
                                     frame,
@@ -64146,7 +64148,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // snapshot)` — structurally, not by a second
                                 // `identical()` check (#1590).
                                 let (extract_at_register, extract_snapshot) =
-                                    extract_reg.branch_provenance::<S>(Some(update_branch), frame);
+                                    extract_reg.branch_provenance::<S>(Some(extract_branch), frame);
+                                // #4957: a `null` or boolean state is the moved register by kind (`jv_identical`).
+                                let extract_at_register = extract_at_register
+                                    || (bind_moved
+                                        && null_bool_identical(
+                                            &update_branch.value,
+                                            &extract_reg.value,
+                                        ));
                                 // #3507: EXTRACT is driven by demand too, straight into
                                 // the outer sink, so `first(path(foreach 1 as $x (.; .;
                                 // .[("a"|stderr), ("b"|stderr)])))` stops after `a`.
@@ -64195,7 +64204,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     && walked_at.is_none()
                                     && extract_reg.trackable
                                     && extract_reg.path.depth() > reg.path.depth()
-                                    && cannot_move_register(ext_expr);
+                                    && (cannot_move_register(ext_expr) || bind_moved);
                                 // ...judged per output behind a `//`: the alternate jq runs after
                                 // it backtracked the left side states the register it entered with
                                 // (`(FE) // 5` on `true`), the left side's own output states what
@@ -64220,9 +64229,21 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         )
                                         && *branch.path == *extract_reg.path
                                     {
-                                        emit(branch.with_register(BranchRegister::Unmoved(
-                                            Cow::Owned(extract_reg.value.clone()),
-                                        )))
+                                        if !bind_moved {
+                                            emit(branch.with_register(BranchRegister::Unmoved(
+                                                Cow::Owned(extract_reg.value.clone()),
+                                            )))
+                                        } else {
+                                            // #4957: the register the inner bind moved holds this `null` or
+                                            // boolean, which is then the register's node (or a raise).
+                                            emit(computed_at_register(
+                                                branch.value.into_owned(),
+                                                Rc::clone(&extract_reg.path),
+                                                BranchRegister::Unmoved(Cow::Owned(
+                                                    extract_reg.value.clone(),
+                                                )),
+                                            ))
+                                        }
                                     } else if register_lost_at_the_root
                                         && !branch.trackable
                                         && branch.path.depth() == 0
