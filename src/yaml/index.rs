@@ -1693,6 +1693,24 @@ mod tests {
     }
 
     #[test]
+    fn a_document_foot_keeps_one_empty_line_between_its_blocks_5052() {
+        // Measured: `. | foot_comment` == "A\n\nB", and a run of blank lines is one.
+        let (_, doc_foot) = doc_head_foot(b"a: 1\n\n# A\n\n# B\n");
+        assert_eq!(doc_foot, ["# A", "", "# B"]);
+        let (_, doc_foot) = doc_head_foot(b"a: 1\n\n# A\n# A2\n\n\n# B\n");
+        assert_eq!(doc_foot, ["# A", "# A2", "", "# B"]);
+        // Across a `---`, the closing document keeps it too.
+        let (_, doc_foot) = doc_head_foot_at(b"a: 1\n\n# A\n\n# B\n---\nb: 2\n", 0);
+        assert_eq!(doc_foot, ["# A", "", "# B"]);
+        // A block attached to the last key is its foot; only the detached one is the document's.
+        let yaml = b"a: 1\n# A\n\n# B\n";
+        let (_, a_foot) = field_key_head_foot(yaml, "a");
+        assert_eq!(a_foot, ["# A"]);
+        let (_, doc_foot) = doc_head_foot(yaml);
+        assert_eq!(doc_foot, ["# B"]);
+    }
+
+    #[test]
     fn a_leading_block_attaches_to_the_document_not_its_first_key_798() {
         // Measured: `. | head_comment` == "lead"; `.a | key | head_comment` empty.
         let yaml = b"# lead\na: 1\n";

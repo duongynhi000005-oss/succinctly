@@ -9748,8 +9748,9 @@ fn write_head_comment_lines<Out: core::fmt::Write>(
 /// line (`a: 1\n# f\n\nb: 2` round-trips as-is, while a foot that ends its
 /// collection gets none), so the caller inserts that blank when it moves on
 /// to a following sibling. A foot block never spans a blank line (the parser
-/// ends a foot at one), so unlike [`write_head_comment_lines`] there is
-/// nothing to derive here.
+/// ends a foot at one), except a document's own foot, whose blocks keep one
+/// blank line between them as an empty range (#5052), written here as a bare
+/// line break; unlike [`write_head_comment_lines`] there is nothing to derive.
 fn write_foot_comment_lines<Out: core::fmt::Write>(
     out: &mut Out,
     indent: &str,

@@ -1242,7 +1242,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // but as its *head* when the document never opened a node at all
             // (a comment-only document, where real yq answers
             // `. | head_comment`, not `foot_comment`).
-            None if self.saw_head_foot_node => self.drain_pending_into_foot(root),
+            None if self.saw_head_foot_node => {
+                self.mark_blank_runs_in_pending();
+                self.drain_pending_into_foot(root)
+            }
             None => {
                 let pending = &mut self.pending_head_lines;
                 self.comments.entry(root).or_default().head.append(pending);
@@ -1453,6 +1456,28 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         } else {
             self.last_head_foot_bp
         }
+    }
+
+    /// Put one empty line between the pending comment lines wherever a blank line (or a run of them)
+    /// separates them in the input (#5052): a document's foot keeps that one blank line between its
+    /// blocks in yq (`a: 1` / blank / `# A` / blank / `# B` answers `. | foot_comment` as `"A\n\nB"`
+    /// and prints the blank back). The empty line is an empty range at the next line's start, which
+    /// the emitters write as a bare line break.
+    fn mark_blank_runs_in_pending(&mut self) {
+        let lines = &self.pending_head_lines;
+        if lines.len() < 2 {
+            return;
+        }
+        let mut marked = Vec::with_capacity(lines.len() * 2);
+        marked.push(lines[0]);
+        for pair in lines.windows(2) {
+            let (end, start) = (pair[0].1, pair[1].0);
+            if self.blank_line_between(end as usize, start as usize) {
+                marked.push((start, start));
+            }
+            marked.push(pair[1]);
+        }
+        self.pending_head_lines = marked;
     }
 
     /// Move the whole pending block onto `bp`'s `foot`. The one place a
@@ -1933,6 +1958,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // `flush_pending_head_lines_with_root`'s own dedent branch
                 // already applies in-document/at EOF (#2811 review).
                 let target = self.positional_boundary_foot_target().unwrap_or(old_root);
+                if target == old_root {
+                    self.mark_blank_runs_in_pending();
+                }
                 self.drain_pending_into_foot(target);
                 return;
             }
