@@ -26,7 +26,7 @@ which tags apply to the changes and search this file for those tags. Each rule h
 | Writing or updating tests                         | `testing`                                    |
 | Updating benchmarks or benchmark docs             | `benchmarks`, `documentation`                |
 | Adding or editing a markdown table                | `documentation`                              |
-| Editing a compliance limitations page            | `documentation`                              |
+| Editing a compliance limitations page             | `documentation`                              |
 | Writing commit messages                           | `commits`                                    |
 | Touching `no_std` boundaries or `std`-gated code  | `module-organization`                        |
 | Walking `DocumentFields` / `DocumentElements`      | `code-style`, `testing`                      |
@@ -684,16 +684,18 @@ or observable.
 
 ### Situation
 
-Adding to or editing [docs/compliance/jq/limitations.md](compliance/jq/limitations.md) or
-[docs/compliance/yq/limitations.md](compliance/yq/limitations.md), the pages where each
+Adding to or editing [docs/compliance/jq/limitations.md](compliance/jq/limitations.md),
+[docs/compliance/yq/limitations.md](compliance/yq/limitations.md) or
+[docs/compliance/yaml/limitations.md](compliance/yaml/limitations.md), the pages where each
 behavioural PR records what it changed.
 
 ### Guidance
 
 Start each new sentence on its own source line, at the paragraph's indentation, and add a
 sentence as a new line rather than appending it to an existing one. A clause of an overlong
-sentence may break after its `;` or `:`. No prose line may exceed 1000 characters (tables,
-headings and fenced code are exempt):
+sentence may break after its `;` or `:`. No line outside a table, a heading or fenced code
+may exceed 1000 characters. `fix` splits only a line that continues a paragraph, and only at a
+sentence end; any other overlong line is reported for a hand break:
 
 ```bash
 python3 scripts/doc_lines.py check   # what CI runs

@@ -29,7 +29,7 @@ Never edit `CHANGELOG.md` in a PR: every PR touching the top of `[Unreleased]` m
 
 ## Limitation Pages: One Sentence Per Line
 
-In `docs/compliance/{jq,yq}/limitations.md`, put each new sentence on its own source line (at
+In `docs/compliance/{jq,yq,yaml}/limitations.md`, put each new sentence on its own source line (at
 the paragraph's indentation) instead of appending it to an existing line: concurrent PRs that
 extend the same paragraph then merge line by line (#5048, STYLE-0014). `python3
 scripts/doc_lines.py check` caps prose lines at 1000 characters; `fix` splits overlong ones. A rebase
