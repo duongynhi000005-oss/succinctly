@@ -38050,22 +38050,6 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
     }
 }
 
-/// Whether a pipe stage after the bare `foreach` of [`bare_bind_foreach_update_key`] may emit a `null` or a boolean
-/// (#5018): the stage, not the `foreach`'s own source, so a source grammar widened later does not switch the
-/// read on for shapes it never covered.
-fn bare_bind_foreach_update_tail_emits_null_or_bool(update: &Expr) -> bool {
-    match unwrap_paren(without_empty_siblings(update)) {
-        Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
-            bare_bind_foreach_update_tail_emits_null_or_bool(expr)
-        }
-        Expr::Pipe(stages) => stages.split_first().is_some_and(|(head, tail)| {
-            tail.iter().any(may_emit_null_or_bool)
-                || bare_bind_foreach_update_tail_emits_null_or_bool(head)
-        }),
-        _ => false,
-    }
-}
-
 /// An `if` arm or a pipe tail of the wrapped read that is not the `foreach`: it leaves the register where it is
 /// and emits no `null` or boolean (a pipe tail that emits one is read through the bind key instead, #5018, under an
 /// EXTRACT that cannot move the register). A `select(true)` hands its input on and is read too (#4800). Not for a
@@ -63877,14 +63861,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4957: ...and where that UPDATE is the bare `foreach` itself, the key its bind steps to. EXTRACT runs from the
     // register the bind moved there (the child of the step's register), not from the accumulator's: the bind's
     // step moves it and the `foreach` emits its state with the register there, so a `null` or boolean EXTRACT
-    // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015).
+    // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015). Whatever
+    // the EXTRACT is: a plain `.`, `.a?` or `length` over an `INIT null` reads the moved register too (#5015).
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
-        .flatten()
-        .filter(|_| {
-            extract.is_some_and(may_emit_null_or_bool)
-                || bare_bind_foreach_update_tail_emits_null_or_bool(update)
-        });
+        .flatten();
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
