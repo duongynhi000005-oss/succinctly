@@ -27,6 +27,15 @@ A structured knowledge base for this codebase lives in `docs/`. Start at [docs/i
 
 Never edit `CHANGELOG.md` in a PR: every PR touching the top of `[Unreleased]` made any two PRs in flight conflict (#3920). Add `changelog.d/<issue>.<type>.md` instead — `<type>` is `added`, `changed`, `deprecated`, `removed`, `performance`, `fixed` or `security`; `+<slug>` replaces the issue number when there is none; `.<n>` before `.md` is a second entry. The body is the entry exactly as it would have read in `CHANGELOG.md` (`- **bold lead-in** (#N).` plus prose and measured numbers); a follow-up that refreshes an entry edits that same file. `python3 scripts/changelog.py check` validates; a PR with no user-visible effect waives the CI check with a `[no changelog]` line in its body (or the `no-changelog` label). `scripts/changelog.py collect` assembles the release section — see [changelog.d/README.md](changelog.d/README.md) and [docs/guides/release.md](docs/guides/release.md).
 
+## Limitation Pages: One Sentence Per Line
+
+In `docs/compliance/{jq,yq}/limitations.md`, put each new sentence on its own source line (at
+the paragraph's indentation) instead of appending it to an existing line: concurrent PRs that
+extend the same paragraph then merge line by line (#5048, STYLE-0014). `python3
+scripts/doc_lines.py check` caps prose lines at 1000 characters; `fix` splits overlong ones. A rebase
+that conflicts in one of these pages because `fix` split a paragraph upstream is resolved by
+`python3 scripts/doc_lines.py resolve <file>` (it splits all three sides, then merges them).
+
 ## AI Scratch Directory
 
 Use `.ai/scratch/` for temporary files (git-ignored):

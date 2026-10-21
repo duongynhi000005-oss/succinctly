@@ -26,6 +26,7 @@ which tags apply to the changes and search this file for those tags. Each rule h
 | Writing or updating tests                         | `testing`                                    |
 | Updating benchmarks or benchmark docs             | `benchmarks`, `documentation`                |
 | Adding or editing a markdown table                | `documentation`                              |
+| Editing a compliance limitations page            | `documentation`                              |
 | Writing commit messages                           | `commits`                                    |
 | Touching `no_std` boundaries or `std`-gated code  | `module-organization`                        |
 | Walking `DocumentFields` / `DocumentElements`      | `code-style`, `testing`                      |
@@ -676,3 +677,40 @@ only decode-failure, structural and collision variants, and its generator emits 
 well-formed containers, so it could not express a delimiter or gap corruption at any case
 count (#2350). A static audit does not depend on a corruption being reachable, expressible,
 or observable.
+
+## STYLE-0014: one sentence per line in the compliance limitation pages
+
+**Tags:** `documentation`
+
+### Situation
+
+Adding to or editing [docs/compliance/jq/limitations.md](compliance/jq/limitations.md) or
+[docs/compliance/yq/limitations.md](compliance/yq/limitations.md), the pages where each
+behavioural PR records what it changed.
+
+### Guidance
+
+Start each new sentence on its own source line, at the paragraph's indentation, and add a
+sentence as a new line rather than appending it to an existing one. A clause of an overlong
+sentence may break after its `;` or `:`. No prose line may exceed 1000 characters (tables,
+headings and fenced code are exempt):
+
+```bash
+python3 scripts/doc_lines.py check   # what CI runs
+python3 scripts/doc_lines.py fix     # split overlong lines at sentence ends
+```
+
+CommonMark renders a newline inside a paragraph as a space, so the page reads the same. A
+branch written before a paragraph was split conflicts with the split once, when it is
+rebased; in that conflict run `python3 scripts/doc_lines.py resolve <file>`, which splits
+all three sides the same way and merges them line by line, then `git rebase --continue`.
+
+### Motivation
+
+These pages grow by a sentence per PR, and several sessions extend the same paragraphs at
+once. Git merges line by line, so two PRs that each added a sentence to one long line always
+conflicted, however independent the sentences (#5048: one 10 KB line was touched by 65
+commits in a week, and a rebase across it needed a word-level three-way merge). This is the
+same in-flight-PR conflict `CHANGELOG.md` had before `changelog.d/` fragments (#3920). Hard
+wrapping at a fixed width helps less: inserting a sentence mid-paragraph rewraps the lines
+after it.
