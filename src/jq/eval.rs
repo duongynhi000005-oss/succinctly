@@ -55966,11 +55966,15 @@ impl<'e> RegisterSpine<'e> {
             {
                 Reach::HandsOn
             }
+            // #5030: ...and on any register, a marker the caller listed hands it on as `.` does, as
+            // [`binds_register`](Self::binds_register) reads one at a bind's head: `$x | . as P` is
+            // `$x as P` (`.a as $x | foreach ($x | . as {b:$q} | .) as $y (.a; .; .)` raises in jq).
             Expr::TrackedVar(marker)
                 if !self.fresh_only
                     && self.markers.contains(&Rc::as_ptr(marker))
                     && (self.null_register
-                        || (self.null_by_kind && matches!(marker.value, OwnedValue::Null))) =>
+                        || !self.null_by_kind
+                        || matches!(marker.value, OwnedValue::Null)) =>
             {
                 Reach::HandsOn
             }
