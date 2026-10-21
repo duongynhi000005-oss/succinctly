@@ -256,7 +256,9 @@ fn test_foreach_update_try_handler_behind_a_value_head_5004() -> Result<()> {
 /// is emptied by the source's own `try`, so jq's handler never runs where this one would), an outer `?//` chain (whose
 /// first alternative jq retries on the body's raise), a nested `foreach` whose INIT navigates (an earlier step's raise
 /// the resolver does not see), and a source that is a comma of caught destructures (jq's `try`s empty each item):
-/// seeding the handler there answered or wrote what jq does not (`= 9` wrote `{"a":9}`, `del` wrote `{"a":{}}`).
+/// seeding the handler there answered or wrote what jq does not (`= 9` wrote `{"a":9}`, `del` wrote `{"a":{}}`). And a later
+/// step a run does not cover once an earlier step seeded its handler: its unseeded handler's output would be refused
+/// as exact, so `try del(..) catch "c"` answered `"c"` (#5012); it refuses at the `try` as a guess.
 /// Loud, not wrong.
 #[test]
 fn test_foreach_update_try_handler_where_the_nested_foreach_is_not_modelled_stays_refused_5004(
@@ -326,6 +328,11 @@ fn test_foreach_update_try_handler_where_the_nested_foreach_is_not_modelled_stay
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach (.a) as $i (.; null | (try (foreach (try ($x as {a:$a} | .), try ($x as {a:$a} | .)) as $y (null; .; error($x))) catch null); $i | .a?))]",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+        ),
+        (
+            r#"{"a":{}}"#,
+            r#"try del(. as $x | foreach (.,.a) as $i (null; try (foreach ($x as {a:$a} | .) as $y (.; .; .a)) catch (.); $i)) catch "c""#,
+            "Invalid path expression with result \"Invalid path expression n...",
         ),
     ] {
         for (stdout, stderr, code) in [
