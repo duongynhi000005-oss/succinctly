@@ -1903,8 +1903,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// dedented (`a:` / `  b: 1` / `# c` / blank / `---` is `.a`'s key's
     /// foot, measured, #2811) -- this runs before `last_head_foot_bp` is
     /// reset below, so `PREV` is still the closing document's own last key.
-    /// With no `PREV` it takes the ordinary path (delegated to
-    /// [`Self::flush_pending_head_lines`]).
+    /// A block detached from `PREV` too (a blank line on each side) is the closing document's foot as well,
+    /// placed like one flush against the marker (`a: 1\n\n# A\n\n---\nb: 2\n`, #5053), when the closing document
+    /// opened a node and the one after the marker has content ([`Self::next_document_has_content`]). Otherwise,
+    /// and with no closing document, it takes the ordinary path (delegated to [`Self::flush_pending_head_lines`]).
     ///
     /// `old_root_bp` is `None` for the very first document (nothing to
     /// reach back to), in which case this always defers to the ordinary
@@ -1968,8 +1970,46 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.flush_pending_head_lines_with_root(None, old_root);
                 return;
             }
+            // Detached from `PREV` by a blank line as well (#5053): yq keeps the block as the closing
+            // document's foot, placed as one flush against the marker is, not as the next document's head.
+            // Only when the closing document opened a node (`last_head_foot_bp`): a comment-only document
+            // keeps the ordinary path, which reaches back across the marker in its own way (#798).
+            if self.last_head_foot_bp.is_some() && self.next_document_has_content() {
+                let target = self.positional_boundary_foot_target().unwrap_or(old_root);
+                self.drain_pending_into_foot(target);
+                return;
+            }
         }
         self.flush_pending_head_lines(next);
+    }
+
+    /// Whether the document opening at `self.pos` has a content line: past blank lines and comment-only
+    /// lines, something other than the next `---`/`...` marker or the end of input (#5053). yq places a
+    /// block that reaches back across a marker differently when the document after it is comment-only.
+    fn next_document_has_content(&self) -> bool {
+        let mut pos = self.pos;
+        while pos < self.input.len() {
+            let rest = &self.input[pos..];
+            let indent = rest
+                .iter()
+                .take_while(|&&b| Self::is_inline_whitespace(b))
+                .count();
+            match rest.get(indent) {
+                None => return false,
+                Some(&b) if is_line_break(b) => {}
+                Some(b'#') => {}
+                Some(_) => {
+                    return indent != 0
+                        || !(Self::marker_prefix(rest, b"---")
+                            || Self::marker_prefix(rest, b"..."));
+                }
+            }
+            pos += rest
+                .iter()
+                .position(|&b| is_line_break(b))
+                .map_or(rest.len(), |at| at + line_break_len(rest, at));
+        }
+        false
     }
 
     /// Whether a wholly blank line (empty or inline whitespace only) lies in `[from, to)`:
@@ -2940,33 +2980,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
     /// Check if we're at a document start marker (`---`).
     fn is_document_start(&self) -> bool {
-        if self.pos + 2 >= self.input.len() {
-            return false;
-        }
-        let slice = &self.input[self.pos..self.pos + 3];
-        if slice != b"---" {
-            return false;
-        }
-        // Must be followed by white space (space or tab), a line break, or EOF.
-        // The tab is not optional: `doc_marker_char` (validate.rs), the strict
-        // validator's copy of this same check, already includes it, and
-        // dropping it here meant `---\tfoo` was silently parsed as content
-        // instead of a document boundary (#434).
-        Self::is_ws_break_or_eoi(self.peek_at(3))
+        Self::marker_prefix(&self.input[self.pos.min(self.input.len())..], b"---")
+    }
+
+    /// Whether `text` starts with `marker` (`---` or `...`) as a document marker: followed by white space
+    /// (space or tab), a line break, or EOF, and with the three bytes present. The tab is not optional:
+    /// `doc_marker_char` (validate.rs), the strict validator's copy of this same check, already includes
+    /// it, and dropping it meant `---\tfoo` was silently parsed as content instead of a document boundary
+    /// (#434). One rule for [`Self::is_document_start`], [`Self::is_document_end`] and
+    /// [`Self::next_document_has_content`].
+    fn marker_prefix(text: &[u8], marker: &[u8; 3]) -> bool {
+        text.len() >= 3 && text[..3] == marker[..] && Self::is_ws_break_or_eoi(text.get(3).copied())
     }
 
     /// Check if we're at a document end marker (`...`).
     fn is_document_end(&self) -> bool {
-        if self.pos + 2 >= self.input.len() {
-            return false;
-        }
-        let slice = &self.input[self.pos..self.pos + 3];
-        if slice != b"..." {
-            return false;
-        }
-        // Must be followed by white space (space or tab), a line break, or EOF.
-        // See `is_document_start` for why the tab isn't optional (#434).
-        Self::is_ws_break_or_eoi(self.peek_at(3))
+        Self::marker_prefix(&self.input[self.pos.min(self.input.len())..], b"...")
     }
 
     /// Skip past a document marker (`---` or `...`).
