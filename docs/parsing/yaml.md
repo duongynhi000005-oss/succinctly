@@ -4361,7 +4361,7 @@ pub struct BalancedParens<W = Vec<u64>, S: SelectSupport = NoSelect> { ... }
 **WithSelect** uses a sampled select index:
 - Stores position of every 256th 1-bit
 - `select1(k)` = O(1) jump to sample + O(sample_rate/64) scan ≈ O(1) amortized
-- Memory overhead: ~3% (8 bytes per 256 ones)
+- Memory overhead: 12.5% of the BP bitmap (8 bytes per 256 ones, at BP's 50% density)
 
 **find_bp_at_text_pos** simplified from:
 ```rust

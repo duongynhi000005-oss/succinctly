@@ -96,9 +96,7 @@ fn extract_l2(entry: u128, i: usize) -> u16 {
 |   L1 (32 bits)   |L2[0]|L2[1]|L2[2]|L2[3]|L2[4]|L2[5]|L2[6]| pad |
 |     32 bits      | 9b  | 9b  | 9b  | 9b  | 9b  | 9b  | 9b  | 33b |
 Total: 128 bits per 512 bits = 25% overhead
-
-But we only store L2 for 7 of 8 words (8th is implied), so:
-Effective overhead: ~3%
+(L2 needs only 7 offsets, since word 0's is always 0, but the entry is still a full u128)
 ```
 
 ### Prior Art

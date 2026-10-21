@@ -103,8 +103,8 @@ total excess and the minimum excess reached inside it (both relative to the bloc
 
 `find_close` skips any block whose minimum cannot bring the running excess back to the target,
 climbing to L1 and L2 to skip larger runs, and scans bits only inside the block that holds the
-match. `enclose` uses the same arrays backwards (#4102). `find_open` does not: it scans words
-backwards with a per-word maximum computed on the fly.
+match. `enclose` uses the same arrays backwards (#4102). `find_open` does not: it scans backwards bit
+by bit.
 
 ## Applications
 

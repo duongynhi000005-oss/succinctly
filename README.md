@@ -11,7 +11,7 @@ Succinctly provides space-efficient data structures with fast rank and select op
 
 ## Features
 
-- **Bitvector with O(1) rank and O(log n) select** - Poppy-style 3-level directory, tuned for query speed over compactness (~28-48% overhead)
+- **Bitvector with O(1) rank and sampled select** - Poppy-style 3-level directory, tuned for query speed over compactness (~28-48% overhead)
 - **Balanced parentheses for tree navigation** - hierarchical min-excess index for fast `find_close`/`enclose`, plus an O(1) rank directory (~58% overhead, tuned for speed)
 - **JSON semi-indexing with SIMD acceleration** - Up to 880 MiB/s throughput on x86_64 (AMD Zen 4) with table-driven PFSM parser
 - **YAML semi-indexing** - Complete YAML 1.2 parser with anchor/alias resolution (~250-400 MiB/s)

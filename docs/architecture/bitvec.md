@@ -107,7 +107,8 @@ measures **27.5-47.5%** resident overhead, rising with bit density
 
 ## SIMD Optimization
 
-A single word is popcounted with `u64::count_ones()`. On ARM64 that compiles to NEON `cnt`. On
+A single word is popcounted with `u64::count_ones()` (or, under the `portable-popcount` feature,
+a broadword routine). On ARM64 that compiles to NEON `cnt`. On
 x86_64 it is the `POPCNT` instruction only when the build enables that target feature (for example
 `-C target-cpu=native`). This repo's builds set no `target-cpu`, so they get the baseline
 `x86_64` target's bit-twiddling sequence instead. Bulk popcounts (`popcount_words`) choose an implementation at
