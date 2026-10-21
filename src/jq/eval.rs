@@ -41649,6 +41649,25 @@ struct EmptiedUpdate<'a> {
     /// value that is not the state, and leaves jq's register where it was. It may emit several values
     /// (`{a:(1,2)} | FE`, #4797): the `foreach` then runs once per value, each run as empty as the first.
     literal_head: bool,
+    /// Whether the `foreach` sits in a comma branch of an `if` (`if . then (FE, empty) else . end`, #4800).
+    comma_branch: bool,
+    /// Whether that comma branch is read beyond the bare `if .` written alone (#5010): on another condition
+    /// (`if .a then (FE, empty) else . end`), with a stage after the `if` or a wrapper around it. Read like the bare
+    /// `if` there, the step whose state takes the `else .` branch (the `null` an empty earlier step left) lets a `.a`
+    /// EXTRACT's index error escape a `?` and a `try` where jq answers `[]`, unless that step is narrowed to the branch
+    /// it took, which [`taken_if_branch`] does only for a `foreach` UPDATE whose `if` it finds ([`taken_if_item`]). So
+    /// such an UPDATE is read only there ([`emptied_update_read`]); in a `reduce` UPDATE, a `foreach` EXTRACT, behind a
+    /// head stage, a `// empty`, a `catch` or a `first`/`limit`/`nth` it keeps the refusal.
+    beyond_bare_if: bool,
+}
+
+/// [`emptied_update`], for a fold body: a comma branch read beyond the bare `if .`
+/// ([`EmptiedUpdate::beyond_bare_if`]) only in a `foreach` UPDATE (`foreach_update`) whose `if` [`taken_if_branch`]
+/// finds (#4800).
+fn emptied_update_read(expr: &Expr, foreach_update: bool) -> Option<EmptiedUpdate<'_>> {
+    emptied_update(expr).filter(|emptied| {
+        !emptied.beyond_bare_if || foreach_update && taken_if_item(expr).is_some()
+    })
 }
 
 /// Whether `e` is a function of `.` alone that emits once and has no effect (#4778): the stages of an
@@ -41923,6 +41942,8 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             has_fallback: false,
             truthy: false,
             literal_head: false,
+            comma_branch: false,
+            beyond_bare_if: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
@@ -41959,6 +41980,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(stages.get(skipped)?)?;
             emptied.literal_head |= literal_head;
             let after = &stages[skipped + 1..];
+            emptied.beyond_bare_if |= emptied.comma_branch && !after.is_empty();
             let guarded = stages[..skipped]
                 .iter()
                 .any(|stage| !matches!(unwrap_paren(stage), Expr::Identity));
@@ -41979,7 +42001,12 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             }
             (after.is_empty() && !guarded).then_some(emptied)
         }
-        e if emptied_wrapper_inner(e).is_some() => emptied_update(emptied_wrapper_inner(e)?),
+        e if emptied_wrapper_inner(e).is_some() => {
+            emptied_update(emptied_wrapper_inner(e)?).map(|mut emptied| {
+                emptied.beyond_bare_if |= emptied.comma_branch;
+                emptied
+            })
+        }
         Expr::Alternative(left, right) => {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
@@ -41999,10 +42026,14 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             if !on_dot && !is_pure_of_dot(cond) {
                 return None;
             }
-            // A comma branch (`if . then (FE, empty) else . end`) is read like the bare `FE` (#4800), under any
-            // condition and with any stage or `try`/`?` around the `if`: the index error that once escaped a `?`
-            // there came from the step whose state took the `else` branch, which [`taken_if_branch`] now reads.
+            // A comma branch (`if . then (FE, empty) else . end`) is read like the bare `FE` (#4800); on another
+            // condition, or with a stage or a wrapper around the `if`, only where the step's `else` branch is read
+            // ([`EmptiedUpdate::beyond_bare_if`]).
+            let comma_branch = matches!(unwrap_paren(then_branch), Expr::Comma(_));
             let mut emptied = emptied_update(then_branch)?;
+            emptied.comma_branch |= comma_branch;
+            // After the recursion, so that a comma behind a nested `if` is marked under this one's condition too.
+            emptied.beyond_bare_if |= emptied.comma_branch && !on_dot;
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
             // it is not the state of (#4782): the condition is then a gate on the state (#4793).
             if on_dot && !emptied.literal_head {
@@ -42030,7 +42061,7 @@ fn sole_update_mark<S: EvalSemantics>(
             Some(fold_body::sole_update_foreach(input, in_foreach, extract))
         }
         e => {
-            let emptied = emptied_update(e)?;
+            let emptied = emptied_update_read(e, in_foreach && !extract)?;
             // #4778, #4782, #4797: what the state decides, the stages after a fallback and a literal
             // stage ahead are read for a `reduce` UPDATE and a `foreach` UPDATE or EXTRACT alike: the
             // step is empty exactly when the `foreach` is, whichever of them surround it.
@@ -50146,34 +50177,14 @@ fn source_is_caught_destructure(expr: &Expr) -> bool {
     }
 }
 
-/// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
-/// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
-/// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
-/// read as before. A condition that is a pure function of `.` ([`is_pure_of_dot`]: `.a`, `length > 0`) is read
-/// the same way once evaluated on the state (#4800): jq runs an `if`'s condition in a subexp, so it moves no
-/// register either, and only one that emits a single falsy value takes the `else` branch (one that raises keeps
-/// the whole `if`). A comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l` scope
-/// whose one item is such an `if` ([`label_sole_item`]) are read as the bare `if` (#4800): neither changes what
-/// the `if` emits.
-fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
-    fn falsy_on<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> bool {
-        match unwrap_paren(cond) {
-            Expr::Identity => !state.is_truthy(),
-            cond if is_pure_of_dot(cond) => {
-                let mut outputs = Vec::new();
-                let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |out| {
-                    outputs.push(out);
-                    Demand::Continue
-                });
-                matches!((flow, outputs.as_slice()), (Flow::Exhausted, [out]) if !out.is_truthy())
-            }
-            _ => false,
-        }
-    }
-    /// The `if` the UPDATE is, and whether it was found behind a handler-less `try`/`?` or at the head of a pipe
-    /// whose later stages leave the register where it is ([`neutral_leaves_register`]), which add no movement of
-    /// their own (#4800): the branch the state took is then the only one that can move the register.
-    fn sole_if(e: &Expr, budget: u8) -> Option<(&Expr, bool)> {
+/// The `if` a `foreach` UPDATE is, for [`taken_if_branch`], and whether it was found behind a handler-less `try`/`?`
+/// or at the head of a pipe whose later stages are `.` or `select(true)` (#4800): neither adds a movement of its own
+/// or changes the value, so the branch the state took is the only part of the step that can move the register. A
+/// comma whose other items emit nothing ([`without_empty_siblings`]) and a `label $l` scope whose one item is such an
+/// `if` ([`label_sole_item`]) are read as the bare `if`: neither changes what the `if` emits. Anything else, a head
+/// stage or another wrapper included, is `None`.
+fn taken_if_item(update: &Expr) -> Option<(&Expr, bool)> {
+    fn go(e: &Expr, budget: u8) -> Option<(&Expr, bool)> {
         let budget = budget.checked_sub(1)?;
         let sole = without_empty_siblings(e);
         match unwrap_paren(sole) {
@@ -50182,20 +50193,50 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
                 .filter(|item| matches!(unwrap_paren(item), Expr::If { .. }))
                 .map(|item| (item, false)),
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
-                sole_if(expr, budget).map(|(item, _)| (item, true))
+                go(expr, budget).map(|(item, _)| (item, true))
             }
             Expr::Pipe(stages) => stages
                 .split_first()
                 .filter(|(_, tail)| {
-                    tail.iter()
-                        .all(|stage| neutral_leaves_register(stage) || is_select_true(stage))
+                    tail.iter().all(|stage| {
+                        matches!(unwrap_paren(stage), Expr::Identity) || is_select_true(stage)
+                    })
                 })
-                .and_then(|(head, _)| sole_if(head, budget))
+                .and_then(|(head, _)| go(head, budget))
                 .map(|(item, _)| (item, true)),
             _ => None,
         }
     }
-    let Some((item, wrapped)) = sole_if(update, WRAPPED_CHAIN_DEPTH) else {
+    go(update, WRAPPED_CHAIN_DEPTH)
+}
+
+/// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
+/// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
+/// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
+/// read as before. A condition that is a pure function of `.` ([`is_pure_of_dot`]: `.a`, `length > 0`) is read
+/// the same way once evaluated on the state (#4800): jq runs an `if`'s condition in a subexp, so it moves no
+/// register either, and only one that emits a single falsy value takes the `else` branch (one that raises keeps
+/// the whole `if`). The `if` is found where [`taken_if_item`] finds it.
+fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
+    fn falsy_on<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> bool {
+        match unwrap_paren(cond) {
+            Expr::Identity => !state.is_truthy(),
+            cond if is_pure_of_dot(cond) => {
+                let mut outputs = Vec::new();
+                let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |out| {
+                    outputs.push(out);
+                    if outputs.len() > 1 {
+                        Demand::Stop
+                    } else {
+                        Demand::Continue
+                    }
+                });
+                matches!((flow, outputs.as_slice()), (Flow::Exhausted, [out]) if !out.is_truthy())
+            }
+            _ => false,
+        }
+    }
+    let Some((item, wrapped)) = taken_if_item(update) else {
         return update;
     };
     let mut current = item;
@@ -50208,6 +50249,7 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
         }
         current = else_branch;
     }
+    // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included.
     if wrapped && core::ptr::eq(current, item) {
         update
     } else {
@@ -62803,7 +62845,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // hands it a value that is not the accumulator.
     let foreach_update_on_register = first_step_on_register
         && (matches!(unwrap_paren(update), Expr::Foreach { .. })
-            || emptied_update(update).is_some_and(|emptied| !emptied.literal_head));
+            || emptied_update_read(update, false).is_some_and(|emptied| !emptied.literal_head));
     // #4440: an UPDATE that is a `?//` bind of `.` runs its alternatives with `.` on the accumulator,
     // which is on the register at the first step as for the UPDATEs above.
     let alt_bind_update_on_register = first_step_on_register && update_is_alt_bind(update);

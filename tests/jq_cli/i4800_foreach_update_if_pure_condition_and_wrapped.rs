@@ -423,3 +423,86 @@ fn test_foreach_update_if_comma_branch_with_select_true_after_or_a_pure_conditio
         ),
     ])
 }
+
+/// #4800: the comma `if` read beyond the bare `if .` (on another condition, with a stage or a wrapper around it) is read
+/// only in a `foreach` UPDATE whose `if` `taken_if_branch` finds, the only place the step whose `null` state takes the
+/// `else .` branch is narrowed to that branch. Lifting #5010's refusal everywhere let a `.a` or `.b` index error escape
+/// a `?` and a `try` where jq answers `[]` / `"C"`: in a `foreach` EXTRACT, behind a head stage (`. |`, `select(.) |`),
+/// a `first`/`limit`/`catch` wrapper and a stage that computes (`| .b`, `| length`). Those keep the answers `main`
+/// gave, which match jq here; a `reduce` UPDATE keeps its refusal too. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_foreach_comma_if_beyond_the_bare_form_outside_a_read_foreach_update_keeps_its_refusal_4800(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) | .b; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) | .b; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; first(if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; limit(1; if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) catch empty; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try ([path(. as $x | foreach (.a,.) as $i (.; try (if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) catch .; .a))]) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; . | if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; .; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) | length))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; .; select(.) | if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; .; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) else . end) | select(true) | .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
