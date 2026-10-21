@@ -45817,6 +45817,32 @@ fn operand_leaves_register(operand: &Expr) -> bool {
     cannot_move_register(peel_register_transparent(operand))
 }
 
+/// Whether `expr` leaves jq's register where it entered because of a collect (`[E]`), which jq runs to exhaustion and
+/// so backtracks to the fork it began at: whatever `E` navigated (#5024). Read through a comma (each item runs from
+/// the register the comma entered with) and a pipe whose later stages cannot move it, so `[.a] | length` and
+/// `([.a], .)` are read as `[.a]` is; every other leaf is [`cannot_move_register`]'s.
+fn collect_leaves_register(expr: &Expr) -> bool {
+    match unwrap_paren(expr) {
+        Expr::Array(_) => true,
+        Expr::Comma(items) => items.iter().all(collect_leaves_register),
+        // A stage after a collect meets the fresh array, which is no node of the register.
+        Expr::Pipe(stages) => stages.split_first().is_some_and(|(head, tail)| {
+            collect_leaves_register(head) && tail.iter().all(navigates_a_fresh_value_only)
+        }),
+        other => cannot_move_register(other),
+    }
+}
+
+/// Whether `expr` is `.` or `length`: a stage after a collect that reads the fresh array it is handed, which is no node
+/// of the register (#5024). A generator (`tostream`, `paths`) forks the INIT, and a variable or a call can hand the
+/// stages after it a node jq's register may be on, so those are not read.
+fn navigates_a_fresh_value_only(expr: &Expr) -> bool {
+    matches!(
+        unwrap_paren(expr),
+        Expr::Identity | Expr::Builtin(Builtin::Length)
+    )
+}
+
 /// [`cannot_move_register`] of `expr` as written or of what is under the wrappers that add no
 /// movement ([`operand_leaves_register`]), plus the bare builtins that navigate nothing
 /// ([`is_bare_register_neutral_builtin`], #3960) read through the shapes that only fork or
@@ -62906,7 +62932,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         S::TAG == EvalTag::Jq && fold_mentions_frozen_var(patterns, &[input, init, update]);
     let slice_ok = fold_slice_ok(patterns, input);
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
-    let init_keeps_register = S::TAG != EvalTag::Jq || cannot_move_register(init);
+    let init_keeps_register =
+        S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
     // #3780: whether UPDATE navigates the accumulator on a path that always runs --
     // syntactic, so decided once, not per source element
     // ([`reduce_update_at_register`]).
@@ -63702,7 +63729,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         update
     };
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
-    let init_keeps_register = S::TAG != EvalTag::Jq || cannot_move_register(init);
+    let init_keeps_register =
+        S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
     // #3761: `resolve_reduce`'s #3710 rule for `foreach`. A computed emission is
     // not the register, but when nothing in the fold can have moved it jq's
     // register is where the `foreach` entered, and the next pipe stage may still
