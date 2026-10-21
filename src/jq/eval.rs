@@ -42020,7 +42020,10 @@ fn is_value_head(e: &Expr) -> bool {
 /// end` around it (#4754): the stages after it run once per output, so an empty `foreach` leaves
 /// the whole UPDATE empty. In a `foreach` UPDATE a step that falls back to a value or reads the
 /// `null` an earlier empty step left behind emits it (#4776), which the fold's own walk does once
-/// it knows the step is empty.
+/// it knows the step is empty. The `if` may have an `else` other than `.` when it holds no fold of its own
+/// (`if . then FE else .a end`, #5034): the `else` runs only on a step that never drives the `foreach`'s source,
+/// which [`EmptiedUpdate::else_beyond_dot`] records for [`emptied_update_read`] to withhold from every reader but a
+/// `foreach` UPDATE.
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(without_empty_siblings(expr)) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
