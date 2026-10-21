@@ -38025,8 +38025,23 @@ fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
             }))
         .then(|| bare_bind_source_key(input, true))
         .flatten(),
+        // #4957: a pipe whose later stages leave the register where it is and emit no `null` or boolean
+        // (`FE | .`) hands the `foreach`'s emission on unchanged.
+        Expr::Pipe(stages) => {
+            let (head, tail) = stages.split_first()?;
+            tail.iter()
+                .all(plain_beside_bind_foreach)
+                .then(|| bare_bind_foreach_update_key(head))
+                .flatten()
+        }
         _ => None,
     }
+}
+
+/// An arm, pipe tail or comma item beside a bare caught-bind `foreach` that is not the `foreach`: it leaves the
+/// register where it is and emits no `null` or boolean.
+fn plain_beside_bind_foreach(e: &Expr) -> bool {
+    cannot_move_register(e) && !may_emit_null_or_bool(e)
 }
 
 /// Whether a fold's UPDATE is, or holds through a handler-less `try`/`?`, a pipe whose later stages are
@@ -38045,11 +38060,6 @@ fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
 /// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
 /// or boolean EXTRACT, and a comma sibling beside the `foreach` (`(FE), null`, `(FE), []`), 4 of 100,000.
 fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> bool {
-    /// An arm, pipe tail or comma item that is not the `foreach`: it leaves the register where it is and emits
-    /// no `null` or boolean.
-    fn plain(e: &Expr) -> bool {
-        cannot_move_register(e) && !may_emit_null_or_bool(e)
-    }
     fn go(e: &Expr, budget: u8) -> bool {
         let Some(budget) = budget.checked_sub(1) else {
             return false;
@@ -38073,9 +38083,9 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
             // The arms that are not the `foreach` must leave the register where it is: a sibling that navigates
             // (`if . then FE else .a end`) states a register the accumulator is not on.
-            Expr::Pipe(stages) => stages
-                .split_first()
-                .is_some_and(|(head, tail)| tail.iter().all(plain) && go(head, budget)),
+            Expr::Pipe(stages) => stages.split_first().is_some_and(|(head, tail)| {
+                tail.iter().all(plain_beside_bind_foreach) && go(head, budget)
+            }),
             Expr::If {
                 cond,
                 then_branch,
@@ -38083,8 +38093,8 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
             } => {
                 let (in_then, in_else) = (go(then_branch, budget), go(else_branch, budget));
                 cannot_move_register(cond)
-                    && (in_then || plain(then_branch))
-                    && (in_else || plain(else_branch))
+                    && (in_then || plain_beside_bind_foreach(then_branch))
+                    && (in_else || plain_beside_bind_foreach(else_branch))
                     && (in_then || in_else)
             }
             _ => false,
