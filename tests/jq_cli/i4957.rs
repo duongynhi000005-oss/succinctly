@@ -1181,7 +1181,7 @@ fn test_4957_null_boolean_extract_after_a_bare_caught_bind_foreach_update() -> R
 // where it is (`FE | .`, `FE | length`). The pipe hands the `foreach`'s emission on unchanged, so the register the
 // inner bind moved is still the one the EXTRACT's `null`/`true`/`false` is judged against (#4957).
 
-/// #4957: `FE | .`, `try (FE | .)`, `(FE | .)?` and `FE | length` under a `null`, `true` or `not` EXTRACT, over a root
+/// #4957: `FE | .`, `try (FE | .)`, `(FE | .)?`, `FE | length` and `FE | has("a")`/`$x`/`tostring` under a `null`, `true` or `not` EXTRACT, over a root
 /// register's child that is `null`, `false` and a container; `[path(..)?]` and `try path(..) catch`. Every row captured
 /// from `/usr/bin/jq` 1.7.1 (stdout, exit code), both routes.
 #[test]
@@ -1189,6 +1189,90 @@ fn test_4957_null_boolean_extract_after_a_bare_caught_bind_foreach_update() -> R
 fn test_4957_null_boolean_extract_after_a_pipe_wrapped_bare_caught_bind_foreach_update(
 ) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | has("a"); null))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | has("a"); null))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | has("a"); true))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | has("a"); true))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | $x; null))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | $x; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | $x; true))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | $x; true))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | tostring; null))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | tostring; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | tostring; true))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | tostring; true))?]",
+            "[]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":null}"#,
             r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .; null))?]",
