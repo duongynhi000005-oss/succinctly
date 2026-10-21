@@ -232,3 +232,39 @@ fn test_fold_source_alternative_chain_after_a_navigating_init_refuses_5013() -> 
     }
     Ok(())
 }
+
+/// #5013: inside another fold's body an INIT that lands on a `null` below the root keeps the live `null` on the fold's
+/// own frame, as before: the register's frame is not used there. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_null_init_inside_a_fold_body_unchanged_5013() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1}"#,
+            r"path(foreach (1) as $o (.; reduce (.a) as $y (.c; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[path(foreach (1,2) as $o (.; foreach (.b?) as $y (.c; .; .); .))]",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1) as $o (.; reduce (1) as $y (.c; .)))",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[path(foreach (1) as $o (.; foreach (1) as $y (.c; .; .); .))]",
+            "[[\"c\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
