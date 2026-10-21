@@ -38156,7 +38156,7 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
 ///
 /// #4800: a `select` stage that never lets a value through (`select(false)`, [`never_truthy`]) in such a pipe is
 /// the `empty` it is, and the stages after the first stage that emits nothing never run: a pipe is rewritten to end
-/// on that `empty`. Neither the constant condition nor `empty` reads the state or moves a register. The resolver
+/// on that `empty` (a pipe that starts with such a stage is left as it is). Neither the constant condition nor `empty` reads the state or moves a register. The resolver
 /// reads a pipe that ends in `empty` as an UPDATE that never emits, where the `select` spelling (or a navigating
 /// stage after the `empty`) reached its stage machinery and refused the `foreach` ahead of it for an emission that is
 /// never made.
@@ -38182,17 +38182,18 @@ fn without_noop_pipes(update: &Expr) -> Option<Expr> {
         match e {
             // The stages after the first one that emits nothing never run.
             Expr::Pipe(stages) => {
-                let at = stages.iter().position(dead_stage)?;
+                // Not a dead first stage: the stages behind it are read by the register machinery as they stand
+                // (`(select(false) | 1 | FE) // 5`, #4853), which an `empty` alone would not carry.
+                let at = stages.iter().position(dead_stage).filter(|&at| at > 0)?;
                 let is_empty = matches!(unwrap_paren(&stages[at]), Expr::Builtin(Builtin::Empty));
-                (!is_empty || at + 1 < stages.len()).then(|| match at {
-                    0 => Expr::Builtin(Builtin::Empty),
-                    _ => Expr::Pipe(
+                (!is_empty || at + 1 < stages.len()).then(|| {
+                    Expr::Pipe(
                         stages[..at]
                             .iter()
                             .cloned()
                             .chain(core::iter::once(Expr::Builtin(Builtin::Empty)))
                             .collect(),
-                    ),
+                    )
                 })
             }
             Expr::Paren(inner) => boxed(inner).map(Expr::Paren),
