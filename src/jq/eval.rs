@@ -38153,9 +38153,23 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
 /// condition: a `?//` chain's source that reads `(.|.)` is answered
 /// as written (`test_two_alternative_chain_in_a_carrying_foreach_in_a_moved_fold_body_4694` pins jq's answer), and
 /// the same source as `.` is refused.
+///
+/// #4800: a `select` stage that never lets a value through (`select(false)`, [`never_truthy`]) in such a pipe is
+/// the `empty` it is, and the stages after the first stage that emits nothing never run: a pipe is rewritten to end
+/// on that `empty`. Neither the constant condition nor `empty` reads the state or moves a register. The resolver
+/// reads a pipe that ends in `empty` as an UPDATE that never emits, where the `select` spelling (or a navigating
+/// stage after the `empty`) reached its stage machinery and refused the `foreach` ahead of it for an emission that is
+/// never made.
 fn without_noop_pipes(update: &Expr) -> Option<Expr> {
     fn noop_pipe(e: &Expr) -> bool {
         matches!(e, Expr::Pipe(_)) && is_identity_pipe(e)
+    }
+    fn dead_stage(stage: &Expr) -> bool {
+        match unwrap_paren(stage) {
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
+            _ => false,
+        }
     }
     /// `e` with its output positions rewritten, `None` when none holds a no-op pipe.
     fn rewrite(e: &Expr) -> Option<Expr> {
@@ -38166,6 +38180,21 @@ fn without_noop_pipes(update: &Expr) -> Option<Expr> {
             return Some(Expr::Identity);
         }
         match e {
+            // The stages after the first one that emits nothing never run.
+            Expr::Pipe(stages) => {
+                let at = stages.iter().position(dead_stage)?;
+                let is_empty = matches!(unwrap_paren(&stages[at]), Expr::Builtin(Builtin::Empty));
+                (!is_empty || at + 1 < stages.len()).then(|| match at {
+                    0 => Expr::Builtin(Builtin::Empty),
+                    _ => Expr::Pipe(
+                        stages[..at]
+                            .iter()
+                            .cloned()
+                            .chain(core::iter::once(Expr::Builtin(Builtin::Empty)))
+                            .collect(),
+                    ),
+                })
+            }
             Expr::Paren(inner) => boxed(inner).map(Expr::Paren),
             Expr::Comma(items) => {
                 let rewritten: Vec<Option<Expr>> = items.iter().map(rewrite).collect();
