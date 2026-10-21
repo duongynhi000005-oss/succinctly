@@ -66,4 +66,5 @@ mod i5053;
 mod i5053_crlf;
 mod i5056;
 mod i5058;
+mod i5062;
 mod i865;
