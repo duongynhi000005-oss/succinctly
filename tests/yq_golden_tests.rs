@@ -292,6 +292,18 @@ fn yq_golden_conformance() {
 /// Neither quirk is triggered by ordinary (comment-free) content, which is why
 /// every other golden case still passes this test's invariance check unmodified.
 const KNOWN_CRLF_DIVERGENCES: &[&str] = &[
+    // #5053: the first document's leading comment keeps its `\r` under CRLF in yq, as it does here now. The
+    // DOM route's output for these cases therefore differs from the LF golden exactly as yq's does (8 of the 9
+    // match yq's own CRLF output; `meta_assign_clear_foot_seq_items_2796` also has yq's CRLF foot quirk).
+    "meta_assign_clear_comments_container_keeps_key_head_2796",
+    "meta_assign_clear_comments_map_value_2796",
+    "meta_assign_clear_foot_dots_2796",
+    "meta_assign_clear_foot_seq_items_2796",
+    "meta_assign_clear_head_update_form_2796",
+    "meta_assign_clear_line_dots_2796",
+    "meta_assign_key_clear_2796",
+    "meta_assign_key_head_replaces_existing_2796",
+    "meta_assign_root_foot_keeps_last_entry_foot_2796",
     "standalone_comments_cursor_result_2795",
     "standalone_comments_head_anchor_style_2795",
     "standalone_comments_header_2795",

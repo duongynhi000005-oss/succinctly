@@ -2849,7 +2849,7 @@ pub fn to_owned_with_comments<V: DocumentValue, S: EvalSemantics>(
 }
 
 /// The document preamble as yq prints it (#4086): verbatim, except that the `---` marker
-/// line loses any trailing blanks.
+/// line loses any trailing blanks and a blank CRLF line is `# \r` (#5053).
 fn normalized_preamble(preamble: &str) -> String {
     preamble
         .split_inclusive('\n')
@@ -2857,6 +2857,9 @@ fn normalized_preamble(preamble: &str) -> String {
             let bare = line.trim_end_matches(['\n', '\r']);
             if bare.trim_end_matches([' ', '\t']) == "---" {
                 alloc::borrow::Cow::Owned(format!("---{}", &line[bare.len()..]))
+            } else if bare.is_empty() && line == "\r\n" {
+                // #5053: a blank CRLF line is `# \r` in yq's output (the `\r` is comment text to go-yaml).
+                alloc::borrow::Cow::Borrowed("# \r\n")
             } else {
                 alloc::borrow::Cow::Borrowed(line)
             }
