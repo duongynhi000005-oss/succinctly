@@ -13,7 +13,6 @@ Hierarchical structures enable O(1) or O(log n) queries by organizing auxiliary 
 | 2-level hierarchy   | O(1)       | ~3%            | Frequent queries      |
 | 3-level hierarchy   | O(1)       | ~3%            | Very large datasets   |
 | RangeMin structure  | O(1)       | ~39% (bp.rs)   | Tree nav (find_close) |
-| RangeMax structure  | O(1)       | ~1.5%          | Tree nav (find_open)  |
 
 ---
 
@@ -290,58 +289,51 @@ Tree operations require finding positions where cumulative excess (opens minus c
 
 ### Hierarchical Min-Excess Index
 
-Store minimum excess within each block:
+`BalancedParens` (`src/trees/bp.rs`) stores, for each block, the minimum excess reached inside it and the
+block's total excess, at three granularities. Within a word, `find_close` uses byte lookup tables
+(`BYTE_FIND_CLOSE`, `BYTE_MIN_EXCESS`, `BYTE_TOTAL_EXCESS`).
 
 ```
-Level 2: Min excess for 4096-bit superblocks
-Level 1: Min excess for 512-bit blocks
-Level 0: Use byte lookup tables for 8-bit chunks
+L2: per 1,024 words (65,536 bits): min excess and total excess   (i32)
+L1: per    32 words ( 2,048 bits): min excess and total excess   (i16)
+L0: per     1 word  (    64 bits): min excess and total excess   (i8 min, i16 total)
 ```
 
 ```rust
-struct RangeMinIndex {
-    // L1: Min excess for each 512-bit block
-    l1_min: Vec<i16>,
-
-    // L2: Min excess for each 4096-bit superblock
-    l2_min: Vec<i16>,
-}
-```
-
-**Query: find_close(pos)**
-
-Find matching close paren for open at position `pos`:
-
-```rust
-fn find_close(&self, pos: u64) -> u64 {
-    let mut excess = 1;  // Start inside the open paren
-
-    // Phase 1: Scan bytes using lookup table
-    while excess > 0 {
-        let byte = self.get_byte(current_pos);
-        if let Some(offset) = BYTE_FIND_CLOSE[byte][excess] {
-            return current_pos + offset;
-        }
-        excess += BYTE_TOTAL_EXCESS[byte];
-        current_pos += 8;
-    }
-
-    // Phase 2: Skip blocks using L1 index
-    while excess + self.l1_min[block] > 0 {
-        excess += self.l1_total[block];
-        block += 1;
-    }
-
-    // Phase 3: Scan within block
+struct BalancedParens<W, S> {
+    // ...
+    l0_min_excess: Vec<i8>,     // per word, relative to the word's start
+    l0_word_excess: Vec<i16>,   // per word, total excess
+    l1_min_excess: Vec<i16>,    // per 32 words
+    l1_block_excess: Vec<i16>,
+    l2_min_excess: Vec<i32>,    // per 1,024 words; i32 because a 65,536-bit block's
+    l2_block_excess: Vec<i32>,  // excess ranges over [-65,536, 65,536] (#188)
     // ...
 }
 ```
+
+The three levels cost about 39% of the parenthesis bitmap (3 bytes per 8-byte word at L0, 4 bytes per 256
+at L1, 8 bytes per 8,192 at L2); the struct's rank directory adds another 18.75%. See
+[balanced-parens.md](../architecture/balanced-parens.md) for the full table.
+
+**Query: find_close(pos)**
+
+Find the matching close paren for the open at position `pos`:
+
+1. A leaf (the next bit is a close) answers at once.
+2. Otherwise scan the rest of the starting word with the byte tables (`find_close_in_start_word`).
+3. `find_close_from` then runs a state machine (`ScanWord`, `CheckL0`, `CheckL1`, `CheckL2`, `FromL0`,
+   `FromL1`, `FromL2`). At each level it asks whether `excess + block_min_excess <= 0`, i.e. whether the
+   excess can reach zero inside the block; if not it adds the block's total excess and skips it whole, and
+   if so it descends one level.
 
 **Result**: 40x speedup on tree navigation.
 
 ### SIMD-Accelerated Index Construction (January 2026)
 
-On ARM, the L1 index building can be accelerated using NEON SIMD:
+On ARM, the L1 index building can be accelerated using NEON SIMD
+(`build_l1_index_neon`, feature `simd`, aarch64; `build_l2_index_neon` for L2, and SSE4.1 variants
+`build_l1_index_sse41`/`build_l2_index_sse41` on x86_64):
 
 ```rust
 // Process 8 words at a time
@@ -363,60 +355,33 @@ unsafe fn build_l1_neon(l0_min: &[i8], l0_excess: &[i16]) -> (Vec<i16>, Vec<i16>
 }
 ```
 
+(A sketch of the shape; the real function is `build_l1_index_neon` in `bp.rs`.)
+
 **Result**: 2.8x faster L1 index construction on ARM (Graviton 4).
 
 The same SIMD pattern is also applied to L2 index building, providing 1-3%
 improvement at large scales (100M+ nodes) with no regression at smaller sizes.
 
-### Indexed find_open (January 2026)
+### find_open and enclose
 
-The `find_close` operation uses hierarchical **min-excess** indices to skip blocks
-where excess won't drop to zero. The symmetric `find_open` operation (find matching
-open for a close) requires scanning **backwards**, needing **max-excess** indices.
+`find_close` skips blocks with the **min-excess** index. The mirror image, `find_open` (find the matching
+open for a close), scans **backwards**, and it does **not** use an index:
 
-**Problem**: `find_open` was O(d) bit-by-bit scanning, while `find_close` was O(1).
+- `BalancedParens::find_open` calls the free function `find_open`, a bit-by-bit backward scan, O(d) in the
+  distance to the match.
+- `enclose` (the parent of an open) does use the index, backwards (#4102): scanning back from `p - 1` the
+  parent is the first open that brings the running excess to +1, and a block of total excess `bx` and
+  prefix minimum `mn` reaches at most `bx - mn` from its end, so a block with `excess + bx - mn < 1` is
+  skipped whole (`enclose_indexed`). The free `enclose` skips a word at a time with `word_max_excess_rev`.
+  A sibling walk reaches a first child's parent in a few steps, but the k-th member of a wide mapping is k
+  siblings from it, so the linear scan made `parent` on such a member linear in k and a fan-out over the
+  members quadratic.
 
-**Solution**: Add reverse max-excess indices at all three levels:
-
-```rust
-struct BalancedParens {
-    // Forward scanning (find_close) - existing
-    l0_min_excess: Vec<i8>,      // Per-word min excess
-    l1_min_excess: Vec<i16>,     // Per-32-word block min excess
-    l2_min_excess: Vec<i16>,     // Per-1024-word block min excess
-
-    // Reverse scanning (find_open) - new
-    l0_max_excess_rev: Vec<i8>,  // Per-word max excess (backwards)
-    l1_max_excess_rev: Vec<i16>, // Per-32-word block max excess (backwards)
-    l2_max_excess_rev: Vec<i16>, // Per-1024-word block max excess (backwards)
-}
-```
-
-**State machine**: Mirrors `find_close_from` but scans backwards:
-
-```rust
-fn find_open_from(&self, start_pos: usize, target_excess: i32) -> Option<usize> {
-    // States: ScanWord, CheckL0, CheckL1, CheckL2, FromL0, FromL1, FromL2
-
-    // Skip condition (reversed):
-    // - find_close: excess + block_min_excess <= 0  (might drop to zero)
-    // - find_open:  excess + block_max_excess_rev >= target  (might rise to target)
-
-    // If block can't reach target, skip entire block:
-    excess += block_total_excess;
-    pos = previous_block_boundary;
-}
-```
-
-**Byte lookup table** for O(1) in-word scanning:
-
-```rust
-// BYTE_FIND_OPEN_REV[byte_val][target-1] = bit position where excess
-// first reaches target when scanning bits 7→0, or 8 if not found
-const BYTE_FIND_OPEN_REV: [[u8; 16]; 256] = { /* precomputed */ };
-```
-
-**Benchmark results** (1000 queries, ARM Graviton 4):
+**An indexed `find_open` was designed and benchmarked but never merged.** The branch
+`newhoggy/optimise-enclose-and-find_open` (commit `93963776a`) adds reverse **max-excess** arrays at all three
+levels (`l0_max_excess_rev`, `l1_max_excess_rev`, `l2_max_excess_rev`) and a `find_open_from` state machine
+mirroring `find_close_from`, with a reverse byte table (`BYTE_FIND_OPEN_REV`), at about 1.5 bytes per word of
+extra space. On that branch it measured (1000 queries, ARM Graviton 4):
 
 | Size | Indexed | Linear (O(d)) | Speedup |
 |------|---------|---------------|---------|
@@ -424,11 +389,9 @@ const BYTE_FIND_OPEN_REV: [[u8; 16]; 256] = { /* precomputed */ };
 | 100K | 10.2 µs | 886.3 µs      | **87x** |
 | 1M   | 9.3 µs  | 4,573 µs      | **492x** |
 
-**Note on `enclose`**: The `enclose` operation (find parent) was kept as linear
-scan because the parent is typically very close (1-2 bits away). The indexed
-version added overhead without benefit for nearby targets.
-
-**Space overhead**: ~1.5 bytes per word additional (3 new i8/i16 vectors).
+None of those fields or functions exist on `main` (`git grep -n 'l0_max_excess_rev\|find_open_from' -- src`
+finds nothing), so the numbers describe the unmerged branch, not the shipped `find_open`, which is still
+the linear scan in the right-hand column.
 
 ### Prior Art
 
@@ -519,7 +482,6 @@ Fewer levels / larger blocks:
 | EliasFano           | `bits/elias_fano.rs`  | Compressed monotone ints   | ~23%*    |
 | CumulativeIndex     | `json/light.rs`       | Fast IB select             | ~4%      |
 | RangeMinIndex       | `trees/bp.rs`         | O(1) find_close            | ~39%‡    |
-| RangeMaxRevIndex    | `trees/bp.rs`         | O(1) find_open (16-492x)   | ~1.5%    |
 | LightweightIndex    | `dsv/index_*.rs`      | DSV iteration              | ~0.8%    |
 
 ‡For `BalancedParens` the min-excess levels are ~39% of the bitmap and its own rank directory adds 18.75%, ≈ 58% in all ([balanced-parens.md](../architecture/balanced-parens.md#space-overhead), #5026).
