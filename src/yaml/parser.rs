@@ -215,6 +215,10 @@ struct PendingBlock {
     /// `.k`'s key's foot, measured), so `PREV` itself is kept and this
     /// consulted instead.
     blank_before: bool,
+    /// The column of the block a blank line just settled onto `PREV` as its foot, when this block is the
+    /// next one of the same run (#5053): go-yaml ended the blocks at that column with the first, so this one
+    /// is evaluated against the blocks still open outside it.
+    follows_foot_at: Option<usize>,
 }
 
 /// Output from parsing: the semi-index structures.
@@ -1000,10 +1004,25 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // one block (blank line preserved) attached to `.a.b`'s key, not
         // split with `h1` misrouted onto `.a`'s own foot (measured; #2795
         // review).
+        let mut follows_foot_at = None;
         if let Some(&(_, last_end)) = self.pending_head_lines.last() {
             if self.blank_line_between(last_end as usize, start as usize)
                 && self.pending_block.column <= self.pending_block.prev_indent
             {
+                // Exactly one blank line: go-yaml keeps a run with two or more together (measured).
+                let one_blank = self.input[last_end as usize..start as usize]
+                    .iter()
+                    .filter(|&&b| b == b'\n')
+                    .count()
+                    == 2;
+                // ...and the first block sits at the innermost open block's own column, which is what ends that
+                // block for go-yaml (`unrollIndent`); one at an odd column leaves it open.
+                if one_blank
+                    && self.pending_block.column == self.pending_block.prev_indent
+                    && self.attached_prev().is_some()
+                {
+                    follows_foot_at = Some(self.pending_block.column);
+                }
                 self.resolve_pending_block_backward();
             }
         }
@@ -1033,6 +1052,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.blank_line_precedes(start as usize)
             };
             self.capture_pending_block(column, after_split, blank_before);
+            self.pending_block.follows_foot_at = follows_foot_at;
         }
         self.pending_head_lines.push((start, end));
     }
@@ -1057,6 +1077,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         self.pending_block.prev_indent = prev_indent;
         self.pending_block.after_split = after_split;
         self.pending_block.blank_before = blank_before;
+        self.pending_block.follows_foot_at = None;
         self.pending_block.frames.clear();
         if column > prev_indent {
             return;
@@ -1232,6 +1253,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             if next_column < prev_indent && column != next_column {
                 if self.pending_block.after_split && column < prev_indent {
                     self.settle_dedented_block(next, root);
+                } else if let Some(owner) = self.outer_key_of_settled_foot(next_column) {
+                    // The run's first block already closed the blocks at its column as `PREV`'s foot, so this
+                    // one is the foot of the key that owns them (#5053).
+                    self.drain_pending_into_foot(owner);
                 } else {
                     self.drain_pending_into_foot(prev);
                 }
@@ -1255,6 +1280,23 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.comments.entry(root).or_default().head.append(pending);
             }
         }
+    }
+
+    /// The key whose value block the run's first block closed, for the block after it (#5053): the last key of
+    /// the innermost open mapping outside the closed column, when `next_column` dedents past that column. `a:` /
+    /// `  b: 1` / `  # A` / blank / `  # B` / `c: 2` is `# A` on `.a.b`'s key and `# B` on `.a`'s.
+    fn outer_key_of_settled_foot(&self, next_column: usize) -> Option<usize> {
+        let closed_at = self.pending_block.follows_foot_at?;
+        // A block at the dedenting node's own column (or left of it) is placed by that column, not moved.
+        if next_column >= closed_at || self.pending_block.column <= next_column {
+            return None;
+        }
+        self.pending_block
+            .frames
+            .iter()
+            .rev()
+            .filter(|frame| frame.indent < closed_at)
+            .find_map(|frame| frame.is_mapping.then_some(frame.last_key_bp).flatten())
     }
 
     /// Place a dedented block (`column < prev_indent`) whose adjacency no
@@ -2006,7 +2048,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 if self.detached_block_to_prev_before_dedent(0) {
                     return;
                 }
-                let target = self.positional_boundary_foot_target().unwrap_or(old_root);
+                // A second block of the run, after a blank line, is the foot of the key that owns the blocks
+                // the first closed, as in a mapping (`outer_key_of_settled_foot`, #5053).
+                let target = self
+                    .outer_key_of_settled_foot(0)
+                    .or_else(|| self.positional_boundary_foot_target())
+                    .unwrap_or(old_root);
                 if target == old_root {
                     self.mark_blank_runs_in_pending();
                 }
