@@ -1244,7 +1244,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             // `. | head_comment`, not `foot_comment`).
             None if self.saw_head_foot_node => {
                 self.mark_blank_runs_in_pending();
-                self.drain_pending_into_foot(root)
+                self.drain_pending_into_foot(root);
             }
             None => {
                 let pending = &mut self.pending_head_lines;
