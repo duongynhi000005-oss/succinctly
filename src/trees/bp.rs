@@ -2463,6 +2463,27 @@ impl<W: AsRef<[u64]>, S: SelectSupport> BalancedParens<W, S> {
         self.select.heap_size()
     }
 
+    /// Returns the heap bytes retained by the navigation indices: the L0-L2
+    /// min-excess arrays, the rank directory, and the select index (see
+    /// [`select_heap_size`](Self::select_heap_size)).
+    ///
+    /// The parenthesis words are not counted, since `W` may be a borrowed
+    /// slice. Per 64-bit word of parentheses, L0 keeps 3 bytes, L1 4 bytes per
+    /// 32 words, L2 8 bytes per 1024 words, and the rank directory 12 bytes per
+    /// 8 words: about 58% of the bitmap before select (#5026).
+    pub fn index_heap_size(&self) -> usize {
+        use core::mem::size_of_val;
+        size_of_val(self.l0_min_excess.as_slice())
+            + size_of_val(self.l0_word_excess.as_slice())
+            + size_of_val(self.l1_min_excess.as_slice())
+            + size_of_val(self.l1_block_excess.as_slice())
+            + size_of_val(self.l2_min_excess.as_slice())
+            + size_of_val(self.l2_block_excess.as_slice())
+            + size_of_val(self.rank_l1.as_slice())
+            + size_of_val(self.rank_l2.as_slice())
+            + self.select.heap_size()
+    }
+
     /// Check if the bit at position p is a 1 (open parenthesis).
     #[inline]
     pub fn is_open(&self, p: usize) -> bool {
@@ -3730,6 +3751,32 @@ mod tests {
                 "rate {rate}: unexpected select index size"
             );
         }
+    }
+
+    /// `index_heap_size` counts every index array at its documented width:
+    /// 3 bytes per word at L0, 4 per 32 words at L1, 8 per 1024 words at L2
+    /// and 12 per 8 words of rank directory, plus the select index. This is
+    /// the figure `docs/architecture/balanced-parens.md` quotes (#5026).
+    #[test]
+    fn test_index_heap_size_matches_documented_layout() {
+        let pairs = 65_536;
+        let (words, len) = balanced_words(pairs);
+        let n = words.len();
+        assert_eq!(n, 2048);
+
+        let plain = BalancedParens::new(words.clone(), len);
+        let expected = n * 3 + n / 32 * 4 + n / 1024 * 8 + n / 8 * 12;
+        assert_eq!(plain.select_heap_size(), 0);
+        assert_eq!(plain.index_heap_size(), expected);
+        // 9,488 index bytes over a 16,384-byte bitmap: 57.9%.
+        assert_eq!(expected * 1000 / (n * 8), 579);
+
+        let cspoppy = BalancedParens::new_with_cspoppy(words, len);
+        assert_eq!(cspoppy.select_heap_size(), pairs / 256 * 4);
+        assert_eq!(
+            cspoppy.index_heap_size(),
+            expected + cspoppy.select_heap_size()
+        );
     }
 
     /// A configured rate of 0 must not hang or panic; it behaves like rate 1
