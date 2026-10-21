@@ -19,6 +19,7 @@ const REJECTED: &[(&str, &[&str])] = &[
     ("a\n b: 1\n", &[]),
     ("- a\n  z: 1\n", &["-o", "json", "-I0"]),
     ("- a\n  z: 1\n", &["-P"]),
+    ("- a\n\n  z: 1\n", &[]),
 ];
 
 /// Documents yq accepts (a `:` not followed by a space is text): (document, `-o json -I0` output).
@@ -31,6 +32,8 @@ const ACCEPTED: &[(&str, &str)] = &[
     ("k:\n  - a\n    z\n", "{\"k\":[\"a z\"]}\n"),
     ("- |\n  x: y\n", "[\"x: y\\n\"]\n"),
     ("a: |\n  x: y\n", "{\"a\":\"x: y\\n\"}\n"),
+    ("a\n---\nb: 1\n", "\"a\"\n{\"b\":1}\n"),
+    ("a\n---\nz: 1\n", "\"a\"\n{\"z\":1}\n"),
 ];
 
 #[test]
