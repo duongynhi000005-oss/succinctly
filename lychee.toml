@@ -47,6 +47,11 @@ exclude = [
   # from the runner on every retry (#3616); the host's landing pages are still
   # checked. Drop this once the server recovers.
   '^https://drops\.dagstuhl\.de/storage/',
+  # Microsoft Research's publication pages answer 504 from the runner on every
+  # retry (the Data-Parallel Finite-State Machines link in
+  # docs/architecture/prior-art.md still did when probed directly), failing
+  # Check Links on PRs that touch no link. Drop this once the server recovers.
+  '^https://www\.microsoft\.com/en-us/research/',
   # A link pinned to a commit SHA cannot rot, but GitHub's web tier serves those
   # HTML pages with 503/504s for hours at a time (#3594), and a `commit/` page
   # has no raw form to check instead.
