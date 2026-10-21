@@ -38088,7 +38088,7 @@ fn plain_beside_bind_foreach(e: &Expr) -> bool {
 /// differential grid (the resolver does not yet carry the register the inner source moves to the inner
 /// `foreach`'s emission): reading any nested `foreach` this way, 6 of 30,000 rows (a `?//` chain, a nested
 /// pattern, a `select` stage); a second variable in the pattern, 11 of 40,000; a body other than `.`, 2 more;
-/// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
+/// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000 (read as a whole; the steps that run the `then` branch are read per step instead, [`taken_then_branch`], #4800, and a step that runs the `else` keeps this refusal); a `null`
 /// or boolean EXTRACT behind an `if`, and a comma sibling that emits a value beside the `foreach` (`(FE), null`, `(FE), []`), 4 of
 /// 100,000. A comma whose other items emit nothing (`(FE, empty)`) is the `foreach` alone
 /// ([`without_empty_siblings`], #4800).
@@ -50455,6 +50455,46 @@ fn taken_if_item(update: &Expr) -> Option<(&Expr, bool)> {
     go(update, WRAPPED_CHAIN_DEPTH)
 }
 
+/// What an `if` condition that is `.` or a pure function of it ([`is_pure_of_dot`]) says on `state`: `Some(truthy)`
+/// when it emits exactly one value, `None` for any other condition or one that raises or emits twice (#4800).
+fn cond_truthiness<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> Option<bool> {
+    match unwrap_paren(cond) {
+        Expr::Identity => Some(state.is_truthy()),
+        cond if is_pure_of_dot(cond) => {
+            let mut outputs = Vec::new();
+            let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |out| {
+                outputs.push(out);
+                if outputs.len() > 1 {
+                    Demand::Stop
+                } else {
+                    Demand::Continue
+                }
+            });
+            match (flow, outputs.as_slice()) {
+                (Flow::Exhausted, [out]) => Some(out.is_truthy()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The `then` branch a step with state `state` ran, for an `if` UPDATE ([`taken_if_item`]) whose condition is truthy
+/// on it: the `else` branch did not run, so what it holds (`else .a`) moved no register on this step (#4800). The
+/// twin of [`taken_if_branch`]'s `else` reading, for the marks that read the UPDATE as a whole.
+fn taken_then_branch<'e, S: EvalSemantics>(
+    update: &'e Expr,
+    state: &OwnedValue,
+) -> Option<&'e Expr> {
+    let (item, _) = taken_if_item(update)?;
+    match unwrap_paren(item) {
+        Expr::If {
+            cond, then_branch, ..
+        } if cond_truthiness::<S>(cond, state) == Some(true) => Some(then_branch),
+        _ => None,
+    }
+}
+
 /// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
 /// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
 /// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
@@ -50464,22 +50504,7 @@ fn taken_if_item(update: &Expr) -> Option<(&Expr, bool)> {
 /// the whole `if`). The `if` is found where [`taken_if_item`] finds it.
 fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
     fn falsy_on<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> bool {
-        match unwrap_paren(cond) {
-            Expr::Identity => !state.is_truthy(),
-            cond if is_pure_of_dot(cond) => {
-                let mut outputs = Vec::new();
-                let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |out| {
-                    outputs.push(out);
-                    if outputs.len() > 1 {
-                        Demand::Stop
-                    } else {
-                        Demand::Continue
-                    }
-                });
-                matches!((flow, outputs.as_slice()), (Flow::Exhausted, [out]) if !out.is_truthy())
-            }
-            _ => false,
-        }
+        cond_truthiness::<S>(cond, state) == Some(false)
     }
     let Some((item, wrapped)) = taken_if_item(update) else {
         return update;
@@ -64059,11 +64084,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // not need `first_step_on_register`: a source that moves the register still leaves the accumulator on it at
     // the steps whose element is the root (`foreach (.,.a)`'s first), which `active_at_register` says per step.
     // The outermost fold only: one inside another fold's body was not measured.
-    let bare_bind_foreach_update_on_register = S::TAG == EvalTag::Jq
+    let bare_bind_foreach_gates = S::TAG == EvalTag::Jq
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
-        && cannot_move_register(init)
-        && update_wraps_bare_bind_foreach(update, extract);
+        && cannot_move_register(init);
+    let bare_bind_foreach_update_on_register =
+        bare_bind_foreach_gates && update_wraps_bare_bind_foreach(update, extract);
+    // #4800: the same gates, for the steps of an `if` UPDATE that [`update_wraps_bare_bind_foreach`] refuses as a whole
+    // but whose `then` branch it reads ([`taken_then_branch`]).
+    let bare_bind_foreach_update_per_step =
+        bare_bind_foreach_gates && !bare_bind_foreach_update_on_register;
     // #4957: ...and where that UPDATE is the bare `foreach` itself, the key its bind steps to. EXTRACT runs from the
     // register the bind moved there (the child of the step's register), not from the accumulator's: the bind's
     // step moves it and the `foreach` emits its state with the register there, so a `null` or boolean EXTRACT
@@ -64741,8 +64771,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             }
                             Demand::Continue
                         };
+                        // #4800: ...and a step of an `if` UPDATE whose condition is truthy on the state, which ran the
+                        // `then` branch alone: an `else` that navigates (`else .a`) moved no register, so the step is
+                        // read as the `then` branch is ([`taken_then_branch`]).
+                        let then_branch_on_register = bare_bind_foreach_update_per_step
+                            && active_at_register
+                            && !live_stepped
+                            && taken_then_branch::<S>(&bound_update, &entry_state)
+                                .is_some_and(|then| update_wraps_bare_bind_foreach(then, extract));
                         let _acc_is_register =
-                            (alt_bind_update_on_register && active_at_register && !live_stepped)
+                            ((alt_bind_update_on_register && active_at_register && !live_stepped)
+                                || then_branch_on_register)
                                 .then(fold_body::acc_is_register);
                         // #4550: see `resolve_reduce`'s `_acc_off_register`.
                         // UPDATE only: EXTRACT resolves one body deeper, so it never reads this mark.
