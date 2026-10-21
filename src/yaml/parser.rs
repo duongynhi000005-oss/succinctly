@@ -9352,15 +9352,24 @@ mod tests {
     }
 
     /// #410: the comment guard in `parse_unquoted_key` tested only for a preceding
-    /// space, so `a\t# c: d` loaded the comment text into the key as `{"a\t# c":"d"}`
-    /// instead of erroring the same way `a # c: d` already did.
+    /// space, so `a\t# c: d` loaded the comment text into the key as `{"a\t# c":"d"}`.
+    /// A tab starts the comment as a space does. Since #5062 the `: ` inside it no longer
+    /// makes the line a mapping entry at all, so it is the scalar `a`, as in yq v4.53.3
+    /// (it was rejected as `key without value` until then).
     #[test]
     fn regression_issue_410_tab_before_hash_starts_a_comment_in_a_key() {
-        let err = build_semi_index(b"a\t# c: d\n").unwrap_err();
-        assert!(
-            matches!(err, YamlError::KeyWithoutValue { line: 1, offset: 0 }),
-            "expected key-without-value at line 1 offset 0, got {err:?}"
-        );
+        for yaml in [&b"a\t# c: d\n"[..], b"a # c: d\n"] {
+            let index = crate::yaml::YamlIndex::build(yaml).expect("a scalar with a comment");
+            let root = index.root(yaml);
+            let crate::yaml::light::YamlValue::Sequence(docs) = root.value() else {
+                panic!("virtual document sequence");
+            };
+            let (doc, _) = docs.uncons_cursor().unwrap();
+            let crate::yaml::light::YamlValue::String(s) = doc.value() else {
+                panic!("expected the scalar `a`, not a mapping");
+            };
+            assert_eq!(s.as_str().unwrap(), "a");
+        }
     }
 
     /// #437: `parse_flow_unquoted_key` had no `#` arm at all, so a comment inside
