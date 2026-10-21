@@ -7777,6 +7777,10 @@ fn emit_yaml_value_at_depth(
                     })
                     .collect();
                 let rendered = render_flow('{', '}', entries, &ci, owner_indent);
+                let rendered = with_foot_trailing_comma(
+                    rendered,
+                    depth > 0 && !in_flow && !comments.meta().foot_comment().is_empty(),
+                );
                 with_container_tag(value, comments, rendered)
             } else {
                 // Block style mapping
@@ -8169,6 +8173,17 @@ fn render_flow(
     }
     out.push(close);
     out
+}
+
+/// go-yaml writes a `,` before the `}` of a non-empty flow mapping that owns a foot comment
+/// (`- {a: 1,}` with `# c` under it, #5058), which yq reads back as the same mapping. Only below the
+/// output's root (the root's foot is the document's, and yq prints `{a: 1}` there), outside another
+/// flow collection, and for a mapping rendered on one line. `owns_foot` is that test.
+fn with_foot_trailing_comma(mut rendered: String, owns_foot: bool) -> String {
+    if owns_foot && rendered.ends_with('}') && !rendered.contains('\n') {
+        rendered.insert(rendered.len() - 1, ',');
+    }
+    rendered
 }
 
 /// The tag a non-empty block container carries on its header line: the explicit tag
@@ -13655,6 +13670,45 @@ mod tests {
         let mut out = Vec::new();
         output_value(&mut out, value, comments, &config, None).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// #5058: the DOM route (a write) keeps go-yaml's `,` before the `}` of a non-empty flow mapping
+    /// that owns a foot comment, as the streaming route does; the output's root does not get one
+    /// (its foot is the document's), nor an empty mapping. Captured against yq v4.53.3.
+    #[test]
+    fn flow_mapping_that_owns_a_foot_keeps_a_trailing_comma_on_a_write_5058() {
+        for (yaml, filter, want) in [
+            (
+                "k:\n  - { a: 1 }\n  # c\n",
+                ".k[0].a = 2",
+                "k:\n  - {a: 2,}\n  # c",
+            ),
+            (
+                "k:\n  - { a: 1 }\n  # c\n",
+                ".k += [3]",
+                "k:\n  - {a: 1,}\n  # c\n\n  - 3",
+            ),
+            ("k:\n  - {}\n  # c\n", ".z = 1", "k:\n  - {}\n  # c\nz: 1"),
+            ("{ a: 1 }\n# c\n", ".b = 2", "{a: 1, b: 2}\n# c"),
+        ] {
+            assert_eq!(
+                render_with_comments(yaml, filter).trim_end(),
+                want,
+                "{yaml:?} {filter}"
+            );
+        }
+        assert_eq!(
+            with_foot_trailing_comma("{a: 1}".to_string(), true),
+            "{a: 1,}"
+        );
+        assert_eq!(
+            with_foot_trailing_comma("{a: 1}".to_string(), false),
+            "{a: 1}"
+        );
+        assert_eq!(
+            with_foot_trailing_comma("{a: 1, # c\n}".to_string(), true),
+            "{a: 1, # c\n}"
+        );
     }
 
     /// #2796: `...` visits the mapping keys too, so its clearing writes reach what yq keeps on

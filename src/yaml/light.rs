@@ -221,6 +221,15 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         Ok(())
     }
 
+    /// Whether a sequence item has a foot comment, on its content node or its bare `-` wrapper's
+    /// (the two positions [`Self::write_item_foot_comments_at`] writes from, #5058).
+    #[inline]
+    fn item_owns_foot(&self, raw_bp: usize, cursor_bp: usize) -> bool {
+        self.index.has_standalone_comments()
+            && (!self.index.get_foot_comments(cursor_bp).is_empty()
+                || (raw_bp != cursor_bp && !self.index.get_foot_comments(raw_bp).is_empty()))
+    }
+
     /// [`Self::write_item_head_comments_at`]'s foot counterpart -- ORs
     /// together the two "did it write anything" answers, matching how each
     /// original call site combined them with `|=`.
@@ -2542,14 +2551,37 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                             }
                             out.write_char('-')?;
                             let child_indent = compact_yaml_indent(indent);
-                            let header_comment = write_deferred_value_with_header_comment(
-                                out,
-                                &cursor,
-                                &child_indent,
-                                indent_spaces,
-                                unit,
-                                sort_keys,
-                            )?;
+                            let header_comment = if self
+                                .item_owns_foot(raw.bp_position(), cursor.bp_position())
+                                && cursor.style() == "flow"
+                                && matches!(cursor.value(), YamlValue::Mapping(fields) if !fields.is_empty())
+                            {
+                                // #5058: go-yaml writes a `,` before the `}` of a non-empty flow
+                                // mapping that owns a foot comment (`- {a: 1,}`).
+                                let mut rendered = String::new();
+                                let header_comment = write_deferred_value_with_header_comment(
+                                    &mut rendered,
+                                    &cursor,
+                                    &child_indent,
+                                    indent_spaces,
+                                    unit,
+                                    sort_keys,
+                                )?;
+                                if rendered.ends_with('}') && !rendered.contains('\n') {
+                                    rendered.insert(rendered.len() - 1, ',');
+                                }
+                                out.write_str(&rendered)?;
+                                header_comment
+                            } else {
+                                write_deferred_value_with_header_comment(
+                                    out,
+                                    &cursor,
+                                    &child_indent,
+                                    indent_spaces,
+                                    unit,
+                                    sort_keys,
+                                )?
+                            };
                             // A bare `- # c` item with nothing at all after
                             // it shares its bp with the wrapper -- same as
                             // a genuine compact scalar (`- foo # own`),
@@ -12070,6 +12102,36 @@ mod tests {
             .stream_yaml_document(&mut out, IndentSpec::spaces(2), false)
             .unwrap();
         assert_eq!(out, "a:\n  b: {x: 1, y: 2}\n  c: 3");
+    }
+
+    #[test]
+    fn test_stream_yaml_flow_mapping_item_that_owns_a_foot_keeps_a_trailing_comma_5058() {
+        // #5058: go-yaml writes `,}` for a non-empty flow mapping that owns a foot comment (yq v4.53.3).
+        // An empty one, a flow sequence and an item whose comment heads the next item do not.
+        for (yaml, expected) in [
+            (
+                &b"k:\n  - { a: 1, b: 2 }\n  # c\n"[..],
+                "k:\n  - {a: 1, b: 2,}\n  # c",
+            ),
+            (
+                b"k:\n  - { a: 1 } # l\n  # c\n",
+                "k:\n  - {a: 1,} # l\n  # c",
+            ),
+            (b"k:\n  - {}\n  # c\n", "k:\n  - {}\n  # c"),
+            (b"k:\n  - [1, 2]\n  # c\n", "k:\n  - [1, 2]\n  # c"),
+            (
+                b"k:\n  - { a: 1 }\n  # c\n  - 2\n",
+                "k:\n  - {a: 1}\n  # c\n  - 2",
+            ),
+        ] {
+            let index = YamlIndex::build(yaml).unwrap();
+            let mut out = String::new();
+            index
+                .root(yaml)
+                .stream_yaml_document(&mut out, IndentSpec::spaces(2), false)
+                .unwrap();
+            assert_eq!(out, expected, "{:?}", String::from_utf8_lossy(yaml));
+        }
     }
 
     #[test]
