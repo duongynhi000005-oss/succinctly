@@ -4,8 +4,10 @@
 //! requires `s-separate-in-line` before the `#` that opens a comment, and
 //! `s-white` is a space *or a tab*. `parse_unquoted_key`'s comment guard
 //! (`src/yaml/parser.rs`) tested only for a preceding space, so `a\t# c: d` loaded
-//! the comment text into the key as `{"a\t# c":"d"}` instead of raising the same
-//! `KeyWithoutValue` error `a # c: d` already did.
+//! the comment text into the key as `{"a\t# c":"d"}`. Until #5062 both spellings were
+//! then rejected as `KeyWithoutValue`, because the mapping-entry lookahead read the `: `
+//! inside the comment as a key's colon; yq v4.53.3 reads them as the plain scalar `a`,
+//! and so does succinctly now.
 //!
 //! This is the comment-indicator sibling of `tests/yaml_tab_separation_tests.rs`
 //! (#370), which fixed the same "space but not tab" shape for the `:` value
@@ -47,48 +49,48 @@ impl core::fmt::Debug for Text<'_> {
     }
 }
 
-/// A document where a tab before `#` must be rejected as `KeyWithoutValue`, with
+/// A document where a tab before `#` starts a comment, so the line is the plain scalar
+/// before it (never a key holding the comment text), with yq v4.53.3's JSON for it and
 /// the reason it's here.
-struct ErrorRow {
+struct CommentRow {
     yaml: &'static [u8],
+    json: &'static str,
     why: &'static str,
 }
 
-const REJECTED: &[ErrorRow] = &[
-    ErrorRow {
+const COMMENTED: &[CommentRow] = &[
+    CommentRow {
         yaml: b"a\t# c: d\n",
+        json: r#""a""#,
         why: "the #410 repro: loaded as {\"a\\t# c\":\"d\"} before the fix",
     },
-    ErrorRow {
+    CommentRow {
         yaml: b"a # c: d\n",
-        why: "the space form, already correct — pins that the fix doesn't regress it",
+        json: r#""a""#,
+        why: "the space form",
     },
-    ErrorRow {
+    CommentRow {
         yaml: b"a\t\t# c: d\n",
+        json: r#""a""#,
         why: "a run of tabs: the guard checks the byte immediately before #, not a scan",
     },
-    ErrorRow {
+    CommentRow {
         yaml: b"- a\t# c: d\n",
-        why: "parse_compact_mapping_entry, the other caller of parse_unquoted_key",
+        json: r#"["a"]"#,
+        why: "a sequence item, the compact-entry path",
     },
 ];
 
 #[track_caller]
-fn assert_key_without_value(yaml: &[u8], why: &str) {
-    let err = to_json(yaml)
-        .err()
-        .unwrap_or_else(|| panic!("{:?} unexpectedly parsed — {why}", Text(yaml)));
-    assert!(
-        matches!(err, YamlError::KeyWithoutValue { .. }),
-        "{:?} — {why}: expected KeyWithoutValue, got {err:?}",
-        Text(yaml)
-    );
+fn assert_scalar_before_the_comment(yaml: &[u8], json: &str, why: &str) {
+    let got = to_json(yaml).unwrap_or_else(|err| panic!("{:?} — {why}: {err:?}", Text(yaml)));
+    assert_eq!(got, json, "{:?} — {why}", Text(yaml));
 }
 
 #[test]
 fn a_tab_before_hash_starts_a_comment_in_a_plain_key() {
-    for row in REJECTED {
-        assert_key_without_value(row.yaml, row.why);
+    for row in COMMENTED {
+        assert_scalar_before_the_comment(row.yaml, row.json, row.why);
     }
 }
 
@@ -115,16 +117,16 @@ fn a_tab_before_hash_already_started_a_comment_in_a_value() {
 }
 
 /// The property behind the table: whichever `s-white` byte spells the separation
-/// before `#`, the document is rejected the same way. Stated as an invariance so a
+/// before `#`, the document reads the same way. Stated as an invariance so a
 /// future change has to break the *rule*, not just one pinned error case.
 #[test]
-fn spelling_the_separation_with_a_space_gives_the_same_error() {
-    for row in REJECTED {
+fn spelling_the_separation_with_a_space_gives_the_same_answer() {
+    for row in COMMENTED {
         let spaces: Vec<u8> = row
             .yaml
             .iter()
             .map(|&b| if b == b'\t' { b' ' } else { b })
             .collect();
-        assert_key_without_value(&spaces, row.why);
+        assert_scalar_before_the_comment(&spaces, row.json, row.why);
     }
 }

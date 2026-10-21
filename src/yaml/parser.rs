@@ -2966,6 +2966,10 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 }
                 // Line ended without finding `: `
                 b if Self::is_break(b) => return false,
+                // #5062: a `#` after a space or tab starts a comment (the s-separate-in-line rule
+                // `parse_unquoted_key` applies, #370/#410), so a `: ` after it is the comment's
+                // (`- a # TODO: x` is the scalar `a`, not a key).
+                b'#' if i > self.pos && matches!(self.input[i - 1], b' ' | b'\t') => return false,
                 // Note: " and ' in the middle of a key are allowed (e.g., bla"keks: foo)
                 // Continue scanning past them.
                 _ => i += 1,
@@ -9103,6 +9107,44 @@ fn build_semi_index_impl(input: &[u8], json_strict: bool) -> Result<SemiIndex, Y
 mod tests {
     use super::*;
 
+    /// #5062: a `: ` inside a trailing comment does not make a plain scalar a mapping key. yq v4.53.3
+    /// reads each of these; they were rejected as `key without value`. `a#b: c` (no space before `#`)
+    /// is still the key `a#b`.
+    #[test]
+    fn test_comment_colon_after_a_plain_scalar_is_not_a_key_5062() {
+        for yaml in [
+            &b"- a # b: c\n"[..],
+            b"a # b: c\n",
+            b"k:\n  a # b: c\n",
+            b"- - a # b: c\n",
+            b"- a\t# b: c\n",
+            b"- &x a # b: c\n",
+            b"- !t a # b: c\n",
+            b"? a # b: c\n",
+            b"- ubuntu-22.04-arm # TODO: update to 24.04 when https://github.com/x/y solved\n",
+        ] {
+            assert!(
+                build_semi_index(yaml).is_ok(),
+                "{:?}",
+                String::from_utf8_lossy(yaml)
+            );
+        }
+        let index = crate::yaml::YamlIndex::build(b"- a#b: c\n").unwrap();
+        let root = index.root(b"- a#b: c\n");
+        let crate::yaml::light::YamlValue::Sequence(docs) = root.value() else {
+            panic!("virtual document sequence");
+        };
+        let (doc, _) = docs.uncons_cursor().unwrap();
+        let crate::yaml::light::YamlValue::Sequence(items) = doc.value() else {
+            panic!("a sequence document");
+        };
+        let (item, _) = items.uncons_cursor().unwrap();
+        assert!(matches!(
+            item.value(),
+            crate::yaml::light::YamlValue::Mapping(_)
+        ));
+    }
+
     #[test]
     fn test_simple_mapping() {
         let yaml = b"name: Alice";
@@ -9357,15 +9399,24 @@ mod tests {
     }
 
     /// #410: the comment guard in `parse_unquoted_key` tested only for a preceding
-    /// space, so `a\t# c: d` loaded the comment text into the key as `{"a\t# c":"d"}`
-    /// instead of erroring the same way `a # c: d` already did.
+    /// space, so `a\t# c: d` loaded the comment text into the key as `{"a\t# c":"d"}`.
+    /// A tab starts the comment as a space does. Since #5062 the `: ` inside it no longer
+    /// makes the line a mapping entry at all, so it is the scalar `a`, as in yq v4.53.3
+    /// (it was rejected as `key without value` until then).
     #[test]
     fn regression_issue_410_tab_before_hash_starts_a_comment_in_a_key() {
-        let err = build_semi_index(b"a\t# c: d\n").unwrap_err();
-        assert!(
-            matches!(err, YamlError::KeyWithoutValue { line: 1, offset: 0 }),
-            "expected key-without-value at line 1 offset 0, got {err:?}"
-        );
+        for yaml in [&b"a\t# c: d\n"[..], b"a # c: d\n"] {
+            let index = crate::yaml::YamlIndex::build(yaml).expect("a scalar with a comment");
+            let root = index.root(yaml);
+            let crate::yaml::light::YamlValue::Sequence(docs) = root.value() else {
+                panic!("virtual document sequence");
+            };
+            let (doc, _) = docs.uncons_cursor().unwrap();
+            let crate::yaml::light::YamlValue::String(s) = doc.value() else {
+                panic!("expected the scalar `a`, not a mapping");
+            };
+            assert_eq!(s.as_str().unwrap(), "a");
+        }
     }
 
     /// #437: `parse_flow_unquoted_key` had no `#` arm at all, so a comment inside
