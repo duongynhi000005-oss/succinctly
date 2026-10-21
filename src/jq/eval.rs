@@ -38144,6 +38144,50 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
         || bare_bind_foreach_update_key(e).is_some()
 }
 
+/// Whether `e` is a no-op chain: `.`, or a pipe of such behind parentheses (`(.|.)`, `((.)|.|.)`).
+fn is_noop_chain(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Identity => true,
+        Expr::Pipe(stages) => stages.iter().all(is_noop_chain),
+        _ => false,
+    }
+}
+
+/// A fold UPDATE with its no-op pipes (`.|.`) replaced by the `.` they are, alone, as a comma item, under a
+/// `try`/`?`, as the left of a `//` or in `first(..)` (#5023); `None` when it holds none, so the common case allocates nothing.
+fn without_noop_pipes(update: &Expr) -> Option<Expr> {
+    match unwrap_paren(update) {
+        Expr::Pipe(_) if is_noop_chain(update) => Some(Expr::Identity),
+        Expr::Comma(items) => {
+            let rewritten: Vec<Option<Expr>> = items.iter().map(without_noop_pipes).collect();
+            rewritten.iter().any(Option::is_some).then(|| {
+                Expr::Comma(
+                    items
+                        .iter()
+                        .zip(rewritten)
+                        .map(|(item, new)| new.unwrap_or_else(|| item.clone()))
+                        .collect(),
+                )
+            })
+        }
+        Expr::Try { expr, catch } => without_noop_pipes(expr).map(|expr| Expr::Try {
+            expr: Box::new(expr),
+            catch: catch.clone(),
+        }),
+        Expr::Optional(inner) => {
+            without_noop_pipes(inner).map(|inner| Expr::Optional(Box::new(inner)))
+        }
+        // `(.|.) // 5` and `first(.|.)`: the left operand and the generator are the UPDATE's own output.
+        Expr::Alternative(left, right) => {
+            without_noop_pipes(left).map(|left| Expr::Alternative(Box::new(left), right.clone()))
+        }
+        Expr::FirstExpr(inner) => {
+            without_noop_pipes(inner).map(|inner| Expr::FirstExpr(Box::new(inner)))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
 /// enclosing fold left it: a chain behind other stages ([`bounded_chain_behind_stages`], #4669), or a
 /// bare `first(CHAIN)` ([`take_wrapped_bare_chain`], #4537) as the body itself. The body is that
@@ -63490,6 +63534,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     } else {
         update
     };
+    // #5023: a pipe of no-ops in the UPDATE (`.|.`), alone or as a comma item, is the `.` it flattens to. The
+    // resolver's pipe route raises #530's terminal refusal on an untracked state it hands on, which a fold's
+    // UPDATE (stored unchecked, as jq does) never meets for a bare `.`: `foreach (.) as $i (null; (.|.); $x)`
+    // was refused where jq answers from the EXTRACT. Only the UPDATE of a `foreach`, where the lone `.` is
+    // the established route; a no-op pipe elsewhere keeps the refusal it had.
+    let update_without_noop_pipes = (S::TAG == EvalTag::Jq)
+        .then(|| without_noop_pipes(update))
+        .flatten();
+    let update = update_without_noop_pipes.as_ref().unwrap_or(update);
     // #4800: an EXTRACT that emits nothing leaves the `foreach` with no output to path-check, and an UPDATE
     // that can neither raise nor have an effect on any state changes nothing else either, so the fold is read
     // with an UPDATE that hands the state on. Reading the real one refused a nested `foreach` in it whose
@@ -69060,20 +69113,6 @@ fn resolve_seq_from_seed<'a, S: EvalSemantics>(
     // bespoke message for it — still a hard error either way, never the
     // silent wrong-success #843 is about.
     let Some(last_dynamic) = flat.iter().rposition(needs_fanout_pass) else {
-        // #5023: a pipe of no-ops (`.|.`) over an untracked seed hands the seed on as a bare `.` does,
-        // register statement and all. The #530 refusal below is the terminal's check of a value that
-        // is not the register; a fold's UPDATE stores its output unchecked, so raising here refused
-        // `foreach (.) as $i (null; (.|.); $x)` where jq answers from the EXTRACT. The consumer's own
-        // terminal check judges the seed. jq mode only: yq's scalar-write no-op convention keeps its raise.
-        // A seed off the root (#2649: a bind's body after a pattern step moved the register) is not the
-        // register, so the empty chain's refusal stays: it is what `reduce (select(.a) | . as {a:$a} | .)`
-        // is refused by.
-        if flat.is_empty() && !seed.trackable && seed.path.depth() == 0 && S::TAG == EvalTag::Jq {
-            return match sink(seed) {
-                Demand::Continue => ResolveFlow::Exhausted,
-                Demand::Stop => ResolveFlow::Stopped,
-            };
-        }
         // The seed's own value and trackability, not the enclosing node's:
         // for the root seed those are the same thing, and for a non-root one
         // (#2649) the untracked-seed refusals below are exactly the ones jq
