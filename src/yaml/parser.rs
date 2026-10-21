@@ -8408,6 +8408,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         None
     }
 
+    /// Whether the cursor is at the `|`/`>` header of a block scalar that is the document's root
+    /// node (#5067): outside every container, where the plain-scalar scanner would otherwise read
+    /// it and end at a `: ` in its content. Its content is measured against the document, so the
+    /// callers pass base indent 0, as the `--- |` line does.
+    fn at_document_root_block_scalar(&self) -> bool {
+        self.type_stack.len() <= 1 && !self.json_strict && matches!(self.peek(), Some(b'|' | b'>'))
+    }
+
     /// A block scalar whose header sits on a line of its own (#4259, and after node properties
     /// #4271), with the gap and close checks already made by the caller: its content has to be
     /// indented more than the block that owns it, which can be no more than the header itself.
@@ -8720,10 +8728,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             self.attach_document_root_node(indent);
                             // The block scalar of a document-root node with properties
                             // (`&x |`, `!!str >`) takes the same parser (#5067).
-                            if self.type_stack.len() <= 1
-                                && !self.json_strict
-                                && matches!(self.peek(), Some(b'|' | b'>'))
-                            {
+                            if self.at_document_root_block_scalar() {
                                 return self.parse_block_scalar(0);
                             }
                             self.set_ib();
@@ -8830,10 +8835,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // A document-root block scalar is read by the block-scalar parser, as
                     // `--- |` is, not by the plain-scalar scanner below: that scan ends at a
                     // `: ` in the content and takes what follows as a further node (#5067).
-                    if self.type_stack.len() <= 1
-                        && !self.json_strict
-                        && matches!(self.peek(), Some(b'|' | b'>'))
-                    {
+                    if self.at_document_root_block_scalar() {
                         return self.parse_block_scalar(0);
                     }
                     self.set_ib();
