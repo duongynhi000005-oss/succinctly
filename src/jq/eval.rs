@@ -38144,6 +38144,92 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
         || bare_bind_foreach_update_key(e).is_some()
 }
 
+/// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
+/// are (#5023); `None` when it holds none, so the common case allocates nothing. `.|.` is `.` in jq wherever it
+/// stands, so the rewrite changes no meaning: it only keeps the resolver's pipe route, which raises #530's terminal
+/// refusal on an untracked state, from judging a no-op chain where a lone `.` is answered.
+///
+/// Output positions only: a no-op pipe that is the UPDATE, a comma item, the body of a `try`/`?` or its handler, an
+/// operand of `//`, a branch of an `if`, the generator of `first`/`limit`, or the body of a `$var` bind or `label`
+/// (a destructuring bind's body and a pipe's last stage are answered as they stand). Not a bind's source or an `if`
+/// condition: a `?//` chain's source that reads `(.|.)` is answered
+/// as written (`test_two_alternative_chain_in_a_carrying_foreach_in_a_moved_fold_body_4694` pins jq's answer), and
+/// the same source as `.` is refused.
+fn without_noop_pipes(update: &Expr) -> Option<Expr> {
+    fn noop_pipe(e: &Expr) -> bool {
+        matches!(e, Expr::Pipe(_)) && is_identity_pipe(e)
+    }
+    /// `e` with its output positions rewritten, `None` when none holds a no-op pipe.
+    fn rewrite(e: &Expr) -> Option<Expr> {
+        fn boxed(e: &Expr) -> Option<Box<Expr>> {
+            rewrite(e).map(Box::new)
+        }
+        if noop_pipe(e) {
+            return Some(Expr::Identity);
+        }
+        match e {
+            Expr::Paren(inner) => boxed(inner).map(Expr::Paren),
+            Expr::Comma(items) => {
+                let rewritten: Vec<Option<Expr>> = items.iter().map(rewrite).collect();
+                rewritten.iter().any(Option::is_some).then(|| {
+                    Expr::Comma(
+                        items
+                            .iter()
+                            .zip(rewritten)
+                            .map(|(item, new)| new.unwrap_or_else(|| item.clone()))
+                            .collect(),
+                    )
+                })
+            }
+            Expr::Try { expr, catch } => {
+                let (body, handler) = (
+                    boxed(expr),
+                    catch.as_deref().and_then(rewrite).map(Box::new),
+                );
+                (body.is_some() || handler.is_some()).then(|| Expr::Try {
+                    expr: body.unwrap_or_else(|| expr.clone()),
+                    catch: handler.or_else(|| catch.clone()),
+                })
+            }
+            Expr::Optional(inner) => boxed(inner).map(Expr::Optional),
+            Expr::Alternative(left, right) => {
+                let (l, r) = (boxed(left), boxed(right));
+                (l.is_some() || r.is_some()).then(|| {
+                    Expr::Alternative(
+                        l.unwrap_or_else(|| left.clone()),
+                        r.unwrap_or_else(|| right.clone()),
+                    )
+                })
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let (t, f) = (boxed(then_branch), boxed(else_branch));
+                (t.is_some() || f.is_some()).then(|| Expr::If {
+                    cond: cond.clone(),
+                    then_branch: t.unwrap_or_else(|| then_branch.clone()),
+                    else_branch: f.unwrap_or_else(|| else_branch.clone()),
+                })
+            }
+            Expr::FirstExpr(inner) => boxed(inner).map(Expr::FirstExpr),
+            Expr::Limit { n, expr } => boxed(expr).map(|expr| Expr::Limit { n: n.clone(), expr }),
+            Expr::Label { name, body } => boxed(body).map(|body| Expr::Label {
+                name: name.clone(),
+                body,
+            }),
+            Expr::As { expr, var, body } => boxed(body).map(|body| Expr::As {
+                expr: expr.clone(),
+                var: var.clone(),
+                body,
+            }),
+            _ => None,
+        }
+    }
+    rewrite(update)
+}
+
 /// Whether a fold's UPDATE or EXTRACT holds a `foreach` over a `?//` chain that meets `.` where the
 /// enclosing fold left it: a chain behind other stages ([`bounded_chain_behind_stages`], #4669), or a
 /// bare `first(CHAIN)` ([`take_wrapped_bare_chain`], #4537) as the body itself. The body is that
@@ -63490,6 +63576,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     } else {
         update
     };
+    // #5023: a pipe of no-ops in the UPDATE (`.|.`) is the `.` it flattens to. The
+    // resolver's pipe route raises #530's terminal refusal on an untracked state it hands on, which a fold's
+    // UPDATE (stored unchecked, as jq does) never meets for a bare `.`: `foreach (.) as $i (null; (.|.); $x)`
+    // was refused where jq answers from the EXTRACT. Only the UPDATE of a `foreach`, where the lone `.` is
+    // the established route; a no-op pipe elsewhere keeps the refusal it had.
+    let update_without_noop_pipes = (S::TAG == EvalTag::Jq)
+        .then(|| without_noop_pipes(update))
+        .flatten();
+    let update = update_without_noop_pipes.as_ref().unwrap_or(update);
     // #4800: an EXTRACT that emits nothing leaves the `foreach` with no output to path-check, and an UPDATE
     // that can neither raise nor have an effect on any state changes nothing else either, so the fold is read
     // with an UPDATE that hands the state on. Reading the real one refused a nested `foreach` in it whose
