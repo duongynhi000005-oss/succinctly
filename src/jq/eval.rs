@@ -63905,13 +63905,23 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4957: ...and where that UPDATE is the bare `foreach` itself, the key its bind steps to. EXTRACT runs from the
     // register the bind moved there (the child of the step's register), not from the accumulator's: the bind's
     // step moves it and the `foreach` emits its state with the register there, so a `null` or boolean EXTRACT
-    // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015).
+    // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015). Whatever
+    // the EXTRACT is: a plain `.`, `.a?` or `length` over an `INIT null` reads the moved register too (#5015).
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
+        // #5015: for every EXTRACT but a `getpath`, which reads from the state's own node, not from where the
+        // bind moved the register: over an `INIT .` it names the root's path where jq's does, so the restatement
+        // misplaces it (190 of 60,000 rows of an EXTRACT-builtin grid). One that #4957/#5018 already stated for
+        // (a `null`/boolean EXTRACT or tail) keeps it.
         .filter(|_| {
             extract.is_some_and(may_emit_null_or_bool)
                 || bare_bind_foreach_update_tail_emits_null_or_bool(update)
+                || !extract.is_some_and(|extract| {
+                    any_subexpr(extract, &mut |e| {
+                        matches!(e, Expr::Builtin(Builtin::GetPath(_)))
+                    })
+                })
         });
     let alt_bind_update_on_register = first_step_on_register
         && (update_is_alt_bind(update)
