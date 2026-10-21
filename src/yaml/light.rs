@@ -9763,8 +9763,10 @@ fn write_foot_comment_lines<Out: core::fmt::Write>(
             continue;
         };
         out.write_char('\n')?;
-        out.write_str(indent)?;
-        out.write_str(line)?;
+        if !line.is_empty() {
+            out.write_str(indent)?;
+            out.write_str(line)?;
+        }
         wrote = true;
     }
     Ok(wrote)
