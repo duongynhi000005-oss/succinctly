@@ -12,7 +12,7 @@ Hierarchical structures enable O(1) or O(log n) queries by organizing auxiliary 
 | Sampled index       | O(n/k)     | 1/k            | Infrequent queries    |
 | 2-level hierarchy   | O(1)       | ~3%            | Frequent queries      |
 | 3-level hierarchy   | O(1)       | ~3%            | Very large datasets   |
-| RangeMin structure  | O(1)       | ~6%            | Tree nav (find_close) |
+| RangeMin structure  | O(1)       | ~39% (bp.rs)   | Tree nav (find_close) |
 | RangeMax structure  | O(1)       | ~1.5%          | Tree nav (find_open)  |
 
 ---
@@ -96,9 +96,7 @@ fn extract_l2(entry: u128, i: usize) -> u16 {
 |   L1 (32 bits)   |L2[0]|L2[1]|L2[2]|L2[3]|L2[4]|L2[5]|L2[6]| pad |
 |     32 bits      | 9b  | 9b  | 9b  | 9b  | 9b  | 9b  | 9b  | 33b |
 Total: 128 bits per 512 bits = 25% overhead
-
-But we only store L2 for 7 of 8 words (8th is implied), so:
-Effective overhead: ~3%
+(L2 needs only 7 offsets, since word 0's is always 0, but the entry is still a full u128)
 ```
 
 ### Prior Art
@@ -516,13 +514,17 @@ Fewer levels / larger blocks:
 
 | Structure           | Location              | Purpose                    | Overhead |
 |---------------------|-----------------------|----------------------------|----------|
-| 3-level RankDir     | `bits/rank.rs`        | O(1) rank queries          | ~3%      |
-| SelectIndex         | `bits/select.rs`      | Accelerated select         | ~3%      |
+| 3-level RankDir     | `bits/rank.rs`        | O(1) rank queries          | 25%      |
+| SelectIndex         | `bits/select.rs`      | Accelerated select         | 50% x d† |
 | EliasFano           | `bits/elias_fano.rs`  | Compressed monotone ints   | ~23%*    |
 | CumulativeIndex     | `json/light.rs`       | Fast IB select             | ~4%      |
-| RangeMinIndex       | `trees/bp.rs`         | O(1) find_close            | ~6%      |
+| RangeMinIndex       | `trees/bp.rs`         | O(1) find_close            | ~39%‡    |
 | RangeMaxRevIndex    | `trees/bp.rs`         | O(1) find_open (16-492x)   | ~1.5%    |
 | LightweightIndex    | `dsv/index_*.rs`      | DSV iteration              | ~0.8%    |
+
+‡For `BalancedParens` the min-excess levels are ~39% of the bitmap and its own rank directory adds 18.75%, ≈ 58% in all ([balanced-parens.md](../architecture/balanced-parens.md#space-overhead), #5026).
+
+†For bit density d at the default sample rate 256: 25% at d = 0.5, 2.5% at d = 0.05.
 
 *EliasFano overhead is relative to the data being encoded, not to a bitvector. It provides 4.4× compression vs Vec<u32> for bp_to_text-like data.
 

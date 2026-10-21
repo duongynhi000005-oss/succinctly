@@ -74,7 +74,7 @@ use succinctly::bp::BalancedParens;  // Use succinctly::trees instead
 Succinct data structures use space close to the information-theoretic minimum while supporting fast queries. The key operations are:
 
 - **rank1(i)**: Count 1-bits in positions [0, i) - O(1)
-- **select1(k)**: Find position of k-th 1-bit - O(log n)
+- **select1(k)**: Find position of k-th 1-bit - an O(1) jump to a sample, then a short scan
 
 ### Poppy Rank Directory
 
@@ -83,21 +83,24 @@ The rank directory uses a 3-level structure (L0/L1/L2) for O(1) rank queries:
 ```
 L0: Cumulative count every 2^32 bits (64-bit counters)
 L1: Cumulative count every 512 bits within L0 block (32-bit)
-L2: Cumulative count every 64 bits within L1 block (10-bit, packed)
+L2: Cumulative count every 64 bits within L1 block (9-bit, 7 packed per block)
 ```
 
-Space overhead: ~3% of bitvector size.
+L1 and the seven L2 offsets of a 512-bit block share one cache-aligned `u128`.
+
+Space overhead: 25% of bitvector size (128 bits per 512), a deliberate trade of space for speed. See
+[bitvec.md](../architecture/bitvec.md#space-analysis).
 
 ### Select Index
 
-Select uses a sampled index with binary search:
+Select uses a sampled index:
 
 ```
-Sample: Store position of every 256th 1-bit
-Query: Binary search to find block, then scan within block
+Sample: Store (word index, ones before it) for every 256th 1-bit
+Query: Jump to sample k / 256 in O(1), then scan words forward to the target
 ```
 
-Space overhead: ~1-3% depending on bit density.
+Space overhead: 128 bits per 256 set bits, so it depends on density: 25% at 50% ones, 2.5% at 5%.
 
 ### Balanced Parentheses
 
@@ -108,7 +111,9 @@ Trees are encoded as balanced parentheses (1=open, 0=close). The RangeMin struct
 - `enclose(i)`: Find enclosing parenthesis pair
 - `first_child(i)`, `next_sibling(i)`, `parent(i)`: Tree navigation
 
-Space overhead: ~6% of bitvector size.
+Space overhead: about 58% of the bitmap (the L0 min-excess arrays are 37.5% of it, the rank
+directory 18.75%), plus 6.25% with `WithCsPoppy` select. See
+[balanced-parens.md](../architecture/balanced-parens.md#space-overhead).
 
 ### JSON Semi-Indexing
 

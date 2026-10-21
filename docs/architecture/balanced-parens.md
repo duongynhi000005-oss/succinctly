@@ -92,7 +92,19 @@ Position: 0 1 2 3 4 5 6 7 8 9
 RangeMin[0..4] = 1 (minimum excess in range)
 ```
 
-The index uses a sparse table (O(n log n) space) or a linear-space structure.
+The index is a 3-level hierarchy, not a sparse table. Each level stores, per block, the block's
+total excess and the minimum excess reached inside it (both relative to the block's start):
+
+| Level | Block           | Fields                                       |
+|-------|-----------------|----------------------------------------------|
+| L0    | one 64-bit word | `l0_min_excess: i8`, `l0_word_excess: i16`   |
+| L1    | 32 words        | `l1_min_excess: i16`, `l1_block_excess: i16` |
+| L2    | 1,024 words     | `l2_min_excess: i32`, `l2_block_excess: i32` |
+
+`find_close` skips any block whose minimum cannot bring the running excess back to the target,
+climbing to L1 and L2 to skip larger runs, and scans bits only inside the block that holds the
+match. `enclose` uses the same arrays backwards (#4102). `find_open` does not: it scans backwards bit
+by bit.
 
 ## Applications
 
@@ -114,9 +126,24 @@ BP:   ( ( ( ) ( ) ) )
 
 ## Space Overhead
 
-- BP bits: 2n bits for n nodes
-- RangeMin: O(n) or O(n log n) depending on variant
-- Total: ~6% overhead with optimized RangeMin
+For n nodes the parentheses take 2n bits. The indices, as a share of that bitmap, are:
+
+| Part                        | Fields                                      | Bits per      | Overhead  |
+|-----------------------------|---------------------------------------------|---------------|-----------|
+| L0 min-excess               | `l0_min_excess: i8` + `l0_word_excess: i16` | 24 per 64     | 37.5%     |
+| L1 min-excess               | `l1_min_excess` + `l1_block_excess` (`i16`) | 32 per 2,048  | 1.6%      |
+| L2 min-excess               | `l2_min_excess` + `l2_block_excess` (`i32`) | 64 per 65,536 | 0.1%      |
+| Rank directory              | `rank_l1: u32` + `rank_l2: u64`             | 96 per 512    | 18.75%    |
+| **Total (`NoSelect`)**      |                                             |               | **≈ 58%** |
+| Select (`WithCsPoppy`, #64) | one `u32` per 256 opens                     | 32 per 512    | +6.25%    |
+
+`BalancedParens::index_heap_size()` reports these bytes (it leaves out the parenthesis words, which
+`W` may borrow). A unit test pins 9,488 bytes of index for a 16,384-byte bitmap, 57.9%. JSON uses
+`NoSelect` (≈ 58%); YAML uses `WithCsPoppy` (≈ 64%).
+
+Most of it is L0: two values per 64-bit word. `l0_word_excess` ranges over [-64, 64], so it is
+stored wider than it needs to be. This page used to say "~6%", which matches no subset of these
+fields; it may date from an earlier index.
 
 ## Implementation Optimizations
 

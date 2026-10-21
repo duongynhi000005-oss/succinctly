@@ -8,7 +8,7 @@ Design and implementation of the bit vector with rank/select support.
 
 `BitVec` is a bit vector that supports:
 - O(1) rank operations
-- O(log n) select operations
+- sampled select: an O(1) jump to the nearest sample, then a short forward word scan
 - **27.5-47.5% space overhead**, rising with bit density (see [Space Analysis](#space-analysis)) —
   *not* the ~3% of a compact Poppy index, a figure this page previously quoted from the paper
 
@@ -28,77 +28,95 @@ pub struct BitVec {
 
 ## Index Structure
 
-### Superblocks (Level 0)
-- One entry per 512 bits
-- Stores cumulative popcount from start of bit vector
-- u64 values (supports up to 2^64 bits)
+The rank directory ([src/bits/rank.rs](../../src/bits/rank.rs)) is a 3-level Poppy-style layout:
 
-### Blocks (Level 1)
-- One entry per 64 bits
-- Stores popcount within the containing superblock
-- u16 values (max 512, fits in 9 bits)
+| Level | Granularity                 | Stores                                                   | Width      |
+|-------|-----------------------------|----------------------------------------------------------|------------|
+| L0    | one entry per 2^32 bits     | absolute count of ones before the superblock             | `u64`      |
+| L1    | one entry per 512-bit block | count of ones before the block, relative to its L0 entry | 32 bits    |
+| L2    | words 1-7 of each block     | count of ones before the word, within the block          | 7 x 9 bits |
+
+L1 and L2 for one block share a single `u128`: the low 32 bits hold L1 and bits 32-94 hold the
+seven 9-bit L2 offsets (the largest is 7 x 64 = 448, which fits). Word 0 of a block needs no
+offset. The `u128` entries live in a 64-byte-aligned allocation, four per cache line, so a rank
+query touches one cache line of directory. L0 only gets an entry once a vector passes 2^32 bits
+(512 MiB), so below that it is empty.
 
 ## Rank Algorithm
 
+`RankDirectory::rank_at_word` returns the ones before a word; `rank1` adds the partial word:
+
 ```rust
-fn rank1(&self, pos: usize) -> u64 {
-    let word_idx = pos / 64;
-    let bit_idx = pos % 64;
-    let superblock_idx = word_idx / 8;
-    let block_idx = word_idx;
+fn rank1(&self, i: usize) -> usize {
+    let word_idx = i / 64;
+    let bit_idx = i % 64;
 
-    // Level 0: superblock cumulative count
-    let superblock_count = self.superblock_rank[superblock_idx];
+    // Directory: L0 + L1 + L2 for the ones before word_idx
+    let block_idx = word_idx / 8;
+    let word_in_block = word_idx % 8;
+    let entry = l1_l2[block_idx];                        // one u128
+    let l0 = if block_idx >= 1 << 23 { l0[block_idx / (1 << 23) - 1] } else { 0 };
+    let l1 = (entry & 0xFFFF_FFFF) as u64;
+    let l2 = if word_in_block == 0 {
+        0
+    } else {
+        ((entry >> (32 + (word_in_block - 1) * 9)) & 0x1FF) as u64
+    };
 
-    // Level 1: block count within superblock
-    let block_count = self.block_rank[block_idx] as u64;
-
-    // Partial word: popcount of remaining bits
+    // Partial word: popcount of the bits below i
     let mask = (1u64 << bit_idx) - 1;
-    let partial = (self.bits[word_idx] & mask).count_ones() as u64;
-
-    superblock_count + block_count + partial
+    (l0 + l1 + l2) as usize + popcount_word(words[word_idx] & mask) as usize
 }
 ```
 
+(Simplified: the real code also clamps `i` to the vector's length and returns early for `0`.)
+
 ## Select Algorithm
 
-Select uses binary search over the rank index:
+`select1(k)` uses the sampled `SelectIndex` ([src/bits/select.rs](../../src/bits/select.rs)), not
+the rank directory:
 
-1. Binary search superblocks to find containing superblock
-2. Linear scan blocks within superblock
-3. Use popcount + CTZ to find exact bit position
+1. The index stores one `(word index, ones before that word)` pair per `select_sample_rate` set
+   bits (256 by default; `Config::select_sample_rate` changes it). `jump_to(k)` reads sample
+   `k / rate` in O(1) and returns the word to start from and how many ones are left to skip.
+2. `scan_select` ([src/bits/scan.rs](../../src/bits/scan.rs)) walks forward, popcounting words
+   (whole blocks at a time once the scan runs long) until the running total passes the target.
+3. `select_in_word` finds the bit inside the crossing word.
+
+The cost is the O(1) jump plus a scan that grows with the gap between samples, so it depends on
+density: at most `rate` ones lie between the sample and the target, however many words hold them.
+
+`select0` has no sample index of its own: it binary-searches `rank0`, so it is O(log n) (#602).
 
 ## Space Analysis
 
 For n bits:
+
 - Bits: n bits
-- Superblock index: n/512 * 64 = n/8 bits (12.5%)
-- Block index: n/64 * 16 = n/4 bits (25%)
+- L1 + L2: one 128-bit entry per 512 bits = n/4 bits (**25%**)
+- L0: 64 bits per 2^32 bits, negligible (zero below 2^32 bits)
+- Select samples: 128 bits (two `u64`s) per `rate` set bits, i.e. 128 x d / rate of n for
+  density d: 25% at d = 0.5, 2.5% at d = 0.05 with the default rate 256
 
-The block index is packed to bring that down:
-
-### Optimized Block Index
-- Store relative counts within superblock
-- 8 blocks per superblock, max count 64 each
-- Pack into u16 (max 512 total)
-
-Actual overhead of the rank directory:
-- Superblock: n/512 * 64 bits = 0.125n bits
-- Block: n/64 * 9 bits = 0.14n bits
-- Total: ~0.265n bits, i.e. **~25% overhead** — 128 bits of metadata per 512 bits of data
+So the rank directory costs a fixed 25%, and `heap_size()` adds the samples on top.
 
 This is a deliberate trade of space for query speed, and is *not* the ~3% of a compact Poppy index;
-see the note in [src/bits/rank.rs](../../src/bits/rank.rs). The sampled `SelectIndex` adds an entry per
-256 set bits on top, so a full `BitVec` measures **27.5-47.5%** resident overhead, rising with bit
-density ([../benchmarks/rust-succinct-libs.md](../benchmarks/rust-succinct-libs.md)).
+see the note in [src/bits/rank.rs](../../src/bits/rank.rs). With the select samples a full `BitVec`
+measures **27.5-47.5%** resident overhead, rising with bit density
+([../benchmarks/rust-succinct-libs.md](../benchmarks/rust-succinct-libs.md)).
 
 ## SIMD Optimization
 
-Popcount uses platform-specific SIMD:
-- x86_64: `POPCNT` instruction
-- ARM64: NEON `vcnt` + horizontal add
-- Fallback: Lookup table
+A single word is popcounted with `u64::count_ones()` (or, under the `portable-popcount` feature,
+a broadword routine). On ARM64 that compiles to NEON `cnt`. On
+x86_64 it is the `POPCNT` instruction only when the build enables that target feature (for example
+`-C target-cpu=native`). This repo's builds set no `target-cpu`, so they get the baseline
+`x86_64` target's bit-twiddling sequence instead. Bulk popcounts (`popcount_words`) choose an implementation at
+compile time ([src/bits/popcount.rs](../../src/bits/popcount.rs)):
+- `simd` feature: NEON intrinsics on ARM64; on x86_64, AVX-512 `VPOPCNTDQ` when the CPU has it
+  (runtime detection, needs `std`), else a `count_ones()` loop
+- default: a `count_ones()` loop that LLVM auto-vectorises
+- `portable-popcount` feature: a broadword (SWAR) bit-counting loop with no intrinsics
 
 ## Used By
 

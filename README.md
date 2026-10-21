@@ -11,8 +11,8 @@ Succinctly provides space-efficient data structures with fast rank and select op
 
 ## Features
 
-- **Bitvector with O(1) rank and O(log n) select** - Poppy-style 3-level directory, tuned for query speed over compactness (~28-48% overhead)
-- **Balanced parentheses for tree navigation** - RangeMin structure with O(1) operations and ~6% overhead
+- **Bitvector with O(1) rank and sampled select** - Poppy-style 3-level directory, tuned for query speed over compactness (~28-48% overhead)
+- **Balanced parentheses for tree navigation** - hierarchical min-excess index for fast `find_close`/`enclose`, plus an O(1) rank directory (~58% overhead, tuned for speed)
 - **JSON semi-indexing with SIMD acceleration** - Up to 880 MiB/s throughput on x86_64 (AMD Zen 4) with table-driven PFSM parser
 - **YAML semi-indexing** - Complete YAML 1.2 parser with anchor/alias resolution (~250-400 MiB/s)
 - **DSV/CSV semi-indexing** - High-performance CSV/TSV parsing (85-1676 MiB/s) with BMI2 acceleration
@@ -311,7 +311,7 @@ succinctly
 ### Core Data Structures
 
 - **`bits::BitVec`** - Bitvector with 3-level Poppy-style rank directory (~25% overhead) and sampled select index; ~28-48% resident overhead in total, rising with bit density ([benchmarks](docs/benchmarks/rust-succinct-libs.md))
-- **`trees::BalancedParens`** - Hierarchical min-excess structure for O(1) tree navigation (~6% overhead)
+- **`trees::BalancedParens`** - Hierarchical min-excess structure and rank directory for tree navigation (~58% overhead; ~64% with select support, see [balanced-parens.md](docs/architecture/balanced-parens.md#space-overhead))
 - **`json::JsonIndex`** - Semi-index combining Interest Bits (IB) and Balanced Parentheses (BP) for fast JSON navigation
 - **`yaml::YamlIndex`** - YAML semi-index with anchor/alias resolution and multi-document support
 - **`dsv::DsvIndex`** - Lightweight DSV semi-index with BMI2-accelerated quote masking

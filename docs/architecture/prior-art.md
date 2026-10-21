@@ -29,7 +29,7 @@ rising with bit density; see [../benchmarks/rust-succinct-libs.md](../benchmarks
 | Fully-Functional Succinct Trees      | Sadakane & Navarro | 2010 | RangeMin structure for O(1) tree navigation |
 | Optimal Succinctness for Parentheses | Navarro & Sadakane | 2014 | Space-optimal BP representation             |
 
-**Succinctly implementation**: [src/trees/bp.rs](../../src/trees/bp.rs) implements hierarchical RangeMin with ~6% overhead.
+**Succinctly implementation**: [src/trees/bp.rs](../../src/trees/bp.rs) implements a hierarchical min-excess index (3 levels) plus a rank directory, about 58% of the bitmap ([balanced-parens.md](balanced-parens.md#space-overhead)).
 
 ### JSON Semi-Indexing
 
