@@ -54,5 +54,6 @@ mod i4971;
 mod i4977;
 mod i4986;
 mod i5013;
+mod i5015;
 mod i5017;
 mod i5018;
