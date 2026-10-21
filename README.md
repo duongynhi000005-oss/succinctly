@@ -228,11 +228,11 @@ See [docs/benchmarks/rust-parsers.md](docs/benchmarks/rust-parsers.md), [docs/be
 
 ### Popcount Strategies (mutually exclusive)
 
-| Feature             | Description                                           |
-|---------------------|-------------------------------------------------------|
-| *(default)*         | Uses Rust's `count_ones()` which auto-vectorizes      |
-| `simd`.             | Explicit SIMD intrinsics (NEON on ARM, POPCNT on x86) |
-| `portable-popcount` | Portable bitwise algorithm (no intrinsics)            |
+| Feature             | Description                                                         |
+|---------------------|---------------------------------------------------------------------|
+| *(default)*         | Uses Rust's `count_ones()` which auto-vectorizes                    |
+| `simd`              | Explicit SIMD intrinsics (NEON on ARM, AVX-512 VPOPCNTDQ on x86_64) |
+| `portable-popcount` | Portable bitwise algorithm (no intrinsics)                          |
 
 ### Other Features
 

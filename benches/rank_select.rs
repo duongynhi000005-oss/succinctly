@@ -143,7 +143,7 @@ fn bench_select_in_word(c: &mut Criterion) {
 /// Benchmark raw popcount performance.
 ///
 /// This benchmark isolates popcount performance for direct comparison across:
-/// - Architectures: x86_64 (POPCNT), ARM64 (NEON)
+/// - Architectures: x86_64 (AVX-512 VPOPCNTDQ, or POPCNT if the build enables it), ARM64 (NEON)
 /// - Feature flags: default, simd, portable-popcount
 ///
 /// Run with different features to compare:

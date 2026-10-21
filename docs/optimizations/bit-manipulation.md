@@ -314,7 +314,7 @@ multi-byte step.
 
 | Technique     | Location                 | Purpose                           |
 |---------------|--------------------------|-----------------------------------|
-| POPCNT        | `bits/popcount.rs`       | Rank queries, index building      |
+| Popcount      | `bits/popcount.rs`       | Rank queries, index building      |
 | CTZ loop      | `util/broadword.rs`      | Select-in-word                    |
 | Bit clearing  | `util/broadword.rs`      | Set bit iteration                 |
 | PDEP toggle   | `util/simd/x86.rs`       | Quote region masking (10x faster) |
