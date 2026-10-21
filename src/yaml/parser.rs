@@ -1328,18 +1328,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         if next_column >= closed_at || self.pending_block.column <= next_column {
             return None;
         }
-        // A block left of the closed column, at the column of a block still open, is placed by that column
-        // (yq: the foot of that block's last key, `x:` / `  a:` / `    b: 1` / `    # A` / blank / `  # B` /
-        // `c: 2` keeps `# B` at column 2 under `.x.a`); not modelled here, so it keeps the placement it had.
+        // A block left of the closed column, at the column of a block still open, is placed by that column:
+        // the foot of that block's last key (`x:` / `  a:` / `    b: 1` / `    # A` / blank / `  # B` /
+        // `c: 2` is `# B` at column 2 on `.x.a`'s key).
         let column = self.pending_block.column;
-        if column < closed_at
-            && self
+        if column < closed_at {
+            if let Some(frame) = self
                 .pending_block
                 .frames
                 .iter()
-                .any(|frame| frame.indent == column)
-        {
-            return None;
+                .find(|frame| frame.indent == column)
+            {
+                return frame.is_mapping.then_some(frame.last_key_bp).flatten();
+            }
         }
         // The mapping the following node belongs to: the key it follows owns the blocks that closed.
         self.pending_block
