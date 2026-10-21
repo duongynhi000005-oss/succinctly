@@ -1346,3 +1346,55 @@ fn test_5018_comma_sibling_beside_a_bare_caught_bind_foreach_update() -> Result<
         ),
     ])
 }
+
+/// #5018: the comma is split the way the gate split it, so an `empty` item around it or beside a literal does not
+/// shift which item is the `foreach`, and a `null` literal sibling answers as jq does (two paths, then its raise).
+/// Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit code), both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5018_null_sibling_beside_a_bare_caught_bind_foreach_update() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), null; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7), empty; null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; empty, ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7); null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; (7, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .)), empty; null)) catch "C""#,
+            "[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), empty), 7; null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7), empty; null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
