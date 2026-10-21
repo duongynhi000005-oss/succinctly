@@ -1,8 +1,9 @@
 //! Detailed popcount strategy benchmarks.
 //!
 //! Compares performance across the three popcount implementations:
-//! - `scalar`: Rust's `count_ones()` — the default strategy; auto-vectorizes to
-//!   POPCNT on x86_64 and CNT on aarch64.
+//! - `scalar`: Rust's `count_ones()` — the default strategy; CNT on aarch64, and on
+//!   x86_64 POPCNT/VPOPCNTDQ only if the build enables those target features
+//!   (a baseline build is broadword; see docs/optimizations/simd.md).
 //! - `portable`: pure broadword (SWAR) bitwise algorithm (`portable-popcount`).
 //! - `simd`: explicit SIMD intrinsics — AVX-512 VPOPCNTDQ dispatch on x86_64,
 //!   256-byte-unrolled NEON on aarch64.

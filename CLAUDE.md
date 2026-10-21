@@ -41,7 +41,7 @@ repo (e.g. `users.yaml`) — those are committed samples, not scratch space.
 
 ## Project Overview
 
-Succinctly is a high-performance Rust library implementing succinct data structures with fast rank and select operations, optimized for both x86_64 (AVX-512 VPOPCNTDQ when the CPU has it; `count_ones()` is the `POPCNT` instruction only in a build that enables the `popcnt` target feature) and ARM (NEON) architectures.
+Succinctly is a high-performance Rust library implementing succinct data structures with fast rank and select operations, optimized for both x86_64 (AVX-512 VPOPCNTDQ where available; when `count_ones()` is `POPCNT`: [simd.md](docs/optimizations/simd.md#per-word-popcounts-on-baseline-x86_64-5035)) and ARM (NEON) architectures.
 
 ### Semi-Indexing Architecture
 

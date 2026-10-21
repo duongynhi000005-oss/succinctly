@@ -1013,9 +1013,9 @@ baseline `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin` targets lack it, s
 
 ```bash
 printf '#[no_mangle] pub fn pc(x:u64)->u32{x.count_ones()}\n' > pc.rs
-rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu --emit asm -o - pc.rs | grep -c popcnt   # 0
+rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu --emit asm -o - pc.rs | grep -c popcnt || true   # 0
 rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu -C target-feature=+popcnt \
-      --emit asm -o - pc.rs | grep -c popcnt                                                          # 1
+      --emit asm -o - pc.rs | grep -c popcnt                                                                  # 1
 ```
 
 (rustc 1.99.0; the same on `x86_64-apple-darwin`.) Whether `+popcnt` moves the end-to-end benchmarks

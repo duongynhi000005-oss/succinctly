@@ -27,7 +27,7 @@ pub fn popcount_word(word: u64) -> u32 {
     {
         // aarch64: NEON `cnt`. x86_64: the `POPCNT` instruction only when the build enables the
         // `popcnt` target feature (`-C target-cpu=native`); this repo's builds set none, so the
-        // baseline x86_64 target gets a 19-instruction broadword sequence (#5035).
+        // baseline x86_64 target gets a broadword sequence (docs/optimizations/simd.md, #5035).
         word.count_ones()
     }
 
@@ -278,7 +278,7 @@ fn popcount_words_x86(words: &[u64]) -> usize {
     }
 
     // Fallback: a `count_ones()` loop. `count_ones` lowers to `POPCNT` on x86_64 only when the build
-    // enables the `popcnt` target feature (`-C target-cpu=native`); the baseline target gets the
+    // enables the `popcnt` target feature (`-C target-cpu=native`); a baseline build gets a
     // broadword sequence (#5035, docs/optimizations/simd.md).
     let mut total = 0usize;
     for &word in words {
