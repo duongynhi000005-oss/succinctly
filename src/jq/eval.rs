@@ -37669,7 +37669,7 @@ fn pattern_is_plain(pattern: &Pattern) -> bool {
 
 /// Whether `e` can neither raise nor have an effect on any input, so that nothing observable depends on
 /// running it ([`resolve_foreach`]'s #4800 read of a `foreach` whose EXTRACT emits nothing): literals, `.`,
-/// `not`, `tostring`, `select` of a boolean literal, and the structure around them (pipe, comma, `//`,
+/// `not`, `tostring`, `empty`, `select` of a boolean literal, and the structure around them (pipe, comma, `//`,
 /// `if`, `try`/`?`, a nested `foreach` of such parts). A destructuring pattern can raise on a value that
 /// is not the container it names, so a pattern bind (the `foreach` source's or its own) is read only
 /// `caught`, inside a `try`/`?` that swallows the raise; a `$name` pattern never raises, and a pattern
@@ -37682,7 +37682,7 @@ fn expr_is_inert(e: &Expr, caught: bool) -> bool {
     }
     match e {
         Expr::Identity | Expr::Literal(_) | Expr::Var(_) | Expr::TrackedVar(_) | Expr::Not => true,
-        Expr::Builtin(Builtin::ToString) => true,
+        Expr::Builtin(Builtin::ToString | Builtin::Empty) => true,
         Expr::Builtin(Builtin::Select(cond)) => {
             matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(_)))
         }
@@ -38003,11 +38003,12 @@ fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>
 }
 
 /// The step of a fold's UPDATE that is, or is a handler-less `try`/`?` around, a bare `foreach` over a
-/// caught or plain bind of one variable (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`. Where
+/// caught or plain bind of one variable (#4957): `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`, alone or
+/// in a comma whose other items emit nothing (`(FE, empty)`, [`without_empty_siblings`], #4800). Where
 /// that bind passes, jq's register moves to the bound child, and the `foreach` emits its state with the
 /// register there. A source with a handler (`catch .`) emits whether the bind passed or not, so it is refused.
 fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
-    match unwrap_paren(update) {
+    match unwrap_paren(without_empty_siblings(update)) {
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
             bare_bind_foreach_update_key(expr)
         }
@@ -38043,7 +38044,9 @@ fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
 /// `foreach`'s emission): reading any nested `foreach` this way, 6 of 30,000 rows (a `?//` chain, a nested
 /// pattern, a `select` stage); a second variable in the pattern, 11 of 40,000; a body other than `.`, 2 more;
 /// an INIT `0` with an UPDATE `$y`, 11 of 50,000; an `if` arm that navigates (`else .a`), 10 of 3,000; a `null`
-/// or boolean EXTRACT, and a comma sibling beside the `foreach` (`(FE), null`, `(FE), []`), 4 of 100,000.
+/// or boolean EXTRACT, and a comma sibling that emits a value beside the `foreach` (`(FE), null`, `(FE), []`), 4 of
+/// 100,000. A comma whose other items emit nothing (`(FE, empty)`) is the `foreach` alone
+/// ([`without_empty_siblings`], #4800).
 fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> bool {
     /// An arm, pipe tail or comma item that is not the `foreach`: it leaves the register where it is and emits
     /// no `null` or boolean.
@@ -38054,7 +38057,7 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
         let Some(budget) = budget.checked_sub(1) else {
             return false;
         };
-        match unwrap_paren(e) {
+        match unwrap_paren(without_empty_siblings(e)) {
             Expr::Foreach {
                 input,
                 patterns,
