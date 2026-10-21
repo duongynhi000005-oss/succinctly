@@ -60780,6 +60780,20 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         // own accumulator does not follow.
         // An INIT that lands on a `null` below the root keeps that live `null` on the frame.
         let init_moved_off_entry = init_moved_register_frame::<S>(source_trackable, reg);
+        // #5017: ...and a fold whose INIT cannot move the register, entered on a frame that already names
+        // where jq's register is and holds its value (an enclosing fold source after a navigating INIT, a
+        // computed stage ahead of the fold): SOURCE runs from that register as well, so a `$x` bound
+        // elsewhere is read as not it (`foreach (reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .)`
+        // answered `["a"]` and `del` deleted `.a`).
+        let entered_on_register = S::TAG == EvalTag::Jq
+            && fold_body::depth() == 0
+            && !source_trackable
+            && !init_moved_off_entry
+            && !register_null_off_root
+            && !reg.trackable
+            && frame.at.is_some()
+            && frame.register().is_some()
+            && !frame.register_loss.is_lost();
         return FoldSourceAmbient {
             value,
             trackable: source_trackable,
@@ -60793,7 +60807,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             register_non_null: reg.register_is_non_null(),
             register_null: reg.register_is_null(),
             register_null_off_root,
-            init_moved_off_entry,
+            init_moved_off_entry: init_moved_off_entry || entered_on_register,
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s

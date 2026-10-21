@@ -138,3 +138,77 @@ fn test_fold_source_moved_register_on_later_forks_and_dot_spelled_catches_5017()
         ),
     ])
 }
+
+/// #5017: a fold whose INIT cannot move the register, entered on a frame that already names jq's register and holds
+/// its value, runs its SOURCE from that register too: a `reduce` nested in the source of a `foreach` after INIT `.a`,
+/// or a fold behind a computed stage (`1 |`, `.a | tostring |`), now raises at a foreign `$x`'s destructure as jq does
+/// (`del` deleted `.a`); a `$x` bound at the register's node, a caught destructure and an unmoved INIT answer as before.
+/// Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_entered_on_a_register_frame_reads_a_foreign_destructure_5017() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach (reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | reduce (foreach ($x as {b:$q} | .) as $w (0; .; .)) as $y (.a; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach (reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (reduce (try ($x as {b:$q} | .)) as $w (0; .)) as $y (.a; .; .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.; .; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (1 | reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | .a | tostring | reduce ($x as {b:$q} | .) as $w (0; .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | 1 | foreach ($x as {b:$q} | .) as $w (0; .; .))",
+            "",
+            "Invalid path expression with result 0",
+            5,
+        ),
+    ])
+}
