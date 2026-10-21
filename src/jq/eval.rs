@@ -57392,6 +57392,15 @@ fn emits_input_once(e: &Expr) -> bool {
 }
 
 /// `source` with every `try BODY catch H` replaced by `BODY` ([`caught_destructure_in_unrouted_body`]).
+/// `source` with every `try` (with or without a handler) and `?` dropped, for reading which markers it
+/// destructures (#5030): what the `try`s do with the raise is left to the resolver that runs the original.
+fn drop_tries(source: &Expr) -> Expr {
+    match source {
+        Expr::Try { expr, .. } | Expr::Optional(expr) => drop_tries(expr),
+        other => map_subexprs(other, &mut |child| drop_tries(child)),
+    }
+}
+
 fn drop_caught_handlers(source: &Expr) -> Expr {
     match source {
         Expr::Try {
@@ -58023,6 +58032,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
     // holding a container bound elsewhere than it names is not the register, whatever the document is.
     // Through a `?//` chain too: jq names the last alternative's step where the resolver names the
     // first's, but read by value the chain answered and a write went through.
+    // #5030: on such an ambient a `try`/`?` around the fold that destructures (`try reduce ($x as P | .) ..`)
+    // does not hide the marker: the resolver this routes to runs the `try` as jq does, catching the inner
+    // raise and leaving the source empty, where the by-value drive answered and `del` deleted `.a`.
+    let tries_dropped;
+    let marker_scan = if ambient.frame_names_register {
+        tries_dropped = drop_tries(source);
+        &tries_dropped
+    } else {
+        source
+    };
     let top_foreign_destructure = || {
         S::TAG == EvalTag::Jq
             && ((fold_body::depth() == 0
@@ -58031,7 +58050,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 && try_free())
                 || ambient.frame_names_register)
             && !foreign_register_markers_with::<S>(
-                source,
+                marker_scan,
                 ambient,
                 ambient.frame_names_register,
                 &passing_selects,
