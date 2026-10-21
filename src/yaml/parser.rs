@@ -1283,20 +1283,20 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     }
 
     /// The key whose value block the run's first block closed, for the block after it (#5053): the last key of
-    /// the innermost open mapping outside the closed column, when `next_column` dedents past that column. `a:` /
+    /// the open mapping the following node (at `next_column`) belongs to, when it dedents past the closed column. `a:` /
     /// `  b: 1` / `  # A` / blank / `  # B` / `c: 2` is `# A` on `.a.b`'s key and `# B` on `.a`'s.
     fn outer_key_of_settled_foot(&self, next_column: usize) -> Option<usize> {
         let closed_at = self.pending_block.follows_foot_at?;
-        // A block at the dedenting node's own column (or left of it) is placed by that column, not moved.
-        if next_column >= closed_at || self.pending_block.column <= next_column {
+        // This block sits at the column the first one closed, and the node after it dedents past that column.
+        if next_column >= closed_at || self.pending_block.column != closed_at {
             return None;
         }
+        // The mapping the following node belongs to: the key it follows owns the blocks that closed.
         self.pending_block
             .frames
             .iter()
-            .rev()
-            .filter(|frame| frame.indent < closed_at)
-            .find_map(|frame| frame.is_mapping.then_some(frame.last_key_bp).flatten())
+            .find(|frame| frame.indent == next_column)
+            .and_then(|frame| frame.is_mapping.then_some(frame.last_key_bp).flatten())
     }
 
     /// Place a dedented block (`column < prev_indent`) whose adjacency no

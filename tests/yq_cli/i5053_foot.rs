@@ -84,6 +84,42 @@ const ROWS: &[(&str, &str, &[&str], &str)] = &[
         &[],
         "a:\n  - 1\n  # A\n# B\n\nc: 2\n",
     ),
+    (
+        "a:\n  b:\n    c: 1\n    # A\n\n # B\n\n---\nb: 2\n",
+        ".",
+        &[],
+        "a:\n  b:\n    c: 1\n    # A\n# B\n---\nb: 2\n",
+    ),
+    (
+        "k:\n  a:\n    b: 1\n    # A\n\n    # B\nc: 2\n",
+        ".",
+        &[],
+        "k:\n  a:\n    b: 1\n    # A\n# B\n\nc: 2\n",
+    ),
+    (
+        "a:\n  b:\n    c: 1\n    # A\n\n    # B\nd: 2\n",
+        ".",
+        &[],
+        "a:\n  b:\n    c: 1\n    # A\n# B\n\nd: 2\n",
+    ),
+    (
+        "x:\n  a:\n    b: 1\n    # A\n\n    # B\n  c: 2\n",
+        ".",
+        &[],
+        "x:\n  a:\n    b: 1\n    # A\n  # B\n\n  c: 2\n",
+    ),
+    (
+        "x:\n  a:\n    b: 1\n    # A\n\n    # B\n\n---\nz: 1\n",
+        ".",
+        &[],
+        "x:\n  a:\n    b: 1\n    # A\n# B\n---\nz: 1\n",
+    ),
+    (
+        "a:\n  b:\n    c: 1\n    # A\n\n# B\n\n---\nz: 1\n",
+        ".",
+        &[],
+        "a:\n  b:\n    c: 1\n    # A\n# B\n---\nz: 1\n",
+    ),
 ];
 
 #[test]
