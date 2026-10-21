@@ -55966,11 +55966,19 @@ impl<'e> RegisterSpine<'e> {
             {
                 Reach::HandsOn
             }
+            // #5030: ...and on any register, for the routing walks, a marker the caller listed hands it
+            // on as `.` does, as [`binds_register`](Self::binds_register) reads one at a bind's head:
+            // `$x | . as P` is `$x as P` (`.a as $x | foreach ($x | . as {b:$q} | .) as $y (.a; .; .)`
+            // raises in jq). Not for a walk through a `reduce` (`through_reduce`): those decide a fold
+            // body's loud refusal, which no `try` catches, and a marker in a comma, an `if` branch or a
+            // wrapper there is not the register on every output
+            // (`foreach (($x, $x) | . as [$q] | .) ..` inside another fold's UPDATE raises catchably in jq).
             Expr::TrackedVar(marker)
                 if !self.fresh_only
                     && self.markers.contains(&Rc::as_ptr(marker))
                     && (self.null_register
-                        || (self.null_by_kind && matches!(marker.value, OwnedValue::Null))) =>
+                        || (self.null_by_kind && matches!(marker.value, OwnedValue::Null))
+                        || (!self.null_by_kind && !self.through_reduce)) =>
             {
                 Reach::HandsOn
             }
