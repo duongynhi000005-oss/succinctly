@@ -2,7 +2,7 @@
 //! over a source that leaves a container state (`.`, `(.,.a)` on `{"a":null}`), is read as the bare `foreach` is.
 //! `FE` is `foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`.
 
-use crate::assert_path_rows_both_routes_3749;
+use crate::{assert_path_rows_both_routes_3749, run_jq_full};
 use anyhow::Result;
 
 /// #4800: `(FE, empty)`, `(empty, FE)` and `(FE, select(false))` were refused naming the state (uncatchably, so a `?`
@@ -2553,4 +2553,162 @@ fn test_foreach_with_an_emitting_nothing_extract_reads_empty_as_inert_4800() -> 
             0,
         ),
     ])
+}
+
+/// #4800: the same comma under `try path(..) catch "c"`: jq's own, catchable error is caught (`"c"`), where the refusal
+/// the comma was read as before was uncatchable. Rows captured from jq 1.7.1, both routes, on `{"a":null}`.
+#[test]
+fn test_foreach_update_empty_comma_item_under_try_catch_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (empty, foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); .)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); $i)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), select(false)); .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: a comma that holds a *value* beside the `foreach` is not read (`(FE, 7)`: the `7` is stored as a state of its
+/// own, with the register where jq leaves it), so a `?` around the path keeps the refusal, uncatchably, where jq
+/// answers `[]`. Loud, not a wrong answer; the uncaught form matches jq's own refusal.
+#[test]
+fn test_foreach_update_comma_with_a_value_sibling_stays_refused_4800() -> Result<()> {
+    let filter = r"[path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), 7); $i))?]";
+    let input = r#"{"a":null}"#;
+    for (stdout, stderr, code) in [
+        run_jq_full(&["-c", filter], Some(input))?,
+        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
+    ] {
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", 5),
+            "{filter}: stderr {stderr:?}"
+        );
+        assert!(
+            stderr.contains(r#"Invalid path expression with result {"a":null}"#),
+            "{filter}: {stderr:?}"
+        );
+    }
+    Ok(())
 }
