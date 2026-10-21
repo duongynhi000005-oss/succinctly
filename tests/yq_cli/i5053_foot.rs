@@ -228,6 +228,24 @@ const ROWS: &[(&str, &str, &[&str], &str)] = &[
         &[],
         "x:\n  a:\n    b: 1\n    # A\n# B\n\n# C\n\nd: 2\n",
     ),
+    (
+        "x:\n  a:\n    b: 1\n    # A\n\n   # B\nc: 2\n",
+        ".",
+        &[],
+        "x:\n  a:\n    b: 1\n    # A\n# B\n\nc: 2\n",
+    ),
+    (
+        "a:\r\n  b: 1\r\n  # A\r\n\r\n    # B\r\nc: 2\r\n",
+        ".",
+        &[],
+        "a:\n  b: 1\n  # A\n# B\n\nc: 2\n",
+    ),
+    (
+        "a:\r\n  b: 1\r\n  # A\r\n\r\n  # B\r\n\r\n  # C\r\nc: 2\r\n",
+        ".",
+        &[],
+        "a:\n  b: 1\n  # A\n# B\n\n# C\n\nc: 2\n",
+    ),
 ];
 
 #[test]

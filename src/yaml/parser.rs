@@ -1296,6 +1296,21 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
+    /// Place the pending blocks at a `---`/`...` boundary (a dedent to column 0): a second block of a run after
+    /// a blank line is the foot of the key that owns the blocks the first closed, as in a mapping
+    /// (`outer_key_of_settled_foot`, #5053); otherwise the foot of the node the column names, else the closing
+    /// document's root (#2811), whose blocks keep the blank line between them (#5052).
+    fn drain_pending_at_boundary(&mut self, old_root: usize) {
+        let owner = self.outer_key_of_settled_foot(0);
+        let target = owner
+            .or_else(|| self.positional_boundary_foot_target())
+            .unwrap_or(old_root);
+        if owner.is_some() || target == old_root {
+            self.mark_blank_runs_in_pending();
+        }
+        self.drain_pending_into_foot(target);
+    }
+
     /// Drain the pending blocks into the foot of the key that owns the blocks a run's first block closed
     /// (#5053), keeping the blank line between them as a document's foot does (#5052).
     fn drain_pending_into_owner_foot(&mut self, owner: usize) {
@@ -1311,6 +1326,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         // The node after this block dedents past the column the first one closed, and this block is not at or
         // left of that node's own column (a block there is placed by that column, not moved).
         if next_column >= closed_at || self.pending_block.column <= next_column {
+            return None;
+        }
+        // A block left of the closed column, at the column of a block still open, is placed by that column
+        // (yq: the foot of that block's last key, `x:` / `  a:` / `    b: 1` / `    # A` / blank / `  # B` /
+        // `c: 2` keeps `# B` at column 2 under `.x.a`); not modelled here, so it keeps the placement it had.
+        let column = self.pending_block.column;
+        if column < closed_at
+            && self
+                .pending_block
+                .frames
+                .iter()
+                .any(|frame| frame.indent == column)
+        {
             return None;
         }
         // The mapping the following node belongs to: the key it follows owns the blocks that closed.
@@ -2051,16 +2079,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // placed by column, the same dedent-aware rule
                 // `flush_pending_head_lines_with_root`'s own dedent branch
                 // already applies in-document/at EOF (#2811 review).
-                // ...except a second block of a run after a blank line, which is the foot of the key that owns
-                // the blocks the first closed (`outer_key_of_settled_foot`, #5053).
-                let owner = self.outer_key_of_settled_foot(0);
-                let target = owner
-                    .or_else(|| self.positional_boundary_foot_target())
-                    .unwrap_or(old_root);
-                if owner.is_some() || target == old_root {
-                    self.mark_blank_runs_in_pending();
-                }
-                self.drain_pending_into_foot(target);
+                self.drain_pending_at_boundary(old_root);
                 return;
             }
             if self.attached_prev().is_some() {
@@ -2075,16 +2094,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 if self.detached_block_to_prev_before_dedent(0) {
                     return;
                 }
-                // A second block of the run, after a blank line, is the foot of the key that owns the blocks
-                // the first closed, as in a mapping (`outer_key_of_settled_foot`, #5053).
-                let owner = self.outer_key_of_settled_foot(0);
-                let target = owner
-                    .or_else(|| self.positional_boundary_foot_target())
-                    .unwrap_or(old_root);
-                if owner.is_some() || target == old_root {
-                    self.mark_blank_runs_in_pending();
-                }
-                self.drain_pending_into_foot(target);
+                self.drain_pending_at_boundary(old_root);
                 return;
             }
         }
