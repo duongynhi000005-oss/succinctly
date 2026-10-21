@@ -8145,6 +8145,16 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
         // `head_comment_lines_with_blanks`'s own doc comment for the bug
         // this closes.
         let ranges = self.index.get_head_comments(self.bp_pos);
+        // #5053: the first document's leading block, in a header with a CRLF break, keeps its `\r`s and turns
+        // each blank CRLF line into `# \r`, as the verbatim header [`write_yq_header`] prints it on the
+        // streaming route.
+        let header_end = self.header_end();
+        let in_header = matches!(ranges.first(), Some(&(first_start, _)) if (first_start as usize) < header_end);
+        if in_header {
+            if let Some(lines) = crlf_header_head_lines(&self.text[..header_end]) {
+                return lines;
+            }
+        }
         let mut lines = head_comment_lines_with_blanks(self.text, ranges);
         // #4093: the blank lines between the block and a node at column 0 are kept by
         // yq (an indented node drops them, and so does a block that itself follows a
@@ -9636,6 +9646,47 @@ fn blank_line_before(text: &[u8], at: usize) -> bool {
         .all(|b| matches!(b, b' ' | b'\t' | b'\r'))
 }
 
+/// The comment lines of a first-document header (`header`: [`yq_header_len`]'s bytes) as yq prints them when a line
+/// break in it is `\r\n`, or `None` for a header without one (#5053): every comment line keeps its `\r` where its break
+/// is CRLF, and a blank line with a CRLF break is `# \r` -- the `\r` is comment text to go-yaml -- where one with a
+/// bare `\n` stays a blank line. The `---` and `%` lines are the header's own, not comment lines.
+fn crlf_header_head_lines(header: &[u8]) -> Option<Vec<String>> {
+    if !header.windows(2).any(|pair| pair == b"\r\n") {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < header.len() {
+        let rest = &header[pos..];
+        let line_end = rest
+            .iter()
+            .position(|&b| is_line_break(b))
+            .unwrap_or(rest.len());
+        let brk = if line_end < rest.len() {
+            line_break_len(rest, line_end)
+        } else {
+            0
+        };
+        let line = core::str::from_utf8(&rest[..line_end]).ok()?;
+        let crlf = brk == 2 && rest[line_end] == b'\r';
+        if line.is_empty() {
+            out.push(if crlf {
+                "# \r".to_string()
+            } else {
+                String::new()
+            });
+        } else if !(line.starts_with("---") || line.starts_with('%')) {
+            out.push(if crlf {
+                format!("{line}\r")
+            } else {
+                line.to_string()
+            });
+        }
+        pos += line_end + brk;
+    }
+    Some(out)
+}
+
 /// Build a node's standalone head comment lines as owned strings, inserting
 /// an empty (`""`) entry wherever [`blank_line_between`] finds a blank line
 /// separating two lines of the block -- the DOM route's own analogue of
@@ -9948,6 +9999,11 @@ fn write_yq_header<W: AsRef<[u64]>, Out: core::fmt::Write>(
         };
         let line = &rest[..line_end];
         if doc_markers || !line.starts_with("---") {
+            // #5053: a blank line of a CRLF header is `# \r` in yq's output -- the `\r` is comment text to go-yaml,
+            // which reads the line as a comment of its own -- where an LF header keeps the bare blank line.
+            if line.is_empty() && brk == 2 && rest.as_bytes()[line_end] == b'\r' {
+                out.write_str("# ")?;
+            }
             out.write_str(line)?;
             // The break itself is reproduced verbatim, unlike every other
             // line break in the output, which is normalized to `\n` (#324):
@@ -18222,10 +18278,12 @@ plain: hello
         fn header_line_breaks_are_reproduced_verbatim() {
             // Measured against pinned yq (#2795 review): a CRLF/CR source
             // header keeps its own break spelling, unlike every other line
-            // break in the output, which is normalized to `\n` (#324).
+            // break in the output, which is normalized to `\n` (#324). A
+            // blank CRLF line in it is `# \r` (#5053, re-measured against
+            // v4.53.3: the `\r` is comment text to go-yaml).
             assert_eq!(
                 stream(b"# lead\r\n\r\n---\r\na: 1\r\n"),
-                "# lead\r\n\r\n---\r\na: 1"
+                "# lead\r\n# \r\n---\r\na: 1"
             );
             assert_eq!(stream(b"# lead\r\ra: 1\r"), "# lead\r\ra: 1");
         }
