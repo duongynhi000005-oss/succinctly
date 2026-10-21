@@ -38154,21 +38154,24 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
 /// as written (`test_two_alternative_chain_in_a_carrying_foreach_in_a_moved_fold_body_4694` pins jq's answer), and
 /// the same source as `.` is refused.
 ///
-/// #4800: a `select` stage that never lets a value through (`select(false)`, [`never_truthy`]) in such a pipe is
-/// the `empty` it is, and the stages after the first stage that emits nothing never run: a pipe is rewritten to end
-/// on that `empty` (a pipe that starts with such a stage is left as it is). Neither the constant condition nor `empty` reads the state or moves a register. The resolver
-/// reads a pipe that ends in `empty` as an UPDATE that never emits, where the `select` spelling (or a navigating
-/// stage after the `empty`) reached its stage machinery and refused the `foreach` ahead of it for an emission that is
-/// never made.
+/// #4800: in such a pipe, a stage that emits nothing ([`emits_nothing`]: `empty`, `select(false)`, `first(empty)`,
+/// `limit(0; ..)`) is the `empty` it is, and the stages after the first one never run: the pipe, a parenthesised
+/// pipe inside it flattened (`|` is associative), is rewritten to end on that `empty`. A pipe that starts with such a
+/// stage is left as it is. Neither the constant condition nor `empty` reads the state or moves a register. The
+/// resolver reads a pipe that ends in `empty` as an UPDATE that never emits, where the other spellings (or a
+/// navigating stage after the `empty`) reached its stage machinery and refused the `foreach` ahead of it for an
+/// emission that is never made.
 fn without_noop_pipes(update: &Expr) -> Option<Expr> {
     fn noop_pipe(e: &Expr) -> bool {
         matches!(e, Expr::Pipe(_)) && is_identity_pipe(e)
     }
-    fn dead_stage(stage: &Expr) -> bool {
-        match unwrap_paren(stage) {
-            Expr::Builtin(Builtin::Empty) => true,
-            Expr::Builtin(Builtin::Select(cond)) => never_truthy(cond),
-            _ => false,
+    /// The stages of a pipe with its parenthesised pipes spliced in.
+    fn flat_stages<'a>(stages: &'a [Expr], out: &mut Vec<&'a Expr>) {
+        for stage in stages {
+            match unwrap_paren(stage) {
+                Expr::Pipe(inner) => flat_stages(inner, out),
+                other => out.push(other),
+            }
         }
     }
     /// `e` with its output positions rewritten, `None` when none holds a no-op pipe.
@@ -38182,15 +38185,20 @@ fn without_noop_pipes(update: &Expr) -> Option<Expr> {
         match e {
             // The stages after the first one that emits nothing never run.
             Expr::Pipe(stages) => {
+                let mut flat = Vec::new();
+                flat_stages(stages, &mut flat);
                 // Not a dead first stage: the stages behind it are read by the register machinery as they stand
                 // (`(select(false) | 1 | FE) // 5`, #4853), which an `empty` alone would not carry.
-                let at = stages.iter().position(dead_stage).filter(|&at| at > 0)?;
-                let is_empty = matches!(unwrap_paren(&stages[at]), Expr::Builtin(Builtin::Empty));
-                (!is_empty || at + 1 < stages.len()).then(|| {
+                let at = flat
+                    .iter()
+                    .position(|stage| emits_nothing(stage))
+                    .filter(|&at| at > 0)?;
+                let is_empty = matches!(flat[at], Expr::Builtin(Builtin::Empty));
+                (!is_empty || at + 1 < flat.len()).then(|| {
                     Expr::Pipe(
-                        stages[..at]
+                        flat[..at]
                             .iter()
-                            .cloned()
+                            .map(|stage| (*stage).clone())
                             .chain(core::iter::once(Expr::Builtin(Builtin::Empty)))
                             .collect(),
                     )
@@ -63759,7 +63767,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // resolver's pipe route raises #530's terminal refusal on an untracked state it hands on, which a fold's
     // UPDATE (stored unchecked, as jq does) never meets for a bare `.`: `foreach (.) as $i (null; (.|.); $x)`
     // was refused where jq answers from the EXTRACT. Only the UPDATE of a `foreach`, where the lone `.` is
-    // the established route; a no-op pipe elsewhere keeps the refusal it had.
+    // the established route; a no-op pipe elsewhere keeps the refusal it had. #4800: the same pass ends a pipe on
+    // the first stage that emits nothing (`FE | select(false) | .a` is `FE | empty`), the UPDATE that never emits.
     let update_without_noop_pipes = (S::TAG == EvalTag::Jq)
         .then(|| without_noop_pipes(update))
         .flatten();

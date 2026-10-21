@@ -9,8 +9,10 @@ use anyhow::Result;
 /// (a container state), were refused naming the state -- uncatchably under `?` -- where jq answers: the UPDATE never
 /// emits, so `path` emits nothing and `del`/`|=` echo the document. The `empty` spelling of the same UPDATE was already
 /// read; `select(false)` reached the stage machinery instead. A stage after the first one that emits nothing never runs
-/// (`FE | select(false) | .a`, `(...) | empty | .a`). Rows captured from jq 1.7.1 (stdout, first stderr line, exit
-/// code), both routes.
+/// (`FE | select(false) | .a`, `(...) | empty | .a`), whatever spells the stage that emits nothing
+/// (`first(empty)`, `limit(0; .)`, `select(false // null)`, a parenthesised one) and a parenthesised pipe around it;
+/// a pipe that starts with such a stage (`select(false) | FE`, `(select(false) | 1 | FE) // 5`) keeps the read it
+/// had (the `at > 0` guard is pinned by `test_foreach_extract_after_an_alternative_behind_an_if_is_read_per_branch_4853`). Rows captured from jq 1.7.1 (stdout, first stderr line, exit code), both routes.
 #[test]
 fn test_foreach_update_pipe_with_a_stage_that_emits_nothing_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -123,6 +125,90 @@ fn test_foreach_update_pipe_with_a_stage_that_emits_nothing_4800() -> Result<()>
             r#"{"a":true}"#,
             r"[path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), empty) | select(null) | .a; .a))?]",
             "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | first(empty); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | first(empty); .))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | limit(0; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | (select(false)); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | select(false // null); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | select(false)) | .a; .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"del(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | select(false)) | .a; .))",
+            "{\"a\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | (select(false) | .a); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | empty | select(false); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | empty; .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach . as $i (.; select(false) | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; (select(false) | 1 | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // 5; $i))?]",
+            "[[]]\n",
             "",
             0,
         ),
