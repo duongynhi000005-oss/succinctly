@@ -7722,6 +7722,12 @@ fn emit_yaml_value_at_depth(
                                 depth + 1,
                                 if flow_collection { indent } else { &val_indent },
                             );
+                            let item = with_foot_trailing_comma(
+                                item,
+                                flow_collection
+                                    && matches!(v, OwnedValue::Object(o) if !o.is_empty())
+                                    && !elem_comments.meta().foot_comment().is_empty(),
+                            );
                             let comment_suffix = trailing_comment_suffix(elem_comments, indent);
                             let anchor = anchor_decl_prefix(elem_comments);
                             entry_line(indent, "-", &anchor, item, &comment_suffix)
@@ -7777,10 +7783,6 @@ fn emit_yaml_value_at_depth(
                     })
                     .collect();
                 let rendered = render_flow('{', '}', entries, &ci, owner_indent);
-                let rendered = with_foot_trailing_comma(
-                    rendered,
-                    depth > 0 && !in_flow && !comments.meta().foot_comment().is_empty(),
-                );
                 with_container_tag(value, comments, rendered)
             } else {
                 // Block style mapping
@@ -8176,9 +8178,10 @@ fn render_flow(
 }
 
 /// go-yaml writes a `,` before the `}` of a non-empty flow mapping that owns a foot comment
-/// (`- {a: 1,}` with `# c` under it, #5058), which yq reads back as the same mapping. Only below the
-/// output's root (the root's foot is the document's, and yq prints `{a: 1}` there), outside another
-/// flow collection, and for a mapping rendered on one line. `owns_foot` is that test.
+/// (`- {a: 1,}` with `# c` under it, #5058), which yq reads back as the same mapping. Only for a block
+/// sequence's item (a mapping *value*'s trailing comment is its key's foot in yq, which writes no
+/// comma, and the output's root has the document's), and for a mapping rendered on one line.
+/// `owns_foot` is the item test.
 fn with_foot_trailing_comma(mut rendered: String, owns_foot: bool) -> String {
     if owns_foot && rendered.ends_with('}') && !rendered.contains('\n') {
         rendered.insert(rendered.len() - 1, ',');
@@ -13689,6 +13692,16 @@ mod tests {
                 "k:\n  - {a: 1,}\n  # c\n\n  - 3",
             ),
             ("k:\n  - {}\n  # c\n", ".z = 1", "k:\n  - {}\n  # c\nz: 1"),
+            (
+                "k:\n  b: { x: 1 }\n  # c\n",
+                ".z = 1",
+                "k:\n  b: {x: 1}\n  # c\nz: 1",
+            ),
+            (
+                "a:\n  - b: { x: 1 }\n    # c\n",
+                ".z = 1",
+                "a:\n  - b: {x: 1}\n    # c\nz: 1",
+            ),
             ("{ a: 1 }\n# c\n", ".b = 2", "{a: 1, b: 2}\n# c"),
         ] {
             assert_eq!(
