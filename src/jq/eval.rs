@@ -37763,22 +37763,18 @@ fn is_truthy_literal(cond: &Expr) -> bool {
     )
 }
 
-/// A fold UPDATE `if C then A else . end` on a literal truthy `C` (#4957), read as `A`: it runs `A` and
-/// nothing else, so the marks that read a bare `A` (`plain_update_heads`, `sole_update_mark`, ..) read it
-/// too. Not an `A` that is a comma, which [`emptied_update`] leaves unread, nor any other `else` or a
-/// falsy literal: those keep the reading they had. Anything else is returned as it is.
+/// A fold UPDATE `if C then A else B end` on a literal truthy `C` (#4957), read as `A`: it runs `A` and
+/// nothing else (the `else` never runs, whatever it is: `.a`, #5034), so the marks that read a bare `A`
+/// (`plain_update_heads`, `sole_update_mark`, ..) read it too. Not an `A` that is a comma, which
+/// [`emptied_update`] leaves unread, nor a falsy literal: that keeps the reading it had. Anything else is
+/// returned as it is.
 fn take_literal_if_branch(update: &Expr) -> &Expr {
     let mut current = update;
     while let Expr::If {
-        cond,
-        then_branch,
-        else_branch,
+        cond, then_branch, ..
     } = unwrap_paren(current)
     {
-        if is_truthy_literal(cond)
-            && matches!(unwrap_paren(else_branch), Expr::Identity)
-            && !matches!(unwrap_paren(then_branch), Expr::Comma(_))
-        {
+        if is_truthy_literal(cond) && !matches!(unwrap_paren(then_branch), Expr::Comma(_)) {
             current = then_branch;
         } else {
             break;
@@ -41743,6 +41739,11 @@ struct EmptiedUpdate<'a> {
     /// such an UPDATE is read only there ([`emptied_update_read`]); in a `reduce` UPDATE, a `foreach` EXTRACT, behind a
     /// head stage, a `// empty`, a `catch` or a `first`/`limit`/`nth` it keeps the refusal.
     beyond_bare_if: bool,
+    /// Whether an `if` around the `foreach` has an `else` branch other than `.` (`if . then FE else .a end`, #5034).
+    /// The `else` runs only on a step whose state took it, and that step never drives the `foreach`'s source, so for
+    /// the marks a source drive reads the UPDATE is empty exactly when the `foreach` is. A reader that takes the
+    /// `else` as `.` (the `reduce` UPDATE's first step, [`emptied_update_read`]) does not hold for it.
+    else_beyond_dot: bool,
 }
 
 /// [`emptied_update`], for a fold body: a comma branch read beyond the bare `if .`
@@ -41750,7 +41751,8 @@ struct EmptiedUpdate<'a> {
 /// finds (#4800).
 fn emptied_update_read(expr: &Expr, foreach_update: bool) -> Option<EmptiedUpdate<'_>> {
     emptied_update(expr).filter(|emptied| {
-        !emptied.beyond_bare_if || foreach_update && taken_if_item(expr).is_some()
+        (!emptied.beyond_bare_if || foreach_update && taken_if_item(expr).is_some())
+            && (!emptied.else_beyond_dot || foreach_update)
     })
 }
 
@@ -42028,6 +42030,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             literal_head: false,
             comma_branch: false,
             beyond_bare_if: false,
+            else_beyond_dot: false,
         }),
         Expr::Label { name, body } => match unwrap_paren(body) {
             // `label $l | (FE, break $l)`: the break emits nothing either. Looser than [`label_sole_item`] on
@@ -42104,7 +42107,11 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             cond,
             then_branch,
             else_branch,
-        } if matches!(unwrap_paren(else_branch), Expr::Identity) => {
+        } if matches!(unwrap_paren(else_branch), Expr::Identity)
+            || !any_subexpr(else_branch, &mut |e| {
+                matches!(e, Expr::Foreach { .. } | Expr::Reduce { .. })
+            }) =>
+        {
             let on_dot = matches!(unwrap_paren(cond), Expr::Identity);
             // #4778: ...or a pure function of it (`if .a then FE else . end`).
             if !on_dot && !is_pure_of_dot(cond) {
@@ -42116,6 +42123,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let comma_branch = matches!(unwrap_paren(then_branch), Expr::Comma(_));
             let mut emptied = emptied_update(then_branch)?;
             emptied.comma_branch |= comma_branch;
+            emptied.else_beyond_dot |= !matches!(unwrap_paren(else_branch), Expr::Identity);
             // After the recursion, so that a comma behind a nested `if` is marked under this one's condition too.
             emptied.beyond_bare_if |= emptied.comma_branch && !on_dot;
             // The `truthy` check reads the value the `foreach` is handed, which a literal stage ahead of
