@@ -38390,6 +38390,38 @@ fn bare_bind_foreach_extract_key(extract: &Expr) -> Option<PatternKey<'_>> {
     go(extract, WRAPPED_CHAIN_DEPTH)
 }
 
+/// Whether the bare `foreach` an EXTRACT holds ([`bare_bind_foreach_extract_key`]) has a source that catches its
+/// bind's raise (`try (..)`, `(..)?`): where the variable it destructures is not jq's register, `path_intact`
+/// raises, the catch swallows it, and the `foreach` is empty (#5106).
+fn bare_bind_foreach_extract_is_caught(extract: &Expr) -> bool {
+    fn go(e: &Expr, budget: u8) -> bool {
+        let Some(budget) = budget.checked_sub(1) else {
+            return false;
+        };
+        match unwrap_paren(without_empty_siblings(e)) {
+            Expr::Foreach { input, .. } => matches!(
+                unwrap_paren(input),
+                Expr::Try { catch: None, .. } | Expr::Optional(_)
+            ),
+            Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
+            Expr::Pipe(stages) => stages.first().is_some_and(|head| go(head, budget)),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if emits_nothing(else_branch) {
+                    go(then_branch, budget)
+                } else {
+                    go(else_branch, budget)
+                }
+            }
+            _ => false,
+        }
+    }
+    go(extract, WRAPPED_CHAIN_DEPTH)
+}
+
 /// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
 /// are (#5023); `None` when it holds none, so the common case allocates nothing. `.|.` is `.` in jq wherever it
 /// stands, so the rewrite changes no meaning: it only keeps the resolver's pipe route, which raises #530's terminal
@@ -65269,6 +65301,21 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     let extract_bind_key = (bare_bind_foreach_gates && cannot_move_register(update))
         .then(|| extract.and_then(bare_bind_foreach_extract_key))
         .flatten();
+    // ...and not when UPDATE stores a variable (`$x`): the step where the bind passes then meets a state the resolver
+    // cannot tell from the register's and refuses loudly, as it does with no bind in the fold at all, which the
+    // emission dropped here at an earlier step would have ended the run before (`foreach . as $i ({}; $x; FE)`).
+    // ...nor when INIT is not a `null` or boolean literal: a state that is a node the resolver can mistake for the
+    // register meets the same loud refusal (`foreach (.a,.) as $i (.; .; if true then (FE | .) else empty end)`, whose
+    // first step's emission ended the run in a catchable error).
+    let extract_bind_caught = extract_bind_key.is_some()
+        && matches!(
+            unwrap_paren(init),
+            Expr::Literal(Literal::Null | Literal::Bool(_))
+        )
+        && !any_subexpr(update, &mut |e| {
+            matches!(e, Expr::Var(_) | Expr::TrackedVar(_))
+        })
+        && extract.is_some_and(bare_bind_foreach_extract_is_caught);
     let alt_bind_update_off_comma = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
@@ -65997,7 +66044,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     register_lost_at_the_root && has_branching_comma(&bound_update);
                                 // #5106: the register the EXTRACT's bare `foreach` bind moved onto its bound child,
                                 // where it emitted (so the bind passed, and `$x` was the step's register).
-                                let extract_bind = extract_bind_key.as_ref().and_then(|key| {
+                                let extract_bind_register = extract_bind_key.as_ref().map(|_| {
                                     // ...only where the variable the bind destructures is that register: a `$x`
                                     // that is not it raises in jq's `path_intact`, the `try` catches it, and
                                     // nothing is emitted, whatever the resolver's nested walk answered.
@@ -66014,15 +66061,35 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         }
                                         false
                                     });
-                                    if markers == 0 || !all_identical {
-                                        return None;
-                                    }
-                                    let component = key.component::<S>(&active_reg.value).ok()?;
-                                    let child = key.child::<S>(&active_reg.value).ok()?;
-                                    Some((PathPrefix::extend(&active_reg.path, component), child))
+                                    (markers > 0).then_some(all_identical)
                                 });
+                                let extract_bind = extract_bind_key
+                                    .as_ref()
+                                    .filter(|_| extract_bind_register == Some(Some(true)))
+                                    .and_then(|key| {
+                                        let component =
+                                            key.component::<S>(&active_reg.value).ok()?;
+                                        let child = key.child::<S>(&active_reg.value).ok()?;
+                                        Some((
+                                            PathPrefix::extend(&active_reg.path, component),
+                                            child,
+                                        ))
+                                    });
+                                // ...and the `foreach` is empty there when its source catches the raise, so an
+                                // emission the nested walk made on such a step is dropped.
+                                let extract_bind_empty = extract_bind_caught
+                                    && extract_bind_register == Some(Some(false));
                                 let mut emit_extracted = |branch: PathBranch<'a>| -> Demand {
-                                    if let Some((path, child)) =
+                                    if extract_bind_empty
+                                        && !branch.trackable
+                                        && matches!(
+                                            branch.register,
+                                            BranchRegister::None | BranchRegister::AtEntry
+                                        )
+                                        && *branch.path == *extract_reg.path
+                                    {
+                                        Demand::Continue
+                                    } else if let Some((path, child)) =
                                         extract_bind.as_ref().filter(|_| {
                                             !branch.trackable
                                                 && matches!(
