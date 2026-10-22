@@ -5912,17 +5912,6 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
-    /// [`Self::reject_content_after_inline_value`] for the plain scalar that began at `start` (#5064): the
-    /// scalar stops at a `: ` and what follows is no node, so `- a` / `  z: 1` is yq's "mapping values are
-    /// not allowed in this context", not `["a z", 1]`. A block scalar (`|`, `>`) is read by the same
-    /// scanner at the document root and leaves the cursor inside its content, so it is not asked.
-    fn reject_content_after_plain_scalar(&self, start: usize) -> Result<(), YamlError> {
-        if matches!(self.input.get(start), Some(b'|' | b'>')) {
-            return Ok(());
-        }
-        self.reject_content_after_inline_value()
-    }
-
     /// Parse a value (could be scalar or nested structure).
     fn parse_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
         // Check for a property first - it prefixes the actual value. Callers
@@ -5998,11 +5987,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                let start = self.pos;
                 let end_pos = self.parse_unquoted_value_with_indent(min_indent);
                 self.set_bp_text_end(end_pos);
                 self.write_bp_close();
-                self.reject_content_after_plain_scalar(start)?;
+                // The scalar stops at a `: ` and what follows is no node (#5064), so `- a` /
+                // `  z: 1` is yq's "mapping values are not allowed in this context".
+                self.reject_content_after_inline_value()?;
             }
         }
         Ok(())
@@ -8408,6 +8398,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         None
     }
 
+    /// Whether the cursor is at the `|`/`>` header of a block scalar that is the document's root
+    /// node (#5067): outside every container, where the plain-scalar scanner would otherwise read
+    /// it and end at a `: ` in its content. Its content is measured against the document, so the
+    /// callers pass base indent 0, as the `--- |` line does.
+    fn at_document_root_block_scalar(&self) -> bool {
+        self.type_stack.len() <= 1 && !self.json_strict && matches!(self.peek(), Some(b'|' | b'>'))
+    }
+
     /// A block scalar whose header sits on a line of its own (#4259, and after node properties
     /// #4271), with the gap and close checks already made by the caller: its content has to be
     /// indented more than the block that owns it, which can be no more than the header itself.
@@ -8718,6 +8716,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         _ => {
                             // Scalar value - only doc_root if not inside a container
                             self.attach_document_root_node(indent);
+                            // The block scalar of a document-root node with properties
+                            // (`&x |`, `!!str >`) takes the same parser (#5067).
+                            if self.at_document_root_block_scalar() {
+                                return self.parse_block_scalar(0);
+                            }
                             self.set_ib();
                             self.write_bp_open();
                             // type_stack.len() == 1 means we're inside only the virtual root sequence
@@ -8732,13 +8735,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                     self.pos
                                 }
                                 _ => {
-                                    let start = self.pos;
                                     let end = if is_truly_doc_root {
                                         self.parse_unquoted_value_doc_root(indent)
                                     } else {
                                         self.parse_unquoted_value_with_indent(indent)
                                     };
-                                    self.reject_content_after_plain_scalar(start)?;
+                                    self.reject_content_after_inline_value()?;
                                     end
                                 }
                             };
@@ -8819,6 +8821,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
                     self.attach_document_root_node(indent);
+                    // A document-root block scalar is read by the block-scalar parser, as
+                    // `--- |` is, not by the plain-scalar scanner below: that scan ends at a
+                    // `: ` in the content and takes what follows as a further node (#5067).
+                    if self.at_document_root_block_scalar() {
+                        return self.parse_block_scalar(0);
+                    }
                     self.set_ib();
                     self.write_bp_open();
                     // Only use doc_root mode if we're not inside any container
@@ -8849,7 +8857,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                 self.parse_unquoted_value_with_indent(indent)
                             };
                             self.check_json_strict_scalar(start, end)?;
-                            self.reject_content_after_plain_scalar(start)?;
+                            self.reject_content_after_inline_value()?;
                             end
                         }
                     };
