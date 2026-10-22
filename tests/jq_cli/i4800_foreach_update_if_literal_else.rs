@@ -197,7 +197,7 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_4800() -> Result<()> {
 }
 
 /// #4800: a `try` with a handler and a comma beside an item that emits are read too, where the state reaches a literal
-/// `else` arm of an `if` whose other arms move the register only through a fold that heads them (`literal_else_arm`):
+/// `else` arm of an `if` whose other arms move the register only through a fold that heads them (`literal_taken_arm`):
 /// the literal cannot raise, so the handler never runs, and the step takes it as the UPDATE it ran
 /// (`handler_literal_arm`, `resolved_if_arm`); the comma's items are resolved one at a time, the `if` as its arm
 /// (`if_arm_comma_items`). Every row fails on the base: the `.a` EXTRACT rows raised `Invalid path expression near
@@ -411,7 +411,7 @@ fn test_foreach_update_if_behind_a_handler_or_comma_keeps_the_whole_resolve_4800
 
 /// #4800: the mirror shape, a literal `then` the state ran beside the fold in the `else` (`if .a then 1 else FE end`),
 /// is read behind a `try ... catch` and beside an emitting comma item as the literal `else` arm is
-/// (`literal_else_arm`), on the `foreach`'s last step: the stored literal feeds no later UPDATE, which would run the
+/// (`literal_taken_arm`), on the `foreach`'s last step: the stored literal feeds no later UPDATE, which would run the
 /// fold arm on it. Every row fails on the base: the `$i` rows answered `[]` and `path`, `del` and `|= 9` raised
 /// `Invalid path expression with result {"a":null}`, the `.a` EXTRACT row raised `Invalid path expression near attempt
 /// to access element "a" of null`. Rows captured from jq 1.7.1; dropping the `then` reading fails the test.
@@ -495,12 +495,27 @@ fn test_foreach_update_if_with_a_literal_then_beside_a_fold_in_the_else_4800() -
             "",
             0,
         ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as {a:$k} ?// $k (.; (if .a then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end, 7); $k))?]",
+            "[[\"a\",\"a\"],[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as {a:$k} ?// $k (.; try (if .a then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $k))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
     ])
 }
 
 /// #4800: a literal `then` past a falsy `elif` condition is not read ([`taken_then_branch`]: an earlier step may run the
-/// later arm), so the chain keeps the whole-`if` resolve it had. jq answers `[[]]`, `[]` and `[[]]`; the answers are
-/// pinned as they stand (a fix flips them). Reading it turned one wrong answer into another in a 3,000-row grid.
+/// later arm), so the chain keeps the whole-`if` resolve it had. jq answers `[[]]`, `[]`, `[[]]` and `[[],[]]`; the
+/// answers are pinned as they stand (a fix flips them). Reading it changed the last row, `(7, if .a then null elif .b
+/// then 2 else FE end)` on `{"b":true}`, from one wrong answer (`[]`) to another (`[[]]`).
 #[test]
 fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_4800() -> Result<()>
 {
@@ -526,6 +541,13 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
             "",
             0,
         ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach . as $i (.; (7, if .a then null elif .b then 2 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
 }
 
@@ -537,7 +559,8 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
 /// names `["b"]` where jq's register moved to `["a"]`, and narrowing the literal arm's step turned the refusal that
 /// masked it into a write of `.b`. The literal `then` is read only on the `foreach`'s last step: read on the first of
 /// two, the `.a` EXTRACT row's refusal became a truncated `[["a","a"]]`, because the second step runs the fold arm on
-/// the stored literal and refuses where a `?` swallows it.
+/// the stored literal and refuses where a `?` swallows it. The same holds for the first fork of a two-value INIT, and
+/// for a `?//` retry that runs UPDATE again on the stored literal (the last row; the base answers `[]` there too).
 #[test]
 fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -586,6 +609,20 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
         (
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i ((.,.); try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach .a as {a:$k} ?// $k (.; (if .a then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end, 7); (if $k == null then error("x") else $k end)))?]"#,
             "[]\n",
             "",
             0,

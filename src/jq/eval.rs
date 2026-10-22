@@ -50641,14 +50641,17 @@ fn taken_then_branch<'e, S: EvalSemantics>(
 ) -> Option<&'e Expr> {
     let (item, _) = taken_if_item(update)?;
     let head = walk_falsy_else_chain::<S>(item, state);
+    truthy_then::<S>(head, state)
+        .filter(|_| core::ptr::eq(head, item) || emptied_update_read(update, body).is_some())
+}
+
+/// The `then` branch of `head` when it is an `if` whose condition is truthy on `state` ([`cond_truthiness`]), the one
+/// rule [`taken_then_branch`] and [`literal_taken_arm`] share for which `then` a step ran (#4800).
+fn truthy_then<'e, S: EvalSemantics>(head: &'e Expr, state: &OwnedValue) -> Option<&'e Expr> {
     match unwrap_paren(head) {
         Expr::If {
             cond, then_branch, ..
-        } if cond_truthiness::<S>(cond, state) == Some(true)
-            && (core::ptr::eq(head, item) || emptied_update_read(update, body).is_some()) =>
-        {
-            Some(then_branch)
-        }
+        } if cond_truthiness::<S>(cond, state) == Some(true) => Some(then_branch),
         _ => None,
     }
 }
@@ -50717,8 +50720,9 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
     }
 }
 
-/// The literal arm a falsy walk of the `if` that `item` is ([`taken_if_item`], [`walk_falsy_else_chain`]) reaches on
-/// `state`, where the `if` can move the register only through folds that head its arms (#4800): `null` in
+/// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
+/// ([`walk_falsy_else_chain`]) reaches on `state`, or (on the last step) the `then` of the first `if`, where the `if`
+/// can move the register only through folds that head its arms (#4800): `null` in
 /// `if .a then FE else null end` on `{"a":null}`. Resolving such an `if` whole lets `cannot_move_register` read the fold
 /// in the arm that did not run, which withholds the tracking of the `null` the literal arm stores (jq: `jv_identical`
 /// by kind). Any other `if` is resolved whole as before, and so is a computed `else`: narrowed behind a handler or
@@ -50727,9 +50731,9 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
 /// arm on it, which the resolve cannot place (under a `?` that refusal truncated jq's output). An `if` that navigates
 /// without a fold (`if .a then .b else 3 end`) already matches jq whole, and one that navigates ahead of a fold
 /// (`if . then (.b | FE) else 3 end`) names a path jq's register never reaches on the step that runs that arm, which a
-/// refusal on the literal arm's step used to mask (narrowing it turned that refusal into a write of `.b`). The shape is checked before the condition is evaluated, so an `if` it cannot read costs no
-/// evaluation.
-fn literal_else_arm<'e, S: EvalSemantics>(
+/// refusal on the literal arm's step used to mask (narrowing it turned that refusal into a write of `.b`). The shape
+/// is checked before the condition is evaluated, so an `if` it cannot read costs no evaluation.
+fn literal_taken_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
     last_step: bool,
@@ -50787,21 +50791,13 @@ fn literal_else_arm<'e, S: EvalSemantics>(
     // literal the next step would run the fold arm on (`if .b then null else FE end`: `.b` of the stored `null` is
     // falsy), which the resolve cannot place, so it is read only on the `foreach`'s last step: the stored literal feeds
     // no later UPDATE. A `then` past a falsy `elif` condition is not read ([`taken_then_branch`]).
-    match unwrap_paren(arm) {
-        Expr::If {
-            cond, then_branch, ..
-        } if last_step
-            && core::ptr::eq(arm, if_item)
-            && cond_truthiness::<S>(cond, state) == Some(true)
-            && matches!(unwrap_paren(then_branch), Expr::Literal(_)) =>
-        {
-            Some(then_branch)
-        }
-        _ => None,
-    }
+    (last_step && core::ptr::eq(arm, if_item))
+        .then(|| truthy_then::<S>(arm, state))
+        .flatten()
+        .filter(|then| matches!(unwrap_paren(then), Expr::Literal(_)))
 }
 
-/// [`literal_else_arm`] of the body of a `try` with a handler (`try (U) catch H`), which a `foreach` step takes as
+/// [`literal_taken_arm`] of the body of a `try` with a handler (`try (U) catch H`), which a `foreach` step takes as
 /// the UPDATE it ran (`update_taken`) and resolves ([`resolved_if_arm`]) where it names one (#4800).
 fn handler_literal_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
@@ -50812,13 +50808,13 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
         Expr::Try {
             expr,
             catch: Some(_),
-        } => literal_else_arm::<S>(expr, state, last_step),
+        } => literal_taken_arm::<S>(expr, state, last_step),
         _ => None,
     }
 }
 
 /// The items of a fold UPDATE comma that a `foreach` step resolves one at a time because one of them is an `if` that
-/// reaches a literal `else` arm on `state` ([`literal_else_arm`], #4800: `(if .a then FE else null end), 7`): jq runs
+/// reaches a literal arm on `state` ([`literal_taken_arm`], #4800: `(if .a then FE else null end), 7`): jq runs
 /// each comma item from the input the step entered UPDATE with, and each `if` item is resolved as its arm
 /// ([`resolved_if_arm`]). Every other item must be unable to move the register ([`cannot_move_register`]: `7`, `.`,
 /// `$i`), so the marks the step takes per item (a sole `foreach`, its register folds) describe nothing a sibling holds.
@@ -50833,7 +50829,7 @@ fn if_arm_comma_items<'e, S: EvalSemantics>(
     };
     let mut narrowed = false;
     for item in items {
-        if literal_else_arm::<S>(item, state, last_step).is_some() {
+        if literal_taken_arm::<S>(item, state, last_step).is_some() {
             narrowed = true;
         } else if !cannot_move_register(item) {
             return None;
@@ -65205,7 +65201,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         for (index, item) in comma_items.iter().enumerate() {
                             in_bind_item.set(bind_item.map_or(true, |at| at == index));
                             update_taken.set(if S::TAG == EvalTag::Jq {
-                                // #4800: a `try` with a handler around an `if` that reaches a literal `else`
+                                // #4800: a `try` with a handler around an `if` that reaches a literal arm
                                 // ran that arm ([`handler_literal_arm`]).
                                 handler_literal_arm::<S>(item, &entry_state, last_step)
                                     .unwrap_or_else(|| {
