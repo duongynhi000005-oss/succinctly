@@ -40681,24 +40681,24 @@ fn same_frame_position_as_spelled<'r>(
             .into_iter()
             .zip(components_from_root(rhs)),
     )
-    .is_some_and(|node| !node.is_some_and(FoldNode::is_copied))
+    .names_one_node()
 }
 
-/// Two chains' components walked in lockstep from `root` ([`folded_component_step`]): `None` where a step names
-/// different children, else the node both reach (`Some(None)` once the walk cannot follow).
+/// Two chains' components walked in lockstep from `root` ([`folded_component_step`]): `Differs` where a step names
+/// different children, else the node both reach, or `Unknown` once the walk cannot follow.
 fn fold_lockstep<'v, 'c>(
     root: &'v OwnedValue,
     pairs: impl Iterator<Item = (&'c Expr, &'c Expr)>,
-) -> Option<Option<FoldNode<'v>>> {
+) -> FoldedStep<'v> {
     let mut node = Some(FoldNode::Value(root));
     for (left, right) in pairs {
         node = match folded_component_step(node, left, right) {
-            FoldedStep::Differs => return None,
+            FoldedStep::Differs => return FoldedStep::Differs,
             FoldedStep::At(next) => Some(next),
             FoldedStep::Unknown => None,
         };
     }
-    Some(node)
+    node.map_or(FoldedStep::Unknown, FoldedStep::At)
 }
 
 /// `chain` walked from `root` (#5103): its components with each slice that spans the whole of a non-empty array dropped
@@ -40777,7 +40777,10 @@ fn same_node_through_full_slices<'r>(
     !left.ends_fresh
         && !right.ends_fresh
         && left.kept.len() == right.kept.len()
-        && fold_lockstep(root, left.kept.into_iter().zip(right.kept)).is_some()
+        && !matches!(
+            fold_lockstep(root, left.kept.into_iter().zip(right.kept)),
+            FoldedStep::Differs
+        )
 }
 
 /// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
@@ -40965,6 +40968,18 @@ enum FoldedStep<'v> {
     /// They agree, but the walk has no node to stand on (a step it cannot
     /// take), so later steps need structural agreement.
     Unknown,
+}
+
+impl FoldedStep<'_> {
+    /// Whether a lockstep walk that agreed throughout still names one node: not where a step differs, and not where
+    /// it ends on a slice jq copies (#5103: two evaluations of it are two arrays).
+    fn names_one_node(self) -> bool {
+        match self {
+            Self::Differs => false,
+            Self::At(node) => !node.is_copied(),
+            Self::Unknown => true,
+        }
+    }
 }
 
 /// One lockstep step of [`same_frame_position`]'s walk from `node`. `lhs` and
