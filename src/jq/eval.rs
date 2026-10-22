@@ -38140,6 +38140,30 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
     (go(e, WRAPPED_CHAIN_DEPTH)
         && outer_extract.map_or(true, |extract| !may_emit_null_or_bool(extract)))
         || bare_bind_foreach_update_key(e).is_some()
+        || comma_bind_split(e).is_some()
+}
+
+/// A fold UPDATE that is a comma of one bare caught-bind `foreach` ([`bare_bind_foreach_update_key`]) and literal
+/// siblings (`(FE | .), 7`, #5018): the index of the `foreach` item and the key its bind steps to. jq runs each
+/// comma item from the register the step entered UPDATE with, and only the `foreach`'s bind moves it, so the fold
+/// resolves the items one at a time and states the moved register for the `foreach`'s emission alone; a sibling's
+/// emission stays at the entry register, where a `null`/boolean EXTRACT is judged against it (the `7` of
+/// `(FE | .), 7` under EXTRACT `null` raises in jq, the `foreach`'s own emission names the bound child's path).
+fn comma_bind_split(update: &Expr) -> Option<(usize, PatternKey<'_>, &[Expr])> {
+    let Expr::Comma(items) = unwrap_paren(without_empty_siblings(update)) else {
+        return None;
+    };
+    let mut split = None;
+    for (index, item) in items.iter().enumerate() {
+        if let Some(key) = bare_bind_foreach_update_key(item) {
+            if split.replace((index, key)).is_some() {
+                return None;
+            }
+        } else if !matches!(unwrap_paren(item), Expr::Literal(_)) {
+            return None;
+        }
+    }
+    split.map(|(index, key)| (index, key, items.as_slice()))
 }
 
 /// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
@@ -63918,33 +63942,38 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register =
         S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
-    // #3761: `resolve_reduce`'s #3710 rule for `foreach`. A computed emission is
-    // not the register, but when nothing in the fold can have moved it jq's
-    // register is where the `foreach` entered, and the next pipe stage may still
-    // navigate from a variable frozen there (`path(.a as $v | foreach (1) as $i
-    // (.; 5; .) | ($v | .b?)?)` is empty in jq, which catches the refusal; the
-    // stage dropped the register and the refusal became an uncatchable guess).
-    // The leaf states it on every untracked emission; the stage then takes the
-    // stricter of that and its own verdict. A trackable entry only: an untracked
-    // one carries its register on the stage.
-    let register_unmoved = S::TAG == EvalTag::Jq
-        && trackable
-        && foreach_cannot_move_register(patterns, input, init, update, extract);
+    // #5018: the per-UPDATE judgements below, for the whole UPDATE and (in a comma of a bare caught-bind `foreach`
+    // and literals, [`comma_bind_split`]) for a literal sibling read as the UPDATE of its own: jq runs each comma
+    // item from the register the step entered UPDATE with, and the `foreach` item's moves do not reach a sibling.
+    #[derive(Clone, Copy, Default)]
+    struct UpdateFlags {
+        register_unmoved: bool,
+        update_states_entry_if_unwalked: bool,
+        update_states_it: bool,
+        step_cannot_move: bool,
+        entry_stays_at_register: bool,
+        entry_stays_unless_source_walks: bool,
+        update_stays_if_stated: bool,
+    }
+    let flags = core::cell::Cell::new(UpdateFlags::default());
     // #3984: see `resolve_reduce`'s identical flag; EXTRACT counts too.
     // #4756: ...except a `null` marker beside a live `null` register: `jv_identical` holds by kind
     // for any `null`, so the marker is the register wherever it came from and there is no pointer
-    // to guess at.
-    let mentions_frozen_var = S::TAG == EvalTag::Jq && {
-        let fold_parts = [input, init, update]
-            .into_iter()
-            .chain(extract)
-            .collect::<Vec<_>>();
-        let null_markers_beside_null_register = !trackable
-            && matches!(frame.register(), Some(OwnedValue::Null))
-            && !frame.register_loss.is_lost()
-            && fold_markers_are_all_null(patterns, &fold_parts);
-        fold_mentions_frozen_var(patterns, &fold_parts) && !null_markers_beside_null_register
+    // to guess at. Asked of the whole UPDATE, and of a literal sibling alone (#5018).
+    let mentions_frozen_for = |upd: &Expr| {
+        S::TAG == EvalTag::Jq && {
+            let fold_parts = [input, init, upd]
+                .into_iter()
+                .chain(extract)
+                .collect::<Vec<_>>();
+            let null_markers_beside_null_register = !trackable
+                && matches!(frame.register(), Some(OwnedValue::Null))
+                && !frame.register_loss.is_lost()
+                && fold_markers_are_all_null(patterns, &fold_parts);
+            fold_mentions_frozen_var(patterns, &fold_parts) && !null_markers_beside_null_register
+        }
     };
+    let mentions_frozen_var = mentions_frozen_for(update);
     // #4499: this `foreach` is another fold's whole UPDATE (or heads the pipe that is), and the
     // `$var` it mentions is in its UPDATE or EXTRACT: a `$var` in INIT or the source is the
     // accumulator or element itself, which the enclosing register's position does not certify.
@@ -63953,18 +63982,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && mentions_frozen_var
         && fold_reads_enclosing_register(input)
         && !fold_mentions_frozen_var(patterns, &[input, init]);
-    // #3580: everything but UPDATE leaves the register where the fold entered, so
-    // an emission is at the entry exactly when the UPDATE output it came from was
-    // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
-    // inside the loop, so the register an emission carries is the one UPDATE's
-    // output left. The statement is per emission; this only says it may be read.
-    // #4129: not the pattern, which is asked per step instead (`walked.is_none()` in the
-    // bind callback below): a destructuring pattern moves the register only on the steps
-    // that walk, and a bare `$var` never does ([`each_fold_bind`] hands it no `walked`).
-    let update_states_entry_if_unwalked = S::TAG == EvalTag::Jq
-        && trackable
-        && !register_unmoved
-        && foreach_body_cannot_move(input, init, extract);
     // #4130: on an untracked entry the stage reads the statement of every emission
     // that navigated nothing ([`foreach_states_register_on_untracked_entry`]), so each
     // one states it: the frame's register when the step provably left it there
@@ -63977,44 +63994,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     let entry_depth = fold_body::depth();
     // #4615: the body this `foreach` is the UPDATE of reads the statement it makes.
     let update_of_stating_fold = fold_body::foreach_body_stating_here();
-    // #4615: an UPDATE that is itself a `foreach` whose source moves the register only by a bind
-    // leaves it at the entry on the emissions that foreach states so, which the stage reads per
-    // emission (a `foreach` inside another fold's body).
-    let null_register_here = !trackable && matches!(frame.register(), Some(OwnedValue::Null));
-    let update_states_it = states_untracked
-        && match unwrap_paren(update) {
-            Expr::Foreach { .. } => {
-                source_moves_register_only_by_binds_in_update(update, null_register_here)
-            }
-            // #4757: and a `reduce` whose source and INIT cannot move the register and whose UPDATE
-            // moves it only by a bind: it backtracks both, so the register is INIT's.
-            Expr::Reduce {
-                input: reduce_input,
-                patterns: reduce_patterns,
-                init: reduce_init,
-                update: reduce_update,
-            } => {
-                patterns_all_bare(reduce_patterns)
-                    && (cannot_move_register(reduce_input)
-                        || source_moves_register_only_by_binds_in_update(
-                            reduce_input,
-                            null_register_here,
-                        ))
-                    && cannot_move_register(reduce_init)
-                    && source_moves_register_only_by_binds_in_update(
-                        reduce_update,
-                        null_register_here,
-                    )
-            }
-            _ => false,
-        };
     let mut stating_sink = |branch: PathBranch<'a>| -> Demand {
         let _after_the_loop = fold_body::restore(entry_marks);
-        if register_unmoved && !branch.trackable {
+        if flags.get().register_unmoved && !branch.trackable {
             sink(branch.with_register(BranchRegister::Unmoved(Cow::Borrowed(value))))
         } else if states_untracked && !branch.trackable && branch.path.depth() == 0 {
             // #4615: the step's emission is at the entry register when it says so itself.
-            let nested_says_entry = !update_states_it
+            let nested_says_entry = !flags.get().update_states_it
                 || matches!(
                     branch.register,
                     BranchRegister::Unmoved(_) | BranchRegister::AtEntry
@@ -64053,11 +64039,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // An INIT escape still surfaces only after every fork it preceded has
     // run, exactly as the collecting `flow_result(init_escape)` tail did:
     // `resolve_node_sink` reports it after delivering its prefix.
-    // #3883: nothing after the source can move the step register -- the same `UPDATE` and
-    // `EXTRACT` for every element, so judged once. (`INIT` and the source are already in the
-    // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
-    let step_cannot_move =
-        cannot_move_register(update) && extract.map_or(true, cannot_move_register);
     // #4835: the INIT of the outermost fold's direct UPDATE may move the register; below it, or behind a
     // wrapper, it must not ([`body_holds_chain_foreach`]).
     let chain_foreach_may_move_init = fold_body::depth() == 0 && cannot_move_register(input);
@@ -64099,9 +64080,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // step moves it and the `foreach` emits its state with the register there, so a `null` or boolean EXTRACT
     // is that register's node or a raise ([`computed_at_register`]) and a navigating one steps from it (#5015). Whatever
     // the EXTRACT is: a plain `.`, `.a?` or `length` over an `INIT null` reads the moved register too (#5015).
+    // #5018: ...or, in a comma of literals, the key of the one `foreach` item, which only that item's emissions state.
+    let comma_split = bare_bind_foreach_update_on_register
+        .then(|| comma_bind_split(update))
+        .flatten();
+    let comma_bind_item = comma_split.as_ref().map(|(index, _, _)| *index);
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
+        .or_else(|| comma_split.map(|(_, key, _)| key))
         // #5015: for every EXTRACT but a `getpath`, which reads from the state's own node, not from where the
         // bind moved the register: over an `INIT .` it names the root's path where jq's does, so the restatement
         // misplaces it (190 of 60,000 rows of an EXTRACT-builtin grid). One that #4957/#5018 already stated for
@@ -64115,15 +64102,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     })
                 })
         });
-    let alt_bind_update_on_register = first_step_on_register
+    let alt_bind_update_off_comma = first_step_on_register
         && (update_is_alt_bind(update)
             // #4537: and a nested `foreach` over `first(CHAIN)`, whose source meets `.` there. #4818: or
             // over a bounded chain behind other stages (`limit(2; (., .) | CHAIN)`), which the routing in
             // `drive_fold_source_with` then sends to the resolver's walk of a bound (#4669). #4835: also
             // behind a `try`, a comma, a pipe or an `if`.
             || body_holds_chain_foreach(update, chain_foreach_may_move_init))
-        || single_bind_update_on_register
-        || bare_bind_foreach_update_on_register;
+        || single_bind_update_on_register;
+    let alt_bind_update_on_register =
+        alt_bind_update_off_comma || bare_bind_foreach_update_on_register;
     // ...and EXTRACT, which runs with `.` on the state UPDATE stored.
     let alt_bind_extract_on_register = first_step_on_register
         && extract.is_some_and(|extract| {
@@ -64135,36 +64123,116 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #4694: see `resolve_reduce`'s `carries_dot`.
     let carries_dot =
         S::TAG == EvalTag::Jq && input_cannot_move && matches!(unwrap_paren(init), Expr::Identity);
-    let entry_stays_at_register = states_untracked
-        && init_keeps_register
-        && !mentions_frozen_var
-        && input_cannot_move
-        && step_cannot_move;
-    // #4489: a source whose only movement is a destructuring bind (a `?//` chain that falls back
-    // to its bare alternative on an entry that is not the register) still leaves the register at
-    // the entry on an element that took no walk step ([`source_moves_register_only_by_binds`]).
-    // The element says so itself, below.
-    // #4615: also inside another fold's body. The statement an emission makes there is read by
-    // the enclosing fold, which accepts it only where its own UPDATE is this `foreach`
-    // (`update_states_it`); a `try` or a navigation around it never meets it as the register
-    // (the #4609 whole-grid sample's `try`-in-UPDATE row, which answered `["a"]` where jq prints
-    // nothing, is in the sweep's `untracked-foreach-update-try` context).
-    let entry_stays_unless_source_walks = states_untracked
-        && init_keeps_register
-        && !mentions_frozen_var
-        && step_cannot_move
-        && !input_cannot_move
-        && if entry_depth == 0 {
-            source_moves_register_only_by_binds(input)
-        } else {
-            // The enclosing `foreach` accepted this source with its own register in hand.
-            update_of_stating_fold && source_moves_register_only_by_binds_in_update(input, true)
-        };
-    let update_stays_if_stated = update_states_it
-        && init_keeps_register
-        && !mentions_frozen_var
-        && input_cannot_move
-        && extract.map_or(true, cannot_move_register);
+    // The per-UPDATE judgements, asked of the whole UPDATE and, for a comma of a bare caught-bind `foreach` and
+    // literals ([`comma_bind_split`], #5018), of a literal sibling alone: jq runs each comma item from the
+    // register the step entered UPDATE with, and the `foreach` item's moves do not reach a sibling.
+    let update_flags = |upd: &Expr, mentions_frozen_var: bool| -> UpdateFlags {
+        // #3761: `resolve_reduce`'s #3710 rule for `foreach`. A computed emission is
+        // not the register, but when nothing in the fold can have moved it jq's
+        // register is where the `foreach` entered, and the next pipe stage may still
+        // navigate from a variable frozen there (`path(.a as $v | foreach (1) as $i
+        // (.; 5; .) | ($v | .b?)?)` is empty in jq, which catches the refusal; the
+        // stage dropped the register and the refusal became an uncatchable guess).
+        // The leaf states it on every untracked emission; the stage then takes the
+        // stricter of that and its own verdict. A trackable entry only: an untracked
+        // one carries its register on the stage.
+        let register_unmoved = S::TAG == EvalTag::Jq
+            && trackable
+            && foreach_cannot_move_register(patterns, input, init, upd, extract);
+        // #3580: everything but UPDATE leaves the register where the fold entered, so
+        // an emission is at the entry exactly when the UPDATE output it came from was
+        // (an `AtEntry`, or a handler's `Unmoved` of the fold's register). jq emits from
+        // inside the loop, so the register an emission carries is the one UPDATE's
+        // output left. The statement is per emission; this only says it may be read.
+        // #4129: not the pattern, which is asked per step instead (`walked.is_none()` in the
+        // bind callback below): a destructuring pattern moves the register only on the steps
+        // that walk, and a bare `$var` never does ([`each_fold_bind`] hands it no `walked`).
+        let update_states_entry_if_unwalked = S::TAG == EvalTag::Jq
+            && trackable
+            && !register_unmoved
+            && foreach_body_cannot_move(input, init, extract);
+        // #4615: an UPDATE that is itself a `foreach` whose source moves the register only by a bind
+        // leaves it at the entry on the emissions that foreach states so, which the stage reads per
+        // emission (a `foreach` inside another fold's body).
+        let null_register_here = !trackable && matches!(frame.register(), Some(OwnedValue::Null));
+        let update_states_it = states_untracked
+            && match unwrap_paren(update) {
+                Expr::Foreach { .. } => {
+                    source_moves_register_only_by_binds_in_update(update, null_register_here)
+                }
+                // #4757: and a `reduce` whose source and INIT cannot move the register and whose UPDATE
+                // moves it only by a bind: it backtracks both, so the register is INIT's.
+                Expr::Reduce {
+                    input: reduce_input,
+                    patterns: reduce_patterns,
+                    init: reduce_init,
+                    update: reduce_update,
+                } => {
+                    patterns_all_bare(reduce_patterns)
+                        && (cannot_move_register(reduce_input)
+                            || source_moves_register_only_by_binds_in_update(
+                                reduce_input,
+                                null_register_here,
+                            ))
+                        && cannot_move_register(reduce_init)
+                        && source_moves_register_only_by_binds_in_update(
+                            reduce_update,
+                            null_register_here,
+                        )
+                }
+                _ => false,
+            };
+        // #3883: nothing after the source can move the step register -- the same `UPDATE` and
+        // `EXTRACT` for every element, so judged once. (`INIT` and the source are already in the
+        // step register: `FoldRegister::enter` and `foreach_step_register` place it after them.)
+        let step_cannot_move =
+            cannot_move_register(upd) && extract.map_or(true, cannot_move_register);
+        UpdateFlags {
+            register_unmoved,
+            update_states_entry_if_unwalked,
+            update_states_it,
+            step_cannot_move,
+            entry_stays_at_register: states_untracked
+                && init_keeps_register
+                && !mentions_frozen_var
+                && input_cannot_move
+                && step_cannot_move,
+            // #4489: a source whose only movement is a destructuring bind (a `?//` chain that falls back
+            // to its bare alternative on an entry that is not the register) still leaves the register at
+            // the entry on an element that took no walk step ([`source_moves_register_only_by_binds`]).
+            // The element says so itself, below.
+            // #4615: also inside another fold's body. The statement an emission makes there is read by
+            // the enclosing fold, which accepts it only where its own UPDATE is this `foreach`
+            // (`update_states_it`); a `try` or a navigation around it never meets it as the register
+            // (the #4609 whole-grid sample's `try`-in-UPDATE row, which answered `["a"]` where jq prints
+            // nothing, is in the sweep's `untracked-foreach-update-try` context).
+            entry_stays_unless_source_walks: states_untracked
+                && init_keeps_register
+                && !mentions_frozen_var
+                && step_cannot_move
+                && !input_cannot_move
+                && if entry_depth == 0 {
+                    source_moves_register_only_by_binds(input)
+                } else {
+                    // The enclosing `foreach` accepted this source with its own register in hand.
+                    update_of_stating_fold
+                        && source_moves_register_only_by_binds_in_update(input, true)
+                },
+            update_stays_if_stated: update_states_it
+                && init_keeps_register
+                && !mentions_frozen_var
+                && input_cannot_move
+                && extract.map_or(true, cannot_move_register),
+        }
+    };
+    let whole_flags = update_flags(update, mentions_frozen_var);
+    flags.set(whole_flags);
+    // #5018: ...and the same judgements for a literal sibling alone (no `foreach` to move the register, none to
+    // mention a frozen `$x`), which the comma's literals are read as ([`comma_bind_split`] admits no other).
+    let sibling_flags = comma_bind_split(update).and_then(|(at, _, items)| {
+        let (_, sibling) = items.iter().enumerate().find(|(index, _)| *index != at)?;
+        Some(update_flags(sibling, mentions_frozen_for(sibling)))
+    });
     let mut fork_index = 0usize;
     // Set by the sink when a fork ends the whole call; it outranks INIT's
     // own trailing escape, which jq never reaches once a consumer has
@@ -64393,17 +64461,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // body can have moved it. Read by the sink above, per emission.
                         // #4489: ...and a source element that the resolver left an unmoved root
                         // branch, untracked, walked no step of a destructuring bind either.
-                        let source_unmoved = entry_stays_unless_source_walks
-                            && elem.register_path.is_none()
-                            && matches!(elem.moved, MovedRegister::Unmoved);
-                        step_at_entry.set(
-                            (entry_stays_at_register || source_unmoved || update_stays_if_stated)
-                                && walked.is_none(),
-                        );
-                        // #4129: this step's emissions state the entry when no walk step
-                        // moved the register off it.
-                        let update_states_entry =
-                            update_states_entry_if_unwalked && walked.is_none();
+                        // #5018: set per UPDATE item below ([`UpdateFlags`]).
+                        let update_states_entry = core::cell::Cell::new(false);
                         if let Some(control) =
                             charge_alternative_update(&mut budget, &mut ran_update, "foreach")
                         {
@@ -64424,13 +64483,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // `first(path(foreach 1 as $x (.; .[("a"|stderr), ("b"|stderr)])))`
                         // wrote `ab` where jq writes `a`. `resolve_reduce`'s UPDATE stays
                         // collected: jq evaluates every one of its outputs.
-                        let entry_state = core::mem::replace(&mut state, OwnedValue::Null);
+                        let mut entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
-                        let update_taken = if S::TAG == EvalTag::Jq {
-                            taken_if_branch::<S>(&bound_update, &entry_state)
-                        } else {
-                            &bound_update
-                        };
+                        // #5018: per UPDATE item of a comma ([`comma_bind_split`]), set below.
+                        let update_taken = core::cell::Cell::new(&bound_update);
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
                         // escapes first, must not leave the old node's path behind).
@@ -64469,6 +64525,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             single_bind_update_on_register && active_at_register && !live_stepped;
                         let mut delivered = false;
                         let update_stop_at = core::cell::Cell::new(None::<u64>);
+                        // #5018: whether the UPDATE item being resolved is the comma's `foreach` ([`comma_bind_split`]);
+                        // an UPDATE that is not such a comma is its own item.
+                        let in_bind_item = core::cell::Cell::new(true);
                         let mut on_update = |update_branch: PathBranch<'a>| -> Demand {
                             delivered = true;
                             // This closure runs again when a `?//` inside UPDATE
@@ -64527,7 +64586,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             }
                             // #3580: this emission's register is the one UPDATE's
                             // output left, which is the entry's when it said so.
-                            let update_unmoved = update_states_entry
+                            let update_unmoved = update_states_entry.get()
                                 && matches!(update_branch.register, BranchRegister::AtEntry);
                             // #3939: a computed emission that sits at the step's register
                             // (a pattern walk or a navigating source moved it off the root)
@@ -64562,7 +64621,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         )
                                         && (*branch.path == *reg.path
                                             && matches!(branch.register, BranchRegister::AtEntry)
-                                            || step_cannot_move
+                                            || flags.get().step_cannot_move
                                                 && (branch.path.depth() == 0
                                                     || *branch.path == *reg.path))
                                 }) {
@@ -64587,11 +64646,18 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // EXTRACT runs from there.
                                 let moved_update_branch;
                                 let mut bind_moved = false;
-                                let extract_branch = match inner_bind_key.as_ref().and_then(|key| {
-                                    let component = key.component::<S>(&active_reg.value).ok()?;
-                                    let child = key.child::<S>(&active_reg.value).ok()?;
-                                    Some((PathPrefix::extend(&active_reg.path, component), child))
-                                }) {
+                                let extract_branch = match inner_bind_key
+                                    .as_ref()
+                                    .filter(|_| in_bind_item.get())
+                                    .and_then(|key| {
+                                        let component =
+                                            key.component::<S>(&active_reg.value).ok()?;
+                                        let child = key.child::<S>(&active_reg.value).ok()?;
+                                        Some((
+                                            PathPrefix::extend(&active_reg.path, component),
+                                            child,
+                                        ))
+                                    }) {
                                     Some((path, child)) => {
                                         bind_moved = true;
                                         moved_update_branch = PathBranch::passthrough(
@@ -64608,7 +64674,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 let extract_reg = active_reg.advance::<S>(
                                     extract_branch,
                                     // #4948: only the branch of an `if . then .. else .. end` the state took ran.
-                                    update_taken,
+                                    update_taken.get(),
                                     frame,
                                     entry_state_by_kind || is_null_or_bool(&active_reg.value),
                                 );
@@ -64779,16 +64845,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             && !live_stepped
                             && taken_then_branch::<S>(&bound_update, &entry_state)
                                 .is_some_and(|then| update_wraps_bare_bind_foreach(then, extract));
-                        let _acc_is_register =
-                            ((alt_bind_update_on_register && active_at_register && !live_stepped)
-                                || then_branch_on_register)
-                                .then(fold_body::acc_is_register);
-                        // #4550: see `resolve_reduce`'s `_acc_off_register`.
-                        // UPDATE only: EXTRACT resolves one body deeper, so it never reads this mark.
-                        // Never together with the mark above.
-                        let _acc_off_register =
-                            (state_off_register && !live_stepped && _acc_is_register.is_none())
-                                .then(fold_body::acc_off_register);
                         // #4694: a `foreach` that carries `.` through (its source cannot move the register
                         // and its INIT is `.`) runs its UPDATE on the state its enclosing body handed it,
                         // which a moved body's register is still not at: the marks `resolve_reduce` passes
@@ -64797,96 +64853,167 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             .then(fold_body::source_moved_inherited);
                         let inherits_moved_loop =
                             carries_dot && fold_body::foreach_body_moved_here();
-                        // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
-                        // emits, so an inner source that is empty leaves this one emitting nothing.
-                        let _sole_update_foreach =
-                            sole_update_mark::<S>(&bound_update, FoldBody::ForeachUpdate);
-                        // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
-                        // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
-                        // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
-                        // register, or retries an alternative on the body's raise, in ways the step does not report.
-                        let bare_step =
-                            matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
-                        // And only on the `foreach`'s last step, of its last INIT fork: a step before it that placed
-                        // its handler would let the `foreach` reach later steps `main` never reached (it refused at
-                        // this one), whose handler the reading may not cover. Unseeded there, a refusal of a frozen
-                        // `$x`/`$i` is read as exact, which a `try`/`?` around the fold swallows (#5012). What runs
-                        // after the `foreach`'s outputs is newly reached, as after any refusal turned into an answer.
-                        let last_step = run_bounds == Some((fork_index + 1, steps));
-                        // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
-                        // `bind.apply` already copies the whole UPDATE for the step).
-                        let seedable_step = bare_step && last_step;
-                        let mut entry_tries = None;
-                        // #4800: ...and a caught foreign `$x` is read against the element the source moved the
-                        // register onto, not the state the last step left. Where the pattern lands on a
-                        // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
-                        // handler that emits, only where #5004 places every such handler's output, or the handler
-                        // is inside the nested `foreach`'s INIT, UPDATE or EXTRACT (it emits into that state).
-                        let _register = (_sole_update_foreach.is_some()
-                            && elem.register_path.is_some()
-                            && plain_update_heads(&bound_update).is_some_and(|(heads, source)| {
-                                head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
-                                    source_destructures_to_null_or_bool(source, &handed)
-                                        || (is_null_or_bool(&handed)
-                                            && source_destructures_to_container(source)
-                                            && match emitting_handler_count(&bound_update) {
-                                                0 => true,
-                                                emitting => {
-                                                    entry_tries = seedable_step
-                                                        .then(|| update_entry_tries(&bound_update))
-                                                        .flatten();
-                                                    entry_tries.as_ref().is_some_and(
-                                                        |(tries, inner)| {
-                                                            tries.len() + inner == emitting
-                                                        },
-                                                    )
-                                                }
-                                            })
-                                })
-                            }))
-                        .then(|| fold_body::foreach_register(elem.value.clone()));
-                        // #5004: placed only where that reading holds, which is where the resolver models whether
-                        // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
-                        // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
-                        // grids turned 33 of 40,000 rows into wrong answers).
-                        let _update_try_entry = (seedable_step && _register.is_some())
-                            .then(|| {
-                                entry_tries
-                                    .take()
-                                    .map(|(tries, _)| tries)
-                                    .or_else(|| update_entry_try_bodies(&bound_update))
-                            })
-                            .flatten()
-                            .map(|tries| {
-                                fold_body::update_try_entry(tries, active_reg.value.clone())
-                            });
-                        // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
-                        // read the register the step left.
-                        let _register_folds = (S::TAG == EvalTag::Jq)
-                            .then(|| fold_body::register_folds(register_fold_items(&bound_update)));
-                        let _foreach_body = if input_cannot_move && !inherits_moved_loop {
-                            if update_stays_if_stated {
-                                fold_body::foreach_body_stating()
+                        // #5018: a comma of the `foreach` and literals runs each item from the register the step
+                        // entered UPDATE with, so each is resolved on its own and only the `foreach`'s emissions
+                        // state the register its bind moved.
+                        // Split the step's own copy of the UPDATE the way the gate split `update`, so the index
+                        // names the same item.
+                        let bound_split =
+                            comma_bind_item.and_then(|_| comma_bind_split(&bound_update));
+                        debug_assert!(comma_bind_item.is_none() || bound_split.is_some());
+                        let comma_items = bound_split
+                            .as_ref()
+                            .map_or_else(|| core::slice::from_ref(&bound_update), |split| split.2);
+                        let bind_item = bound_split.as_ref().map(|split| split.0);
+                        let mut flow = ResolveFlow::Exhausted;
+                        for (index, item) in comma_items.iter().enumerate() {
+                            in_bind_item.set(bind_item.map_or(true, |at| at == index));
+                            update_taken.set(if S::TAG == EvalTag::Jq {
+                                taken_if_branch::<S>(item, &entry_state)
                             } else {
-                                fold_body::foreach_body()
-                            }
-                        } else {
-                            fold_body::foreach_body_moved()
-                        };
-                        let flow = active_reg.resolve_sink::<S>(
-                            &bound_update,
-                            entry_state,
-                            active_at_register,
-                            &entry_snapshot,
-                            keep,
-                            &mut |update_branch| {
-                                let demand = on_update(update_branch);
-                                if demand == Demand::Stop {
-                                    update_stop_at.set(Some(pipe_retry_generation()));
+                                item
+                            });
+                            let item_flags = if in_bind_item.get() {
+                                whole_flags
+                            } else {
+                                sibling_flags.unwrap_or(whole_flags)
+                            };
+                            flags.set(item_flags);
+                            // #4130: an emission of this step is at the entry register when the
+                            // step took no walk step (a bare `$var`, or the one a failed
+                            // destructure's restored fork reached) and nothing else in the loop
+                            // body can have moved it. Read by the sink above, per emission.
+                            // #4489: ...and a source element that the resolver left an unmoved root
+                            // branch, untracked, walked no step of a destructuring bind either.
+                            let source_unmoved = item_flags.entry_stays_unless_source_walks
+                                && elem.register_path.is_none()
+                                && matches!(elem.moved, MovedRegister::Unmoved);
+                            step_at_entry.set(
+                                (item_flags.entry_stays_at_register
+                                    || source_unmoved
+                                    || item_flags.update_stays_if_stated)
+                                    && walked.is_none(),
+                            );
+                            // #4129: this step's emissions state the entry when no walk step
+                            // moved the register off it.
+                            update_states_entry.set(
+                                item_flags.update_states_entry_if_unwalked && walked.is_none(),
+                            );
+                            // #5018: the `foreach` item's emissions are at the register its source left, as a lone
+                            // `foreach` UPDATE's are; a literal sibling's are not.
+                            let _acc_is_register = (((if in_bind_item.get() {
+                                alt_bind_update_on_register
+                            } else {
+                                alt_bind_update_off_comma
+                            }) && active_at_register
+                                && !live_stepped)
+                                || (in_bind_item.get() && then_branch_on_register))
+                                .then(fold_body::acc_is_register);
+                            // #4550: see `resolve_reduce`'s `_acc_off_register`.
+                            // UPDATE only: EXTRACT resolves one body deeper, so it never reads this mark.
+                            // Never together with the mark above.
+                            let _acc_off_register =
+                                (state_off_register && !live_stepped && _acc_is_register.is_none())
+                                    .then(fold_body::acc_off_register);
+                            // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
+                            // emits, so an inner source that is empty leaves this one emitting nothing.
+                            let _sole_update_foreach =
+                                sole_update_mark::<S>(item, FoldBody::ForeachUpdate);
+                            // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
+                            // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
+                            // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
+                            // register, or retries an alternative on the body's raise, in ways the step does not report.
+                            let bare_step =
+                                matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
+                            // And only on the `foreach`'s last step, of its last INIT fork: a step before it that placed
+                            // its handler would let the `foreach` reach later steps `main` never reached (it refused at
+                            // this one), whose handler the reading may not cover. Unseeded there, a refusal of a frozen
+                            // `$x`/`$i` is read as exact, which a `try`/`?` around the fold swallows (#5012). What runs
+                            // after the `foreach`'s outputs is newly reached, as after any refusal turned into an answer.
+                            let last_step = run_bounds == Some((fork_index + 1, steps));
+                            // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
+                            // `bind.apply` already copies the whole UPDATE for the step).
+                            let seedable_step = bare_step && last_step;
+                            let mut entry_tries = None;
+                            // #4800: ...and a caught foreign `$x` is read against the element the source moved the
+                            // register onto, not the state the last step left. Where the pattern lands on a
+                            // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
+                            // handler that emits, only where #5004 places every such handler's output, or the handler
+                            // is inside the nested `foreach`'s INIT, UPDATE or EXTRACT (it emits into that state).
+                            let _register = (_sole_update_foreach.is_some()
+                                && elem.register_path.is_some()
+                                && plain_update_heads(item).is_some_and(|(heads, source)| {
+                                    head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
+                                        source_destructures_to_null_or_bool(source, &handed)
+                                            || (is_null_or_bool(&handed)
+                                                && source_destructures_to_container(source)
+                                                && match emitting_handler_count(item) {
+                                                    0 => true,
+                                                    emitting => {
+                                                        entry_tries = seedable_step
+                                                            .then(|| update_entry_tries(item))
+                                                            .flatten();
+                                                        entry_tries.as_ref().is_some_and(
+                                                            |(tries, inner)| {
+                                                                tries.len() + inner == emitting
+                                                            },
+                                                        )
+                                                    }
+                                                })
+                                    })
+                                }))
+                            .then(|| fold_body::foreach_register(elem.value.clone()));
+                            // #5004: placed only where that reading holds, which is where the resolver models whether
+                            // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
+                            // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
+                            // grids turned 33 of 40,000 rows into wrong answers).
+                            let _update_try_entry = (seedable_step && _register.is_some())
+                                .then(|| {
+                                    entry_tries
+                                        .take()
+                                        .map(|(tries, _)| tries)
+                                        .or_else(|| update_entry_try_bodies(item))
+                                })
+                                .flatten()
+                                .map(|tries| {
+                                    fold_body::update_try_entry(tries, active_reg.value.clone())
+                                });
+                            // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
+                            // read the register the step left.
+                            let _register_folds = (S::TAG == EvalTag::Jq)
+                                .then(|| fold_body::register_folds(register_fold_items(item)));
+                            let _foreach_body = if input_cannot_move && !inherits_moved_loop {
+                                if flags.get().update_stays_if_stated {
+                                    fold_body::foreach_body_stating()
+                                } else {
+                                    fold_body::foreach_body()
                                 }
-                                demand
-                            },
-                        );
+                            } else {
+                                fold_body::foreach_body_moved()
+                            };
+                            flow = active_reg.resolve_sink::<S>(
+                                item,
+                                // Moved into the last item's resolve, as it was for the one item.
+                                if index + 1 == comma_items.len() {
+                                    core::mem::replace(&mut entry_state, OwnedValue::Null)
+                                } else {
+                                    entry_state.clone()
+                                },
+                                active_at_register,
+                                &entry_snapshot,
+                                keep,
+                                &mut |update_branch| {
+                                    let demand = on_update(update_branch);
+                                    if demand == Demand::Stop {
+                                        update_stop_at.set(Some(pipe_retry_generation()));
+                                    }
+                                    demand
+                                },
+                            );
+                            if !matches!(flow, ResolveFlow::Exhausted) {
+                                break;
+                            }
+                        }
                         // The sink answered `Stop`: its own verdict is in `outcome`,
                         // and a flow that merely ended early (a bounded consumer
                         // *inside* UPDATE) is a success for this step.

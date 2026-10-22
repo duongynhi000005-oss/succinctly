@@ -2689,11 +2689,11 @@ fn test_foreach_update_empty_comma_item_under_try_catch_4800() -> Result<()> {
     ])
 }
 
-/// #4800: a comma that holds a *value* beside the `foreach` is not read (`(FE, 7)`: the `7` is stored as a state of its
-/// own, with the register where jq leaves it), so a `?` around the path keeps the refusal, uncatchably, where jq
-/// answers `[]`. Loud, not a wrong answer; the uncaught form matches jq's own refusal.
+/// #4800: a comma that holds a *value* beside the `foreach` (`(FE, 7)`: the `7` is stored as a state of its own,
+/// with the register where jq leaves it) was not read, so a `?` around the path kept the refusal, uncatchably, where
+/// jq answers `[]`. Since #5018 a literal sibling is read item by item and the answer is jq's own.
 #[test]
-fn test_foreach_update_comma_with_a_value_sibling_stays_refused_4800() -> Result<()> {
+fn test_foreach_update_comma_with_a_value_sibling_answers_like_jq_4800() -> Result<()> {
     let filter = r"[path(. as $x | foreach . as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .), 7); $i))?]";
     let input = r#"{"a":null}"#;
     for (stdout, stderr, code) in [
@@ -2702,12 +2702,8 @@ fn test_foreach_update_comma_with_a_value_sibling_stays_refused_4800() -> Result
     ] {
         assert_eq!(
             (stdout.as_str(), code),
-            ("", 5),
+            ("[]\n", 0),
             "{filter}: stderr {stderr:?}"
-        );
-        assert!(
-            stderr.contains(r#"Invalid path expression with result {"a":null}"#),
-            "{filter}: {stderr:?}"
         );
     }
     Ok(())

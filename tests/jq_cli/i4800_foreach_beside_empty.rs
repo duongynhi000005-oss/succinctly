@@ -717,9 +717,10 @@ fn test_caught_foreign_marker_destructure_foreach_beside_an_empty_comma_item_480
 }
 
 /// #4800: the controls of [`test_caught_foreign_marker_destructure_foreach_beside_an_empty_comma_item_4800`]
-/// keep their refusal: a sibling that stores a value of its own (`7`, `null`) or a second `foreach` that moves
+/// keep their refusal: a sibling that stores a value of its own (`7`) or a second `foreach` that moves
 /// the register itself is not the bare `FE`, so the UPDATE is refused naming its own state where jq names the
-/// sibling's value. Only the refusal's kind is pinned here, as the sibling tests do.
+/// sibling's value. Only the refusal's kind is pinned here, as the sibling tests do. (A `null` literal sibling is
+/// read item by item since #5018: `test_5018_null_sibling_beside_a_bare_caught_bind_foreach_update`.)
 #[test]
 fn test_caught_foreign_marker_destructure_foreach_beside_a_value_item_stays_refused_4800(
 ) -> Result<()> {
@@ -741,13 +742,6 @@ fn test_caught_foreign_marker_destructure_foreach_beside_a_value_item_stays_refu
         (
             r#"{"a":null}"#,
             r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .))",
-            "",
-            "Invalid path expression with result",
-            5,
-        ),
-        (
-            r#"{"a":null}"#,
-            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), null; .))",
             "",
             "Invalid path expression with result",
             5,

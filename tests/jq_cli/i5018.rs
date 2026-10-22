@@ -1028,3 +1028,373 @@ fn test_5018_pipe_stage_emitting_null_or_boolean_after_a_bare_caught_bind_foreac
         ),
     ])
 }
+
+// jq runs each item of a comma UPDATE from the register the step entered UPDATE with, and only the bare caught-bind
+// `foreach`'s bind moves it onto the bound child. The `foreach` item's emission is judged against that child, and a
+// literal sibling's against the entry register (the `7` of `(FE | .), 7` raises under a `null` EXTRACT on a root
+// object). The comma was read as one UPDATE whose register the `foreach` moved, so `try path(..) catch "C"` answered
+// `"C"` first where jq answers the path, and `[path(..)?]` dropped the paths.
+
+/// #5018: a comma of one bare caught-bind `foreach` (alone, piped into `.`/`null`/`not`, behind `try`/`?`) and literal
+/// siblings (`7`, `null`, `true`, `false`, `"s"`, `0`), in either order and with two siblings, over the sources, INITs
+/// and EXTRACTs of the grid, in `path`, `del` and `paths`. Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit
+/// code), both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5018_comma_sibling_beside_a_bare_caught_bind_foreach_update() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7; null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":7}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (.; 0, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | not), "s"; $i))?]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach (.) as $i (null; 0, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .))?, false; $x))?]",
+            "[[],[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try path(. as $x | foreach ((.a,.a)) as $i (.; 0, (foreach (try ($x as [$a] | .)) as $y (.; .; .) | .); null)) catch "C""#,
+            "[\"a\"]\n[\"a\",0]\n[\"a\"]\n[\"a\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":7}"#,
+            r#"[path(. as $x | foreach ((.,.a,.)) as $i (null; "s", (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 0; $i))?]"#,
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.) as $i (null; 7, try (foreach (try ($x as [$a] | .)) as $y (.; .; .)), 0; $i)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[7]",
+            r"[path(. as $x | foreach (null) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .))?, false, true; length))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r#"try del(. as $x | foreach ((.,.a,.)) as $i (.; (foreach (($x as {a:$a} | .)?) as $y (.; .; .)), false, 7; true)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"[7]",
+            r#"try del(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as [$a] | .)) as $y (.; .; .) | .), "s"; .a?)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach (.,.a) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .))?, true, false; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r#"[path(. as $x | foreach ((.,.a,.)) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .) | .), "s", 7; length))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[7]",
+            r"[path(. as $x | foreach (.) as $i (null; true, null, (foreach (($x as {a:$a} | .)?) as $y (.; .; .) | null); $i))?]",
+            "[[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.) as $i (null; try (foreach (try ($x as [$a] | .)) as $y (.; .; .)), 0, false; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.a,.) as $i (null; "s", (foreach (($x as {a:$a} | .)?) as $y (.; .; .))?, 0; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[7]}"#,
+            r#"try path(. as $x | foreach (null) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | not), false, false; $x)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach ((.,.a,.)) as $i (.; null, true, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | not); $i)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r#"try path(. as $x | foreach (.,.a) as $i (null; true, null, try (foreach (try ($x as [$a] | .)) as $y (.; .; .)); $x)) catch "C""#,
+            "[]\n[]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try path(. as $x | foreach ((.,.a,.)) as $i (null; (foreach (($x as {a:$a} | .)?) as $y (.; .; .))?, true, null; $i)) catch "C""#,
+            "[\"a\"]\n[]\n[]\n[\"a\",\"a\"]\n[\"a\"]\n[\"a\"]\n[\"a\"]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (null; false, "s", (foreach (try ($x as [$a] | .)) as $y (.; .; .) | .); $i)) catch "C""#,
+            "[]\n[]\n[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.,.a) as $i (null; "s", false, (foreach (($x as {a:$a} | .)?) as $y (.; .; .))?; $i)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach ((.,.a,.)) as $i (.; (foreach (($x as {a:$a} | .)?) as $y (.; .; .) | null), null, true; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach (.a,.) as $i (.; null, (foreach (($x as {a:$a} | .)?) as $y (.; .; .) | null), 0; $x))?]",
+            "[[\"a\"],[\"a\",\"a\"],[\"a\"],[],[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[7]",
+            r"[path(. as $x | foreach (.) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .))?, false, false; .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r#"try del(. as $x | foreach (null) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .) | .), true, true; 7)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r#"try path(. as $x | foreach ((.,.a,.)) as $i (null; "s", (foreach (try ($x as [$a] | .)) as $y (.; .; .) | .), "s"; $i)) catch "C""#,
+            "[]\n[]\n[\"a\"]\n[\"a\"]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try path(. as $x | foreach (.) as $i (null; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 7, "s"; $x)) catch "C""#,
+            "[\"a\"]\n[]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[7]}"#,
+            r#"try path(. as $x | foreach (.) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .) | null), null, "s"; length)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.a,.) as $i (null; 7, try (foreach ($x as {a:$a} | .) as $y (.; .; .)), "s"; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach (.a,.) as $i (.; false, 7, (foreach (($x as {a:$a} | .)?) as $y (.; .; .)); $x)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r#"try path(. as $x | foreach ((.,.a,.)) as $i (null; 7, try (foreach (try ($x as [$a] | .)) as $y (.; .; .)), "s"; $x)) catch "C""#,
+            "[]\n[]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach ((.a,.a)) as $i (null; 0, (foreach ($x as {a:$a} | .) as $y (.; .; .) | null), null; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.) as $i (.; (foreach ($x as {a:$a} | .) as $y (.; .; .)), null, null; .)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach ((.,.a,.)) as $i (.; (foreach (try ($x as [$a] | .)) as $y (.; .; .)), null, 7; $x))?]",
+            "[[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach ((.a,.a)) as $i (null; "s", (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); $i)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r#"try del(. as $x | foreach ((.a,.a)) as $i (null; 7, (foreach (try ($x as [$a] | .)) as $y (.; .; .) | not), false; null)) catch "C""#,
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as [$a] | .)) as $y (.; .; .)), "s"; $i))?]"#,
+            "[[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"[path(. as $x | foreach ((.,.a,.)) as $i (null; false, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | null), 0; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[7]}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), "s", null; null))?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r#"[path(. as $x | foreach (null) as $i (null; (foreach (try ($x as [$a] | .)) as $y (.; .; .) | null), "s", null; .))?]"#,
+            "[[0]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[7]",
+            r#"try path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), true; $x)) catch "C""#,
+            "[]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r"[null]",
+            r#"try path(. as $x | foreach (.,.a) as $i (null; null, true, (foreach (($x as {a:$a} | .)?) as $y (.; .; .) | not); .a?)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[7]}"#,
+            r#"try path(. as $x | foreach ((.,.a,.)) as $i (.; false, false, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | not); $i)) catch "C""#,
+            "[]\n[]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach ((.a,.a)) as $i (null; 7, (foreach ($x as {a:$a} | .) as $y (.; .; .))?, 7; $i)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5018: the comma is split the way the gate split it, so an `empty` item around it or beside a literal does not
+/// shift which item is the `foreach`, and a `null` literal sibling answers as jq does (two paths, then its raise).
+/// Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit code), both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5018_null_sibling_beside_a_bare_caught_bind_foreach_update() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), null; .))",
+            "[\"a\"]\n[\"a\"]\n",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7), empty; null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; empty, ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7); null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; (7, (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .)), empty; null)) catch "C""#,
+            "[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), empty), 7; null)) catch "C""#,
+            "[\"a\"]\n[\"a\"]\n\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .), 7), empty; null))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
