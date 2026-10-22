@@ -238,15 +238,13 @@ fn test_5120_register_x_bind_in_a_foreach_body_beside_a_computed_init() -> Resul
     ])
 }
 
-/// #5120: rows that stay wrong, pinned to jq's answers and ignored until they are fixed: the `{}` document's `= 9`
-/// (jq writes the path the bind moved the register to; the binary refuses), and the `null` markers, whose
-/// `null`/boolean EXTRACT is accepted at the register the bind moved to (#5121). On `main` they were a silent no-op or
-/// an empty `path` (the `{}` row's `= 9` left the document where jq writes); the binary now refuses them loudly. The
-/// helper stops at the first failing row, so check all four when this is fixed.
+/// #5121: a `null` or boolean emission after the bind of the register `$x` passed is accepted at the register the bind
+/// moved to, which jq names (`["a","b"]`); the `{}` document's `= 9` writes there. They were refused (and, before
+/// #5120, a silent no-op) until #5111 left the body's `.` hand-on unchecked in a three-argument `foreach` UPDATE. Every
+/// row captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
-#[ignore = "#5121"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5120_known_gaps_after_the_register_is_handed_on() -> Result<()> {
+fn test_5121_null_bool_emission_after_the_bind_moved_the_register() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             r"{}",
