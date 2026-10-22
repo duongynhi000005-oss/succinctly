@@ -41838,7 +41838,9 @@ fn emptied_update_read(expr: &Expr, body: FoldBody) -> Option<EmptiedUpdate<'_>>
             || body == FoldBody::ForeachUpdate && taken_if_item(expr).is_some())
             && (!emptied.else_beyond_dot
                 || matches!(body, FoldBody::ForeachUpdate | FoldBody::ReduceUpdate))
-            && (!emptied.mirrored || body == FoldBody::ReduceUpdate)
+            && (!emptied.mirrored
+                || body == FoldBody::ReduceUpdate
+                || body == FoldBody::ForeachUpdate && emptied.truthy)
     })
 }
 
@@ -50481,18 +50483,33 @@ fn cond_truthiness<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> Option<
 
 /// The `then` branch a step with state `state` ran, for an `if` UPDATE ([`taken_if_item`]) whose condition is truthy
 /// on it: the `else` branch did not run, so what it holds (`else .a`) moved no register on this step (#4800). The
-/// twin of [`taken_if_branch`]'s `else` reading, for the marks that read the UPDATE as a whole.
+/// twin of [`taken_if_branch`]'s `else` reading, for the marks that read the UPDATE as a whole. An `elif` chain is
+/// walked as [`taken_if_branch`] walks it: a falsy condition continues into the `else`, which must itself be an `if`,
+/// and the first truthy one names its `then`. A final `else` that ran, or a condition that is not a single pure value,
+/// is `None`. A `then` found past a falsy condition is read only where [`emptied_update_read`] reads the chain, which
+/// is what states the `foreach` empty on the earlier step that runs it with `$x` off the register: unread
+/// (`if .b then 7 elif .a then FE else .a end`, or a fold in two arms), that step emits, and the mark would let the
+/// next one through (a wrong accept in 4 rows of two 12,000-row grid runs).
 fn taken_then_branch<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
 ) -> Option<&'e Expr> {
-    let (item, _) = taken_if_item(update)?;
-    match unwrap_paren(item) {
-        Expr::If {
-            cond, then_branch, ..
-        } if cond_truthiness::<S>(cond, state) == Some(true) => Some(then_branch),
-        _ => None,
+    let (mut current, _) = taken_if_item(update)?;
+    let mut descended = false;
+    while let Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = unwrap_paren(current)
+    {
+        if cond_truthiness::<S>(cond, state)? {
+            return (!descended || emptied_update_read(update, FoldBody::ForeachUpdate).is_some())
+                .then_some(then_branch);
+        }
+        descended = true;
+        current = else_branch;
     }
+    None
 }
 
 /// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
