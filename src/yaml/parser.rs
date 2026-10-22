@@ -5251,6 +5251,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     let end_pos = match self.peek() {
                         Some(b'"') => {
                             self.parse_double_quoted()?;
+                            self.reject_deeper_line_after_value()?;
                             self.pos
                         }
                         // `json_strict` still applies here: reachable via a
@@ -5266,6 +5267,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                 return Err(self.err_json_strict_single_quote());
                             }
                             self.parse_single_quoted()?;
+                            self.reject_deeper_line_after_value()?;
                             self.pos
                         }
                         _ => {
@@ -5850,6 +5852,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_open();
                 self.parse_double_quoted()?;
                 self.reject_content_after_inline_value()?;
+                self.reject_deeper_line_after_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5864,6 +5867,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_open();
                 self.parse_single_quoted()?;
                 self.reject_content_after_inline_value()?;
+                self.reject_deeper_line_after_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -5898,6 +5902,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// live: `true: 'v'`/`true: True`/`true: .5` all error on the second
     /// value in real yq too.
     fn parse_inline_value(&mut self, min_indent: usize) -> Result<usize, YamlError> {
+        let quoted = matches!(self.peek(), Some(b'"' | b'\''));
         let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
@@ -5918,6 +5923,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
         };
         self.reject_content_after_inline_value()?;
+        if quoted {
+            self.reject_deeper_line_after_value()?;
+        }
         Ok(end)
     }
 
@@ -5984,6 +5992,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_open();
                 self.parse_double_quoted()?;
                 self.reject_content_after_inline_value()?;
+                self.reject_deeper_line_after_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -6001,6 +6010,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 self.write_bp_open();
                 self.parse_single_quoted()?;
                 self.reject_content_after_inline_value()?;
+                self.reject_deeper_line_after_value()?;
                 self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
@@ -6447,11 +6457,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             Some(b'[') => {
                 self.parse_flow_sequence()?;
                 self.reject_trailing_flow_content(permit_colon_terminator)?;
+                self.reject_deeper_line_after_value()?;
                 Ok(true)
             }
             Some(b'{') => {
                 self.parse_flow_mapping()?;
                 self.reject_trailing_flow_content(permit_colon_terminator)?;
+                self.reject_deeper_line_after_value()?;
                 Ok(true)
             }
             Some(b'|' | b'>') => {
@@ -7527,6 +7539,50 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             chomping,
             explicit_indent,
         })
+    }
+
+    /// After a complete quoted or flow value (`k: "a"`, `- [1]`), the next line with content must not sit deeper
+    /// than the block that holds it either (#5086): the value cannot be continued, and a line still deeper than its
+    /// block belongs to nothing. yq stops there with `did not find expected key` (`... '-' indicator` in a
+    /// sequence); it was read as a key of its own or dropped (`k:` / `  "a"` / `  z: 1` is `{"k":"a"}`). Not at the
+    /// document root (#5070), and not when something other than blanks and a comment follows the value on its line:
+    /// that is [`Self::reject_content_after_inline_value`]'s.
+    fn reject_deeper_line_after_value(&mut self) -> Result<(), YamlError> {
+        if self.type_stack.len() <= 1 {
+            return Ok(());
+        }
+        // The common case, read without moving the cursor: the value ends its line and the next line starts
+        // with content at or left of the block's indent.
+        let mut i = self.pos;
+        while matches!(self.input.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        if matches!(self.input.get(i), Some(b'\n' | b'\r')) {
+            let mut j = i + self.break_len_at(i).max(1);
+            let line = j;
+            while self.input.get(j) == Some(&b' ') {
+                j += 1;
+            }
+            if let Some(&c) = self.input.get(j) {
+                if !matches!(c, b'\n' | b'\r' | b'\t' | b'#')
+                    && j - line <= self.innermost_block_indent()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        let saved_pos = self.pos;
+        self.skip_inline_whitespace();
+        if self.peek() == Some(b'#') {
+            self.skip_to_eol();
+        }
+        let result = if self.at_break() || self.peek().is_none() {
+            self.reject_line_deeper_than_block_after_block_scalar()
+        } else {
+            Ok(())
+        };
+        self.pos = saved_pos;
+        result
     }
 
     /// After a block scalar that is a value (`a: |`, `- |`), the next line with content must not sit deeper than the
@@ -9014,10 +9070,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             let end_pos = match self.peek() {
                                 Some(b'"') => {
                                     self.parse_double_quoted()?;
+                                    self.reject_deeper_line_after_value()?;
                                     self.pos
                                 }
                                 Some(b'\'') => {
                                     self.parse_single_quoted()?;
+                                    self.reject_deeper_line_after_value()?;
                                     self.pos
                                 }
                                 _ => {
@@ -9122,6 +9180,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     let end_pos = match self.peek() {
                         Some(b'"') => {
                             self.parse_double_quoted()?;
+                            self.reject_deeper_line_after_value()?;
                             self.pos
                         }
                         // No `json_strict` check needed on this quote arm: the
@@ -9134,6 +9193,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         // full scalar-grammar validation (`True` vs `true`).
                         Some(b'\'') => {
                             self.parse_single_quoted()?;
+                            self.reject_deeper_line_after_value()?;
                             self.pos
                         }
                         _ => {
