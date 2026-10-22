@@ -341,5 +341,40 @@ fn test_5110_literal_stage_ahead_of_a_bare_bind_foreach_in_a_foreach_update() ->
             "",
             0,
         ),
+        (
+            r"{}",
+            r#"try path(.a as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | .; null)) catch "ERR""#,
+            "\"ERR\"\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r#"try path(.a as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | (. // 5); null)) catch "ERR""#,
+            "\"ERR\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(.a.a as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | null; null)) catch "ERR""#,
+            "\"ERR\"\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | .; $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; try (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
     ])
 }

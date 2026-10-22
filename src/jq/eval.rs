@@ -38051,20 +38051,16 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
     }
 }
 
-/// Whether a fold's UPDATE is, behind any `try`/`?`, a pipe headed by a literal (#5110): the stage that hands the
-/// bare `foreach` of [`bare_bind_foreach_update_key`] a value that is not the register. Its bind steps from the register
-/// only where the `$x` it destructures is the register, which the syntax cannot say.
+/// Whether a fold's UPDATE holds, anywhere, a pipe of a literal and one stage (#5110): the stage that hands the bare
+/// `foreach` of [`bare_bind_foreach_update_key`] a value that is not the register, which that function reads through.
+/// Its bind steps from the register only where the `$x` it destructures is the register, which the syntax cannot say.
+/// Asked of the whole UPDATE rather than of the shape the key walk follows, so a guard cannot be missed by a spelling
+/// the walk reads (`(1 | FE) | .`, `try (1 | FE)`, a comma item): an over-wide answer only makes the guard apply.
 fn update_pipe_has_literal_head(update: &Expr) -> bool {
-    match unwrap_paren(without_empty_siblings(update)) {
-        Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
-            update_pipe_has_literal_head(expr)
-        }
-        Expr::Comma(items) => items.iter().any(update_pipe_has_literal_head),
-        Expr::Pipe(stages) => stages.split_first().is_some_and(|(head, tail)| {
-            tail.len() == 1 && matches!(unwrap_paren(head), Expr::Literal(_))
-        }),
-        _ => false,
-    }
+    any_subexpr(update, &mut |e| {
+        matches!(e, Expr::Pipe(stages)
+            if stages.len() == 2 && matches!(unwrap_paren(&stages[0]), Expr::Literal(_)))
+    })
 }
 
 /// Whether a pipe stage after the bare `foreach` of [`bare_bind_foreach_update_key`] may emit a `null` or a boolean
