@@ -42,9 +42,7 @@
 8G76      structure         comment-only stream: spec wants zero documents, succinctly now synthesizes one null document to match real yq's CLI decode loop (`yq '1'` on `# c` answers `1`, not zero) — deliberate #2795 review fidelity choice (ADR-0018), not a regression
 98YD      structure         same shape and reason as 8G76 — #2795 review
 9C9N      lax:indentation   indentation not validated — #223
-9HCY      lax:documents     mid-stream `%TAG` directive (no `...` footer before it) absorbed as scalar text rather than rejected — #223 (surfaced by #224: previously masked by tags erroring at column 0 before the directive was ever reached)
 AVM7      scalars           scalar content/folding differs from spec
-C2SP      lax:flow          flow syntax not validated — #223
 CFD4      structure         empty implicit key in a single-pair flow sequence (`[ : x ]`): valid YAML 1.2, rejected by real yq v4.53.3 ("did not find expected node content") — we follow yq, the same policy as FRK4/JEF9/02 — #4558
 CXX2      lax:anchors       anchor/alias rules not validated — #223
 DK3J      scalars           scalar content/folding differs from spec
@@ -54,7 +52,6 @@ G9HC      lax:indentation   indentation not validated — #223
 GT5M      lax:anchors       anchor/alias rules not validated — #223
 H7J7      lax:anchors       anchored key's value on the next line, unindented relative to the key (`key: &x` / `!!map` at the same column) — read as null per indentation, but the tag's own deferred mapping content is then dropped rather than rejected — #223 (surfaced by #224 the same way as 9HCY)
 JEF9/02   scalars           blank final line with no break — follows yq, which gives "" — #344
-KS4U      lax:flow          flow syntax not validated — #223
 L24T/00   scalars           scalar content/folding differs from spec
 L24T/01   scalars           literal block ending the input with a line of spaces and no break: the spec's `b-chomped-last` counts the end of input as a break (`"x\n \n"`), real yq gives `"x\n "` — we follow yq, the same policy as JEF9/02 — #4959
 M7A3      structure         bare document / `...` end-marker mis-parsed (both paths agree)

@@ -90,15 +90,10 @@ fn test_a_comment_after_a_plain_scalar_leaves_valid_documents_alone_5068() -> Re
     Ok(())
 }
 
-/// Recorded gaps: documents yq rejects that are still read, because the check leaves a bare plain
-/// scalar root, a flow value and a line after another node than the scalar the comment ended alone
-/// (a root followed by more content is #5070). Each row is
-/// pinned to what succinctly answers today; delete a row when it starts to fail.
+/// Recorded gaps: documents yq rejects that are still read, because the check leaves a flow value
+/// and a line after another node than the scalar the comment ended alone. Each row is pinned to
+/// what succinctly answers today; delete a row when it starts to fail.
 const RECORDED_GAPS: &[(&str, &str)] = &[
-    ("text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
-    ("&a text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
-    ("--- a\n- b # c\n  d\n", "\"a\"\n[\"b\",\"d\"]\n"),
-    ("--- &a text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
     ("k: [a, b]\n  z\n", "{\"k\":[\"a\",\"b\"]}\n"),
     // Another node stands between the scalar a comment ended and the line.
     ("- a # c\n- \"q\"\n  z\n", "[\"a\",\"q\",\"z\"]\n"),
@@ -107,7 +102,7 @@ const RECORDED_GAPS: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn test_recorded_gaps_after_a_root_scalar_or_a_flow_value_5068() -> Result<()> {
+fn test_recorded_gaps_after_a_flow_value_or_another_node_5068() -> Result<()> {
     for (doc, expected) in RECORDED_GAPS {
         let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
         assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");

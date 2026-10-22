@@ -15853,8 +15853,6 @@ fn test_flow_keyed_mapping_predicate_leaves_other_shapes_alone_1188() -> Result<
     for (input, expected) in [
         // A comment ends the line before any `:` can matter.
         ("[a, b] # c: x\n", r#"["a","b"]"#),
-        // The `:` on the next line is not on the collection's line.
-        ("[a, b]\n: value\n", "[\"a\",\"b\"]\n\"value\""),
         // A quote that closes later, not at the start of a token, is text.
         ("[it's, \"q\"]: v\n", r#"{"":"v"}"#),
         // A quote after a property still opens a string, whose `]` is text.
@@ -15862,13 +15860,17 @@ fn test_flow_keyed_mapping_predicate_leaves_other_shapes_alone_1188() -> Result<
         ("[&x \"a]\", b]: v\n", r#"{"":"v"}"#),
         // CRLF ends the line like LF.
         ("[a, b]: value\r\nz: 1\r\n", r#"{"":"value","z":1}"#),
-        // An escaped line break carries the key onto a second line, which an
-        // implicit key cannot span: previous handling.
-        ("[\"a\\\n b\"]: x\n", "[\"ab\"]\n\"x\""),
     ] {
         let (out, code) = run_yq_stdin(".", input, &["-o", "json", "-I0"])?;
         assert_eq!(code, 0, "{input:?}");
         assert_eq!(out.trim(), expected, "{input:?}");
+    }
+    // The `:` on the next line is not on the collection's line, and an escaped line break carries a
+    // key onto a second line, which an implicit key cannot span: both leave the flow collection as
+    // the document's root with a line after it, which yq rejects (#5070; read as two values before).
+    for input in ["[a, b]\n: value\n", "[\"a\\\n b\"]: x\n"] {
+        let (out, code) = run_yq_stdin(".", input, &["-o", "json", "-I0"])?;
+        assert_eq!((out.as_str(), code), ("", 1), "{input:?}");
     }
     Ok(())
 }

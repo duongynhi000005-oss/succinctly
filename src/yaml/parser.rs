@@ -422,6 +422,11 @@ struct Parser<'a, const HAS_CR: bool> {
     /// call) from "previous document's root is bp 0", which is otherwise
     /// indistinguishable from the field's zero-initialized state.
     seen_any_document: bool,
+
+    /// Whether the current document's root node, a scalar or a flow collection, has been taken (#5070):
+    /// nothing may follow it before the next `---` or `...`. Set when such a node is about to open at
+    /// the document root, cleared by [`Self::start_document`].
+    document_root_node_taken: bool,
     /// The root bp of whichever document [`Self::last_head_foot_bp`]'s `None`
     /// currently means "nothing has opened in the *new* document yet",
     /// rather than "a blank line detached the in-document `PREV`" (#798).
@@ -683,6 +688,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             comment_watermark: 0,
             saw_head_foot_node: false,
             seen_any_document: false,
+            document_root_node_taken: false,
             document_boundary_fallback_bp: None,
             seq_frames: Vec::new(),
             next_seq_serial: 0,
@@ -1996,6 +2002,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// whose owner is already decided.
     fn attach_document_root_node(&mut self, column: usize) {
         if self.type_stack.len() <= 1 {
+            self.document_root_node_taken = true;
             self.attach_head_foot_at(self.bp_pos, column);
         } else if self.current_type == Some(NodeType::SequenceItem) {
             // A bare `-` item's scalar value on its own line: the node a
@@ -3244,6 +3251,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
         }
         self.seen_any_document = true;
+        self.document_root_node_taken = false;
         self.document_start_bp_pos = self.bp_pos;
         // A standalone comment block seen before this document's content
         // belongs to the document's own node, not to its first key -- real
@@ -3645,7 +3653,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 && lookahead + 1 < self.input.len()
                 && matches!(self.input[lookahead + 1], b' ' | b'\t');
             let sequence_indicator_is_block_structure =
-                is_sequence_indicator && next_indent <= start_indent;
+                is_sequence_indicator && next_indent <= start_indent && !is_doc_root;
 
             // A `---`/`...` document marker at true document root must end the
             // scalar rather than fold into it as content (#225): an implicit
@@ -8760,6 +8768,18 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             )
         {
             return Err(self.err_unexpected_char(self.pos, "not a valid JSON value"));
+        }
+
+        // Nothing follows a document's scalar or flow-collection root before the next `---` or
+        // `...`: yq stops with `did not find expected <document start>` where the line read as a
+        // further document (#5070).
+        if self.document_root_node_taken
+            && self.type_stack.len() <= 1
+            && !matches!(self.peek(), Some(b'#' | b'\n' | b'\r') | None)
+        {
+            return Err(
+                self.err_unexpected_char(self.pos, "did not find expected <document start>")
+            );
         }
 
         // A key, an item or a node of any other kind more indented than the block that holds the
