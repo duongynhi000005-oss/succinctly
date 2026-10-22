@@ -197,11 +197,12 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_4800() -> Result<()> {
 }
 
 /// #4800: a `try` with a handler and a comma beside an item that emits are read too, where the state reaches a literal
-/// `else` arm of an `if` that can move the register (`literal_else_arm`): the literal cannot raise, so the handler
-/// never runs (`resolved_if_arm`), and the comma's items are resolved one at a time, the `if` as its arm
+/// `else` arm of an `if` whose other arms move the register only through a fold that heads them (`literal_else_arm`):
+/// the literal cannot raise, so the handler never runs, and the step takes it as the UPDATE it ran
+/// (`handler_literal_arm`, `resolved_if_arm`); the comma's items are resolved one at a time, the `if` as its arm
 /// (`if_arm_comma_items`). Every row fails on the base: the `.a` EXTRACT rows raised `Invalid path expression near
-/// attempt to access element "a" of null` and the `$i` rows answered `[]`. Rows captured from jq 1.7.1; disabling either
-/// new path fails the test.
+/// attempt to access element "a" of null`, the `$i` rows answered `[]`, and `|= 9` raised. Rows captured from jq 1.7.1;
+/// disabling either new path fails the test.
 #[test]
 fn test_foreach_update_if_with_a_literal_else_behind_a_handler_or_beside_an_emitting_item_4800(
 ) -> Result<()> {
@@ -304,13 +305,48 @@ fn test_foreach_update_if_with_a_literal_else_behind_a_handler_or_beside_an_emit
             "",
             0,
         ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else 1 end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else "s" end) catch 1; $i))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.,.a) as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))?]",
+            "[[],[\"a\"]]\n",
+            "",
+            0,
+        ),
     ])
 }
 
 /// #4800: what the handler and comma reads leave alone, each matching jq on the base and pinned to keep matching. A
 /// `then` that ran (the #5082 reading) or a computed `else` (`[.a]`) behind a handler or beside a comma sibling, an
-/// `if` with no fold that can move the register, and a truthy state that runs the `foreach`, keep the whole-`if`
-/// resolve: narrowing the first three lost each of these rows in a differential grid.
+/// `if` with no fold (`if .a then .b else 3 end`, which the base already reads whole), and a truthy state that runs
+/// the `foreach`, keep the whole-`if` resolve: narrowing them lost each of these rows in a differential grid.
 #[test]
 fn test_foreach_update_if_behind_a_handler_or_comma_keeps_the_whole_resolve_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -342,23 +378,47 @@ fn test_foreach_update_if_behind_a_handler_or_comma_keeps_the_whole_resolve_4800
             "",
             0,
         ),
-    ])
-}
-
-/// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers `[[]]`, `[["a"]]`,
-/// `[["a"],["a"]]` and `[["a"]]`: a handler around the `if` over a source that hands `$i` the root (the per-step flags
-/// are derived from the whole UPDATE, and a handler leaves them unable to state the entry register), a comma sibling
-/// that may move the register (`.a`), a `try ... catch` that is itself a comma item, and a computed `else`.
-#[test]
-fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
-    assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":null}"#,
-            r"[path(. as $x | foreach . as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))?]",
+            r"path(foreach .a as $i (.; try (if .a then .b else 3 end) catch 1; $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"(foreach .a as $i (.; try (if .a then .b else 3 end) catch 1; $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(foreach 1 as $i (.; try (if .a then .b else null end) catch 1; .a)) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .a then .b else null end) catch 1; .a))?]",
             "[]\n",
             "",
             0,
         ),
+    ])
+}
+
+/// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers `[["a"]]`,
+/// `[["a"],["a"]]`, `[["a"]]`, `{"a":9}` and `[["a","a"],["a","a"]]`: a comma sibling that may move the register (`.a`),
+/// a `try ... catch` that is itself a comma item, a computed `else`, an arm that navigates ahead of its fold
+/// (`.b | FE`), and a literal `then` that ran beside a fold in the `else` (the mirror shape). The last two stay refusals
+/// on purpose: the step that runs `.b | FE` names `["b"]` where jq's register moved to `["a"]`, and narrowing the
+/// literal arm's step turned the refusal that masked it into a write of `.b`; reading the literal `then` turned the
+/// last row's refusal into a truncated `[["a","a"]]`.
+#[test]
+fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":null}"#,
             r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, .a); $i))?]",
@@ -379,6 +439,20 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
             "[]\n",
             "",
             0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.,.a) as $i (.; (if . then (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else false end, if . then (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else false end); null)) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .b then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; .a))?]",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
         ),
     ])
 }
