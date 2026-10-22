@@ -41833,6 +41833,15 @@ enum FoldBody {
     /// A `foreach` EXTRACT: only the arms read before #5034 (16 of 12,000 grid rows that matched jq turned into
     /// refusals when the `else` beyond `.` was read).
     ForeachExtract,
+    /// A `foreach` EXTRACT of a fold whose source never hands the register on (`(.a,.b)`, `.[]`, [`source_hands_register_off`],
+    /// #5044): its `$x` is a node the register is not on at any step, so the destructure always raises and the `foreach`
+    /// is empty on every step, and the `else` beyond `.` is read as in a `foreach` UPDATE. All 19 grid rows the plain
+    /// [`FoldBody::ForeachExtract`] reading turned from a match into a refusal had `.` among the source's elements,
+    /// where `$x` is the register and the `foreach` emits.
+    ForeachExtractOffRegister,
+    /// A `foreach` UPDATE of a fold whose source never hands the register on ([`source_hands_register_off`], #5044):
+    /// as [`FoldBody::ForeachUpdate`], and the mirrored `foreach` in the `else` is read too.
+    ForeachUpdateOffRegister,
 }
 
 impl FoldBody {
@@ -41846,11 +41855,51 @@ impl FoldBody {
     }
 
     fn in_foreach(self) -> bool {
-        matches!(self, Self::ForeachUpdate | Self::ForeachExtract)
+        matches!(
+            self,
+            Self::ForeachUpdate
+                | Self::ForeachUpdateOffRegister
+                | Self::ForeachExtract
+                | Self::ForeachExtractOffRegister
+        )
     }
 
     fn is_extract(self) -> bool {
-        self == Self::ForeachExtract
+        matches!(self, Self::ForeachExtract | Self::ForeachExtractOffRegister)
+    }
+
+    fn is_foreach_update(self) -> bool {
+        matches!(self, Self::ForeachUpdate | Self::ForeachUpdateOffRegister)
+    }
+
+    /// The UPDATE of a `foreach` over `source`.
+    fn update(source: &Expr) -> Self {
+        if source_hands_register_off(source) {
+            Self::ForeachUpdateOffRegister
+        } else {
+            Self::ForeachUpdate
+        }
+    }
+
+    /// The EXTRACT of a `foreach` over `source`.
+    fn extract(source: &Expr) -> Self {
+        if source_hands_register_off(source) {
+            Self::ForeachExtractOffRegister
+        } else {
+            Self::ForeachExtract
+        }
+    }
+}
+
+/// Whether a `foreach` source never hands the register on at any step (#5044): every element is a field, an
+/// iteration, or such a thing behind a `?`, so each is a descendant of the register and `$x` (the register itself,
+/// bound before the fold) is never the node a step's pattern meets.
+fn source_hands_register_off(source: &Expr) -> bool {
+    match unwrap_paren(source) {
+        Expr::Comma(items) => items.iter().all(source_hands_register_off),
+        Expr::Optional(inner) => source_hands_register_off(inner),
+        Expr::Field(_) | Expr::Iterate => true,
+        _ => false,
     }
 }
 
@@ -41861,13 +41910,21 @@ impl FoldBody {
 /// that `foreach` is behind an `elif` on `.` ([`EmptiedUpdate::truthy`], #4800).
 fn emptied_update_read(expr: &Expr, body: FoldBody) -> Option<EmptiedUpdate<'_>> {
     emptied_update(expr).filter(|emptied| {
-        (!emptied.beyond_bare_if
-            || body == FoldBody::ForeachUpdate && taken_if_item(expr).is_some())
+        (!emptied.beyond_bare_if || body.is_foreach_update() && taken_if_item(expr).is_some())
             && (!emptied.else_beyond_dot
-                || matches!(body, FoldBody::ForeachUpdate | FoldBody::ReduceUpdate))
+                || matches!(
+                    body,
+                    FoldBody::ForeachUpdate
+                        | FoldBody::ForeachUpdateOffRegister
+                        | FoldBody::ReduceUpdate
+                        | FoldBody::ForeachExtractOffRegister
+                ))
             && (!emptied.mirrored
-                || body == FoldBody::ReduceUpdate
-                || body == FoldBody::ForeachUpdate && emptied.truthy)
+                || matches!(
+                    body,
+                    FoldBody::ReduceUpdate | FoldBody::ForeachUpdateOffRegister
+                )
+                || body.is_foreach_update() && emptied.truthy)
     })
 }
 
@@ -64780,7 +64837,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 .then(fold_body::acc_off_register);
                                 // #4776: and an EXTRACT that is such a `foreach` emits nothing for the step.
                                 let _sole_extract_foreach =
-                                    sole_update_mark::<S>(ext_expr, FoldBody::ForeachExtract);
+                                    sole_update_mark::<S>(ext_expr, FoldBody::extract(input));
                                 let _foreach_body = fold_body::foreach_body();
                                 // #4779: ...and the `foreach`es EXTRACT is made of read the register
                                 // this step left, as an UPDATE of that shape reads its fold's.
@@ -64979,7 +65036,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                             // emits, so an inner source that is empty leaves this one emitting nothing.
                             let _sole_update_foreach =
-                                sole_update_mark::<S>(item, FoldBody::ForeachUpdate);
+                                sole_update_mark::<S>(item, FoldBody::update(input));
                             // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
                             // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                             // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
