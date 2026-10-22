@@ -65016,8 +65016,19 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             } else {
                                 fold_body::foreach_body_moved()
                             };
+                            // #4800: a bare `if` UPDATE whose state took one arm resolves that arm alone, as
+                            // jq runs it: the arm that did not run holds the nested `foreach` that
+                            // [`cannot_move_register`] reads, which would otherwise withhold the tracking
+                            // of a literal arm's `null` (`if .a then FE else null end`).
+                            let resolved_item = if S::TAG == EvalTag::Jq
+                                && matches!(unwrap_paren(item), Expr::If { .. })
+                            {
+                                update_taken.get()
+                            } else {
+                                item
+                            };
                             flow = active_reg.resolve_sink::<S>(
-                                item,
+                                resolved_item,
                                 // Moved into the last item's resolve, as it was for the one item.
                                 if index + 1 == comma_items.len() {
                                     core::mem::replace(&mut entry_state, OwnedValue::Null)
