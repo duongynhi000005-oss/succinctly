@@ -218,3 +218,43 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
         ),
     ])
 }
+
+/// #4800: a condition the walk cannot decide on the state (`.a?`, a comma, `range(2)`, a bind) names no arm
+/// ([`taken_if_branch`] answers the `if` itself), so the wrapped `if` is resolved whole and the pipe's `if` stage is
+/// read by `alternate_update_shape`, which is the one route that still reaches the `return None` of its `Pipe` arm
+/// (the literal-arm rows above are resolved as the arm and never get there). Where jq answers `[[]]` or `[[],[]]`
+/// these answer `[]`; the answers are pinned as they stand (a fix flips them), and the rows keep the arm covered.
+#[test]
+fn test_foreach_update_wrapped_if_with_an_undecidable_condition_stays_differing_4800() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true,"b":2}"#,
+            r"[path(foreach . as $i (.; if .a? then 7 else .b end | .; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":2}"#,
+            r"[path(foreach . as $i (.; if .a as $x | $x then 7 else .b end | .; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":2}"#,
+            r"[path(foreach . as $i (.; (if (.a,.b) then 7 else .b end) | select(true); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":2}"#,
+            r"[path(foreach . as $i (.; if range(2) then 7 else .b end | .; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
