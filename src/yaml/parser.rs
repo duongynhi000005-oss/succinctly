@@ -3707,6 +3707,17 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         end
     }
 
+    /// The unquoted scalar a node of its own line starts, scanned from the indent of the block that holds it
+    /// (a continuation line need only be indented more than that block, as under a `key:`, #5083), or from the
+    /// document's own indent at the root (#5086).
+    fn parse_own_line_unquoted_value(&mut self, indent: usize, is_truly_doc_root: bool) -> usize {
+        if is_truly_doc_root {
+            self.parse_unquoted_value_doc_root(indent)
+        } else {
+            self.parse_unquoted_value_with_indent(self.innermost_block_indent())
+        }
+    }
+
     /// Parse an unquoted key (stops at colon+space).
     fn parse_unquoted_key(&mut self) -> Result<usize, YamlError> {
         let start = self.pos;
@@ -8987,13 +8998,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                     self.pos
                                 }
                                 _ => {
-                                    let end = if is_truly_doc_root {
-                                        self.parse_unquoted_value_doc_root(indent)
-                                    } else {
-                                        self.parse_unquoted_value_with_indent(
-                                            self.innermost_block_indent(),
-                                        )
-                                    };
+                                    let end = self
+                                        .parse_own_line_unquoted_value(indent, is_truly_doc_root);
                                     self.reject_content_after_inline_value()?;
                                     end
                                 }
@@ -9109,11 +9115,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         }
                         _ => {
                             let start = self.pos;
-                            let end = if is_truly_doc_root {
-                                self.parse_unquoted_value_doc_root(indent)
-                            } else {
-                                self.parse_unquoted_value_with_indent(self.innermost_block_indent())
-                            };
+                            let end = self.parse_own_line_unquoted_value(indent, is_truly_doc_root);
                             self.check_json_strict_scalar(start, end)?;
                             self.reject_content_after_inline_value()?;
                             end

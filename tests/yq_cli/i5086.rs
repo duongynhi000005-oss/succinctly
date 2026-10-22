@@ -21,6 +21,9 @@ const REJECTED: &[&str] = &[
     "k: &x !!str\n  a\n  z: 1\n",
     "-\n  a\n  b\n  z: 1\n",
     "- k:\n    x\n    y\n    z: 1\n",
+    "- -\n    a\n    z: 1\n",
+    "-\n  - a\n    z: 1\n",
+    "- - k:\n      x\n      y: 1\n",
 ];
 
 /// (document, `-o json -I0 .` output): continuations that are text, and siblings.
@@ -39,6 +42,7 @@ const ACCEPTED: &[(&str, &str)] = &[
     ),
     ("- k:\n    a b\n  m: 1\n", "[{\"k\":\"a b\",\"m\":1}]\n"),
     ("-\n  a\n- b\n", "[\"a\",\"b\"]\n"),
+    ("- -\n    a\n    b\n- c\n", "[[\"a b\"],\"c\"]\n"),
 ];
 
 #[test]
