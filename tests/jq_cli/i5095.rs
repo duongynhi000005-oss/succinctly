@@ -184,62 +184,61 @@ fn test_nested_reduce_refusal_of_a_root_accumulator_is_caught_5095() -> Result<(
     ])
 }
 
-/// #5095 review: a `$x` that is the register's own node spelled through a slice (`.a[0:]` of a non-empty array *is*
-/// `.a` in jq) or at another depth (`.a[0:][0]` is `.a[0]`) is not provably another node, so its refusal stays the
-/// loud guess `main` gave, and is not caught as if it were jq's: jq answers every row (`[["a",0,"b"]]`, and `del`
-/// writes `{"a":[{},{"b":2}]}`), so a caught refusal is a silent wrong answer. The last row, on a trackable stage,
-/// answered `[]` before (#5095 made the frame's position test a proof there too). Both routes.
+/// #5095 review, #5103: a `$x` that is the register's own node spelled through a slice (`.a[0:]` of a non-empty array
+/// *is* `.a` in jq) or at another depth (`.a[0:][0]` is `.a[0]`) is read as that node, so its destructure passes and jq's
+/// answer follows (`[["a",0,"b"]]`, and `del` writes `{"a":[{},{"b":2}]}`), where #5095 kept the refusal loud and `main`
+/// before it answered `[]` on the trackable stage. Never a caught refusal, the silent wrong answer. Both routes.
 #[test]
-fn test_destructure_of_the_register_spelled_through_a_slice_stays_loud_5095() -> Result<()> {
+fn test_destructure_of_the_register_spelled_through_a_slice_answers_as_jq_5095() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a[0:] as $x | .a | 1 | $x as [{b:$q}] | $q)?]",
+            "[[\"a\",0,\"b\"]]\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":2}]",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r#"try del(.a[0:] as $x | .a | 1 | $x as [{b:$q}] | $q) catch "caught""#,
+            "{\"a\":[{},{\"b\":2}]}\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":2}]",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a as $x | .a[0:] | 1 | $x as [{b:$q}] | $q)?]",
+            "[[\"a\",{\"start\":0,\"end\":null},0,\"b\"]]\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":2}]",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a[0:][0] as $x | .a[0] | 1 | $x as {b:$q} | $q)?]",
+            "[[\"a\",0,\"b\"]]\n",
             "",
-            "Invalid path expression near attempt to access element \"b\" of {\"b\":1}",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a[0:] as $x | reduce ($x as [{b:$q}] | $q) as $y (.a; .))?]",
+            "[[\"a\"]]\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":2}]",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":1}]}"#,
             r#"try path(.a as $x | .a[0:] | foreach ($x as [$q] | .) as $y (.; .a?; 1)) catch "c""#,
+            "\"c\"\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":1}]",
-            5,
+            0,
         ),
         (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a[0:] as $x | .a | $x as [{b:$q}] | $q)?]",
+            "[[\"a\",0,\"b\"]]\n",
             "",
-            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":2}]",
-            5,
+            0,
         ),
     ])
 }

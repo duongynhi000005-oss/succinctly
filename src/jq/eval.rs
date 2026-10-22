@@ -40612,6 +40612,17 @@ fn anchor_component_step<'v>(
 /// [`Frame::names`] certifies, toward jq. With no root recorded (`no_std`, a
 /// scalar root) or a step the walk cannot take, a differing pair refuses.
 fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefix>) -> bool {
+    same_frame_position_as_spelled(invocation, lhs, rhs)
+        || same_node_through_full_slices(invocation, lhs, rhs)
+}
+
+/// [`same_frame_position`] for two chains of the same shape: a step of one is compared with the step of the other at
+/// the same depth.
+fn same_frame_position_as_spelled(
+    invocation: u64,
+    lhs: &Rc<PathPrefix>,
+    rhs: &Rc<PathPrefix>,
+) -> bool {
     if Rc::ptr_eq(lhs, rhs) {
         return true;
     }
@@ -40663,6 +40674,95 @@ fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefi
     true
 }
 
+/// `chain`'s components with each slice that spans the whole of a non-empty array (or of a non-empty slice of one)
+/// dropped, as the node it slices (#5103); `None` where a slice stands on a node the walk from `root` cannot reach.
+fn without_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Option<Vec<&'c Expr>> {
+    let mut node = Some(FoldNode::Value(root));
+    let mut kept = Vec::new();
+    for component in components_from_root(chain) {
+        if let Expr::Slice { start, end, .. } = component {
+            let items = node.and_then(FoldNode::items)?;
+            let range = SliceBounds::from_literals(*start, *end).resolve(items.len());
+            if !items.is_empty() && range == (0..items.len()) {
+                continue;
+            }
+            node = Some(FoldNode::Items(&items[range]));
+        } else {
+            node = match folded_component_step(node, component, component) {
+                FoldedStep::At(next) => Some(next),
+                FoldedStep::Unknown | FoldedStep::Differs => None,
+            };
+        }
+        kept.push(component);
+    }
+    Some(kept)
+}
+
+/// #5103: whether `chain` ends in a slice whose range is empty on an array the invocation's root holds there: jq builds
+/// a fresh `[]` for it (`jvp_array_slice` of an empty range), which is no node of the document, so a marker bound
+/// anywhere, and the register standing anywhere, is not it (`{"a":[]}`: `.a as $x | .a[0:]` leaves `$x` foreign, and
+/// the destructure of it raises jq's own catchable error).
+fn ends_at_fresh_slice(invocation: u64, chain: &PathPrefix) -> bool {
+    let components = components_from_root(chain);
+    let Some((Expr::Slice { start, end, .. }, ancestors)) = components.split_last() else {
+        return false;
+    };
+    let Some(root) = invocation_roots::get(invocation) else {
+        return false;
+    };
+    let mut node = Some(FoldNode::Value(&root));
+    for component in ancestors {
+        node = match folded_component_step(node, component, component) {
+            FoldedStep::At(next) => Some(next),
+            FoldedStep::Unknown | FoldedStep::Differs => None,
+        };
+    }
+    node.and_then(FoldNode::items).is_some_and(|items| {
+        SliceBounds::from_literals(*start, *end)
+            .resolve(items.len())
+            .is_empty()
+    })
+}
+
+/// #5103: whether `lhs` and `rhs` name one node once every slice that spans the whole of a non-empty array (or of a
+/// non-empty slice of one) is read as the node it slices. jq's array slice is a view (`jvp_array_slice` moves the
+/// offset and size, sharing the buffer), and `jv_identical` compares pointer, offset and size, so `.a[0:]` of a
+/// non-empty array *is* `.a` (`path(.a as $x | .a[0:] | $x)` is `["a",{"start":0,"end":null}]` in jq 1.7.1), where the
+/// slice of an empty array is a fresh `[]` and a string slice a copy, neither of them the node. Each slice is resolved
+/// against the invocation's root, so a chain the walk cannot follow to an array keeps its slice and the spellings must
+/// then agree as written.
+fn same_node_through_full_slices(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
+    let has_slice = |chain: &PathPrefix| {
+        components_from_root(chain)
+            .iter()
+            .any(|component| matches!(component, Expr::Slice { .. }))
+    };
+    if !has_slice(lhs) && !has_slice(rhs) {
+        return false;
+    }
+    let Some(root) = invocation_roots::get(invocation) else {
+        return false;
+    };
+    let (Some(left), Some(right)) = (
+        without_full_slices(&root, lhs),
+        without_full_slices(&root, rhs),
+    ) else {
+        return false;
+    };
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut node = Some(FoldNode::Value(&root));
+    for (l, r) in left.into_iter().zip(right) {
+        node = match folded_component_step(node, l, r) {
+            FoldedStep::Differs => return false,
+            FoldedStep::At(next) => Some(next),
+            FoldedStep::Unknown => None,
+        };
+    }
+    true
+}
+
 /// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
 /// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
 /// show to be one node, a full slice and its container among them (`.a[0:]` of a non-empty array *is*
@@ -40672,7 +40772,18 @@ fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefi
 /// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
 /// which a finite tree never equals. A key against an index answers `false`: only a `null` holds both.
 fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
-    let (left, right) = (components_from_root(lhs), components_from_root(rhs));
+    if ends_at_fresh_slice(invocation, lhs) || ends_at_fresh_slice(invocation, rhs) {
+        return true;
+    }
+    let root = invocation_roots::get(invocation);
+    // #5103: a whole-range slice of a non-empty array is the node it slices, so it is read through first.
+    let canonical = |chain| match root.as_ref() {
+        Some(root) => without_full_slices(root, chain),
+        None => Some(components_from_root(chain)),
+    };
+    let (Some(left), Some(right)) = (canonical(lhs), canonical(rhs)) else {
+        return false;
+    };
     if left
         .iter()
         .chain(&right)
@@ -40680,7 +40791,6 @@ fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPref
     {
         return false;
     }
-    let root = invocation_roots::get(invocation);
     let mut node = root.as_ref();
     for (l, r) in left.iter().zip(&right) {
         match (l, r) {
