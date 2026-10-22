@@ -37,6 +37,29 @@ fn test_content_after_a_document_end_marker_without_a_start_is_rejected_5089() -
     Ok(())
 }
 
+/// Other spellings yq rejects: content on the marker's own line, CRLF, a marker that opens the
+/// stream (yq rejects everything after it), and a directive followed by content with no `---`.
+const REJECTED_OTHER: &[&str] = &[
+    "a\n... b\n",
+    "a\r\n...\r\nb\r\n",
+    "...\nb\n",
+    "# c\n...\nb\n",
+    "a\n...\n%YAML 1.2\nb\n",
+];
+
+#[test]
+fn test_other_spellings_of_content_after_an_end_marker_are_rejected_5089() -> Result<()> {
+    for doc in REJECTED_OTHER {
+        let (stdout, stderr, code) = run_yq_stdin_with_stderr(".", doc, &[])?;
+        assert_eq!((stdout.as_str(), code), ("", 1), "{doc:?}");
+        assert!(
+            stderr.contains("did not find expected <document start>"),
+            "{doc:?}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
 /// Accepted by yq: (document, `-o json -I0` output).
 const ACCEPTED: &[(&str, &str)] = &[
     ("a\n...\n---\nb\n", "\"a\"\n\"b\"\n"),
