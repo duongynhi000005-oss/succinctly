@@ -109,8 +109,10 @@ fn test_reduce_update_mirrored_if_with_the_caught_foreach_in_the_else_5044() -> 
     ])
 }
 
-/// #5044: a `foreach` EXTRACT that is `if C then FE else B end` keeps its reading ([`EmptiedUpdate::else_beyond_dot`] is
-/// not honoured there): read as a `foreach` UPDATE is, the `[path(..)?]` row below turned into `[]` for jq's
+/// #5044: a `foreach` EXTRACT that is `if C then FE else B end` over a source with `.` among its elements keeps its
+/// reading ([`EmptiedUpdate::else_beyond_dot`] is not honoured there; a source that hands the register off is read, see
+/// `test_foreach_extract_if_with_a_navigating_else_reads_a_source_that_hands_the_register_off_5044`): read as a
+/// `foreach` UPDATE is, the `[path(..)?]` row below turned into `[]` for jq's
 /// `[["a"]]` and the `del` row into a refusal for jq's `"C"` (16 of 12,000 grid rows that matched jq). Every row
 /// captured from jq 1.7.1, both routes.
 #[test]
