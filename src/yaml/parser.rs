@@ -290,6 +290,15 @@ const MAX_NESTING_DEPTH: usize = 128;
 /// context. So a site left un-gated is merely a missed optimization, while a
 /// wrongly-`false` gate would corrupt the parse — which is why the flag is
 /// derived from the bytes rather than from any parser-state heuristic.
+/// A plain scalar the scanner just read: `start..end` in the input, and the indent of the
+/// innermost open block when it began (#5068).
+#[derive(Clone, Copy)]
+struct PlainScalarSpan {
+    start: usize,
+    end: usize,
+    owner: usize,
+}
+
 struct Parser<'a, const HAS_CR: bool> {
     input: &'a [u8],
     pos: usize,
@@ -509,6 +518,12 @@ struct Parser<'a, const HAS_CR: bool> {
     /// the one below it.
     pending_explicit_key: Option<usize>,
 
+    /// Where the plain scalar scanned last began and ended, and the indent of the innermost open
+    /// block when it did (#5068). The next block-context line takes it
+    /// ([`Self::line_is_stray_after_a_plain_scalar`]): a line that stands after a comment that
+    /// ended the scalar has nothing to attach to. Written once per plain scalar scan.
+    last_plain_scalar: Option<PlainScalarSpan>,
+
     /// Whether the key named by [`Self::pending_explicit_key`] was a bare `?`
     /// with no content (`?\n- a\n:\n- c`), as opposed to a key that held a
     /// node of its own (`? k`). Only the latter rejects a same-indent `-`
@@ -683,6 +698,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             in_document: false,
             document_start_bp_pos: 0,
             pending_explicit_key: None,
+            last_plain_scalar: None,
             pending_explicit_key_empty: false,
             nesting_depth: 0,
             json_strict: false,
@@ -3680,6 +3696,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         while end > start && matches!(self.input[end - 1], b' ' | b'\t' | b'\r') {
             end -= 1;
         }
+
+        self.last_plain_scalar = Some(PlainScalarSpan {
+            start,
+            end,
+            owner: self.innermost_block_indent(),
+        });
 
         // Return absolute end position (not length)
         end
@@ -8475,6 +8497,132 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         None
     }
 
+    /// Whether the line at the cursor, at `indent`, stands after the plain scalar `ended` and has
+    /// nothing to attach to there (#5068): `- a # c` / `  z`, `k: a` / `z`, `- a` / `  # c` /
+    /// `  z: 1`. A plain scalar takes every following line more indented than its block until a
+    /// comment ends it, so a bare line left over is neither a continuation nor a node of its own,
+    /// and a key or an item more indented than the block holding the value has no parent: yq
+    /// stops with `did not find expected '-' indicator` / `could not find expected ':'`, where
+    /// the line read as a further item or was dropped. Only inside a container, and not under an
+    /// explicit key; the document root is [`Self::reject_content_after_inline_value`]'s and
+    /// #5070's.
+    ///
+    /// A scalar on a line of its own (the value of the `key:` or `-` above it) goes on line by
+    /// line at the indent it began at, so a bare line after it is a continuation unless a comment
+    /// ended it or it is no more indented than the block.
+    fn line_is_stray_after_a_plain_scalar(
+        &self,
+        ended: Option<PlainScalarSpan>,
+        indent: usize,
+        bare_scalar: bool,
+    ) -> bool {
+        let Some(scalar) = ended else {
+            return false;
+        };
+        if self.type_stack.len() <= 1 || self.pending_explicit_key.is_some() {
+            return false;
+        }
+        if !bare_scalar && indent <= scalar.owner {
+            return false;
+        }
+        let Some(comment) = self.only_comments_between(scalar.end) else {
+            return false;
+        };
+        let line_start = self.input[..scalar.start]
+            .iter()
+            .rposition(|&b| is_line_break(b))
+            .map_or(0, |at| at + 1);
+        // Node properties before the scalar (`&a v`) leave it on a line of its own.
+        let on_its_own_line = only_node_properties(&self.input[line_start..scalar.start]);
+        let stray = if on_its_own_line {
+            if comment {
+                bare_scalar || indent > scalar.owner
+            } else {
+                bare_scalar && indent <= scalar.owner
+            }
+        } else {
+            bare_scalar || indent > scalar.owner
+        };
+        stray && !self.document_root_is_a_bare_plain_scalar()
+    }
+
+    /// Whether nothing but a comment, blank lines and comment lines lies between `from` and the
+    /// line the cursor is on, and if so whether a comment does.
+    fn only_comments_between(&self, from: usize) -> Option<bool> {
+        let mut line_start = self.pos;
+        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
+            line_start -= 1;
+        }
+        let mut comment = false;
+        let mut i = from;
+        // The rest of the scalar's own line.
+        while matches!(self.input.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        if self.input.get(i) == Some(&b'#') {
+            comment = true;
+            while self.input.get(i).is_some_and(|&b| !is_line_break(b)) {
+                i += 1;
+            }
+        }
+        while i < line_start {
+            match self.input.get(i) {
+                Some(b'\n' | b'\r') => i += 1,
+                Some(b' ' | b'\t') => i += 1,
+                Some(b'#') => {
+                    comment = true;
+                    while self.input.get(i).is_some_and(|&b| !is_line_break(b)) {
+                        i += 1;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        (i == line_start).then_some(comment)
+    }
+
+    /// Whether the document the cursor is in opens with a bare plain scalar (#5068): its first
+    /// content line, after the `---` marker's own or the lines above, is neither a key, an item
+    /// nor any other kind of node. Everything after such a root is that scalar's continuation, and
+    /// the parser's reading of a continuation line that opens like an item (`- x`) is not to be
+    /// judged as container content.
+    fn document_root_is_a_bare_plain_scalar(&self) -> bool {
+        let mut line_start = self.pos;
+        while line_start > 0 && !is_line_break(self.input[line_start - 1]) {
+            line_start -= 1;
+        }
+        let mut first_content: Option<&[u8]> = None;
+        let mut end = line_start;
+        while end > 0 {
+            let mut prev_end = end - 1;
+            if prev_end > 0 && self.input[prev_end] == b'\n' && self.input[prev_end - 1] == b'\r' {
+                prev_end -= 1;
+            }
+            let mut prev_start = prev_end;
+            while prev_start > 0 && !is_line_break(self.input[prev_start - 1]) {
+                prev_start -= 1;
+            }
+            end = prev_start;
+            let line = &self.input[prev_start..prev_end];
+            if Self::marker_prefix(line, b"---") || Self::marker_prefix(line, b"...") {
+                let inline = line[3..]
+                    .iter()
+                    .position(|b| !matches!(b, b' ' | b'\t'))
+                    .map(|at| &line[3 + at..]);
+                if let Some(inline) = inline.filter(|rest| !rest.is_empty() && rest[0] != b'#') {
+                    first_content = Some(inline);
+                }
+                break;
+            }
+            let lead = line.iter().take_while(|&&b| b == b' ').count();
+            let rest = &line[lead..];
+            if !(rest.is_empty() || rest[0] == b'#') {
+                first_content = Some(rest);
+            }
+        }
+        first_content.is_some_and(line_opens_a_bare_plain_scalar)
+    }
+
     /// Whether the cursor is at the `|`/`>` header of a block scalar that is the document's root
     /// node (#5067): outside every container, where the plain-scalar scanner would otherwise read
     /// it and end at a `: ` in its content. Its content is measured against the document, so the
@@ -8601,6 +8749,19 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             )
         {
             return Err(self.err_unexpected_char(self.pos, "not a valid JSON value"));
+        }
+
+        // A key, an item or a node of any other kind more indented than the block that holds the
+        // plain scalar on the line above has nothing to attach to once a comment ended it (#5068).
+        let ended = self.last_plain_scalar.take();
+        if ended.is_some()
+            && !matches!(self.peek(), Some(b'#' | b'\n' | b'\r') | None)
+            && self.line_is_stray_after_a_plain_scalar(ended, indent, false)
+        {
+            return Err(self.err_unexpected_char(
+                self.pos,
+                "a line that is neither a key, a sequence item nor a continuation",
+            ));
         }
 
         // Check what kind of content this is
@@ -8896,6 +9057,13 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // #959) - the original repro this issue was filed
                     // against.
                     self.check_mapping_under_mapping_gap(indent, false)?;
+                    // A bare line left over after a plain scalar is no node (#5068).
+                    if self.line_is_stray_after_a_plain_scalar(ended, indent, true) {
+                        return Err(self.err_unexpected_char(
+                            self.pos,
+                            "a line that is neither a key, a sequence item nor a continuation",
+                        ));
+                    }
                     // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
                     self.attach_document_root_node(indent);
@@ -9067,6 +9235,34 @@ fn line_is_bare_dash_before_comment(line: &[u8]) -> bool {
             .iter()
             .find(|&&b| !matches!(b, b' ' | b'\t'))
             .map_or(true, |&b| b == b'#')
+}
+
+/// Whether `line` (already without its leading spaces) opens a document whose root node is a bare
+/// plain scalar: not a key, an item, a flow collection, a quoted or block scalar, an alias or an
+/// explicit-key line, once node properties are set aside (#5068).
+fn line_opens_a_bare_plain_scalar(line: &[u8]) -> bool {
+    let mut at = 0;
+    while matches!(line.get(at), Some(b'&' | b'!')) {
+        while line.get(at).is_some_and(|&b| !matches!(b, b' ' | b'\t')) {
+            at += 1;
+        }
+        while matches!(line.get(at), Some(b' ' | b'\t')) {
+            at += 1;
+        }
+    }
+    let (code, _) = split_trailing_properties(&line[at..]);
+    let Some(&first) = code.first() else {
+        return false;
+    };
+    !(matches!(
+        first,
+        b'[' | b'{' | b'"' | b'\'' | b'|' | b'>' | b'*' | b'%' | b'#' | b'@' | b'`'
+    ) || (matches!(first, b'-' | b'?' | b':')
+        && code.get(1).map_or(true, |&b| matches!(b, b' ' | b'\t')))
+        || code.last() == Some(&b':')
+        || code
+            .windows(2)
+            .any(|w| w[0] == b':' && matches!(w[1], b' ' | b'\t')))
 }
 
 /// Scan a tag's raw extent starting at a `!` in `bytes[start..]` (must be
