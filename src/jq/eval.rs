@@ -64845,9 +64845,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #5113: ...and the source's alone, which says when a step is the last of its INIT fork, however many forks INIT
     // runs. Only for a single pattern: a `?//` chain retries UPDATE on the state a step stored, so it keeps
     // `last_step`.
-    let fork_source_bound = (S::TAG == EvalTag::Jq && patterns.len() == 1)
-        .then(|| source_output_bound(input))
-        .flatten();
+    // Nor where UPDATE holds a `?//` chain of its own: answering an earlier fork reaches the later ones, and a later fork
+    // whose fold source is such a chain was answered as empty where jq emits (2 of 30,000 differential rows turned a
+    // refusal into a truncated answer).
+    let fork_source_bound =
+        (S::TAG == EvalTag::Jq && patterns.len() == 1 && !has_pattern_alternatives(update))
+            .then(|| source_output_bound(input))
+            .flatten();
     // #2979: see `resolve_reduce`'s identical hoist.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
