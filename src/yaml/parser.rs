@@ -7488,7 +7488,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     /// block that holds the scalar (#5078): the scalar ended at a line indented less than its content, and a line
     /// that is still deeper than its parent belongs to nothing. yq stops there with `did not find expected key`
     /// (`did not find expected '-' indicator` in a sequence); it was read as a key (`a: |` / `   x` / `  y` / `b: 1`
-    /// is `{"a":"x\n","y":"b"}`). Blank and comment lines do not count.
+    /// is `{"a":"x\n","y":"b"}`). Blank and comment lines do not count, and a tab is left to the tab-indentation error.
     fn reject_line_deeper_than_block_after_block_scalar(&mut self) -> Result<(), YamlError> {
         let parent = self.innermost_block_indent();
         let saved_pos = self.pos;
@@ -7502,6 +7502,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.skip_to_eol();
                     self.skip_line_break();
                 }
+                // A tab after the indent is the tab-indentation error's to report, with its own message.
+                Some(b'\t') => break Ok(()),
                 Some(_) if indent > parent => {
                     let in_sequence = self.type_stack.last() == Some(&NodeType::SequenceItem);
                     break Err(self.err_unexpected_char(
