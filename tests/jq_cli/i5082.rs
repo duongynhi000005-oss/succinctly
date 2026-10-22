@@ -1,13 +1,15 @@
 //! #5082: a `foreach` UPDATE `if C then LITERAL else .a end` whose condition is truthy runs only the `then`, so the
 //! `else` that navigates moves no register and a `$i` EXTRACT (the root, `jv_identical` to jq's register) is a node
 //! of it. The binary read the whole `if` as one that may have navigated and refused (`path()`, `del()` and `|=`
-//! exit 5 where jq answers; `?` swallowed the refusal and dropped jq's path).
+//! exit 5 where jq answers; `?` swallowed the refusal and dropped jq's path). Every row is captured from
+//! `/usr/bin/jq` 1.7.1 (stdout, error message, exit code) and runs on both routes.
 
 use anyhow::Result;
 
 use crate::assert_path_rows_both_routes_3749;
 
-/// Every row captured from `/usr/bin/jq` 1.7.1 (stdout, error message, exit code), both routes.
+/// The issue's rows and their controls: a bare `if`, the `then` a literal, `.`, `null` or `$i`, an EXTRACT of `$i`,
+/// `.` or `.a`, a falsy or constant condition, a source of two items.
 #[test]
 fn test_5082_truthy_condition_runs_a_then_that_moves_no_register() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -361,6 +363,13 @@ fn test_5082_truthy_condition_runs_a_then_that_moves_no_register() -> Result<()>
             "",
             0,
         ),
+    ])
+}
+
+/// The same `if` on other documents, where the condition is falsy or the document has no object to navigate.
+#[test]
+fn test_5082_other_documents() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":1}"#,
             r"path(foreach . as $i (.; if .a then 7 else .a end; $i))",
@@ -470,6 +479,224 @@ fn test_5082_truthy_condition_runs_a_then_that_moves_no_register() -> Result<()>
             r#"{"a":[1]}"#,
             r"[path(foreach . as $i (.; if true then 7 else .a end; $i))?]",
             "[[]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// The `if` behind a wrapper that adds no movement of its own: parentheses, a handler-less `try`/`?`, a `| .` or
+/// `| select(true)` stage.
+#[test]
+fn test_5082_wrapped_if_is_read_as_its_taken_branch() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; (if .a then 7 else .b end); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; (if .a then 7 else .b end); $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; (if .a then 7 else .b end); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; (if .a then 7 else .b end); $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; (if .a then 7 else .b end); $i)) catch "C""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; try (if .a then 7 else .b end); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; try (if .a then 7 else .b end); $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; try (if .a then 7 else .b end); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; try (if .a then 7 else .b end); $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; try (if .a then 7 else .b end); $i)) catch "C""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; (if .a then 7 else .b end)?; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; (if .a then 7 else .b end)?; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; (if .a then 7 else .b end)?; $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; (if .a then 7 else .b end)?; $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; (if .a then 7 else .b end)?; $i)) catch "C""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; if .a then 7 else .b end | .; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; if .a then 7 else .b end | .; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; if .a then 7 else .b end | .; $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; if .a then 7 else .b end | .; $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; if .a then 7 else .b end | .; $i)) catch "C""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; (if .a then 7 else .b end) | .; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; (if .a then 7 else .b end) | .; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; (if .a then 7 else .b end) | .; $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; (if .a then 7 else .b end) | .; $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; (if .a then 7 else .b end) | .; $i)) catch "C""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"path(foreach . as $i (.; if .a then 7 else .b end | select(true); $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"[path(foreach . as $i (.; if .a then 7 else .b end | select(true); $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"del(foreach . as $i (.; if .a then 7 else .b end | select(true); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r"(foreach . as $i (.; if .a then 7 else .b end | select(true); $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true,"b":{"c":1}}"#,
+            r#"try path(foreach . as $i (.; if .a then 7 else .b end | select(true); $i)) catch "C""#,
+            "[]\n",
             "",
             0,
         ),

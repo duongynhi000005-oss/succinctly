@@ -50559,24 +50559,26 @@ fn taken_then_branch<'e, S: EvalSemantics>(
 /// The UPDATE a step with state `state` ran, for an `if . then A else B end` UPDATE whose state is falsy (#4948):
 /// the `else` branch (an `elif` chain read through), the one branch of the `if` that ran. The `then` branch not
 /// taken moves nothing, so the register is where the step entered. A truthy state keeps the whole `if`, which is
-/// read as before. A condition that is a pure function of `.` ([`is_pure_of_dot`]: `.a`, `length > 0`) is read
-/// the same way once evaluated on the state (#4800): jq runs an `if`'s condition in a subexp, so it moves no
+/// read as before (but for the `then` below). A condition that is a pure function of `.`
+/// ([`is_pure_of_dot`]: `.a`, `length > 0`) is read the same way once evaluated on the state (#4800): jq runs an `if`'s condition in a subexp, so it moves no
 /// register either, and only one that emits a single falsy value takes the `else` branch (one that raises keeps
 /// the whole `if`). The `if` is found where [`taken_if_item`] finds it.
+///
+/// The exception is a truthy state whose `then` cannot move the register ([`cannot_move_register`]): the `else` that
+/// navigates (`if .a then 7 else .a end`) did not run, so the step is that `then`, wrapped or not (#5082). A `then`
+/// that may navigate (`[.b]`) keeps the whole-`if` reading.
 fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
     let Some((item, wrapped)) = taken_if_item(update) else {
         return update;
     };
     let current = walk_falsy_else_chain::<S>(item, state);
-    // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included, except a bare
-    // `if` whose truthy condition ran a `then` that moves no register (`if .a then 7 else .a end`): the
-    // `else` that navigates did not run, so the step is that `then` (#5082).
+    // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included, except an `if`
+    // whose truthy condition ran a `then` that moves no register (`if .a then 7 else .a end`): the `else` that
+    // navigates did not run, so the step is that `then` (#5082).
     if core::ptr::eq(current, item) {
-        if !wrapped {
-            if let Some(then) = taken_then_branch::<S>(update, state) {
-                if cannot_move_register(then) {
-                    return then;
-                }
+        if let Some(then) = taken_then_branch::<S>(update, state) {
+            if cannot_move_register(then) {
+                return then;
             }
         }
         if wrapped {
