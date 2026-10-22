@@ -58873,6 +58873,20 @@ fn drive_fold_source_with<S: EvalSemantics>(
     {
         return Flow::Exhausted;
     }
+    // #5102: inside a fold body, a stage ahead of the `foreach` that navigated (`.b | FE`) leaves the ambient at the
+    // register the frame names, and a `$x` bound elsewhere is not that node: the pattern's step raises, the
+    // `try`/`?` around it catches the raise and the source is empty. Not only for a `foreach` that is a
+    // fold's whole UPDATE (the verdict above), so the pipe tail and the arms of an `if` or `try` read it too.
+    if S::TAG == EvalTag::Jq
+        && foreach_source
+        && ambient.trackable
+        && fold_body::depth() != 0
+        && !fold_body::source_moved_here()
+        && ambient.frame.at.is_some()
+        && caught_foreign_destructure::<S>(source, ambient, false)
+    {
+        return Flow::Exhausted;
+    }
     // #5013: outside every fold body, where INIT moved the register off the entry and the frame is the
     // register's: a `try`/`?` around the destructure of a `$x` bound elsewhere catches the raise of its
     // step and leaves the source empty (`foreach (try ($x as {b:$q} | .)) as $y (.a; .; .)` emits nothing in

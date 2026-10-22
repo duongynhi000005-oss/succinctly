@@ -156007,7 +156007,8 @@ fn test_caught_foreign_marker_destructure_behind_identity_and_label_in_an_update
         (
             r#"{"a":{"b":1}}"#,
             r"path(.a as $x | foreach (1,2) as $i (.; (. | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 1; .))",
-            "[]\n",
+            // #5102: jq prints nothing before the error (live capture); the `[]` this row pinned was this binary's.
+            "",
             "Invalid path expression with result 1",
             5,
         ),
