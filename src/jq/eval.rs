@@ -40654,7 +40654,7 @@ fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefi
 /// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
 /// show to be one node, a full slice and its container among them (`.a[0:]` of a non-empty array *is*
 /// `.a` in jq), and paths of different depth. Only object keys and array indexes are read; any other
-/// step (a slice, a subarray search) answers `false`. The chains part where a step names a different
+/// step (a slice, a subarray search) answers `false`. The chains are distinct where a step names a different
 /// key or a different slot of the same array (a negative index is resolved against the invocation's
 /// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
 /// which a finite tree never equals. A key against an index answers `false`: only a `null` holds both.

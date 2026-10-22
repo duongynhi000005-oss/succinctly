@@ -228,6 +228,13 @@ fn test_destructure_of_the_register_spelled_through_a_slice_stays_loud_5095() ->
             5,
         ),
         (
+            r#"{"a":[{"b":1},{"b":1}]}"#,
+            r#"try path(.a as $x | .a[0:] | foreach ($x as [$q] | .) as $y (.; .a?; 1)) catch "c""#,
+            "",
+            "Invalid path expression near attempt to access element 0 of [{\"b\":1},{\"b\":1}]",
+            5,
+        ),
+        (
             r#"{"a":[{"b":1},{"b":2}]}"#,
             r"[path(.a[0:] as $x | .a | $x as [{b:$q}] | $q)?]",
             "",
