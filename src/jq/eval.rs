@@ -63261,8 +63261,7 @@ fn fold_stop_outcome(is_last: bool, downstream_stopped: &mut Option<u64>) -> Fol
 ///
 /// #5049: a computed output that states the register UPDATE left below the root (`Unmoved`, at the branch's path:
 /// `.a | select(true) | 2`, or a nested `foreach` whose source walked the register onto `$x.a`) keeps that statement
-/// and path, as an EXTRACT that is `.` would emit it: jq emits from inside the loop, so the register is still there for
-/// the stages after. Demoted, the stages read it as lost and drove a `$x` destructure by value, so `| FI` refused where
+/// and path: jq emits from inside the loop, so the register is still there for the stages after. Demoted, the stages read it as lost and drove a `$x` destructure by value, so `| FI` refused where
 /// jq's own path check empties a caught source.
 fn foreach_emitted_branch<'a>(update_branch: &PathBranch<'a>) -> PathBranch<'a> {
     if update_branch.trackable {
@@ -65222,25 +65221,22 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                                     // `foreach` (`try (.a) catch 7` as its UPDATE), with no
                                                     // `try` around it for #5004 to place: none emits at the
                                                     // step's entry, so the reading holds as for no handler.
-                                                    emitting
-                                                        if update_foreach_handlers(item)
-                                                            .is_some_and(|(tries, inner)| {
-                                                                tries.is_empty()
-                                                                    && inner == emitting
-                                                            }) =>
+                                                    emitting => match update_foreach_handlers(item)
                                                     {
-                                                        true
-                                                    }
-                                                    emitting => {
-                                                        entry_tries = seedable_step
-                                                            .then(|| update_entry_tries(item))
-                                                            .flatten();
-                                                        entry_tries.as_ref().is_some_and(
-                                                            |(tries, inner)| {
-                                                                tries.len() + inner == emitting
-                                                            },
-                                                        )
-                                                    }
+                                                        Some((tries, inner))
+                                                            if tries.is_empty() =>
+                                                        {
+                                                            inner == emitting
+                                                        }
+                                                        Some(handlers) if seedable_step => {
+                                                            let placed = handlers.0.len()
+                                                                + handlers.1
+                                                                == emitting;
+                                                            entry_tries = Some(handlers);
+                                                            placed
+                                                        }
+                                                        _ => false,
+                                                    },
                                                 })
                                     })
                                 }))
