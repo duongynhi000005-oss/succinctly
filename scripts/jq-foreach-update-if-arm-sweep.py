@@ -38,8 +38,8 @@ import sys
 # The caught foreign-`$x` fold: `$x` is the context's variable, not the loop's, so its destructure runs
 # on a node that is not jq's path register.
 FOLDS = [
-    ("fe", "foreach (try ($x as {{a:$a}} | .)) as $y (.; .; .)"),
-    ("fe-chain", "foreach (try ($x as {{a:$a}} ?// [$a] | .)) as $y (.; .; .)"),
+    ("fe", "foreach (try ($x as {a:$a} | .)) as $y (.; .; .)"),
+    ("fe-chain", "foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (.; .; .)"),
 ]
 # arm pairs: (name, then, else); {F} is the fold, `1` the literal.
 ARMS = [
@@ -90,15 +90,15 @@ DOCS = [
 
 def build_rows(control):
     updates = []
-    for (cn, c), (an, then, els) in itertools.product(CONDS, CONTROL_ARMS if control else ARMS):
-        updates.append((f"{cn}-{an}", f"if {c} then {then} else {els} end"))
+    for (cond_name, cond), (an, then, els) in itertools.product(CONDS, CONTROL_ARMS if control else ARMS):
+        updates.append((f"{cond_name}-{an}", f"if {cond} then {then} else {els} end"))
     if not control:
         updates.extend(ELIFS)
     rows = []
     for (un, u), (fn, f), (wn, w), src, ex, (inn, init), (cn, c), doc in itertools.product(
         updates, FOLDS, WRAPPERS, SOURCES, EXTRACTS, INITS, CONTEXTS, DOCS
     ):
-        update = w.replace("{U}", u.replace("{F}", f.replace("{{", "{").replace("}}", "}")))
+        update = w.replace("{U}", u.replace("{F}", f))
         outer = f"foreach {src} as $i ({init}; {update}; {ex})"
         name = f"{un}/{fn}/{wn}/{src}/{ex}/{inn}/{cn}"
         rows.append((name, c.replace("{O}", outer), doc))
@@ -189,7 +189,7 @@ def main():
     sections = [("TIMEOUT", hung)]
     failed = bool(hung)
     if args.base and args.control:
-        changed = [r for r in out if r["cand"] != r["base"]]
+        changed = [r for r in out if r["cand"] != r["base"] and r["base"][0] != "TIMEOUT"]
         print(f"control rows whose output changed against --base: {len(changed)}")
         sections.append(("CHANGED", changed))
         failed = failed or bool(changed)
@@ -209,4 +209,5 @@ def main():
     return 1 if failed else 0
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
