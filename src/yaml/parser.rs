@@ -6411,6 +6411,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             }
             Some(b'|' | b'>') => {
                 self.parse_block_scalar(indent)?;
+                self.reject_line_deeper_than_block_after_block_scalar()?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -7483,6 +7484,42 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         })
     }
 
+    /// After a block scalar that is a value (`a: |`, `- |`), the next line with content must not sit deeper than the
+    /// block that holds the scalar (#5078): the scalar ended at a line indented less than its content, and a line
+    /// that is still deeper than its parent belongs to nothing. yq stops there with `did not find expected key`
+    /// (`did not find expected '-' indicator` in a sequence); it was read as a key (`a: |` / `   x` / `  y` / `b: 1`
+    /// is `{"a":"x\n","y":"b"}`). Blank and comment lines do not count.
+    fn reject_line_deeper_than_block_after_block_scalar(&mut self) -> Result<(), YamlError> {
+        let parent = self.innermost_block_indent();
+        let saved_pos = self.pos;
+        let result = loop {
+            let line_start = self.pos;
+            let indent = self.skip_spaces_simd();
+            match self.peek() {
+                None => break Ok(()),
+                Some(b'\n' | b'\r') => self.skip_line_break(),
+                Some(b'#') => {
+                    self.skip_to_eol();
+                    self.skip_line_break();
+                }
+                Some(_) if indent > parent => {
+                    let in_sequence = self.type_stack.last() == Some(&NodeType::SequenceItem);
+                    break Err(self.err_unexpected_char(
+                        line_start + indent,
+                        if in_sequence {
+                            "did not find expected '-' indicator"
+                        } else {
+                            "did not find expected key"
+                        },
+                    ));
+                }
+                Some(_) => break Ok(()),
+            }
+        };
+        self.pos = saved_pos;
+        result
+    }
+
     /// Whether the first non-blank line below a block scalar's header holds content indented less than
     /// `content_indent`, so the scalar has no content of its own (#5067). End of input is not such a line.
     fn first_block_content_line_is_dedented(&mut self, content_indent: usize) -> bool {
@@ -8437,7 +8474,8 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
     fn parse_own_line_block_scalar(&mut self, indent: usize) -> Result<(), YamlError> {
         self.attach_document_root_node(indent);
         let parent = self.innermost_block_indent();
-        self.parse_block_scalar(parent)
+        self.parse_block_scalar(parent)?;
+        self.reject_line_deeper_than_block_after_block_scalar()
     }
 
     /// Whether the node properties that open the cursor's line, parsed from `start`, repeat a
