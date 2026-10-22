@@ -208,3 +208,139 @@ fn test_reduce_update_with_an_init_other_than_dot_keeps_the_rows_that_matched_50
         ),
     ])
 }
+
+/// #5044: a `foreach` EXTRACT `if C then FE else B end` with an `else` beyond `.` is read as an UPDATE's is (the
+/// `foreach` is empty on every step, so the EXTRACT emits nothing) when the fold's source never hands the register on
+/// (`(.a,.b)`, `.[]`, `.[]?`, [`source_hands_register_off`]): `$x` is a node the register is never on, so the destructure
+/// raises each step. `main` read it by value and a `try`/`del`/`|=` around it answered `"C"` or refused where jq
+/// finishes. Every row captured from jq 1.7.1, both routes.
+#[test]
+fn test_foreach_extract_if_with_a_navigating_else_reads_a_source_that_hands_the_register_off_5044(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1,"b":2}"#,
+            r#"try path(. as $x | foreach .[] as $i (.; .; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) elif .b then . | .a else . | .a end)) catch "C""#,
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"try path(. as $x | foreach .[]? as $i (null; .; if true then try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else (.a,.b) end)) catch "C""#,
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1],"b":0}"#,
+            r#"try del(. as $x | foreach (.a,.a) as $i (.; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) else null end)) catch "C""#,
+            "{\"a\":[1],\"b\":0}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r#"try ((. as $x | foreach (.a,.a) as $i (.; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) else empty end)) |= 9) catch "C""#,
+            "{\"a\":null,\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1,"b":2}"#,
+            r#"try del(. as $x | foreach .[] as $i (null; .; if true then try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else .b end)) catch "C""#,
+            "{\"a\":1,\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1,"b":2}"#,
+            r#"try del(. as $x | foreach (.a,.b) as $i (null; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) elif .b then . else . end)) catch "C""#,
+            "{\"a\":1,\"b\":2}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5044: the same for the mirrored `if C then B else FE end` in a `foreach` UPDATE: the `foreach` in the `else` is
+/// read as the one in the `then` is when the source hands the register off. Every row captured from jq 1.7.1, both
+/// routes.
+#[test]
+fn test_foreach_update_mirrored_if_reads_a_source_that_hands_the_register_off_5044() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":2}"#,
+            r#"try ((. as $x | foreach .[] as $i (null; if .a == 1 then .a else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) end; $i)) |= 9) catch "C""#,
+            "{\"a\":null,\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1],"b":0}"#,
+            r#"try ((. as $x | foreach .[]? as $i (.; if .a == 1 then . else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) end; $i)) |= 9) catch "C""#,
+            "{\"a\":[1],\"b\":0}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":null}"#,
+            r#"try del(. as $x | foreach (.a,.a) as $i (.; if .a == 1 then . else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end; true)) catch "C""#,
+            "{\"a\":false,\"b\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r#"try del(. as $x | foreach .[] as $i (null; if .a then empty else try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end; .a)) catch "C""#,
+            "{\"a\":null,\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1],"b":0}"#,
+            r#"try del(. as $x | foreach .[]? as $i (null; if .a then 1 else try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end; null)) catch "C""#,
+            "{\"a\":[1],\"b\":0}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":1},"b":2}"#,
+            r#"try ((. as $x | foreach (.a,.b) as $i (null; if .a == 1 then .a else try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end; .)) |= 9) catch "C""#,
+            "{\"a\":{\"a\":1},\"b\":2}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5044: a source with `.` among its elements (`(.a,.)`) is not read: there `$x` is the register at the last step and
+/// the `foreach` emits, so an EXTRACT read as empty refused 19 of 12,000 grid rows that matched jq. Rows captured from
+/// jq 1.7.1, both routes.
+#[test]
+fn test_foreach_extract_if_with_a_source_that_hands_the_register_on_keeps_the_rows_that_matched_5044(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":1,"b":2}"#,
+            r#"try del(. as $x | foreach (.a,.) as $i (.; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) else empty end)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"[path(. as $x | foreach (.a,.) as $i (.; .; if . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) elif .b then .b else .b end))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
