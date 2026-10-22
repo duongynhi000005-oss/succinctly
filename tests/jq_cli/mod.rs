@@ -68,4 +68,5 @@ mod i5024;
 mod i5030;
 mod i5034;
 mod i5044;
+mod i5049;
 mod i5082;

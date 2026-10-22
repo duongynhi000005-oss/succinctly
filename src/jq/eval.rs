@@ -63258,6 +63258,12 @@ fn fold_stop_outcome(is_last: bool, downstream_stopped: &mut Option<u64>) -> Fol
 /// snapshot must stay recognisable to an outer register when this `foreach`
 /// is nested inside another fold (#1466) -- same rule as `relocate`'s own
 /// demotion arm.
+///
+/// #5049: a computed output that states the register UPDATE left below the root (`Unmoved`, at the branch's path:
+/// `.a | select(true) | 2`, or a nested `foreach` whose source walked the register onto `$x.a`) keeps that statement
+/// and path, as an EXTRACT that is `.` would emit it: jq emits from inside the loop, so the register is still there for
+/// the stages after. Demoted, the stages read it as lost and drove a `$x` destructure by value, so `| FI` refused where
+/// jq's own path check empties a caught source.
 fn foreach_emitted_branch<'a>(update_branch: &PathBranch<'a>) -> PathBranch<'a> {
     if update_branch.trackable {
         PathBranch::new(
@@ -63265,6 +63271,16 @@ fn foreach_emitted_branch<'a>(update_branch: &PathBranch<'a>) -> PathBranch<'a> 
             update_branch.value.clone(),
             true,
         )
+    } else if let (BranchRegister::Unmoved(register), true) =
+        (&update_branch.register, update_branch.path.depth() > 0)
+    {
+        PathBranch::passthrough(
+            update_branch.path.clone(),
+            update_branch.value.clone(),
+            false,
+            update_branch.snapshot.clone(),
+        )
+        .with_register(BranchRegister::Unmoved(register.clone()))
     } else {
         PathBranch::demoted(update_branch.snapshot.clone(), update_branch.value.clone())
     }
@@ -64970,9 +64986,22 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // own) states nothing yet, and only for an EXTRACT that
                                 // [`cannot_move_register`] -- one that may have navigated and
                                 // computed after it keeps the statement it made.
+                                // #5049: ...also on a step whose register the source moved (`walked_at`, a
+                                // destructure of the `$x` that was the register, then a computed output):
+                                // that closure states only an `AtEntry` or a step that cannot move the
+                                // register, and an EXTRACT `$y` after a caught UPDATE emitted with no
+                                // statement, which the stage after the `foreach` read as lost (a `try`
+                                // around the path then caught an exact refusal where jq's stage emits
+                                // nothing). Not after a pattern walk or an INIT that can move the register
+                                // (#5013's unmodelled hand-off to the source), nor for an EXTRACT that can:
+                                // there the statement turned refusals into a wrong accept and a wrong write.
                                 let extract_moved = S::TAG == EvalTag::Jq
                                     && !update_unmoved
-                                    && walked_at.is_none()
+                                    && (walked_at.is_none()
+                                        || (walked.is_none()
+                                            && matches!(elem.moved, MovedRegister::At { .. })
+                                            && cannot_move_register(init)
+                                            && cannot_move_register(ext_expr)))
                                     && extract_reg.trackable
                                     && extract_reg.path.depth() > reg.path.depth()
                                     && (cannot_move_register(ext_expr) || bind_moved);
@@ -65192,6 +65221,19 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                                 && source_destructures_to_container(source)
                                                 && match emitting_handler_count(item) {
                                                     0 => true,
+                                                    // #5049: every emitting handler is inside the nested
+                                                    // `foreach` (`try (.a) catch 7` as its UPDATE), with no
+                                                    // `try` around it for #5004 to place: none emits at the
+                                                    // step's entry, so the reading holds as for no handler.
+                                                    emitting
+                                                        if update_foreach_handlers(item)
+                                                            .is_some_and(|(tries, inner)| {
+                                                                tries.is_empty()
+                                                                    && inner == emitting
+                                                            }) =>
+                                                    {
+                                                        true
+                                                    }
                                                     emitting => {
                                                         entry_tries = seedable_step
                                                             .then(|| update_entry_tries(item))
@@ -65722,6 +65764,12 @@ fn update_entry_try_bodies(update: &Expr) -> Option<Vec<(usize, Expr)>> {
 /// [`update_entry_try_bodies`], with how many handlers that can emit sit inside that `foreach`'s INIT, UPDATE and
 /// EXTRACT: those emit into its own state, not at the outer `try`'s entry, so they are no output #5004 must place.
 fn update_entry_tries(update: &Expr) -> Option<(Vec<(usize, Expr)>, usize)> {
+    update_foreach_handlers(update).filter(|(tries, _)| !tries.is_empty())
+}
+
+/// [`update_entry_tries`] without requiring a `try` around the `foreach`: `Some` with no `try`s for an UPDATE whose
+/// emitting handlers all sit inside that `foreach`'s INIT, UPDATE and EXTRACT (#5049).
+fn update_foreach_handlers(update: &Expr) -> Option<(Vec<(usize, Expr)>, usize)> {
     fn walk<'e>(expr: &'e Expr, tries: &mut Vec<(usize, Expr)>) -> Option<&'e Expr> {
         match unwrap_paren(without_empty_siblings(expr)) {
             foreach @ Expr::Foreach { .. } => Some(foreach),
@@ -65755,10 +65803,7 @@ fn update_entry_tries(update: &Expr) -> Option<(Vec<(usize, Expr)>, usize)> {
             update,
             extract,
             ..
-        } if !tries.is_empty()
-            && cannot_move_register(init)
-            && is_single_caught_destructure(input) =>
-        {
+        } if cannot_move_register(init) && is_single_caught_destructure(input) => {
             let inner = emitting_handler_count(init)
                 + emitting_handler_count(update)
                 + extract.as_deref().map_or(0, emitting_handler_count);
