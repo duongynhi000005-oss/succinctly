@@ -40650,6 +40650,45 @@ fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefi
     true
 }
 
+/// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
+/// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
+/// show to be one node, a full slice and its container among them (`.a[0:]` of a non-empty array *is*
+/// `.a` in jq), and paths of different depth. Only object keys and array indexes are read; any other
+/// step (a slice, a subarray search) answers `false`. The chains are distinct where a step names a different
+/// key or a different slot of the same array (a negative index is resolved against the invocation's
+/// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
+/// which a finite tree never equals. A key against an index answers `false`: only a `null` holds both.
+fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
+    let (left, right) = (components_from_root(lhs), components_from_root(rhs));
+    if left
+        .iter()
+        .chain(&right)
+        .any(|component| !matches!(component, Expr::Field(_) | Expr::Index { .. }))
+    {
+        return false;
+    }
+    let root = invocation_roots::get(invocation);
+    let mut node = root.as_ref();
+    for (l, r) in left.iter().zip(&right) {
+        match (l, r) {
+            (Expr::Field(a), Expr::Field(b)) if a != b => return true,
+            (Expr::Index { idx: a, .. }, Expr::Index { idx: b, .. }) if a != b => {
+                return match node.and_then(OwnedValue::as_array) {
+                    Some(items) => matches!(
+                        (array_slot(items.len(), *a), array_slot(items.len(), *b)),
+                        (Some(x), Some(y)) if x != y
+                    ),
+                    None => *a >= 0 && *b >= 0,
+                };
+            }
+            (Expr::Field(_), Expr::Field(_)) | (Expr::Index { .. }, Expr::Index { .. }) => {}
+            _ => return false,
+        }
+        node = node.and_then(|value| anchor_component_step(value, l).map(|(child, _)| child));
+    }
+    left.len() != right.len()
+}
+
 /// `component` without any `?` wrappers: the frame only moves on the inner
 /// step's success.
 fn strip_optional(component: &Expr) -> &Expr {
@@ -52669,11 +52708,24 @@ impl FoldRegister {
         // widening it would make loud a refusal #3267 keeps exact. The live register is
         // dropped, as `Frame::unknown` drops it, so the frame never records a loss while
         // carrying a register (#3456 D2).
+        // #5095: a frame that carries the register's value, on a fold whose INIT cannot move it,
+        // loses it *there*: jq's register only moves down from it, so a frozen value that is no
+        // node of it (the root, around a register the frame names at `.a`) is not the register,
+        // and its refusal is jq's own, which a `try` catches (`foreach ((reduce ($x as {b:$q} | .)
+        // as $w (.; .c))?) as $y (.a; .; .)`). Outside every fold body only: inside one, the
+        // refusal this keeps loud can be the resolver's own of a step jq takes (`foreach (..) as
+        // $i (null; .. (try (foreach (($x as {a:$a} | .)?) ..) catch 7); $i)` is jq's `[]`).
         if !self.trackable && !self.frame.register_loss.is_lost() {
+            let loss = match &self.frame.register {
+                Some(register) if self.live_register_known && fold_body::depth() == 0 => {
+                    RegisterLoss::LostAt(Rc::clone(register))
+                }
+                _ => RegisterLoss::LostSomewhere,
+            };
             self.frame = self
                 .frame
                 .with_register(None)
-                .with_register_loss(RegisterLoss::LostSomewhere)
+                .with_register_loss(loss)
                 .into_owned();
         }
     }
@@ -62051,14 +62103,19 @@ fn may_alias_register(source: &Expr, register_frame: Option<&Frame>) -> bool {
                         })
                 }
                 Expr::Identity => identity,
-                // A marker bound at a position the register's own frame can compare
-                // and does not name is a different node, whatever it equals (`.a as
-                // $y | .c | try (first($y) as {b:$q} | $q)` on equal siblings: jq
-                // catches it).
+                // A marker bound at a position provably not the one the register's own
+                // frame names is a different node, whatever it equals (`.a as $y | .c |
+                // try (first($y) as {b:$q} | $q)` on equal siblings: jq catches it). #5095:
+                // provably, not merely unnamed: `.a[0:]` is `.a`'s own node in jq.
                 Expr::TrackedVar(marker) => !matches!(
                     &marker.origin,
                     Origin::At { invocation, path }
-                        if self.frame.is_some_and(|f| f.at.is_some() && !f.names(*invocation, path))
+                        if self.frame.is_some_and(|f| {
+                            *invocation == f.invocation
+                                && f.at.as_ref().is_some_and(|at| {
+                                    positions_provably_distinct(*invocation, at, &path.0)
+                                })
+                        })
                 ),
                 Expr::Var(_) => true,
                 Expr::Comma(exprs) => exprs.iter().any(|e| any(e, identity)),
@@ -62120,10 +62177,20 @@ fn source_may_alias_register<S: EvalSemantics>(
     // untracked stage `.` is whatever the stage computed, so a source that mixes a bare `.`
     // with a `$var` marker (`if true then $v0 else . end`) hands the register back on one
     // branch and not the other; a source of either kind alone is one thing throughout.
+    // #5095: ...or while an untracked stage's frame carries the register, which sits where that
+    // frame names ([`resolve_seq_stage`]'s `stage_frame`; a fold SOURCE after a navigating INIT,
+    // [`register_frame`]): a `$x` bound at another position is another node of the document, and
+    // the refusal of its step is jq's own, which a `try` catches (`.a as $x | foreach ($x as {b:$q}
+    // | .) as $y (.b; ..)` on equal siblings). Not for a `null`/boolean register, which jq finds
+    // identical to an equal value wherever it was bound.
+    let names_register = trackable
+        || frame
+            .register()
+            .is_some_and(|register| !matches!(register, OwnedValue::Null | OwnedValue::Bool(_)));
     S::TAG == EvalTag::Jq
         && !(identity_passthrough(source, true)
             && (trackable || !passthrough_mixes_dot_and_marker(source)))
-        && may_alias_register(source, trackable.then_some(frame))
+        && may_alias_register(source, names_register.then_some(frame))
 }
 
 /// The register in hand at a stage: the ambient value itself while trackable, else
@@ -152901,6 +152968,70 @@ mod touched_edge_cases_2999 {
             vec![field("x"), slice(Some(0), None)],
             vec![field("x")]
         ));
+    }
+
+    /// #5095: [`positions_provably_distinct`] answers `true` only where two positions cannot be one node --
+    /// a different key or in-range slot, or an ancestor -- and `false` for every pair `!same_frame_position`
+    /// would also answer `true` without proof: a slice against its container, a negative index with no root to
+    /// resolve it, another kind of step, or a key against an index.
+    #[test]
+    #[cfg(feature = "std")]
+    fn positions_provably_distinct_needs_a_proof_5095() {
+        let field = |n: &str| Expr::Field(n.to_string());
+        let index = |idx: i64| Expr::Index { idx, key: None };
+        let full = Expr::Slice {
+            start: Some(0),
+            end: None,
+            start_key: None,
+            end_key: None,
+        };
+        let chain = |parts: Vec<Expr>| PathPrefix::from_components(parts);
+        let distinct = |invocation: u64, a: Vec<Expr>, b: Vec<Expr>| {
+            positions_provably_distinct(invocation, &chain(a), &chain(b))
+        };
+        let root = OwnedValue::object_from([(
+            "x".to_string(),
+            OwnedValue::array_from(vec![OwnedValue::Int(0), OwnedValue::Int(1)]),
+        )]);
+        let invocation = u64::MAX - 5095;
+        let _guard = invocation_roots::push(invocation, root);
+
+        assert!(distinct(0, vec![field("a")], vec![field("b")]));
+        assert!(!distinct(0, vec![field("a")], vec![field("a")]));
+        // An ancestor is another node; a full slice of the same array is not provably one.
+        assert!(distinct(0, vec![field("a")], vec![field("a"), field("b")]));
+        assert!(!distinct(
+            0,
+            vec![field("x"), full.clone()],
+            vec![field("x")]
+        ));
+        assert!(!distinct(
+            0,
+            vec![field("x"), full, index(0)],
+            vec![field("x"), index(0)]
+        ));
+        // Two non-negative slots differ without a root; a negative one needs the array.
+        assert!(distinct(
+            0,
+            vec![field("x"), index(0)],
+            vec![field("x"), index(1)]
+        ));
+        assert!(!distinct(
+            0,
+            vec![field("x"), index(-1)],
+            vec![field("x"), index(0)]
+        ));
+        assert!(distinct(
+            invocation,
+            vec![field("x"), index(-1)],
+            vec![field("x"), index(0)]
+        ));
+        assert!(!distinct(
+            invocation,
+            vec![field("x"), index(-1)],
+            vec![field("x"), index(1)]
+        ));
+        assert!(!distinct(0, vec![field("x")], vec![index(0)]));
     }
 
     #[test]
