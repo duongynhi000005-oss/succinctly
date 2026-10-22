@@ -1059,7 +1059,11 @@ So the per-word calls are a real cost of the baseline target. Per-call runtime d
 cost more than it saves, so the options are a documented `RUSTFLAGS`, release binaries built with `+popcnt`
 (every x86_64 CPU since about 2008 has the instruction; the baseline target cannot assume it), or
 `#[target_feature(enable = "popcnt")]` clones of the hot loops, which only help where the whole path inlines.
-Which one ships is open on #5035.
+Shipped (#5035): the Linux x64 and Windows x64 release archives are built with `+popcnt` and check for the
+instruction at startup (a message naming the requirement and `cargo install succinctly --features cli` instead of
+`Illegal instruction`); `cargo install` and the library stay at the baseline target, with the `RUSTFLAGS` above as
+the recommended way to build from source on x86_64. `#[target_feature]` clones of whole queries remain a possible
+follow-up for library users.
 
 ### Reproduce
 

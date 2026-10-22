@@ -49,6 +49,10 @@ jobs:
           rust: stable
           target: x86_64-unknown-linux-gnu
           archive-name: succinctly-linux-x64.tar.gz
+          # #5035: POPCNT for every per-word popcount (-2% to -3% median end to end, -20% on
+          # structure-heavy YAML on a Ryzen 9 7950X). The binary checks for the instruction at
+          # startup and says what it needs; see docs/guides/release.md.
+          rustflags: -C target-feature=+popcnt
         - build: linux-arm64
           os: ubuntu-24.04-arm
           rust: stable
@@ -64,6 +68,7 @@ jobs:
           rust: stable
           target: x86_64-pc-windows-msvc
           archive-name: succinctly-windows-x64.zip
+          rustflags: -C target-feature=+popcnt
     runs-on: ${{ matrix.os }}
     steps:
     - name: Checkout repository
@@ -76,6 +81,9 @@ jobs:
         target: ${{ matrix.target }}
 
     - name: Build release binary
+      env:
+        # Empty for the aarch64 builds, which count bits with NEON `cnt` already.
+        RUSTFLAGS: ${{ matrix.rustflags }}
       run: cargo build --verbose --release --features cli --target ${{ matrix.target }}
 
     - name: Strip release binary (linux and macos)

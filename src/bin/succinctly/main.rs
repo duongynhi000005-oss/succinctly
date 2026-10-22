@@ -1645,7 +1645,30 @@ const EVAL_STACK_SIZE: usize = if cfg!(debug_assertions) {
     256 * 1024 * 1024
 };
 
+/// What to say, and where to go, when a binary built with the `popcnt` target feature (the x86_64 release
+/// archives, #5035) starts on a CPU without the instruction.
+#[cfg(any(test, all(target_arch = "x86_64", target_feature = "popcnt")))]
+fn popcnt_required_message(program: &str) -> String {
+    format!(
+        "{program}: this build needs an x86-64 CPU with the POPCNT instruction (Intel Nehalem, AMD K10 \
+         or newer), and this CPU does not report it.\n\
+         Build a baseline binary instead: cargo install succinctly --features cli"
+    )
+}
+
+/// Refuse to run, with a message that names the requirement, rather than die on `Illegal instruction`.
+/// The standard library is prebuilt for the baseline target, so nothing before this executes `POPCNT`.
+#[cfg(all(target_arch = "x86_64", target_feature = "popcnt"))]
+fn require_popcnt() {
+    if !std::arch::is_x86_feature_detected!("popcnt") {
+        eprintln!("{}", popcnt_required_message("succinctly"));
+        std::process::exit(1);
+    }
+}
+
 fn main() -> Result<()> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "popcnt"))]
+    require_popcnt();
     // Run everything on a thread with an explicitly sized stack, then
     // propagate its result. A panic in the child is resumed here rather than
     // swallowed, so panic behaviour (and the abort/backtrace a panic produces)
@@ -3161,5 +3184,22 @@ mod hoist_options_3447 {
             hoist_options_before_positional_flags(argv, 2),
             strs(&["succinctly", "jq", "-n", "-c", "--args", "$P", "a"])
         );
+    }
+}
+
+#[cfg(test)]
+mod popcnt_required_tests_5035 {
+    use super::popcnt_required_message;
+
+    /// #5035: the refusal names the program, the instruction, the CPUs that have it and the way to a build that
+    /// does not need it; it is the whole of what a user on an older CPU sees.
+    #[test]
+    fn the_message_names_the_requirement_and_the_way_out() {
+        let message = popcnt_required_message("succinctly");
+        assert!(message.starts_with("succinctly: "), "{message}");
+        for needle in ["POPCNT", "Nehalem", "K10", "cargo install succinctly"] {
+            assert!(message.contains(needle), "{needle}: {message}");
+        }
+        assert_eq!(message.lines().count(), 2, "{message}");
     }
 }
