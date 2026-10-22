@@ -144951,6 +144951,14 @@ mod tests {
     fn test_path_bind_origin_matrix_accepts_2042() {
         // (input, filter, jq 1.7.1's `-c '[FILTER]'`)
         let rows: &[(&[u8], &str, &str)] = &[
+            // #5103: a whole-range slice of a non-empty array is the array (`jvp_array_slice` shares the
+            // buffer), so jq's `.a[0:3]` of a 3-array is `.a`; refuse-only until then.
+            // full-slice-is-the-array
+            (
+                br#"{"a":[1,2,3]}"#,
+                "path(.a[0:3] as $y | .a | $y)",
+                r#"[["a"]]"#,
+            ),
             // Refuse-only until #3795: the transparent witness grammar takes a
             // navigation of the register's node as a leaf, so a source wrapping
             // one in `select`/`//`/`if` is placed by the resolver, and `$y` is
@@ -145517,12 +145525,6 @@ mod tests {
                 br#"{"x":[1,2],"i":1}"#,
                 "path(.x[.i:]? as $y | .x[1:] | $y)",
                 r#"[["x",{"start":1,"end":null}]]"#,
-            ),
-            // full-slice-is-the-array (jq's `.a[0:3]` of a 3-array is `.a`)
-            (
-                br#"{"a":[1,2,3]}"#,
-                "path(.a[0:3] as $y | .a | $y)",
-                r#"[["a"]]"#,
             ),
             // marker-not-at-head
             (
@@ -153044,6 +153046,7 @@ mod touched_edge_cases_2999 {
         let root = OwnedValue::object_from([
             ("x".to_string(), items(2)),
             ("s".to_string(), OwnedValue::string("ab")),
+            ("e".to_string(), items(0)),
         ]);
         let invocation = u64::MAX - 3464;
         let _guard = invocation_roots::push(invocation, root);
@@ -153181,11 +153184,28 @@ mod touched_edge_cases_2999 {
             vec![field("x"), index(7, None), field("k"), index(-1, None)],
             vec![field("x"), index(7, None), field("k"), index(-1, None)],
         ));
-        // A slice is never folded onto its container (#3494).
-        assert!(!same(
+        // #5103: a slice spanning the whole of a non-empty array is folded onto its container (jq's slice
+        // shares the buffer), and so is one of a whole slice; a partial one is not.
+        assert!(same(
             invocation,
             vec![field("x"), slice(Some(0), None)],
             vec![field("x")]
+        ));
+        assert!(same(
+            invocation,
+            vec![field("x")],
+            vec![field("x"), slice(Some(-9), Some(2)), slice(Some(0), None)]
+        ));
+        assert!(!same(
+            invocation,
+            vec![field("x"), slice(Some(1), None)],
+            vec![field("x")]
+        ));
+        // The slice of an empty array is a fresh `[]` in jq, never its container (#3494).
+        assert!(!same(
+            invocation,
+            vec![field("e"), slice(Some(0), None)],
+            vec![field("e")]
         ));
     }
 

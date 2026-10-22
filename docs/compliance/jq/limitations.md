@@ -3357,7 +3357,7 @@ is the revert that established what the other one costs.
    slot or the same non-empty range of the same array in the invocation's own root
    (`invocation_roots`, now recorded whenever the frame has a position over a container root).
    The walk continues below a slice, over a view of the sliced elements, so `path(.z[0:1][0][1] as $y | .z[-2:-1][0][-1] | $y)`
-   answers too. A slice is never folded onto its container (#3494), and an empty range never agrees
+   answers too. A slice of an empty array is never folded onto its container (#3494; since #5103 a whole-range slice of a non-empty array is), and an empty range never agrees
    (`path(.x[5:] as $y | .x[6:] | $y)` refuses in jq too). The emitted path is unchanged. Pinned in
    `test_resolver_frame_position_is_spelling_insensitive_3464` and
    `test_resolver_frame_position_spelling_controls_refuse_3464`. What was left over was not a
