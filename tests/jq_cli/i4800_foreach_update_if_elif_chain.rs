@@ -8,8 +8,8 @@ use anyhow::Result;
 /// With `FE` behind an `elif` (`if .a then 7 elif . then FE else .a end`) the step that picked it kept the whole-`if`
 /// reading, which refuses the navigating `else` naming the state -- uncatchably under `?` -- where jq answers. The chain
 /// is now walked as `taken_if_branch` walks it: a falsy condition continues into the `else`, the first truthy one names
-/// its `then`. Rows captured from jq 1.7.1 (stdout, first stderr line, exit code), both routes; each fails with the walk
-/// removed.
+/// its `then`. Rows captured from jq 1.7.1 (stdout, first stderr line, exit code), both routes; every row but the
+/// second (a control that already matched) fails on `main`, and removing the walk fails the test.
 #[test]
 fn test_foreach_update_elif_chain_with_the_caught_foreach_in_a_later_arm_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
