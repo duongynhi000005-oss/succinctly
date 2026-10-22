@@ -40604,8 +40604,11 @@ fn anchor_component_step<'v>(
 /// they fold to the same in-range slot -- the negative one counted from the
 /// end, as [`anchor_component_step`] does. Two slices agree when they resolve
 /// to the same non-empty range of the same array (`jv_identical` on a slice
-/// compares the array, offset and size); a slice is never folded onto its
-/// container, so `.[0:]` of `[]` stays distinct from `.` (#3494).
+/// compares the array, offset and size), unless jq copied it ([`FoldNode::slice`]:
+/// every evaluation of such a slice is a new array). Failing that, a slice that
+/// spans the whole of a non-empty array is read as the node it slices (#5103,
+/// [`same_node_through_full_slices`]); the slice of an empty array never is, so
+/// `.[0:]` of `[]` stays distinct from `.` (#3494).
 ///
 /// Only ever answers `true` for two chains that navigate an unmodified root
 /// to one node -- a resolver never writes -- so it can only widen what
@@ -40633,6 +40636,7 @@ fn same_frame_position_as_spelled(
     // needs no container: a hard mismatch refuses at once, and a pair of
     // chains that agree throughout is done.
     let mut needs_root = false;
+    let mut spelled_slice = false;
     let (mut left, mut right) = (&**lhs, &**rhs);
     while let (
         PathPrefix::Node {
@@ -40650,15 +40654,19 @@ fn same_frame_position_as_spelled(
         match relate_components(left_component, right_component) {
             ComponentRelation::Differ => return false,
             ComponentRelation::NeedsRoot => needs_root = true,
-            ComponentRelation::Agree => {}
+            ComponentRelation::Agree => {
+                // #5103: a slice spelled alike may still be a copy jq makes afresh, which only the root can say.
+                spelled_slice |= matches!(strip_optional(left_component), Expr::Slice { .. });
+            }
         }
         (left, right) = (left_parent, right_parent);
     }
-    if !needs_root {
+    if !needs_root && !spelled_slice {
         return true;
     }
     let Some(root) = invocation_roots::get(invocation) else {
-        return false;
+        // With no root, a pair spelled alike keeps the structural answer it always had.
+        return !needs_root;
     };
     let mut node = Some(FoldNode::Value(&root));
     for (left, right) in components_from_root(lhs)
@@ -40671,22 +40679,32 @@ fn same_frame_position_as_spelled(
             FoldedStep::Unknown => None,
         };
     }
-    true
+    // #5103: two evaluations of a slice jq copies are two arrays (`path(.a[65536:] as $x | .a[65536:] | $x)` refuses);
+    // one evaluation shared by both chains is the `Rc::ptr_eq` above.
+    !node.is_some_and(FoldNode::is_copied)
 }
 
-/// `chain`'s components with each slice that spans the whole of a non-empty array (or of a non-empty slice of one)
-/// dropped, as the node it slices (#5103); `None` where a slice stands on a node the walk from `root` cannot reach.
-fn without_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Option<Vec<&'c Expr>> {
+/// `chain` walked from `root` (#5103): its components with each slice that spans the whole of a non-empty array dropped
+/// (`jvp_array_slice` then returns the same view, which `jv_identical` finds identical to the array it slices), and
+/// whether the chain ends on an array jq builds afresh ([`FoldNode::is_fresh`]). `None` where a slice stands on a node
+/// the walk cannot reach.
+struct SliceWalk<'c> {
+    kept: Vec<&'c Expr>,
+    ends_fresh: bool,
+}
+
+fn walk_through_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Option<SliceWalk<'c>> {
     let mut node = Some(FoldNode::Value(root));
     let mut kept = Vec::new();
     for component in components_from_root(chain) {
         if let Expr::Slice { start, end, .. } = component {
-            let items = node.and_then(FoldNode::items)?;
-            let range = SliceBounds::from_literals(*start, *end).resolve(items.len());
-            if !items.is_empty() && range == (0..items.len()) {
+            let current = node?;
+            let len = current.items()?.len();
+            let range = SliceBounds::from_literals(*start, *end).resolve(len);
+            if len > 0 && range == (0..len) {
                 continue;
             }
-            node = Some(FoldNode::Items(&items[range]));
+            node = current.slice(range);
         } else {
             node = match folded_component_step(node, component, component) {
                 FoldedStep::At(next) => Some(next),
@@ -40695,65 +40713,51 @@ fn without_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Option<V
         }
         kept.push(component);
     }
-    Some(kept)
-}
-
-/// #5103: whether `chain` ends in a slice whose range is empty on an array the invocation's root holds there: jq builds
-/// a fresh `[]` for it (`jvp_array_slice` of an empty range), which is no node of the document, so a marker bound
-/// anywhere, and the register standing anywhere, is not it (`{"a":[]}`: `.a as $x | .a[0:]` leaves `$x` foreign, and
-/// the destructure of it raises jq's own catchable error).
-fn ends_at_fresh_slice(invocation: u64, chain: &PathPrefix) -> bool {
-    let components = components_from_root(chain);
-    let Some((Expr::Slice { start, end, .. }, ancestors)) = components.split_last() else {
-        return false;
-    };
-    let Some(root) = invocation_roots::get(invocation) else {
-        return false;
-    };
-    let mut node = Some(FoldNode::Value(&root));
-    for component in ancestors {
-        node = match folded_component_step(node, component, component) {
-            FoldedStep::At(next) => Some(next),
-            FoldedStep::Unknown | FoldedStep::Differs => None,
-        };
-    }
-    node.and_then(FoldNode::items).is_some_and(|items| {
-        SliceBounds::from_literals(*start, *end)
-            .resolve(items.len())
-            .is_empty()
+    Some(SliceWalk {
+        kept,
+        ends_fresh: node.is_some_and(FoldNode::is_fresh),
     })
 }
 
-/// #5103: whether `lhs` and `rhs` name one node once every slice that spans the whole of a non-empty array (or of a
-/// non-empty slice of one) is read as the node it slices. jq's array slice is a view (`jvp_array_slice` moves the
-/// offset and size, sharing the buffer), and `jv_identical` compares pointer, offset and size, so `.a[0:]` of a
-/// non-empty array *is* `.a` (`path(.a as $x | .a[0:] | $x)` is `["a",{"start":0,"end":null}]` in jq 1.7.1), where the
-/// slice of an empty array is a fresh `[]` and a string slice a copy, neither of them the node. Each slice is resolved
-/// against the invocation's root, so a chain the walk cannot follow to an array keeps its slice and the spellings must
-/// then agree as written.
+/// Whether `chain` has a slice step, without allocating.
+fn chain_has_slice(chain: &PathPrefix) -> bool {
+    let mut chain = chain;
+    while let PathPrefix::Node {
+        parent, component, ..
+    } = chain
+    {
+        if matches!(strip_optional(component), Expr::Slice { .. }) {
+            return true;
+        }
+        chain = parent;
+    }
+    false
+}
+
+/// #5103: whether `lhs` and `rhs` name one node once every slice that spans the whole of a non-empty array is read as
+/// the node it slices ([`walk_through_full_slices`]): `.a[0:]` of a non-empty array *is* `.a` in jq (`path(.a as $x |
+/// .a[0:] | $x)` is `["a",{"start":0,"end":null}]` in jq 1.7.1). Never for a chain that ends on an array jq builds
+/// afresh (an empty range, or a slice it copies): two evaluations of one are two arrays, which positions cannot tell
+/// from one evaluation seen twice. Each slice is resolved against the invocation's root; a slice the walk cannot place
+/// answers `false`, leaving the pair to [`same_frame_position_as_spelled`].
 fn same_node_through_full_slices(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
-    let has_slice = |chain: &PathPrefix| {
-        components_from_root(chain)
-            .iter()
-            .any(|component| matches!(component, Expr::Slice { .. }))
-    };
-    if !has_slice(lhs) && !has_slice(rhs) {
+    if !chain_has_slice(lhs) && !chain_has_slice(rhs) {
         return false;
     }
     let Some(root) = invocation_roots::get(invocation) else {
         return false;
     };
     let (Some(left), Some(right)) = (
-        without_full_slices(&root, lhs),
-        without_full_slices(&root, rhs),
+        walk_through_full_slices(&root, lhs),
+        walk_through_full_slices(&root, rhs),
     ) else {
         return false;
     };
-    if left.len() != right.len() {
+    if left.ends_fresh || right.ends_fresh || left.kept.len() != right.kept.len() {
         return false;
     }
     let mut node = Some(FoldNode::Value(&root));
-    for (l, r) in left.into_iter().zip(right) {
+    for (l, r) in left.kept.into_iter().zip(right.kept) {
         node = match folded_component_step(node, l, r) {
             FoldedStep::Differs => return false,
             FoldedStep::At(next) => Some(next),
@@ -40765,25 +40769,30 @@ fn same_node_through_full_slices(invocation: u64, lhs: &PathPrefix, rhs: &PathPr
 
 /// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
 /// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
-/// show to be one node, a full slice and its container among them (`.a[0:]` of a non-empty array *is*
-/// `.a` in jq), and paths of different depth. Only object keys and array indexes are read; any other
-/// step (a slice, a subarray search) answers `false`. The chains are distinct where a step names a different
+/// show to be one node. A slice spanning the whole of a non-empty array is read as the array first (#5103,
+/// [`walk_through_full_slices`]: `.a[0:]` *is* `.a` in jq). A chain that ends on an array jq builds afresh (an empty
+/// range, or a slice jq copies) names no node of the document, so it is distinct from any other spelling, though not
+/// from its own (one evaluation, bound as `. as $x`, is identical to itself). Otherwise only object keys and array
+/// indexes are read; any other step (another slice, a subarray search) answers `false`. The chains are distinct where a step names a different
 /// key or a different slot of the same array (a negative index is resolved against the invocation's
 /// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
 /// which a finite tree never equals. A key against an index answers `false`: only a `null` holds both.
 fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
-    if ends_at_fresh_slice(invocation, lhs) || ends_at_fresh_slice(invocation, rhs) {
-        return true;
-    }
     let root = invocation_roots::get(invocation);
-    // #5103: a whole-range slice of a non-empty array is the node it slices, so it is read through first.
-    let canonical = |chain| match root.as_ref() {
-        Some(root) => without_full_slices(root, chain),
-        None => Some(components_from_root(chain)),
+    let walk = |chain| match root.as_ref() {
+        Some(root) => walk_through_full_slices(root, chain),
+        None => Some(SliceWalk {
+            kept: components_from_root(chain),
+            ends_fresh: false,
+        }),
     };
-    let (Some(left), Some(right)) = (canonical(lhs), canonical(rhs)) else {
+    let (Some(left), Some(right)) = (walk(lhs), walk(rhs)) else {
         return false;
     };
+    if left.ends_fresh || right.ends_fresh {
+        return left.kept != right.kept;
+    }
+    let (left, right) = (left.kept, right.kept);
     if left
         .iter()
         .chain(&right)
@@ -40877,7 +40886,13 @@ fn relate_components(lhs: &Expr, rhs: &Expr) -> ComponentRelation {
 #[derive(Clone, Copy)]
 enum FoldNode<'v> {
     Value(&'v OwnedValue),
-    Items(&'v [OwnedValue]),
+    /// The elements of a slice of an array: where they start in the buffer the slice views (`offset`), and whether
+    /// jq copied them into a new array instead (#5103).
+    Items {
+        items: &'v [OwnedValue],
+        offset: usize,
+        copied: bool,
+    },
 }
 
 impl<'v> FoldNode<'v> {
@@ -40885,9 +40900,43 @@ impl<'v> FoldNode<'v> {
     fn items(self) -> Option<&'v [OwnedValue]> {
         match self {
             Self::Value(OwnedValue::Array(items)) => Some(items),
-            Self::Items(items) => Some(items),
+            Self::Items { items, .. } => Some(items),
             Self::Value(_) => None,
         }
+    }
+
+    /// #5103: jq's slice `range` of this node (an array, or a slice of one). `jvp_array_slice` returns a view of the
+    /// same buffer, its offset moved by `range.start`, unless that offset no longer fits `jv`'s 16-bit `offset`
+    /// (65,536 or more), when it copies the elements into a new array (offset 0); an empty range is a new `[]`
+    /// ([`FoldNode::is_fresh`]). The elements are shared either way, so an index into any of them is the element's own
+    /// node.
+    fn slice(self, range: core::ops::Range<usize>) -> Option<Self> {
+        let (items, offset, copied) = match self {
+            Self::Value(OwnedValue::Array(items)) => (&items[..], 0, false),
+            Self::Items {
+                items,
+                offset,
+                copied,
+            } => (items, offset, copied),
+            Self::Value(_) => return None,
+        };
+        let start = offset + range.start;
+        let copies = start > usize::from(u16::MAX);
+        Some(Self::Items {
+            items: &items[range],
+            offset: if copies { 0 } else { start },
+            copied: copied || copies,
+        })
+    }
+
+    /// Whether jq copied this slice into a new array: every evaluation of it is another array.
+    fn is_copied(self) -> bool {
+        matches!(self, Self::Items { copied: true, items, .. } if !items.is_empty())
+    }
+
+    /// Whether this is an array jq builds afresh, no node of the document: a copied slice, or an empty range's `[]`.
+    fn is_fresh(self) -> bool {
+        matches!(self, Self::Items { items, copied, .. } if copied || items.is_empty())
     }
 }
 
@@ -40952,7 +41001,8 @@ fn folded_component_step<'v>(node: Option<FoldNode<'v>>, lhs: &Expr, rhs: &Expr)
             // .[0:0]` is a fresh array in jq); two slices spelled alike
             // still agree, as they always did.
             if left == right && (!left.is_empty() || lhs == rhs) {
-                FoldedStep::At(FoldNode::Items(&items[left]))
+                node.and_then(|node| node.slice(left))
+                    .map_or(FoldedStep::Unknown, FoldedStep::At)
             } else {
                 FoldedStep::Differs
             }
@@ -153271,6 +153321,110 @@ mod touched_edge_cases_2999 {
             vec![field("x"), index(1)]
         ));
         assert!(!distinct(0, vec![field("x")], vec![index(0)]));
+    }
+
+    /// #5103: jq's slice is a view of the array's buffer unless its offset passes 65,535 (then a copy) or its range is
+    /// empty (then a new `[]`). A whole-range slice of a non-empty array is that array's node, a copy is a new array on
+    /// every evaluation (so two evaluations are two nodes, and positions cannot claim either verdict for the same
+    /// spelling), and an empty range's `[]` is no node of the document. Captured against jq 1.7.1 on a 70,003-array.
+    #[test]
+    #[cfg(feature = "std")]
+    fn slice_identity_follows_jq_views_and_copies_5103() {
+        let field = |n: &str| Expr::Field(n.to_string());
+        let index = |idx: i64| Expr::Index { idx, key: None };
+        let slice = |start: i64, end: Option<i64>| Expr::Slice {
+            start: Some(start),
+            end,
+            start_key: None,
+            end_key: None,
+        };
+        let chain = |parts: Vec<Expr>| Rc::new(PathPrefix::from_components(parts));
+        let items =
+            |n: usize| OwnedValue::array_from((0..n).map(|i| OwnedValue::Int(i as i64)).collect());
+        let root = OwnedValue::object_from([
+            ("x".to_string(), items(2)),
+            ("e".to_string(), items(0)),
+            ("big".to_string(), items(70_003)),
+        ]);
+        let invocation = u64::MAX - 5103;
+        let _guard = invocation_roots::push(invocation, root);
+        let same =
+            |a: Vec<Expr>, b: Vec<Expr>| same_frame_position(invocation, &chain(a), &chain(b));
+        let distinct = |a: Vec<Expr>, b: Vec<Expr>| {
+            positions_provably_distinct(invocation, &chain(a), &chain(b))
+        };
+
+        // A whole-range slice of a non-empty array is the array, also through another view and below it.
+        assert!(same(vec![field("x"), slice(0, None)], vec![field("x")]));
+        assert!(same(
+            vec![field("x"), slice(-9, Some(2)), slice(0, None)],
+            vec![field("x")]
+        ));
+        assert!(same(
+            vec![field("x"), slice(0, None), index(1)],
+            vec![field("x"), index(1)]
+        ));
+        assert!(!distinct(
+            vec![field("x"), slice(0, None)],
+            vec![field("x")]
+        ));
+        assert!(distinct(vec![field("x"), slice(0, None)], vec![field("e")]));
+        // A partial slice is not its container, nor provably another node by position alone.
+        assert!(!same(vec![field("x"), slice(1, None)], vec![field("x")]));
+        assert!(!distinct(
+            vec![field("x"), slice(1, None)],
+            vec![field("x")]
+        ));
+
+        // The slice of an empty array is a new `[]`: another node than any other spelling, but not than its own (one
+        // evaluation bound as `. as $x` is identical to itself), and never folded onto its container (#3494).
+        assert!(!same(vec![field("e"), slice(0, None)], vec![field("e")]));
+        assert!(distinct(vec![field("e"), slice(0, None)], vec![field("e")]));
+        assert!(!distinct(
+            vec![field("e"), slice(0, None)],
+            vec![field("e"), slice(0, None)]
+        ));
+        assert!(!same(
+            vec![field("x"), slice(1, Some(1))],
+            vec![field("x"), slice(0, None), slice(1, Some(1))]
+        ));
+        assert!(!distinct(
+            vec![field("x"), slice(1, Some(1))],
+            vec![field("x"), slice(0, None), slice(1, Some(1))]
+        ));
+
+        // A view up to offset 65,535 is the same node however often it is evaluated; from 65,536 jq copies.
+        assert!(same(
+            vec![field("big"), slice(65_535, None)],
+            vec![field("big"), slice(65_535, None)]
+        ));
+        assert!(!same(
+            vec![field("big"), slice(65_536, None)],
+            vec![field("big"), slice(65_536, None)]
+        ));
+        assert!(!same(
+            vec![field("big"), slice(60_000, None), slice(6_000, None)],
+            vec![field("big"), slice(60_000, None), slice(6_000, None)]
+        ));
+        assert!(!same(
+            vec![field("big"), slice(70_000, None)],
+            vec![field("big"), slice(70_000, None), slice(0, None)]
+        ));
+        assert!(!distinct(
+            vec![field("big"), slice(70_000, None)],
+            vec![field("big"), slice(70_000, None), slice(0, None)]
+        ));
+        assert!(distinct(
+            vec![field("big"), slice(70_000, None)],
+            vec![field("big")]
+        ));
+        // One evaluation shared by both chains is the same node, and a copy's elements are the array's own.
+        let copy = chain(vec![field("big"), slice(70_000, None)]);
+        assert!(same_frame_position(invocation, &copy, &copy));
+        assert!(same(
+            vec![field("big"), slice(70_000, None), index(0)],
+            vec![field("big"), slice(70_000, None), index(0)]
+        ));
     }
 
     #[test]

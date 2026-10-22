@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use crate::assert_path_rows_both_routes_3749;
+use crate::{assert_path_rows_both_routes_3749, run_jq_full};
 
 // jq's array slice is a view (`jvp_array_slice` moves the offset and size over the shared buffer) and `jv_identical`
 // compares pointer, offset and size, so `.a[0:]` of a non-empty array *is* `.a`: `$x` bound at one is the register
@@ -272,4 +272,55 @@ fn test_5103_partial_empty_and_string_slices_stay_other_nodes() -> Result<()> {
             5,
         ),
     ])
+}
+
+/// #5103 review: jq copies a slice whose offset passes 65,535 (`jv`'s `offset` is 16 bits), so two evaluations of it
+/// are two arrays and neither is the other's whole-range slice: the first build of this fix folded `.a[70000:][0:]`
+/// onto `.a[70000:]` and `del` removed three elements where jq raises. One evaluation bound as `. as $x` is still the
+/// same array. Captured from `/usr/bin/jq` 1.7.1 (`-n`, the document built in the filter).
+#[test]
+fn test_5103_copied_slice_past_offset_65535_is_a_new_array_per_evaluation() -> Result<()> {
+    let rows: &[(&str, &str, &str, i32)] = &[
+        (
+            r#"{"a":[range(70003)]} | del(.a[70000:] as $x | .a[70000:][0:] | $x) | .a | length"#,
+            "",
+            "Invalid path expression with result [70000,70001,70002]",
+            5,
+        ),
+        (
+            r#"{"a":[range(70003)]} | try path(.a[70000:] as $x | .a[70000:][0:] | $x) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[range(70003)]} | [path(.a[65536:] as $x | .a[65536:] | $x)?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[range(70003)]} | path(.a[70000:] | . as $x | .[0:] | $x)"#,
+            "[\"a\",{\"start\":70000,\"end\":null},{\"start\":0,\"end\":null}]\n",
+            "",
+            0,
+        ),
+    ];
+    for &(filter, stdout, message, exit) in rows {
+        let (out, err, code) = run_jq_full(&["-nc", filter], None)?;
+        assert_eq!(
+            (out.as_str(), code),
+            (stdout, exit),
+            "`{filter}`: stderr {err:?}"
+        );
+        if message.is_empty() {
+            assert!(err.is_empty(), "`{filter}`: unexpected stderr {err:?}");
+        } else {
+            assert!(
+                err.contains(message),
+                "`{filter}`: stderr {err:?} lacks {message:?}"
+            );
+        }
+    }
+    Ok(())
 }
