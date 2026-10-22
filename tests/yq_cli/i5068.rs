@@ -37,6 +37,8 @@ const REJECTED: &[&str] = &[
     "- a # c\r\n  z\r\n",
     "- a\r\n  # c\r\n  z: 1\r\n",
     "k: a\r\nz\r\n",
+    // A document whose first line is only node properties is not a bare scalar root.
+    "&a\n- x # c\n  y\n",
     // A bare line that is not a continuation at all.
     "- a\nz\n",
     "k: a\nz\n",
@@ -80,6 +82,26 @@ fn test_line_after_a_plain_scalar_a_comment_ended_is_rejected_5068() -> Result<(
 #[test]
 fn test_a_comment_after_a_plain_scalar_leaves_valid_documents_alone_5068() -> Result<()> {
     for (doc, expected) in ACCEPTED {
+        let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
+        assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");
+    }
+    Ok(())
+}
+
+/// Recorded gaps: documents yq rejects that are still read, because the check leaves a bare plain
+/// scalar root and a flow value alone (a root followed by more content is #5070). Each row is
+/// pinned to what succinctly answers today; delete a row when it starts to fail.
+const RECORDED_GAPS: &[(&str, &str)] = &[
+    ("text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
+    ("&a text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
+    ("--- a\n- b # c\n  d\n", "\"a\"\n[\"b\",\"d\"]\n"),
+    ("--- &a text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
+    ("k: [a, b]\n  z\n", "{\"k\":[\"a\",\"b\"]}\n"),
+];
+
+#[test]
+fn test_recorded_gaps_after_a_root_scalar_or_a_flow_value_5068() -> Result<()> {
+    for (doc, expected) in RECORDED_GAPS {
         let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
         assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");
     }
