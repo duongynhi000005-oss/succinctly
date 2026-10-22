@@ -40615,20 +40615,25 @@ fn anchor_component_step<'v>(
 /// [`Frame::names`] certifies, toward jq. With no root recorded (`no_std`, a
 /// scalar root) or a step the walk cannot take, a differing pair refuses.
 fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefix>) -> bool {
-    same_frame_position_as_spelled(invocation, lhs, rhs)
-        || same_node_through_full_slices(invocation, lhs, rhs)
+    if Rc::ptr_eq(lhs, rhs) {
+        return true;
+    }
+    // Fetched once, and only by a pair that needs the containers.
+    let root = core::cell::OnceCell::new();
+    let root = || {
+        root.get_or_init(|| invocation_roots::get(invocation))
+            .as_ref()
+    };
+    same_frame_position_as_spelled(lhs, rhs, root) || same_node_through_full_slices(lhs, rhs, root)
 }
 
 /// [`same_frame_position`] for two chains of the same shape: a step of one is compared with the step of the other at
 /// the same depth.
-fn same_frame_position_as_spelled(
-    invocation: u64,
-    lhs: &Rc<PathPrefix>,
-    rhs: &Rc<PathPrefix>,
+fn same_frame_position_as_spelled<'r>(
+    lhs: &PathPrefix,
+    rhs: &PathPrefix,
+    root: impl Fn() -> Option<&'r OwnedValue>,
 ) -> bool {
-    if Rc::ptr_eq(lhs, rhs) {
-        return true;
-    }
     if lhs.depth() != rhs.depth() {
         return false;
     }
@@ -40637,7 +40642,7 @@ fn same_frame_position_as_spelled(
     // chains that agree throughout is done.
     let mut needs_root = false;
     let mut spelled_slice = false;
-    let (mut left, mut right) = (&**lhs, &**rhs);
+    let (mut left, mut right) = (lhs, rhs);
     while let (
         PathPrefix::Node {
             parent: left_parent,
@@ -40664,24 +40669,36 @@ fn same_frame_position_as_spelled(
     if !needs_root && !spelled_slice {
         return true;
     }
-    let Some(root) = invocation_roots::get(invocation) else {
+    let Some(root) = root() else {
         // With no root, a pair spelled alike keeps the structural answer it always had.
         return !needs_root;
     };
-    let mut node = Some(FoldNode::Value(&root));
-    for (left, right) in components_from_root(lhs)
-        .into_iter()
-        .zip(components_from_root(rhs))
-    {
+    // #5103: two evaluations of a slice jq copies are two arrays (`path(.a[65536:] as $x | .a[65536:] | $x)` refuses);
+    // one evaluation shared by both chains is [`same_frame_position`]'s `Rc::ptr_eq`.
+    fold_lockstep(
+        root,
+        components_from_root(lhs)
+            .into_iter()
+            .zip(components_from_root(rhs)),
+    )
+    .is_some_and(|node| !node.is_some_and(FoldNode::is_copied))
+}
+
+/// Two chains' components walked in lockstep from `root` ([`folded_component_step`]): `None` where a step names
+/// different children, else the node both reach (`Some(None)` once the walk cannot follow).
+fn fold_lockstep<'v, 'c>(
+    root: &'v OwnedValue,
+    pairs: impl Iterator<Item = (&'c Expr, &'c Expr)>,
+) -> Option<Option<FoldNode<'v>>> {
+    let mut node = Some(FoldNode::Value(root));
+    for (left, right) in pairs {
         node = match folded_component_step(node, left, right) {
-            FoldedStep::Differs => return false,
+            FoldedStep::Differs => return None,
             FoldedStep::At(next) => Some(next),
             FoldedStep::Unknown => None,
         };
     }
-    // #5103: two evaluations of a slice jq copies are two arrays (`path(.a[65536:] as $x | .a[65536:] | $x)` refuses);
-    // one evaluation shared by both chains is the `Rc::ptr_eq` above.
-    !node.is_some_and(FoldNode::is_copied)
+    Some(node)
 }
 
 /// `chain` walked from `root` (#5103): its components with each slice that spans the whole of a non-empty array dropped
@@ -40740,49 +40757,47 @@ fn chain_has_slice(chain: &PathPrefix) -> bool {
 /// afresh (an empty range, or a slice it copies): two evaluations of one are two arrays, which positions cannot tell
 /// from one evaluation seen twice. Each slice is resolved against the invocation's root; a slice the walk cannot place
 /// answers `false`, leaving the pair to [`same_frame_position_as_spelled`].
-fn same_node_through_full_slices(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
+fn same_node_through_full_slices<'r>(
+    lhs: &PathPrefix,
+    rhs: &PathPrefix,
+    root: impl Fn() -> Option<&'r OwnedValue>,
+) -> bool {
     if !chain_has_slice(lhs) && !chain_has_slice(rhs) {
         return false;
     }
-    let Some(root) = invocation_roots::get(invocation) else {
+    let Some(root) = root() else {
         return false;
     };
     let (Some(left), Some(right)) = (
-        walk_through_full_slices(&root, lhs),
-        walk_through_full_slices(&root, rhs),
+        walk_through_full_slices(root, lhs),
+        walk_through_full_slices(root, rhs),
     ) else {
         return false;
     };
-    if left.ends_fresh || right.ends_fresh || left.kept.len() != right.kept.len() {
-        return false;
-    }
-    let mut node = Some(FoldNode::Value(&root));
-    for (l, r) in left.kept.into_iter().zip(right.kept) {
-        node = match folded_component_step(node, l, r) {
-            FoldedStep::Differs => return false,
-            FoldedStep::At(next) => Some(next),
-            FoldedStep::Unknown => None,
-        };
-    }
-    true
+    !left.ends_fresh
+        && !right.ends_fresh
+        && left.kept.len() == right.kept.len()
+        && fold_lockstep(root, left.kept.into_iter().zip(right.kept)).is_some()
 }
 
 /// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
 /// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
 /// show to be one node. A slice spanning the whole of a non-empty array is read as the array first (#5103,
 /// [`walk_through_full_slices`]: `.a[0:]` *is* `.a` in jq). A chain that ends on an array jq builds afresh (an empty
-/// range, or a slice jq copies) names no node of the document, and each evaluation of it is a new array, so it is
-/// distinct from every other chain, spelled alike or not, except the one chain it is (one evaluation bound as `. as
-/// $x` shares the register's chain, and is identical to itself). Otherwise only object keys and array
+/// range, or a slice jq copies) names no node of the document, so it is distinct from every chain spelled otherwise;
+/// spelled alike it may be the same evaluation (`.a[70000:] | .[0:] as $x` binds the copy the register stands on) or
+/// another one (`.a[70000:] as $x | .a[70000:]`), which positions cannot tell apart, so that pair answers `false`.
+/// Otherwise only object keys and array
 /// indexes are read; any other step (another slice, a subarray search) answers `false`. The chains are distinct where a step names a different
 /// key or a different slot of the same array (a negative index is resolved against the invocation's
 /// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
 /// which a finite tree never equals. A key against an index answers `false`: only a `null` holds both.
 fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPrefix) -> bool {
     let root = invocation_roots::get(invocation);
+    let has_slice = chain_has_slice(lhs) || chain_has_slice(rhs);
     let walk = |chain| match root.as_ref() {
-        Some(root) => walk_through_full_slices(root, chain),
-        None => Some(SliceWalk {
+        Some(root) if has_slice => walk_through_full_slices(root, chain),
+        _ => Some(SliceWalk {
             kept: components_from_root(chain),
             ends_fresh: false,
         }),
@@ -40791,9 +40806,7 @@ fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPref
         return false;
     };
     if left.ends_fresh || right.ends_fresh {
-        // Two chains spell two evaluations unless they are one chain: a `$x` bound as `. as $x` holds the very
-        // chain the register stands on.
-        return left.kept != right.kept || !core::ptr::eq(lhs, rhs);
+        return left.kept != right.kept;
     }
     let (left, right) = (left.kept, right.kept);
     if left
@@ -153328,8 +153341,8 @@ mod touched_edge_cases_2999 {
 
     /// #5103: jq's slice is a view of the array's buffer unless its offset passes 65,535 (then a copy) or its range is
     /// empty (then a new `[]`). A whole-range slice of a non-empty array is that array's node, a copy is a new array on
-    /// every evaluation (two chains are two arrays, one chain is one), and an empty range's `[]` is no node of the
-    /// document. Captured against jq 1.7.1 on a 70,003-array.
+    /// every evaluation (so a pair spelled alike is undecided: one evaluation or two), and an empty range's `[]` is no
+    /// node of the document. Captured against jq 1.7.1 on a 70,003-array.
     #[test]
     #[cfg(feature = "std")]
     fn slice_identity_follows_jq_views_and_copies_5103() {
@@ -153379,11 +153392,12 @@ mod touched_edge_cases_2999 {
             vec![field("x")]
         ));
 
-        // The slice of an empty array is a new `[]` on every evaluation: another node than every other chain, spelled
-        // alike or not, except the one chain it is (`. as $x` of it), and never folded onto its container (#3494).
+        // The slice of an empty array is a new `[]` on every evaluation: another node than every chain spelled
+        // otherwise, undecided against its own spelling (one evaluation or two), and never folded onto its container
+        // (#3494).
         assert!(!same(vec![field("e"), slice(0, None)], vec![field("e")]));
         assert!(distinct(vec![field("e"), slice(0, None)], vec![field("e")]));
-        assert!(distinct(
+        assert!(!distinct(
             vec![field("e"), slice(0, None)],
             vec![field("e"), slice(0, None)]
         ));
@@ -153393,7 +153407,7 @@ mod touched_edge_cases_2999 {
             vec![field("x"), slice(1, Some(1))],
             vec![field("x"), slice(0, None), slice(1, Some(1))]
         ));
-        assert!(distinct(
+        assert!(!distinct(
             vec![field("x"), slice(1, Some(1))],
             vec![field("x"), slice(0, None), slice(1, Some(1))]
         ));
@@ -153415,7 +153429,9 @@ mod touched_edge_cases_2999 {
             vec![field("big"), slice(70_000, None)],
             vec![field("big"), slice(70_000, None), slice(0, None)]
         ));
-        assert!(distinct(
+        // `.a[70000:] | .[0:] as $x` binds the very copy the register stands on, `.a[70000:] as $x | .a[70000:][0:]`
+        // another one: the same canonical spelling either way, so neither verdict.
+        assert!(!distinct(
             vec![field("big"), slice(70_000, None)],
             vec![field("big"), slice(70_000, None), slice(0, None)]
         ));
