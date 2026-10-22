@@ -681,6 +681,21 @@ Captured live (yq v4.53.3):
 Since #5068 a line left over after such a read is a parse error where it used to be dropped without a word, and that is the only change to these inputs.
 The nearest cases of the same family are `k:` / `  a` / `  z: 1` (yq: `mapping values are not allowed in this context`, here `{"k":"a z"}`) and a document root that is a bare plain scalar followed by more content (#5070).
 
+### A syntax error after a document's first node: yq has printed that node already
+
+yq decodes and prints one document at a time.
+A syntax error later in the input therefore follows the output of every document before it, and for the same document if the error is in what follows its root node.
+succinctly builds the whole index first, so the same input prints nothing and exits 1 with the error.
+Captured live (yq v4.53.3, `-o json -I0 .`):
+
+| input                      | real yq                            | succinctly yq |
+|----------------------------|------------------------------------|---------------|
+| `"q"\nb\n`                 | `"q"`, then the error (exit 1)     | the error     |
+| `a: 1\n---\nk: a\n b: 1\n` | `{"a":1}`, then the error (exit 1) | the error     |
+
+The exit status and the error class agree; only the stdout prefix differs.
+This holds for every parse error, and it is the divergence #5070 adds rows to: a scalar, flow collection or block scalar that is a document's root can have nothing after it before the next `---` (`did not find expected <document start>`).
+
 ## Open divergences (bugs, not decisions)
 
 Representative cases, each live-verified. These are gaps to close, listed here so they are
