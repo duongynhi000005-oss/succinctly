@@ -78,4 +78,7 @@ mod i5078;
 mod i5083;
 mod i5086;
 mod i5073;
+mod i5073;
+mod i5075;
+mod i5078;
 mod i865;
