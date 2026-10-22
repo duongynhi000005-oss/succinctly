@@ -38517,6 +38517,9 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
 /// A `label` is read through (#4567), since no shape admitted here can `break` out of it.
+/// A handler-less `try`/`?` is too (#5136): a bind that raises under it empties the UPDATE and the next state is `null`,
+/// which the resolver derives from the pattern's own walk (#4934), so the outputs it does emit are still the
+/// accumulator's own node.
 /// A `?//` chain is in as the nested fold's source (#4506), and as a nested `reduce`'s own loop
 /// pattern when [`reduce_alternative_is_immaterial`] holds; any other chain there is out (a failed
 /// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must
@@ -38529,6 +38532,10 @@ fn update_returns_its_input(e: &Expr) -> bool {
         // of this function admits a `break` (a comma, an `if`, a call or a `break` itself); the
         // `break $q` rows of `test_reduce_update_label_wrapped_destructure_4567` fail if one starts to.
         Expr::Label { body, .. } => update_returns_its_input(body),
+        // #5136: a handler-less `try`/`?` hands its body's outputs on, and a bind that raises under it empties the UPDATE
+        // (the next state is `null`), which the resolver derives from the pattern's own walk once the register is carried
+        // in (#4934): every output that is emitted is still the accumulator's own node.
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => update_returns_its_input(expr),
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
