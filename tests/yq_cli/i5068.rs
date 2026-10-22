@@ -27,6 +27,16 @@ const REJECTED: &[&str] = &[
     "k:\n  j: a # c\n    z\n",
     "- k: a # c\n    z\n",
     "- - a # c\n    z\n",
+    // A bare line led by node properties.
+    "- a\n&x z\n",
+    "k: a\n!!str z\n",
+    "k: a # c\n&x z\n",
+    "k:\n  a\n&x z\n",
+    "- a\n  # c\n!!str z\n",
+    // CRLF line breaks.
+    "- a # c\r\n  z\r\n",
+    "- a\r\n  # c\r\n  z: 1\r\n",
+    "k: a\r\nz\r\n",
     // A bare line that is not a continuation at all.
     "- a\nz\n",
     "k: a\nz\n",
@@ -54,6 +64,8 @@ const ACCEPTED: &[(&str, &str)] = &[
         "[\"a\",{\"k\":\"z\",\"j\":1}]\n",
     ),
     ("a: 1 # c\nb: 2 # d\n", "{\"a\":1,\"b\":2}\n"),
+    ("- a # c\r\n- z\r\n", "[\"a\",\"z\"]\n"),
+    ("k:\r\n  a\r\n  z\r\n", "{\"k\":\"a z\"}\n"),
 ];
 
 #[test]

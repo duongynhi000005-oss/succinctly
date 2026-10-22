@@ -276,6 +276,15 @@ pub struct SemiIndex {
 /// cap must stay above that.
 const MAX_NESTING_DEPTH: usize = 128;
 
+/// A plain scalar the scanner just read: `start..end` in the input, and the indent of the
+/// innermost open block when it began (#5068).
+#[derive(Clone, Copy)]
+struct PlainScalarSpan {
+    start: usize,
+    end: usize,
+    owner: usize,
+}
+
 /// Parser state for the YAML-lite oracle.
 ///
 /// `HAS_CR` says whether the input contains a carriage return anywhere.
@@ -290,15 +299,6 @@ const MAX_NESTING_DEPTH: usize = 128;
 /// context. So a site left un-gated is merely a missed optimization, while a
 /// wrongly-`false` gate would corrupt the parse — which is why the flag is
 /// derived from the bytes rather than from any parser-state heuristic.
-/// A plain scalar the scanner just read: `start..end` in the input, and the indent of the
-/// innermost open block when it began (#5068).
-#[derive(Clone, Copy)]
-struct PlainScalarSpan {
-    start: usize,
-    end: usize,
-    owner: usize,
-}
-
 struct Parser<'a, const HAS_CR: bool> {
     input: &'a [u8],
     pos: usize,
@@ -8497,6 +8497,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         None
     }
 
+    /// The error for a line with nothing to attach to (#5068).
+    fn err_stray_line(&self) -> YamlError {
+        self.err_unexpected_char(
+            self.pos,
+            "a line that is neither a key, a sequence item nor a continuation",
+        )
+    }
+
     /// Whether the line at the cursor, at `indent`, stands after the plain scalar `ended` and has
     /// nothing to attach to there (#5068): `- a # c` / `  z`, `k: a` / `z`, `- a` / `  # c` /
     /// `  z: 1`. A plain scalar takes every following line more indented than its block until a
@@ -8758,10 +8766,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             && !matches!(self.peek(), Some(b'#' | b'\n' | b'\r') | None)
             && self.line_is_stray_after_a_plain_scalar(ended, indent, false)
         {
-            return Err(self.err_unexpected_char(
-                self.pos,
-                "a line that is neither a key, a sequence item nor a continuation",
-            ));
+            return Err(self.err_stray_line());
         }
 
         // Check what kind of content this is
@@ -8954,6 +8959,11 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         }
                         _ => {
                             // Scalar value - only doc_root if not inside a container
+                            // A bare line led by node properties is judged like one without
+                            // (#5068).
+                            if self.line_is_stray_after_a_plain_scalar(ended, indent, true) {
+                                return Err(self.err_stray_line());
+                            }
                             self.attach_document_root_node(indent);
                             // The block scalar of a document-root node with properties
                             // (`&x |`, `!!str >`) takes the same parser (#5067).
@@ -9059,10 +9069,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.check_mapping_under_mapping_gap(indent, false)?;
                     // A bare line left over after a plain scalar is no node (#5068).
                     if self.line_is_stray_after_a_plain_scalar(ended, indent, true) {
-                        return Err(self.err_unexpected_char(
-                            self.pos,
-                            "a line that is neither a key, a sequence item nor a continuation",
-                        ));
+                        return Err(self.err_stray_line());
                     }
                     // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
