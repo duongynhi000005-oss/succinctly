@@ -38516,8 +38516,10 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
 /// SOURCE the resolver checks as jq does ([`foreach_source_is_path_checked`]), or a
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
-/// A `label` is read through (#4567), since no shape admitted here can `break` out of it, and so is a handler-less
-/// `try`/`?` (#5136).
+/// A `label` is read through (#4567), since no shape admitted here can `break` out of it.
+/// A handler-less `try`/`?` is too (#5136): a bind that raises under it empties the UPDATE and the next state is `null`,
+/// which the resolver derives from the pattern's own walk (#4934), so the outputs it does emit are still the
+/// accumulator's own node.
 /// A `?//` chain is in as the nested fold's source (#4506), and as a nested `reduce`'s own loop
 /// pattern when [`reduce_alternative_is_immaterial`] holds; any other chain there is out (a failed
 /// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must

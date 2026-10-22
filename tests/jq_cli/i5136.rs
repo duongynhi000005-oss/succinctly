@@ -12,7 +12,8 @@ use crate::assert_path_rows_both_routes_3749;
 
 /// #5136: the issue's rows, the controls where the pattern raises (the state becomes `null`, as in jq), and rows of a
 /// differential grid (document x bind site x pattern x body x source x INIT x wrapper x context) that `main` refused or
-/// answered wrongly. Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit code, message), both routes.
+/// answered wrongly, with nested folds, `first`/`label`/`limit`/`if`/`//` around the `try`, and the `catch` handler form as a
+/// control. Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit code, message), both routes.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5136_reduce_update_try_bind_of_dot_keeps_the_accumulator() -> Result<()> {
@@ -350,6 +351,118 @@ fn test_5136_reduce_update_try_bind_of_dot_keeps_the_accumulator() -> Result<()>
             r"{}",
             r"(. as $x | reduce (.,.) as $i (.; try (. as {a:$q} | .))) |= 9",
             "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":0,"b":false,"c":""}"#,
+            r"[path(reduce 1 as $i (.; try (. as [$q] | .) catch {}))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":0,"b":false,"c":""}"#,
+            r"(reduce (1,2) as $i (.; try (. as [$q] | .) catch {})) |= 9",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":{"a":1}}}"#,
+            r"(reduce 1 as $i (.; label $l | try (. as {b:$q} | .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | reduce (1,2) as $i (.; label $l | try (. as {a:{a:$q}} | .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"del(. as $x | reduce (.,.) as $i (.; try (. as {a:$q} | .) | .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"(reduce (.,.) as $i (.; label $l | try (. as {a:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r"[1,[2]]",
+            r"del(reduce (.,.) as $i (.; try (. as [$q] | .) | .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"try path(reduce 1 as $i (.; (. as {b:$q} | .)?)) catch "c""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(. as $x | reduce (1,2) as $i (.; try (. as {a:$q} | .) | .)) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | reduce (1,2) as $i (.; (. as {a:{a:$q}} | .)?)) catch "c""#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"del(. as $x | reduce 1 as $i (.; try (. as {a:{a:$q}} | .) | .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"(reduce (1,2) as $i (.; (. as {b:$q} | .)?)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":0,"b":false,"c":""}"#,
+            r"(. as $x | reduce 1 as $i (.; (. as {a:$q} | .)?)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | reduce . as $i (.; try (. as {a:$q} | .) | .)) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(reduce 1 as $i (.; try (. as {a:{a:$q}} | .) | .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":{"a":1}}}"#,
+            r"path(reduce (1,2) as $i (.; try (. as {a:{a:$q}} | .) | .))",
+            "[]\n",
             "",
             0,
         ),
