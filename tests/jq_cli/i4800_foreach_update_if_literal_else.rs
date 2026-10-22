@@ -94,10 +94,11 @@ fn test_foreach_update_if_with_the_caught_foreach_in_then_and_a_literal_else_480
 }
 
 /// #4800: the arm is resolved alone behind a wrapper too (`resolved_if_arm`): a comma whose other items emit nothing and
-/// a `label` scope without a `break` do not change what the `if` emits, and a handler-less `try`/`?` or a `.` stage
+/// a `label` scope without a `break` ahead of the item do not change what the `if` emits, and a handler-less `try`/`?`
 /// around a state that took a literal `else` arm drops a handler that could catch nothing. jq answers
-/// `[["a","a"]]` (`[["a"]]` for a `$i` EXTRACT); all but the last row fail on the base (`[]`), and resolving the wrapped `if` whole again fails
-/// the test.
+/// `[["a","a"]]` for the `.a` EXTRACT rows, and those fail on the base (`[]`; an `elif` chain and a `(.a,.)` source
+/// included). The `$i` EXTRACT rows, the `| .` row and the `{"a":true}` row already matched on the base: they pin that
+/// the arm-only resolve does not move them. Resolving the wrapped `if` whole again fails the test.
 #[test]
 fn test_foreach_update_wrapped_if_with_a_literal_else_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
