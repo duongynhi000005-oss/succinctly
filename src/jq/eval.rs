@@ -38045,7 +38045,10 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
             // #5107: field navigations ahead of the `foreach` move the register to that child, where the bind
             // steps from ([`update_nav_head`] says which); the restatement starts there.
             if let Some((last, nav)) = stages.split_last() {
-                if !nav.is_empty() && nav.iter().all(|stage| nav_head_fields(stage).is_some()) {
+                if !nav.is_empty()
+                    && matches!(unwrap_paren(last), Expr::Foreach { .. })
+                    && nav.iter().all(|stage| nav_head_fields(stage).is_some())
+                {
                     return bare_bind_foreach_update_key_within(last, budget);
                 }
             }
@@ -38074,12 +38077,11 @@ fn nav_head_fields(head: &Expr) -> Option<Vec<&str>> {
 }
 
 /// The field navigation a fold's UPDATE moves the register through before its bare `foreach` (#5107): the stages
-/// ahead of the `foreach` of a pipe that [`bare_bind_foreach_update_key`] reads through, behind any `try`/`?` or
-/// comma item. `None` when the UPDATE has no such pipe; empty is never returned.
+/// ahead of the `foreach` of a pipe that [`bare_bind_foreach_update_key`] reads through, behind any `try`/`?` (not a
+/// comma: [`comma_bind_split`] refuses a navigated item). `None` when the UPDATE has no such pipe; empty is never returned.
 fn update_nav_head(update: &Expr) -> Option<Vec<&str>> {
     match unwrap_paren(without_empty_siblings(update)) {
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => update_nav_head(expr),
-        Expr::Comma(items) => items.iter().find_map(update_nav_head),
         Expr::Pipe(stages) => {
             let (last, nav) = stages.split_last()?;
             if nav.is_empty() {
@@ -38216,6 +38218,10 @@ fn comma_bind_split(update: &Expr) -> Option<(usize, PatternKey<'_>, &[Expr])> {
     };
     let mut split = None;
     for (index, item) in items.iter().enumerate() {
+        // #5107: a navigated item restates from the child its navigation reaches, which a comma split does not carry.
+        if update_nav_head(item).is_some() {
+            return None;
+        }
         if let Some(key) = bare_bind_foreach_update_key(item) {
             if split.replace((index, key)).is_some() {
                 return None;
@@ -64738,7 +64744,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // literal stage replaces.
     // #5107: ...and behind field navigations, a marker must equal the child they reach (`.b as $x | ... .b | FE`), which
     // has to exist.
-    let nav_head = update_nav_head(update);
+    let nav_head = bare_bind_foreach_update_on_register
+        .then(|| update_nav_head(update))
+        .flatten();
     let head_target = nav_head.as_ref().map(|fields| {
         fields
             .iter()
@@ -64747,20 +64755,22 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                 _ => None,
             })
     });
-    let literal_head_markers_are_the_register = (!update_pipe_has_literal_head(update)
-        && head_target.is_none())
-        || (cannot_move_register(input)
-            && match &head_target {
-                Some(Some(target)) => !any_subexpr(
-                    update,
-                    &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *target),
-                ),
-                Some(None) => false,
-                None => !any_subexpr(
-                    update,
-                    &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
-                ),
-            });
+    // A literal head beside a navigated one is neither reading: their targets differ.
+    let literal_head_markers_are_the_register = !(update_pipe_has_literal_head(update)
+        && head_target.is_some())
+        && ((!update_pipe_has_literal_head(update) && head_target.is_none())
+            || (cannot_move_register(input)
+                && match &head_target {
+                    Some(Some(target)) => !any_subexpr(
+                        update,
+                        &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *target),
+                    ),
+                    Some(None) => false,
+                    None => !any_subexpr(
+                        update,
+                        &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
+                    ),
+                }));
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
