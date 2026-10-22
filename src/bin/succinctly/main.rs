@@ -1656,11 +1656,22 @@ fn popcnt_required_message(program: &str) -> String {
     )
 }
 
+/// Whether CPUID leaf 1's `ecx` reports `POPCNT` (bit 23).
+#[cfg(any(test, all(target_arch = "x86_64", target_feature = "popcnt")))]
+fn cpuid_ecx_reports_popcnt(ecx: u32) -> bool {
+    ecx & (1 << 23) != 0
+}
+
 /// Refuse to run, with a message that names the requirement, rather than die on `Illegal instruction`.
-/// The standard library is prebuilt for the baseline target, so nothing before this executes `POPCNT`.
+///
+/// Asks CPUID itself: `is_x86_feature_detected!("popcnt")` expands to `cfg!(target_feature = "popcnt") || <runtime
+/// check>`, which is `true` by construction in the only build that compiles this function. `main` and the runtime
+/// start-up code carry no `POPCNT` of their own (checked in the release binary: the instruction sits in the query
+/// code, not in `main`, `lang_start` or `_start`), and the standard library is prebuilt for the baseline target.
 #[cfg(all(target_arch = "x86_64", target_feature = "popcnt"))]
 fn require_popcnt() {
-    if !std::arch::is_x86_feature_detected!("popcnt") {
+    let leaf1 = core::arch::x86_64::__cpuid(1);
+    if !cpuid_ecx_reports_popcnt(leaf1.ecx) {
         eprintln!("{}", popcnt_required_message("succinctly"));
         std::process::exit(1);
     }
@@ -3189,7 +3200,7 @@ mod hoist_options_3447 {
 
 #[cfg(test)]
 mod popcnt_required_tests_5035 {
-    use super::popcnt_required_message;
+    use super::{cpuid_ecx_reports_popcnt, popcnt_required_message};
 
     /// #5035: the refusal names the program, the instruction, the CPUs that have it and the way to a build that
     /// does not need it; it is the whole of what a user on an older CPU sees.
@@ -3201,5 +3212,25 @@ mod popcnt_required_tests_5035 {
             assert!(message.contains(needle), "{needle}: {message}");
         }
         assert_eq!(message.lines().count(), 2, "{message}");
+    }
+
+    /// CPUID.01H:ECX bit 23 is POPCNT. The values are real leaf-1 `ecx` words: a Core 2 (no POPCNT, SSE4.1 only)
+    /// and a Nehalem-class CPU (POPCNT and SSE4.2, bits 23 and 20), and the bit alone.
+    #[test]
+    fn the_guard_reads_the_popcnt_bit_of_cpuid_leaf_1() {
+        assert!(
+            !cpuid_ecx_reports_popcnt(0x0408_E3FD),
+            "Core 2: SSE4.1, no POPCNT"
+        );
+        assert!(!cpuid_ecx_reports_popcnt(0), "an empty word");
+        assert!(
+            cpuid_ecx_reports_popcnt(0x029E_E3FF),
+            "Nehalem: SSE4.2 and POPCNT"
+        );
+        assert!(cpuid_ecx_reports_popcnt(1 << 23), "the bit alone");
+        assert!(
+            !cpuid_ecx_reports_popcnt(!(1u32 << 23)),
+            "every other bit set"
+        );
     }
 }
