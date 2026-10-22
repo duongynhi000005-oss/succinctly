@@ -76,4 +76,5 @@ mod i5103;
 mod i5110;
 mod i5111;
 mod i5112;
+mod i5113;
 mod i5120;
