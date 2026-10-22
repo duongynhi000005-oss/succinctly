@@ -105,21 +105,3 @@ fn test_roots_and_separators_that_yq_accepts_are_unchanged_5070() -> Result<()> 
     }
     Ok(())
 }
-
-/// Recorded gap: content after a `...` marker with no `---` is a second document here; yq prints the
-/// first and stops (`did not find expected <document start>`). Pinned to what succinctly answers
-/// today; delete a row when it starts to fail.
-const RECORDED_GAPS: &[(&str, &str)] = &[
-    ("\"a\"\n...\nb\n", "\"a\"\n\"b\"\n"),
-    ("a\n...\nb\n", "\"a\"\n\"b\"\n"),
-    ("--- \"a\"\n... # c\n--- b\n", "\"a\"\n\"b\"\n"),
-];
-
-#[test]
-fn test_recorded_gap_content_after_a_document_end_marker_without_a_start_5070() -> Result<()> {
-    for (doc, expected) in RECORDED_GAPS {
-        let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
-        assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");
-    }
-    Ok(())
-}

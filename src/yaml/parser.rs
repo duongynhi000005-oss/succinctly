@@ -8325,9 +8325,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     }
                 }
 
-                // Start new document if there's content and not already started
+                // Content here has no `---` before it: a document after a `...` needs its own
+                // start marker, and yq stops with `did not find expected <document start>`
+                // where this read a bare document (#5089).
                 if self.peek().is_some() && !self.is_document_end() && !self.in_document {
-                    self.start_document();
+                    return Err(self
+                        .err_unexpected_char(self.pos, "did not find expected <document start>"));
                 }
                 continue;
             }

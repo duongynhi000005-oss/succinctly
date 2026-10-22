@@ -39,6 +39,7 @@
 
 2SXE      structure         document/block structure differs from spec
 5LLU      lax:indentation   indentation not validated — #223
+7Z25      structure         bare document after a `...` end marker (`---` / `scalar1` / `...` / `key: value`): valid YAML 1.2, rejected by real yq v4.53.3 ("did not find expected <document start>": a document after `...` needs its own `---`) — we follow yq, the same policy as CFD4/FRK4/NKF9 — #5089
 8G76      structure         comment-only stream: spec wants zero documents, succinctly now synthesizes one null document to match real yq's CLI decode loop (`yq '1'` on `# c` answers `1`, not zero) — deliberate #2795 review fidelity choice (ADR-0018), not a regression
 98YD      structure         same shape and reason as 8G76 — #2795 review
 9C9N      lax:indentation   indentation not validated — #223
