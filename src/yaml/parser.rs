@@ -5912,17 +5912,6 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         }
     }
 
-    /// [`Self::reject_content_after_inline_value`] for the plain scalar that began at `start` (#5064): the
-    /// scalar stops at a `: ` and what follows is no node, so `- a` / `  z: 1` is yq's "mapping values are
-    /// not allowed in this context", not `["a z", 1]`. A block scalar (`|`, `>`) is read by the same
-    /// scanner at the document root and leaves the cursor inside its content, so it is not asked.
-    fn reject_content_after_plain_scalar(&self, start: usize) -> Result<(), YamlError> {
-        if matches!(self.input.get(start), Some(b'|' | b'>')) {
-            return Ok(());
-        }
-        self.reject_content_after_inline_value()
-    }
-
     /// Parse a value (could be scalar or nested structure).
     fn parse_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
         // Check for a property first - it prefixes the actual value. Callers
@@ -5998,11 +5987,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                let start = self.pos;
                 let end_pos = self.parse_unquoted_value_with_indent(min_indent);
                 self.set_bp_text_end(end_pos);
                 self.write_bp_close();
-                self.reject_content_after_plain_scalar(start)?;
+                // The scalar stops at a `: ` and what follows is no node (#5064), so `- a` /
+                // `  z: 1` is yq's "mapping values are not allowed in this context".
+                self.reject_content_after_inline_value()?;
             }
         }
         Ok(())
@@ -8745,13 +8735,12 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                     self.pos
                                 }
                                 _ => {
-                                    let start = self.pos;
                                     let end = if is_truly_doc_root {
                                         self.parse_unquoted_value_doc_root(indent)
                                     } else {
                                         self.parse_unquoted_value_with_indent(indent)
                                     };
-                                    self.reject_content_after_plain_scalar(start)?;
+                                    self.reject_content_after_inline_value()?;
                                     end
                                 }
                             };
@@ -8868,7 +8857,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                 self.parse_unquoted_value_with_indent(indent)
                             };
                             self.check_json_strict_scalar(start, end)?;
-                            self.reject_content_after_plain_scalar(start)?;
+                            self.reject_content_after_inline_value()?;
                             end
                         }
                     };
