@@ -409,13 +409,135 @@ fn test_foreach_update_if_behind_a_handler_or_comma_keeps_the_whole_resolve_4800
     ])
 }
 
+/// #4800: the mirror shape, a literal `then` the state ran beside the fold in the `else` (`if .a then 1 else FE end`),
+/// is read behind a `try ... catch` and beside an emitting comma item as the literal `else` arm is
+/// (`literal_else_arm`), on the `foreach`'s last step: the stored literal feeds no later UPDATE, which would run the
+/// fold arm on it. Every row fails on the base: the `$i` rows answered `[]` and `path`, `del` and `|= 9` raised
+/// `Invalid path expression with result {"a":null}`, the `.a` EXTRACT row raised `Invalid path expression near attempt
+/// to access element "a" of null`. Rows captured from jq 1.7.1; dropping the `then` reading fails the test.
+#[test]
+fn test_foreach_update_if_with_a_literal_then_beside_a_fold_in_the_else_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .a as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i (.; (7, if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach .a as $i (.; (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end, 7); $i))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .a as $i (.; (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end, 7); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach .a as $i (.; try (if .a then "s" else ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), empty) end) catch 1; $i))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"[path(. as $x | foreach .a as $i (.; try (if . then "s" else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: a literal `then` past a falsy `elif` condition is not read ([`taken_then_branch`]: an earlier step may run the
+/// later arm), so the chain keeps the whole-`if` resolve it had. jq answers `[[]]`, `[]` and `[[]]`; the answers are
+/// pinned as they stand (a fix flips them). Reading it turned one wrong answer into another in a 3,000-row grid.
+#[test]
+fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_4800() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .c then 7 elif .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .c then 7 elif .b then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "",
+            "Invalid path expression with result {\"a\":{\"a\":null}}",
+            5,
+        ),
+        (
+            r#"{"b":true,"a":1}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .c then 7 elif .b then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers `[["a"]]`,
-/// `[["a"],["a"]]`, `[["a"]]`, `{"a":9}` and `[["a","a"],["a","a"]]`: a comma sibling that may move the register (`.a`),
-/// a `try ... catch` that is itself a comma item, a computed `else`, an arm that navigates ahead of its fold
-/// (`.b | FE`), and a literal `then` that ran beside a fold in the `else` (the mirror shape). The last two stay refusals
-/// on purpose: the step that runs `.b | FE` names `["b"]` where jq's register moved to `["a"]`, and narrowing the
-/// literal arm's step turned the refusal that masked it into a write of `.b`; reading the literal `then` turned the
-/// last row's refusal into a truncated `[["a","a"]]`.
+/// `[["a"],["a"]]`, `[["a"]]`, `{"a":9}`, `[["a","a"],["a","a"]]`, `[["a"]]` and `[["a"],[]]`: a comma sibling that may
+/// move the register (`.a`), a `try ... catch` that is itself a comma item, a computed `else`, an arm that navigates
+/// ahead of its fold (`.b | FE`), and a literal `then` that ran beside a fold in the `else` over a source of two
+/// elements (the mirror shape off its last step). The `.b | FE` row stays a refusal on purpose: the step that runs it
+/// names `["b"]` where jq's register moved to `["a"]`, and narrowing the literal arm's step turned the refusal that
+/// masked it into a write of `.b`. The literal `then` is read only on the `foreach`'s last step: read on the first of
+/// two, the `.a` EXTRACT row's refusal became a truncated `[["a","a"]]`, because the second step runs the fold arm on
+/// the stored literal and refuses where a `?` swallows it.
 #[test]
 fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -453,6 +575,20 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
             "",
             "Invalid path expression near attempt to access element \"a\" of null",
             5,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .b then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
         ),
     ])
 }
