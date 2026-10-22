@@ -33,6 +33,10 @@ const REJECTED: &[(&str, &str)] = &[
     ("? k\n: \"a\"\n  z: 1\n", "did not find expected key"),
     ("k: 'a'\n  z: 1\n", "did not find expected key"),
     ("- \"a\"\n  - b\n", "did not find expected '-' indicator"),
+    ("k: [a, b]\n  z\n", "Error"),
+    ("- a # c\n- \"q\"\n  z\n", "Error"),
+    ("- a # c\n- [1]\n  z\n", "Error"),
+    ("k: a # c\nj: \"q\"\n  z\n", "Error"),
 ];
 
 /// (document, `-o json -I0 .` output).
