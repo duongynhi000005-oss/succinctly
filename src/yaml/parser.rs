@@ -5626,6 +5626,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                 // Block scalar as key
                 self.claim_floated_comment_for_key();
                 self.parse_block_scalar(indent)?;
+                self.reject_line_deeper_than_block_after_block_scalar()?;
             }
             _ if self.looks_like_mapping_entry() => {
                 // `? k: v` — a value indicator on this line means the node after `? `
@@ -7502,8 +7503,20 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     self.skip_to_eol();
                     self.skip_line_break();
                 }
-                // A tab after the indent is the tab-indentation error's to report, with its own message.
-                Some(b'\t') => break Ok(()),
+                // A tab-only line is blank. A tab before content is the tab-indentation error's to
+                // report, with its own message.
+                Some(b'\t') => {
+                    let blank = loop {
+                        match self.peek() {
+                            Some(b' ' | b'\t') => self.advance(),
+                            None | Some(b'\n' | b'\r') => break true,
+                            Some(_) => break false,
+                        }
+                    };
+                    if !blank {
+                        break Ok(());
+                    }
+                }
                 Some(_) if indent > parent => {
                     let in_sequence = self.type_stack.last() == Some(&NodeType::SequenceItem);
                     break Err(self.err_unexpected_char(

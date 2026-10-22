@@ -29,6 +29,10 @@ const REJECTED: &[(&str, &str)] = &[
     ("- |2\n x\n- z\n", "did not find expected '-' indicator"),
     ("a: |4\n  x\nb: 1\n", "did not find expected key"),
     ("a: |-\n   x\n  y:\n", "did not find expected key"),
+    ("? |\n   x\n  y\n: v\n", "did not find expected key"),
+    ("- ? |\n    x\n   y\n  : v\n", "did not find expected key"),
+    ("a: !!str |\n   x\n  y\nb: 1\n", "did not find expected key"),
+    ("a: &x |\n   x\n  y\nb: 1\n", "did not find expected key"),
 ];
 
 /// (document, `-o json -I0 .` output).
@@ -49,6 +53,13 @@ const ACCEPTED: &[(&str, &str)] = &[
     ),
     ("a: |2\nx: y\n", "{\"a\":\"\",\"x\":\"y\"}\n"),
     ("a: |\n  x\n\n\nb: 1\n", "{\"a\":\"x\\n\",\"b\":1}\n"),
+    ("? |\n  x\n: v\n", "{\"x\\n\":\"v\"}\n"),
+    (
+        "? |\n  x\n? |\n  y\n: v\n",
+        "{\"x\\n\":null,\"y\\n\":\"v\"}\n",
+    ),
+    ("- ? |\n    x\n  : v\n", "[{\"x\\n\":\"v\"}]\n"),
+    ("a: !!str |\n  x\nb: 1\n", "{\"a\":\"x\\n\",\"b\":1}\n"),
 ];
 
 #[test]
