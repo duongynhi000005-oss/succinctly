@@ -83,5 +83,50 @@ fn test_foreach_update_if_with_the_caught_foreach_in_then_and_a_literal_else_480
             "",
             0,
         ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; if .b then 1 elif .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end; .a))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: the arm is resolved alone only for a bare `if` (`resolved_if_arm`); the same `if` behind a handler-less `try`
+/// or `?`, a comma with an empty sibling or a `label` scope is still resolved whole, so the `foreach` in
+/// the arm that did not run still withholds the tracking of the literal arm's `null`. jq answers `[["a","a"]]` for
+/// each, `[]` here: this pins the answer as it stands (a fix flips it), as the sibling tests pin their refusals.
+#[test]
+fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end)?; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, empty); .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; label $l | if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
 }

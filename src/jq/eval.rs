@@ -50576,6 +50576,20 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
     }
 }
 
+/// What a `foreach` step resolves as its UPDATE item, given the arm `taken` that [`taken_if_branch`] named for it
+/// (#4800): the arm alone when the item is a bare `if`, the item itself otherwise. jq runs only the arm the state
+/// took, and resolving the whole `if` lets `cannot_move_register` read a nested `foreach` in the arm that did not run,
+/// which withholds the tracking of the `null` a literal arm stores (`if .a then FE else null end`, the `else` arm
+/// with a `.a` EXTRACT). A wrapped `if` (behind a `try`, a pipe, a comma or a `label`) stays whole: dropping the
+/// wrapper would drop what a handler catches or a scope breaks out of. `taken` is the item itself in yq mode.
+fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
+    if matches!(unwrap_paren(item), Expr::If { .. }) {
+        taken
+    } else {
+        item
+    }
+}
+
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
 /// is a caught bind of `.` ([`source_is_caught_destructure`]) and nothing else in it can move it
 /// (#4627). Jq mode only, and not where the accumulator or register is a `null`/boolean.
@@ -65016,17 +65030,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             } else {
                                 fold_body::foreach_body_moved()
                             };
-                            // #4800: a bare `if` UPDATE whose state took one arm resolves that arm alone, as
-                            // jq runs it: the arm that did not run holds the nested `foreach` that
-                            // [`cannot_move_register`] reads, which would otherwise withhold the tracking
-                            // of a literal arm's `null` (`if .a then FE else null end`).
-                            let resolved_item = if S::TAG == EvalTag::Jq
-                                && matches!(unwrap_paren(item), Expr::If { .. })
-                            {
-                                update_taken.get()
-                            } else {
-                                item
-                            };
+                            // #4800: ...and the arm it ran is what is resolved ([`resolved_if_arm`]).
+                            let resolved_item = resolved_if_arm(item, update_taken.get());
                             flow = active_reg.resolve_sink::<S>(
                                 resolved_item,
                                 // Moved into the last item's resolve, as it was for the one item.
