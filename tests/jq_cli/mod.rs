@@ -61,6 +61,7 @@ mod i4986;
 mod i5004;
 mod i5013;
 mod i5015;
+mod i5015_catch_handler;
 mod i5017;
 mod i5018;
 mod i5023;

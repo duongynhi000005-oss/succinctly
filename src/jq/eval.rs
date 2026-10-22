@@ -38061,6 +38061,47 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
     }
 }
 
+/// A fold's UPDATE that is a bare `foreach` over a caught bind of one variable *with a handler* (#5015):
+/// `foreach (try ($x as {a:$a} | .) catch .) as $y (.; .; .)`, with the step it takes and the `$x` marker it binds.
+/// Such a source emits whether the bind passed or not (the error message stands in as its element, the register back at
+/// the `try`'s entry), so [`bare_bind_foreach_update_key`] refuses it: whether the register moved onto the bound child is
+/// decided per step, by whether the marker is the step's register.
+fn handler_bind_foreach_update_key(update: &Expr) -> Option<(PatternKey<'_>, &Rc<Tracked>)> {
+    let Expr::Foreach {
+        input,
+        patterns,
+        init,
+        update: body,
+        extract,
+    } = unwrap_paren(without_empty_siblings(update))
+    else {
+        return None;
+    };
+    if !(matches!(patterns.as_slice(), [Pattern::Var(_)])
+        && matches!(unwrap_paren(init), Expr::Identity)
+        && matches!(unwrap_paren(body), Expr::Identity)
+        && extract.as_deref().map_or(true, |extract| {
+            matches!(unwrap_paren(extract), Expr::Identity)
+        })
+        && matches!(unwrap_paren(input), Expr::Try { catch: Some(_), .. }))
+    {
+        return None;
+    }
+    let key = bare_bind_source_key(input, false)?;
+    /// The `$x` marker a [`bare_bind_source_key`] source binds.
+    fn marker_of(e: &Expr) -> Option<&Rc<Tracked>> {
+        match unwrap_paren(e) {
+            Expr::Try { expr, .. } | Expr::Optional(expr) => marker_of(expr),
+            Expr::AsPattern { expr, .. } => match unwrap_paren(expr) {
+                Expr::TrackedVar(marker) => Some(marker),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    Some((key, marker_of(input)?))
+}
+
 /// The field names of a pure navigation `.a`, `.a.b` (#5107): the children a pipe headed by it moves jq's register to.
 fn nav_head_fields(head: &Expr) -> Option<Vec<&str>> {
     match unwrap_paren(head) {
@@ -38203,6 +38244,8 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
     (go(e, WRAPPED_CHAIN_DEPTH)
         && outer_extract.map_or(true, |extract| !may_emit_null_or_bool(extract)))
         || bare_bind_foreach_update_key(e).is_some()
+        // #5015: ...and the handler form, whose pass is decided per step.
+        || handler_bind_foreach_update_key(e).is_some()
         || comma_bind_split(e).is_some()
 }
 
@@ -64774,6 +64817,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
                     ),
                 }));
+    // #5015: ...and a handler form, whose pass is decided per step.
+    // Under a `null` or boolean EXTRACT only: the register's standing decides those, and any other EXTRACT (a `getpath`
+    // that reads the state's own node, a navigation) keeps the reading it had.
+    let handler_bind = bare_bind_foreach_update_on_register
+        .then(|| handler_bind_foreach_update_key(update))
+        .flatten()
+        .filter(|_| extract.is_some_and(may_emit_null_or_bool));
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
@@ -65346,8 +65396,23 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // EXTRACT runs from there.
                                 let moved_update_branch;
                                 let mut bind_moved = false;
-                                let extract_branch = match inner_bind_key
-                                    .as_ref()
+                                // #5015: a handler form passes on the steps whose register the marker is: it moves onto
+                                // the bound child as above; elsewhere the handler ran and jq's register is back at the
+                                // `try`'s entry, the step's own.
+                                let handler_pass = handler_bind.as_ref().map(|(_, marker)| {
+                                    marker_identical::<S>(
+                                        marker,
+                                        &active_reg.value,
+                                        &active_reg.frame,
+                                    )
+                                });
+                                let bind_key = inner_bind_key.as_ref().or_else(|| {
+                                    handler_bind
+                                        .as_ref()
+                                        .filter(|_| handler_pass == Some(true))
+                                        .map(|(key, _)| key)
+                                });
+                                let extract_branch = match bind_key
                                     .filter(|_| in_bind_item.get())
                                     .and_then(|key| {
                                         // #5107: the bind steps from the child the field navigations ahead of
@@ -65386,6 +65451,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             Snapshot::No,
                                         )
                                         .with_register(BranchRegister::Unmoved(Cow::Owned(child)));
+                                        &moved_update_branch
+                                    }
+                                    None if handler_pass == Some(false) && in_bind_item.get() => {
+                                        bind_moved = true;
+                                        moved_update_branch = PathBranch::passthrough(
+                                            Rc::clone(&active_reg.path),
+                                            Cow::Owned(update_branch.value.clone().into_owned()),
+                                            false,
+                                            Snapshot::No,
+                                        )
+                                        .with_register(BranchRegister::AtEntry);
                                         &moved_update_branch
                                     }
                                     None => update_branch,
