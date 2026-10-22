@@ -7551,6 +7551,26 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         if self.type_stack.len() <= 1 {
             return Ok(());
         }
+        // The common case, read without moving the cursor: the value ends its line and the next line starts
+        // with content at or left of the block's indent.
+        let mut i = self.pos;
+        while matches!(self.input.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        if matches!(self.input.get(i), Some(b'\n' | b'\r')) {
+            let mut j = i + self.break_len_at(i).max(1);
+            let line = j;
+            while self.input.get(j) == Some(&b' ') {
+                j += 1;
+            }
+            if let Some(&c) = self.input.get(j) {
+                if !matches!(c, b'\n' | b'\r' | b'\t' | b'#')
+                    && j - line <= self.innermost_block_indent()
+                {
+                    return Ok(());
+                }
+            }
+        }
         let saved_pos = self.pos;
         self.skip_inline_whitespace();
         if self.peek() == Some(b'#') {
