@@ -40930,14 +40930,10 @@ impl<'v> FoldNode<'v> {
     /// ([`FoldNode::is_fresh`]). The elements are shared either way, so an index into any of them is the element's own
     /// node.
     fn slice(self, range: core::ops::Range<usize>) -> Option<Self> {
-        let (items, offset, copied) = match self {
-            Self::Value(OwnedValue::Array(items)) => (&items[..], 0, false),
-            Self::Items {
-                items,
-                offset,
-                copied,
-            } => (items, offset, copied),
-            Self::Value(_) => return None,
+        let items = self.items()?;
+        let (offset, copied) = match self {
+            Self::Items { offset, copied, .. } => (offset, copied),
+            Self::Value(_) => (0, false),
         };
         let start = offset + range.start;
         let copies = start > usize::from(u16::MAX);
@@ -153463,6 +153459,20 @@ mod touched_edge_cases_2999 {
             vec![field("big")]
         ));
         // One evaluation shared by both chains is the same node, and a copy's elements are the array's own.
+        // A slice the walk cannot place (below an out-of-range index) is no claim either way, and a pair spelled
+        // alike through it keeps the structural answer.
+        assert!(!same(
+            vec![field("x"), index(7), slice(0, None)],
+            vec![field("x"), index(7)]
+        ));
+        assert!(!distinct(
+            vec![field("x"), index(7), slice(0, None)],
+            vec![field("e")]
+        ));
+        assert!(same(
+            vec![field("x"), index(7), slice(0, None)],
+            vec![field("x"), index(7), slice(0, None)]
+        ));
         let copy = chain(vec![field("big"), slice(70_000, None)]);
         assert!(same_frame_position(invocation, &copy, &copy));
         assert!(!positions_provably_distinct(invocation, &copy, &copy));
