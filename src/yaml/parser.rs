@@ -8534,7 +8534,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
             return false;
         }
         let Some(comment) = self.only_comments_between(scalar.end) else {
-            return false;
+            return false; // patchcov: coverage tolerate-line reason="defensive: the scalar is taken at the first line start after it, so only a comment or blank line lies between it and the line (flow, quoted and block-scalar neighbours probed, #5068)"
         };
         let line_start = self.input[..scalar.start]
             .iter()
@@ -8583,7 +8583,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                         i += 1;
                     }
                 }
-                _ => return None,
+                _ => return None, // patchcov: coverage tolerate-line reason="defensive: see the caller's let-else, where the same invariant leaves only comments and blank lines here (#5068)"
             }
         }
         (i == line_start).then_some(comment)

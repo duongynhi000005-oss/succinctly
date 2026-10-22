@@ -66,6 +66,8 @@ const ACCEPTED: &[(&str, &str)] = &[
         "[\"a\",{\"k\":\"z\",\"j\":1}]\n",
     ),
     ("a: 1 # c\nb: 2 # d\n", "{\"a\":1,\"b\":2}\n"),
+    // The record of a scalar before a document marker is not the line below the marker's.
+    ("k: a\n---\n  z: 1\n", "{\"k\":\"a\"}\n{\"z\":1}\n"),
     ("- a # c\r\n- z\r\n", "[\"a\",\"z\"]\n"),
     ("k:\r\n  a\r\n  z\r\n", "{\"k\":\"a z\"}\n"),
 ];
@@ -89,7 +91,8 @@ fn test_a_comment_after_a_plain_scalar_leaves_valid_documents_alone_5068() -> Re
 }
 
 /// Recorded gaps: documents yq rejects that are still read, because the check leaves a bare plain
-/// scalar root and a flow value alone (a root followed by more content is #5070). Each row is
+/// scalar root, a flow value and a line after another node than the scalar the comment ended alone
+/// (a root followed by more content is #5070). Each row is
 /// pinned to what succinctly answers today; delete a row when it starts to fail.
 const RECORDED_GAPS: &[(&str, &str)] = &[
     ("text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
@@ -97,6 +100,10 @@ const RECORDED_GAPS: &[(&str, &str)] = &[
     ("--- a\n- b # c\n  d\n", "\"a\"\n[\"b\",\"d\"]\n"),
     ("--- &a text\n- b # c\n  d\n", "\"text\"\n[\"b\",\"d\"]\n"),
     ("k: [a, b]\n  z\n", "{\"k\":[\"a\",\"b\"]}\n"),
+    // Another node stands between the scalar a comment ended and the line.
+    ("- a # c\n- \"q\"\n  z\n", "[\"a\",\"q\",\"z\"]\n"),
+    ("- a # c\n- [1]\n  z\n", "[\"a\",[1],\"z\"]\n"),
+    ("k: a # c\nj: \"q\"\n  z\n", "{\"k\":\"a\",\"j\":\"q\"}\n"),
 ];
 
 #[test]
