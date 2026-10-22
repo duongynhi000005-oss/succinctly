@@ -5253,6 +5253,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             let start = self.pos;
                             let end = self.parse_unquoted_value_with_indent(indent);
                             self.check_json_strict_scalar(start, end)?;
+                            // The scan stops at a `: ` of a later line: no node of its own (#5083), as
+                            // for a value on the key's line (#5064).
+                            self.reject_content_after_inline_value()?;
                             end
                         }
                     };
