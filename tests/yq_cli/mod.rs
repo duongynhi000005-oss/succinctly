@@ -71,6 +71,7 @@ mod i5062;
 mod i5064;
 mod i5067;
 mod i5067_empty;
+mod i5068;
 mod i5075;
 mod i5078;
 mod i865;

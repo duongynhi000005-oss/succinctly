@@ -666,6 +666,21 @@ $ printf '?\n- item\n' | yq -o=json -I=0 .
 - **A `-` line after a completed entry** (`? k` / `: v` / `- x`, and `a: 1` / `- x`) is an error
   here as in yq (#4530).
 
+### A plain scalar on a line of its own is read only up to a line that opens like an item or carries node properties ([#5068](https://github.com/rust-works/succinctly/issues/5068))
+
+A plain scalar goes on across the lines below it until a comment or a less indented line ends it.
+A continuation line that opens like a sequence item (`- x`) or with node properties (`&a v`) is text to yq.
+Here the scalar stops at that line and the remainder is dropped.
+Captured live (yq v4.53.3):
+
+| input                         | real yq          | succinctly yq                      |
+|-------------------------------|------------------|------------------------------------|
+| `- &a\n   v\n  - v\n  text\n` | `["v - v text"]` | parse error (`["v"]` before #5068) |
+| `k:\n  &a v\n  v\n`           | `{"k":"v v"}`    | `{"k":"v"}`                        |
+
+Since #5068 a line left over after such a read is a parse error where it used to be dropped without a word, and that is the only change to these inputs.
+The nearest cases of the same family are `k:` / `  a` / `  z: 1` (yq: `mapping values are not allowed in this context`, here `{"k":"a z"}`) and a document root that is a bare plain scalar followed by more content (#5070).
+
 ## Open divergences (bugs, not decisions)
 
 Representative cases, each live-verified. These are gaps to close, listed here so they are

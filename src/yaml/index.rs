@@ -2898,7 +2898,7 @@ mod tests {
             // An explicit key can fold short lines into one long key.
             ("? a\n  b\n: v\n".to_string(), true),
             // Short lines of CR breaks are lines too.
-            (format!("a: 1\r\nb: {near}\r\n{near}\r\n"), false),
+            (format!("a: 1\r\nb: {near}\r\n  {near}\r\n"), false),
             // A long value on one line may sit beside a key, so it answers `true` too.
             (format!("a: {long}\n"), true),
             // Shorter than a block: nothing to measure.
