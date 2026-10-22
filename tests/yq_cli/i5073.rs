@@ -10,6 +10,18 @@ use crate::run_yq_stdin;
 /// (document, `-o json -I0` output).
 const ROWS: &[(&str, &str)] = &[
     (
+        "- a: |\n   # x\n     y\n   z\n- q\n",
+        "[{\"a\":\"# x\\n  y\\nz\\n\"},\"q\"]\n",
+    ),
+    (
+        "- - |\n    # x\n      y\n    z\n",
+        "[[\"# x\\n  y\\nz\\n\"]]\n",
+    ),
+    (
+        "- a: |\n    # x\n      y\n    z\n- q\n",
+        "[{\"a\":\"# x\\n  y\\nz\\n\"},\"q\"]\n",
+    ),
+    (
         "a: |-\n  # h\n    deep\n  k\nb: 1\n",
         "{\"a\":\"# h\\n  deep\\nk\",\"b\":1}\n",
     ),
