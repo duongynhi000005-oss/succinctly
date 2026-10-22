@@ -51029,13 +51029,34 @@ fn if_arm_comma_items<'e, S: EvalSemantics>(
     };
     let mut narrowed = false;
     for item in items {
-        if literal_taken_arm::<S>(item, state, last_step).is_some() {
+        if literal_taken_arm::<S>(item, state, last_step).is_some()
+            || if_cond_raises::<S>(item, state)
+        {
             narrowed = true;
         } else if !cannot_move_register(item) {
             return None;
         }
     }
     narrowed.then_some(items.as_slice())
+}
+
+/// Whether `item` is an `if` whose condition is a pure function of `.` ([`is_pure_of_dot`]) that raises on `state`
+/// before emitting (#5112): jq runs the comma items in order, so the items ahead of it still emit and the step ends at
+/// the raise. Resolved on its own, that `if` is refused as it was in the whole comma, but after its siblings' emissions.
+fn if_cond_raises<S: EvalSemantics>(item: &Expr, state: &OwnedValue) -> bool {
+    let Expr::If { cond, .. } = unwrap_paren(item) else {
+        return false;
+    };
+    let cond = unwrap_paren(cond);
+    if matches!(cond, Expr::Identity) || !is_pure_of_dot(cond) {
+        return false;
+    }
+    let mut emitted = false;
+    let flow = eval_each_owned::<S>(cond, state, false, Reentry::REBUILT, &mut |_| {
+        emitted = true;
+        Demand::Stop
+    });
+    !emitted && matches!(flow, Flow::Escaped(_))
 }
 
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
