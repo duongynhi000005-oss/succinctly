@@ -693,7 +693,7 @@ Captured live (yq v4.53.3, `-o json -I0 .`):
 | `"q"\nb\n`                 | `"q"`, then the error (exit 1)     | the error     |
 | `a: 1\n---\nk: a\n b: 1\n` | `{"a":1}`, then the error (exit 1) | the error     |
 
-The exit status and the error class agree; only the stdout prefix differs.
+The exit status agrees and the message may differ (yq words a flow key that spans lines as `mapping values are not allowed in this context`); the stdout prefix is the difference that matters.
 This holds for every parse error, and it is the divergence #5070 adds rows to: a scalar, flow collection or block scalar that is a document's root can have nothing after it before the next `---` (`did not find expected <document start>`).
 
 ## Open divergences (bugs, not decisions)

@@ -56,6 +56,14 @@ const REJECTED_OTHER: &[&str] = &[
     "--- \"q\"\nb\n",
     "--- [1]\n- b\n",
     "[a, b]\n: value\n",
+    // A flow key that spans lines is a root with a line after it.
+    "[a,\n b]: v\n",
+    // A folded item-like line does not hide a key after it.
+    "text\n- b\n- c: d\n",
+    // CRLF line breaks.
+    "\"a\"\r\nb\r\n",
+    // The error is in a later document: yq has printed the earlier ones, this prints nothing.
+    "x: 1\n---\n\"a\"\nb\n",
 ];
 
 #[test]
@@ -82,6 +90,7 @@ const ACCEPTED: &[(&str, &str)] = &[
     // Blank lines and comments after a root are not content.
     ("\"q\"\n\n# c\n\n", "\"q\"\n"),
     ("[1] # c\n", "[1]\n"),
+    ("\"q\"\r\n\r\n", "\"q\"\n"),
     // A block collection root is not a scalar root.
     ("a: 1\nb: 2\n", "{\"a\":1,\"b\":2}\n"),
     ("- a\n- b\n", "[\"a\",\"b\"]\n"),
@@ -91,6 +100,24 @@ const ACCEPTED: &[(&str, &str)] = &[
 #[test]
 fn test_roots_and_separators_that_yq_accepts_are_unchanged_5070() -> Result<()> {
     for (doc, expected) in ACCEPTED {
+        let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
+        assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");
+    }
+    Ok(())
+}
+
+/// Recorded gap: content after a `...` marker with no `---` is a second document here; yq prints the
+/// first and stops (`did not find expected <document start>`). Pinned to what succinctly answers
+/// today; delete a row when it starts to fail.
+const RECORDED_GAPS: &[(&str, &str)] = &[
+    ("\"a\"\n...\nb\n", "\"a\"\n\"b\"\n"),
+    ("a\n...\nb\n", "\"a\"\n\"b\"\n"),
+    ("--- \"a\"\n... # c\n--- b\n", "\"a\"\n\"b\"\n"),
+];
+
+#[test]
+fn test_recorded_gap_content_after_a_document_end_marker_without_a_start_5070() -> Result<()> {
+    for (doc, expected) in RECORDED_GAPS {
         let (stdout, code) = run_yq_stdin(".", doc, &["-o", "json", "-I0"])?;
         assert_eq!((stdout.as_str(), code), (*expected, 0), "{doc:?}");
     }
