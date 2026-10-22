@@ -218,3 +218,235 @@ fn test_5102_navigation_stage_ahead_of_a_caught_foreign_foreach_in_a_foreach_upd
         ),
     ])
 }
+
+/// #5102: the same rows where the outer `foreach` has a two-element source, a `reduce` UPDATE, a wrapper around the
+/// `foreach` (`first`, `limit`, `//`, `label`, a comma, `select(true)`), the `foreach` in EXTRACT, two navigating
+/// stages, and a `null` `$x` beside a `null` register (identical by kind, so the destructure passes and `FE` emits).
+/// Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5102_the_wrappers_sources_and_bodies_around_the_navigated_foreach() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":null}"#,
+            r"[path(.a as $x | foreach . as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))]",
+            "[[\"b\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":null}"#,
+            r"(.a as $x | foreach . as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "{\"a\":null,\"b\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (1,2) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (1,2) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.,.) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.,.) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach (.a,.b) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.b) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | reduce (1,2) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"[path(.a as $x | reduce (1,2) as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; first(.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; first(.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); null)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // 3; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // 3; null)) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; limit(1; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; limit(1; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); null)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; label $l | .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; label $l | .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 2; null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; (.b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)), 2; null)) |= 9",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; select(true) | .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; select(true) | .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; .; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; .; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .))) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; .b | .c | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach . as $i (.; .b | .c | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5102: rows that stay wrong, pinned to jq's answers and ignored until they are fixed. The `INIT null` EXTRACT rows
+/// matched `main` through the first step's wrong emission (#5106); the last is the converse, `$x` the node the stage
+/// navigates to (#5107). Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[ignore = "#5106, #5107"]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5102_known_gaps_next_to_the_navigated_foreach() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":2}"#,
+            r"[path(. as $x | foreach . as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"[path(. as $x | foreach (.a,.) as $i (null; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) elif .b then .[0]? else .[0]? end))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":{"a":1}}"#,
+            r"[path(.b as $x | foreach . as $i (.; .b | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}

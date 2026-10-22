@@ -116,7 +116,7 @@ fn test_reduce_update_mirrored_if_with_the_caught_foreach_in_the_else_5044() -> 
 /// `[["a"]]` and the `del` row into a refusal for jq's `"C"` (16 of 12,000 grid rows that matched jq). Every row
 /// captured from jq 1.7.1, both routes. (#5102: the `INIT null` row that was here matched through the first step's
 /// wrong emission, a nested `foreach` found at the navigated register, and jq's answer is the last step's, which this
-/// reading refuses; it is #5106's.)
+/// reading refuses; it is pinned, ignored, in `i5102.rs` as #5106's.)
 #[test]
 fn test_foreach_extract_if_with_a_navigating_else_keeps_the_rows_that_matched_5044() -> Result<()> {
     assert_path_rows_both_routes_3749(&[(
@@ -311,7 +311,7 @@ fn test_foreach_update_mirrored_if_reads_a_source_that_hands_the_register_off_50
 
 /// #5044: a source with `.` among its elements (`(.a,.)`) is not read: there `$x` is the register at the last step and
 /// the `foreach` emits, so an EXTRACT read as empty refused 19 of 12,000 grid rows that matched jq. Rows captured from
-/// jq 1.7.1, both routes. (#5102: the `INIT null` row that was here is #5106's, see above.)
+/// jq 1.7.1, both routes. (#5102: the `INIT null` row that was here is in `i5102.rs`, ignored, see above.)
 #[test]
 fn test_foreach_extract_if_with_a_source_that_hands_the_register_on_keeps_the_rows_that_matched_5044(
 ) -> Result<()> {
