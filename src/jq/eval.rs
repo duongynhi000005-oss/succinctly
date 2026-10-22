@@ -64992,16 +64992,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // register, and an EXTRACT `$y` after a caught UPDATE emitted with no
                                 // statement, which the stage after the `foreach` read as lost (a `try`
                                 // around the path then caught an exact refusal where jq's stage emits
-                                // nothing). Not after a pattern walk or an INIT that can move the register
-                                // (#5013's unmodelled hand-off to the source), nor for an EXTRACT that can:
-                                // there the statement turned refusals into a wrong accept and a wrong write.
+                                // nothing). Only where the source moved the step register (`At`): read on every
+                                // walked step, the statement turned refusals into a wrong accept and a write one
+                                // level short of jq's on differential grids (pinned in `tests/jq_cli/i5049.rs`).
                                 let extract_moved = S::TAG == EvalTag::Jq
                                     && !update_unmoved
                                     && (walked_at.is_none()
-                                        || (walked.is_none()
-                                            && matches!(elem.moved, MovedRegister::At { .. })
-                                            && cannot_move_register(init)
-                                            && cannot_move_register(ext_expr)))
+                                        || matches!(elem.moved, MovedRegister::At { .. }))
                                     && extract_reg.trackable
                                     && extract_reg.path.depth() > reg.path.depth()
                                     && (cannot_move_register(ext_expr) || bind_moved);

@@ -194,10 +194,9 @@ fn test_5049_two_argument_foreach_emission_keeps_the_register_update_left() -> R
     ])
 }
 
-/// #5049: where the inner `foreach`'s step register was not moved by its source alone (an INIT `.a?` that navigates,
-/// an EXTRACT `.a?` that can move it), its EXTRACT's emission states no register: read as the walked step register,
-/// differential grids turned the first row's refusal into an accept (jq refuses) and the second's into a write one level
-/// short of jq's. Each row must answer as jq does or stay refused (exit 5, nothing on stdout), on both routes.
+/// #5049: where the source did not move the inner `foreach`'s step register (`MovedRegister::At`), its EXTRACT's
+/// emission states no register: read as the walked step register, differential grids turned the first row's refusal
+/// into an accept (jq refuses) and the second's into a write one level short of jq's. Each row must answer as jq does or stay refused (exit 5, nothing on stdout), on both routes.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5049_extract_states_no_register_the_source_did_not_move_alone() -> Result<()> {
