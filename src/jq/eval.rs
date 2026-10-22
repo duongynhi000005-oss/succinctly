@@ -50927,8 +50927,9 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
 /// in the arm that did not run, which withholds the tracking of the `null` the literal arm stores (jq: `jv_identical`
 /// by kind). Any other `if` is resolved whole as before, and so is a computed `else`: narrowed behind a handler or
 /// beside a comma sibling, it lost rows that match jq in differential grids. A literal `then` the state ran is named
-/// too, on the `foreach`'s last step only (`last_step`): the literal it stores would feed a later step that runs the fold
-/// arm on it, which the resolve cannot place (under a `?` that refusal truncated jq's output). An `if` that navigates
+/// too, on the last step of an INIT fork only (`last_step`, #5113): the literal it stores would feed a later step of the
+/// fork that runs the fold arm on it, which the resolve cannot place (under a `?` that refusal truncated jq's output),
+/// while the next fork starts from INIT's own output. An `if` that navigates
 /// without a fold (`if .a then .b else 3 end`) already matches jq whole, and one that navigates ahead of a fold
 /// (`if . then (.b | FE) else 3 end`) names a path jq's register never reaches on the step that runs that arm, which a
 /// refusal on the literal arm's step used to mask (narrowing it turned that refusal into a write of `.b`). The shape
@@ -50989,8 +50990,8 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
     }
     // The mirror shape: a literal `then` of the first `if` that the state ran, beside the fold in an `else`. It stores a
     // literal the next step would run the fold arm on (`if .b then null else FE end`: `.b` of the stored `null` is
-    // falsy), which the resolve cannot place, so it is read only on the `foreach`'s last step: the stored literal feeds
-    // no later UPDATE. A `then` past a falsy `elif` condition is not read ([`taken_then_branch`]).
+    // falsy), which the resolve cannot place, so it is read only on the last step of an INIT fork (#5113): the stored
+    // literal feeds no later UPDATE, the next fork starting from INIT's own output. A `then` past a falsy `elif` condition is not read ([`taken_then_branch`]).
     (last_step && core::ptr::eq(arm, if_item))
         .then(|| truthy_then::<S>(arm, state))
         .flatten()
@@ -65457,12 +65458,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             comma_bind_item.and_then(|_| comma_bind_split(&bound_update));
                         // The step that reaches both bounds of the source is the `foreach`'s last ([`run_bounds`]).
                         let last_step = run_bounds == Some((fork_index + 1, steps));
+                        // #5113: ...and the last step of this INIT fork, after which jq stores INIT's next output as the
+                        // state, so a literal this step stores feeds no later UPDATE ([`literal_taken_arm`]).
+                        let fork_last_step = run_bounds.is_some_and(|(_, items)| items == steps);
                         debug_assert!(comma_bind_item.is_none() || bound_split.is_some());
                         // #4800: ...and so is a comma one of whose items is an `if` resolved as its arm
                         // ([`if_arm_comma_items`]).
                         let if_arm_items = (S::TAG == EvalTag::Jq && bound_split.is_none())
                             .then(|| {
-                                if_arm_comma_items::<S>(&bound_update, &entry_state, last_step)
+                                if_arm_comma_items::<S>(&bound_update, &entry_state, fork_last_step)
                             })
                             .flatten();
                         let comma_items = bound_split
@@ -65477,7 +65481,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             update_taken.set(if S::TAG == EvalTag::Jq {
                                 // #4800: a `try` with a handler around an `if` that reaches a literal arm
                                 // ran that arm ([`handler_literal_arm`]).
-                                handler_literal_arm::<S>(item, &entry_state, last_step)
+                                handler_literal_arm::<S>(item, &entry_state, fork_last_step)
                                     .unwrap_or_else(|| {
                                         taken_if_branch::<S>(item, &entry_state, update_body)
                                     })
