@@ -37,6 +37,13 @@ const REJECTED: &[(&str, &str)] = &[
     ("- a # c\n- \"q\"\n  z\n", "Error"),
     ("- a # c\n- [1]\n  z\n", "Error"),
     ("k: a # c\nj: \"q\"\n  z\n", "Error"),
+    ("k: !!str \"a\"\n  z: 1\n", "did not find expected key"),
+    ("k: !!str [1]\n  z: 1\n", "did not find expected key"),
+    ("k: \"a\"\r\n  z: 1\r\n", "did not find expected key"),
+    (
+        "- \"a\"\r\n  z: 1\r\n",
+        "did not find expected '-' indicator",
+    ),
 ];
 
 /// (document, `-o json -I0 .` output).
@@ -56,6 +63,9 @@ const ACCEPTED: &[(&str, &str)] = &[
         "{\"a\":{\"b\":{\"x\":1},\"c\":1}}\n",
     ),
     ("- k: \"a\"\n  z: 1\n", "[{\"k\":\"a\",\"z\":1}]\n"),
+    ("k: \"a\"\r\nm: 1\r\n", "{\"k\":\"a\",\"m\":1}\n"),
+    ("- \"a\"\n---\n- [1]\n", "[\"a\"]\n[[1]]\n"),
+    ("k: \"a\"\n...\n", "{\"k\":\"a\"}\n"),
 ];
 
 #[test]
