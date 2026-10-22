@@ -240,7 +240,9 @@ fn test_5120_register_x_bind_in_a_foreach_body_beside_a_computed_init() -> Resul
 
 /// #5120: rows that stay wrong, pinned to jq's answers and ignored until they are fixed: the `{}` document's `= 9`
 /// (jq writes the path the bind moved the register to; the binary refuses), and the `null` markers, whose
-/// `null`/boolean EXTRACT is accepted at the register the bind moved to. They were answered by a silent no-op before (#5121).
+/// `null`/boolean EXTRACT is accepted at the register the bind moved to (#5121). On `main` they were a silent no-op or
+/// an empty `path` (the `{}` row's `= 9` left the document where jq writes); the binary now refuses them loudly. The
+/// helper stops at the first failing row, so check all four when this is fixed.
 #[test]
 #[ignore = "#5121"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
