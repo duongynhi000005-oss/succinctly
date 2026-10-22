@@ -1018,11 +1018,48 @@ rustc --crate-type=lib -O --target x86_64-unknown-linux-gnu -C target-feature=+p
       --emit asm -o - pc.rs | grep -c popcnt                                                                  # 1
 ```
 
-(rustc 1.99.0; the same on `x86_64-apple-darwin`.) Whether `+popcnt` moves the end-to-end benchmarks
-(`jq_bench`/`yq_bench`, rank/select micro-benchmarks) has not been measured; it needs an interleaved A/B on an
-x86_64 box (default build vs `RUSTFLAGS="-C target-feature=+popcnt"`) and is tracked on #5035. Per-call
-runtime dispatch on a single word would cost more than it saves, so the options are a documented `RUSTFLAGS`,
-release binaries built with `+popcnt`, or `#[target_feature(enable = "popcnt")]` clones of the hot loops.
+(rustc 1.99.0; the same on `x86_64-apple-darwin`.)
+
+**Measured (#5035).** terminus (AMD Ryzen 9 7950X), rustc 1.99.0, one source tree built twice with
+`cargo build --release --features cli,bench-runner`: the default build (0 `popcnt` instructions in the binary)
+and `RUSTFLAGS="-C target-feature=+popcnt"` (182). Every comparison alternates the two builds within each
+repetition ([A/B method](../guides/benchmarking.md#ab-benchmarking-method)).
+
+*End to end*, `scripts/ab-cli.py`, 15 repetitions, 1 MB and 10 MB inputs from `yaml generate-suite` /
+`json generate-suite`, `.` and `.[]`, output identity 0 differences. Negative is faster with `+popcnt`.
+`--control` (the default build against a copy of itself) is the noise floor:
+
+| tool | workloads | control median (range) | A/B median, two runs | A/B mean, two runs | A/B range, two runs              |
+|------|-----------|------------------------|----------------------|--------------------|----------------------------------|
+| yq   | 68        | -0.4% (-4.9% .. +1.4%) | -2.9%, -1.9%         | -5.4%, -4.5%       | -18.9% .. +2.5%, -20.1% .. +5.2% |
+| jq   | 52        | -0.9% (-8.9% .. +0.9%) | -2.9%, -2.5%         | -2.8%, -2.5%       | -7.5% .. +1.4%, -7.6% .. +3.2%   |
+
+The yq gain follows how structure-heavy the input is: `empty-items` -16% to -18%, `half-empty-items` -14% to
+-20%, `flow` -12% to -14%, `sequences` and `anchors` about -10%, where `select1`/`rank1` run most often. The rows
+that read slower are `numbers` (+3% to +5%), `users` (+2% to +3%) and `navigation` (+3%) in the second run, which
+labels its rows by pattern, and at most +2.5% in the first, which does not. That is inside what code layout alone
+moves on this codebase (±5%, [#2603](https://github.com/rust-works/succinctly/issues/2603)); no holdout exists for a
+codegen flag, so they are not attributed.
+
+*Micro-benchmarks*, Criterion (`--features simd`, 1 s warm-up, 3 s measurement), two repetitions in opposite
+order, median of the two:
+
+| benchmark                       | change with `+popcnt`          |
+|---------------------------------|--------------------------------|
+| `rank1` (1M / 10M bits)         | -31% / -38%                    |
+| `select1` (1M / 10M bits)       | -51% / -50%                    |
+| `bp_rank1` (flat, deep, mixed)  | -37%                           |
+| `bp_select1`                    | -50% (`select1_cspoppy` -7%)   |
+| `select_scan` scalar / portable | -73% / -54%                    |
+| `select_scan` dispatch          | -24% (the 256-bit rows +1%)    |
+| `popcount/single_word`          | -64%                           |
+| `popcount/*_raw` (bulk kernel)  | ±1% (already the AVX-512 path) |
+
+So the per-word calls are a real cost of the baseline target. Per-call runtime dispatch on a single word would
+cost more than it saves, so the options are a documented `RUSTFLAGS`, release binaries built with `+popcnt`
+(every x86_64 CPU since about 2008 has the instruction; the baseline target cannot assume it), or
+`#[target_feature(enable = "popcnt")]` clones of the hot loops, which only help where the whole path inlines.
+Which one ships is open on #5035.
 
 ### Reproduce
 
