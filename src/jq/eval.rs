@@ -64818,9 +64818,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                     ),
                 }));
     // #5015: ...and a handler form, whose pass is decided per step.
+    // Under a `null` or boolean EXTRACT only: the register's standing decides those, and any other EXTRACT (a `getpath`
+    // that reads the state's own node, a navigation) keeps the reading it had.
     let handler_bind = bare_bind_foreach_update_on_register
         .then(|| handler_bind_foreach_update_key(update))
-        .flatten();
+        .flatten()
+        .filter(|_| extract.is_some_and(may_emit_null_or_bool));
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
@@ -65450,10 +65453,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                         .with_register(BranchRegister::Unmoved(Cow::Owned(child)));
                                         &moved_update_branch
                                     }
-                                    None if handler_pass == Some(false)
-                                        && in_bind_item.get()
-                                        && extract.is_some_and(may_emit_null_or_bool) =>
-                                    {
+                                    None if handler_pass == Some(false) && in_bind_item.get() => {
                                         bind_moved = true;
                                         moved_update_branch = PathBranch::passthrough(
                                             Rc::clone(&active_reg.path),
