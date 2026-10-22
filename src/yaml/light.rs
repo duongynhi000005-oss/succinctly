@@ -6655,9 +6655,9 @@ impl<'a> YamlString<'a> {
     }
 
     /// The indent of the block that owns a block scalar whose header is the first thing on
-    /// its line (`a:` / `  >` / `  text`, `-` / `  |` / `  text`, #4259), or `None` when
-    /// something else comes first on the line (`key: |`, `- |`, `--- |`) and
-    /// [`Self::compute_key_indent`] applies.
+    /// its line (`a:` / `  >` / `  text`, `-` / `  |` / `  text`, #4259; 0 for the document's
+    /// root node, #5075), or `None` when something else comes first on the line (`key: |`,
+    /// `- |`, `--- |`) and [`Self::compute_key_indent`] applies.
     ///
     /// YAML measures the content against that parent, not against the header's own line, so
     /// `a:` / `  >` / `  text` has content at the header's indent. The parent is read off the
@@ -6712,7 +6712,10 @@ impl<'a> YamlString<'a> {
             }
             return Some(indent);
         }
-        None
+        // Nothing above the header but blank lines, comments and node properties: it is the
+        // document's root node, whose parent is the document itself. Its content needs only to
+        // be indented more than column 0, wherever the header sits (#5075).
+        Some(0)
     }
 
     /// Compute the indentation of the mapping key associated with a block scalar.
