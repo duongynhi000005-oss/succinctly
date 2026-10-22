@@ -50568,12 +50568,22 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
         return update;
     };
     let current = walk_falsy_else_chain::<S>(item, state);
-    // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included.
-    if wrapped && core::ptr::eq(current, item) {
-        update
-    } else {
-        current
+    // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included, except a bare
+    // `if` whose truthy condition ran a `then` that moves no register (`if .a then 7 else .a end`): the
+    // `else` that navigates did not run, so the step is that `then` (#5082).
+    if core::ptr::eq(current, item) {
+        if !wrapped {
+            if let Some(then) = taken_then_branch::<S>(update, state) {
+                if cannot_move_register(then) {
+                    return then;
+                }
+            }
+        }
+        if wrapped {
+            return update;
+        }
     }
+    current
 }
 
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
