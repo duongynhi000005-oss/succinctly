@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use crate::assert_path_rows_both_routes_3749;
+use crate::{assert_path_rows_both_routes_3749, run_jq_full};
 
 // `FI = foreach (try ($x as {a:$a} | .)) as $y (.; try (.a) catch 7; .)`. On the outer step whose element is the root,
 // `$x` is jq's register, so FI's source moves it onto `$x.a`; FI's `.a` on the `null` state then fails `path_intact`
@@ -192,4 +192,38 @@ fn test_5049_two_argument_foreach_emission_keeps_the_register_update_left() -> R
             5,
         ),
     ])
+}
+
+/// #5049: where the inner `foreach`'s step register was not moved by its source alone (an INIT `.a?` that navigates,
+/// an EXTRACT `.a?` that can move it), its EXTRACT's emission states no register: read as the walked step register,
+/// differential grids turned the first row's refusal into an accept (jq refuses) and the second's into a write one level
+/// short of jq's. Each row must answer as jq does or stay refused (exit 5, nothing on stdout), on both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5049_extract_states_no_register_the_source_did_not_move_alone() -> Result<()> {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            r#"{"a":{"b":1},"b":{"b":1}}"#,
+            r"first(path(. as $x | foreach . as $i (.; if . then foreach ($x as {a:$a} | .) as $y (.a?; try (.a) catch $y; 7) else . end; null) | .a))",
+            "",
+        ),
+        (
+            "null",
+            r"(. as $x | foreach (.a,.) as $i (.; not | foreach ($x as {a:$a} | .) as $y (null; try (.a) catch $y; .a?); 7) | foreach ($x as {a:$a} | .) as $y (null; try (.a) catch $y; .a?)) |= 9",
+            "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":9}}}}}}\n",
+        ),
+    ];
+    for &(input, filter, jq_stdout) in rows {
+        let routes = [
+            run_jq_full(&["-c", filter], Some(input))?,
+            run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
+        ];
+        for (stdout, stderr, code) in routes {
+            assert!(
+                stdout == jq_stdout || (code == 5 && stdout.is_empty()),
+                "`{filter}` on {input}: neither jq's {jq_stdout:?} nor a refusal: {stdout:?} {stderr:?} exit {code}"
+            );
+        }
+    }
+    Ok(())
 }
