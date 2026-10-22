@@ -55004,6 +55004,13 @@ fn foreign_register_markers_with<S: EvalSemantics>(
             };
             let provably_other = if off_body || moved_at.is_some() {
                 matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
+                    // #5030: a `null` marker is no node of a register known not to be `null`: INIT moved the
+                    // register onto one (`.a.c as $x | reduce ($x as {b:$q} | .) as $y (.a; .)` with `.a` a
+                    // container), and `null` is `jv_identical` only to a `null`.
+                    || (off_body
+                        && moved_at.is_none()
+                        && ambient.register_non_null
+                        && matches!(&marker.value, OwnedValue::Null))
                     // #4790: a `null` is `jv_identical` to the register by kind, so it is the register
                     // on a step whose element is `null`, and only there: onto a node known not to be
                     // `null` its destructure's step raises (a `null` `$x` is the one scalar that
