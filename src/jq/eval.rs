@@ -53098,11 +53098,15 @@ impl FoldRegister {
             // reading the register ([`is_register_fold`]).
             // #4901: ...or a bind chain in the tail of the `reduce` UPDATE that marked it
             // ([`fold_body::state_handed_on_here`]), which is one sequence of path-checked steps.
+            // #5120: ...and a `foreach` body that is such a chain: its accumulator is no node of the register (a
+            // computed INIT), but the bind's `$x` may be, and read against none its step was taken to raise and the
+            // body emitted nothing (a silent no-op where jq refuses or writes).
             let carries = S::TAG == EvalTag::Jq
                 && self.trackable
                 && !tr
                 && (!fans_out(expr)
-                    || (fold_body::state_handed_on_here() && is_single_output_bind(expr)));
+                    || ((fold_body::state_handed_on_here() || fold_body::foreach_body_here())
+                        && is_single_output_bind(expr)));
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)
