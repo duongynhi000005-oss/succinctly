@@ -52565,11 +52565,21 @@ impl FoldRegister {
         // widening it would make loud a refusal #3267 keeps exact. The live register is
         // dropped, as `Frame::unknown` drops it, so the frame never records a loss while
         // carrying a register (#3456 D2).
+        // #5095: a frame that carries the register's value loses it *there*: jq's register only
+        // moves down from it, so a frozen value that is no node of it (the root, around a register
+        // the frame names at `.a`) is not the register, and its refusal is jq's own, which a `try`
+        // catches (`foreach ((reduce ($x as {b:$q} | .) as $w (.; .c))?) as $y (.a; .; .)`).
         if !self.trackable && !self.frame.register_loss.is_lost() {
+            let loss = self
+                .frame
+                .register()
+                .map_or(RegisterLoss::LostSomewhere, |register| {
+                    RegisterLoss::LostAt(Rc::new(register.clone()))
+                });
             self.frame = self
                 .frame
                 .with_register(None)
-                .with_register_loss(RegisterLoss::LostSomewhere)
+                .with_register_loss(loss)
                 .into_owned();
         }
     }
@@ -62016,10 +62026,20 @@ fn source_may_alias_register<S: EvalSemantics>(
     // untracked stage `.` is whatever the stage computed, so a source that mixes a bare `.`
     // with a `$var` marker (`if true then $v0 else . end`) hands the register back on one
     // branch and not the other; a source of either kind alone is one thing throughout.
+    // #5095: ...or while an untracked stage's frame carries the register, which sits where that
+    // frame names ([`resolve_seq_stage`]'s `stage_frame`; a fold SOURCE after a navigating INIT,
+    // [`register_frame`]): a `$x` bound at another position is another node of the document, and
+    // the refusal of its step is jq's own, which a `try` catches (`.a as $x | foreach ($x as {b:$q}
+    // | .) as $y (.b; ..)` on equal siblings). Not for a `null`/boolean register, which jq finds
+    // identical to an equal value wherever it was bound.
+    let names_register = trackable
+        || frame
+            .register()
+            .is_some_and(|register| !matches!(register, OwnedValue::Null | OwnedValue::Bool(_)));
     S::TAG == EvalTag::Jq
         && !(identity_passthrough(source, true)
             && (trackable || !passthrough_mixes_dot_and_marker(source)))
-        && may_alias_register(source, trackable.then_some(frame))
+        && may_alias_register(source, names_register.then_some(frame))
 }
 
 /// The register in hand at a stage: the ambient value itself while trackable, else
