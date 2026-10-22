@@ -696,6 +696,13 @@ Captured live (yq v4.53.3, `-o json -I0 .`):
 The exit status agrees and the message may differ (yq words a flow key that spans lines as `mapping values are not allowed in this context`); the stdout prefix is the difference that matters.
 This holds for every parse error, and it is the divergence #5070 adds rows to: a scalar, flow collection or block scalar that is a document's root can have nothing after it before the next `---` (`did not find expected <document start>`).
 
+### Content after a `...` end marker — rejected as yq does, with two shapes that still differ ([#5089](https://github.com/rust-works/succinctly/issues/5089))
+
+A document after a `...` marker needs its own `---`: `a` / `...` / `b` stops with `did not find expected <document start>` in yq and here (YAML Test Suite `7Z25` is valid YAML 1.2 and fails for that reason, as `CFD4` and `FRK4` do).
+Two shapes still differ.
+A directive after the marker (`a` / `...` / `%YAML 1.2` / `---` / `b`) is rejected by yq and read as two documents here, because YAML 1.2 allows it (spec examples 6.18, 6.21 and 9.6 are written that way).
+A stream whose first document is `--- text` followed by `...` and more content reads as one scalar in yq (`--- v` / `...` / `b` is `"v... b"`, the marker folded into the text) and as an error here; it read as two documents (`"v"`, `"b"`) before #5089.
+
 ## Open divergences (bugs, not decisions)
 
 Representative cases, each live-verified. These are gaps to close, listed here so they are
