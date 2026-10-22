@@ -7617,8 +7617,14 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                     // Empty line - skip and continue
                     self.skip_line_break();
                 }
+                Some(b'#') if indent > base_indent => {
+                    // A `#` line indented deeper than the parent is the first content line (#5073): it sets
+                    // the indent, so a deeper line after it is more content, not the scalar's indent.
+                    self.pos = saved_pos;
+                    return Some(indent);
+                }
                 Some(b'#') => {
-                    // Comment line - skip to end
+                    // Comment line at or below the parent's indent - skip to end
                     self.skip_to_eol();
                     self.skip_line_break();
                 }
