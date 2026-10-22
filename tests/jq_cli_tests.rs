@@ -161886,12 +161886,15 @@ fn test_caught_foreign_marker_destructure_foreach_update_behind_a_gate_or_fallba
 /// the bare `FOREACH` (the register is placed, `["a"]`) or for the alternate of a `//`, which jq runs after it
 /// backtracked a falsy left side (`[]` on `true`); the left side's own output is refused, see
 /// `test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800`.
+/// #5110: a literal head (`1 | FOREACH`) is no longer refused: the bare `FOREACH` behind it is restated at the register its bind moved to,
+/// and the rows after the loop pin jq's answers (`["a"]`, `{"a":9}`, `null` for `del`). Heads that are not a literal (`not`, `{a:1}`, `[1]`)
+/// keep the refusal.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refused_4800(
 ) -> Result<()> {
     let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
-    for head in ["1 | ", "not | ", "{a:1} | ", "[1] | "] {
+    for head in ["not | ", "{a:1} | ", "[1] | "] {
         for wrap in [
             "path(X)",
             "del(X)",
@@ -161914,6 +161917,41 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
         }
     }
     assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i)))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
         (
             "null",
             r". as $x | path(foreach . as $i (.; foreach ($x as {a:$a}|.) as $y (.; .; .); $i))",
@@ -161945,12 +161983,15 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
 /// Controls that must not move: a comma beside the `foreach` (`(FE), 7`) and a `//` fallback restore
 /// the register for some branches (a comma inside a constructor, `[1,2] | FE`, is no such branch), which only the run can tell, so they keep the answers they had
 /// (`["a"]` then `[]`, and `[]`), as does the bare `FOREACH` UPDATE (`["a"]`).
+/// #5110: a literal head (`1 | FOREACH`) is no longer refused: the bare `FOREACH` behind it is restated at the register its bind moved to,
+/// and the rows after the loop pin jq's answers (`["a"]`, `{"a":9}`, `null` for `del`). Heads that are not a literal (`not`, `{a:1}`, `[1]`)
+/// keep the refusal.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_4800() -> Result<()>
 {
     let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
-    for head in ["1 | ", "not | ", "[1,2] | "] {
+    for head in ["not | ", "[1,2] | "] {
         for stage in [
             " | .",
             " | select(true)",
@@ -161980,6 +162021,251 @@ fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_
         }
     }
     assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .)?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(first(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(try (. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true)))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(first(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(try (. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.)))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(first(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(try (. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | first(.)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end)?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(first(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(try (. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | if true then . else . end))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .)",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .)?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"[limit(1; path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(first(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(try (. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | select(true) | .))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
         (
             "null",
             r"path(. as $x | foreach . as $i (.; foreach ($x as {a:$a}|.) as $y (.; .; .); $i) | .)",
@@ -162121,6 +162407,9 @@ fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() ->
 /// with, so the controls stay `[]`. The refusal is `Invalid path expression with result null` for
 /// `path`, `del` and `|=` (a `del` that answered `null` did so by deleting the root rather than
 /// `["a"]`). Controls captured from `/usr/bin/jq` 1.7.1.
+/// #5110: a literal head (`1 | FOREACH`) is no longer refused: the bare `FOREACH` behind it is restated at the register its bind moved to,
+/// and the rows after the loop pin jq's answers (`["a"]`, `{"a":9}`, `null` for `del`). Heads that are not a literal (`not`, `{a:1}`, `[1]`)
+/// keep the refusal.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_branch_4837(
@@ -162136,7 +162425,6 @@ fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_b
         "try ((L) // 5)",
         "((L) // empty) | .",
         "(((L) // 5) // 6) | .",
-        "(L) | (. // 5)",
         // a `//` that moves nothing restores no register, wherever it sits
         "(5 // 6) | (L)",
         "(L) | select(. // true)",
@@ -162157,6 +162445,34 @@ fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_b
         }
     }
     assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | (. // 5); $i))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | (. // 5); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | (. // 5); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; (1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) | (. // 5); $i)) | .",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
         (
             "null",
             r"path(. as $x | foreach . as $i (.; ((select(false) | 1 | foreach ($x as {a:$a}|.) as $y (.; .; .)) // 5) | .; $i))",

@@ -38037,6 +38037,11 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
         // where the bind put it, so what the EXTRACT is judged against does not depend on the tail's value.
         Expr::Pipe(stages) => {
             let (head, tail) = stages.split_first()?;
+            // #5110: a literal stage ahead of the `foreach` hands it a value that is not the register, and
+            // moves nothing: the bind steps from the register as it does without the stage.
+            if let ([only], Expr::Literal(_)) = (tail, unwrap_paren(head)) {
+                return bare_bind_foreach_update_key_within(only, budget);
+            }
             tail.iter()
                 .all(cannot_move_register)
                 .then(|| bare_bind_foreach_update_key_within(head, budget))
@@ -38044,6 +38049,18 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
         }
         _ => None,
     }
+}
+
+/// Whether a fold's UPDATE holds, anywhere, a pipe of a literal and one stage (#5110): the stage that hands the bare
+/// `foreach` of [`bare_bind_foreach_update_key`] a value that is not the register, which that function reads through.
+/// Its bind steps from the register only where the `$x` it destructures is the register, which the syntax cannot say.
+/// Asked of the whole UPDATE rather than of the shape the key walk follows, so a guard cannot be missed by a spelling
+/// the walk reads (`(1 | FE) | .`, `try (1 | FE)`, a comma item): an over-wide answer only makes the guard apply.
+fn update_pipe_has_literal_head(update: &Expr) -> bool {
+    any_subexpr(update, &mut |e| {
+        matches!(e, Expr::Pipe(stages)
+            if stages.len() == 2 && matches!(unwrap_paren(&stages[0]), Expr::Literal(_)))
+    })
 }
 
 /// Whether a pipe stage after the bare `foreach` of [`bare_bind_foreach_update_key`] may emit a `null` or a boolean
@@ -64670,10 +64687,22 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         .then(|| comma_bind_split(update))
         .flatten();
     let comma_bind_item = comma_split.as_ref().map(|(index, _, _)| *index);
+    // #5110: ...behind a literal stage only where every `$x` marker the UPDATE reads equals the value the fold was entered
+    // with: a marker bound elsewhere (a `null` from an absent key beside a container register) is not the register, its
+    // bind raises, and the stage-less reading's verdict for that is the source's own.
+    // Nor where the source moves the register: the stage-less reading's per-step standing is the accumulator's, which a
+    // literal stage replaces.
+    let literal_head_markers_are_the_register = !update_pipe_has_literal_head(update)
+        || (cannot_move_register(input)
+            && !any_subexpr(
+                update,
+                &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
+            ));
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
         .or_else(|| comma_split.map(|(_, key, _)| key))
+        .filter(|_| literal_head_markers_are_the_register)
         // #5015: for every EXTRACT but a `getpath`, which reads from the state's own node, not from where the
         // bind moved the register: over an `INIT .` it names the root's path where jq's does, so the restatement
         // misplaces it (190 of 60,000 rows of an EXTRACT-builtin grid). One that #4957/#5018 already stated for
