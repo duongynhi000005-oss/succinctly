@@ -38042,10 +38042,54 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
             if let ([only], Expr::Literal(_)) = (tail, unwrap_paren(head)) {
                 return bare_bind_foreach_update_key_within(only, budget);
             }
+            // #5107: field navigations ahead of the `foreach` move the register to that child, where the bind
+            // steps from ([`update_nav_head`] says which); the restatement starts there.
+            if let Some((last, nav)) = stages.split_last() {
+                if !nav.is_empty() && nav.iter().all(|stage| nav_head_fields(stage).is_some()) {
+                    return bare_bind_foreach_update_key_within(last, budget);
+                }
+            }
             tail.iter()
                 .all(cannot_move_register)
                 .then(|| bare_bind_foreach_update_key_within(head, budget))
                 .flatten()
+        }
+        _ => None,
+    }
+}
+
+/// The field names of a pure navigation `.a`, `.a.b` (#5107): the children a pipe headed by it moves jq's register to.
+fn nav_head_fields(head: &Expr) -> Option<Vec<&str>> {
+    match unwrap_paren(head) {
+        Expr::Field(name) => Some(vec![name.as_str()]),
+        Expr::Pipe(stages) => {
+            let mut fields = Vec::new();
+            for stage in stages {
+                fields.extend(nav_head_fields(stage)?);
+            }
+            (!fields.is_empty()).then_some(fields)
+        }
+        _ => None,
+    }
+}
+
+/// The field navigation a fold's UPDATE moves the register through before its bare `foreach` (#5107): the stages
+/// ahead of the `foreach` of a pipe that [`bare_bind_foreach_update_key`] reads through, behind any `try`/`?` or
+/// comma item. `None` when the UPDATE has no such pipe; empty is never returned.
+fn update_nav_head(update: &Expr) -> Option<Vec<&str>> {
+    match unwrap_paren(without_empty_siblings(update)) {
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => update_nav_head(expr),
+        Expr::Comma(items) => items.iter().find_map(update_nav_head),
+        Expr::Pipe(stages) => {
+            let (last, nav) = stages.split_last()?;
+            if nav.is_empty() {
+                return None;
+            }
+            let mut fields = Vec::new();
+            for stage in nav {
+                fields.extend(nav_head_fields(stage)?);
+            }
+            matches!(unwrap_paren(last), Expr::Foreach { .. }).then_some(fields)
         }
         _ => None,
     }
@@ -64692,12 +64736,31 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // bind raises, and the stage-less reading's verdict for that is the source's own.
     // Nor where the source moves the register: the stage-less reading's per-step standing is the accumulator's, which a
     // literal stage replaces.
-    let literal_head_markers_are_the_register = !update_pipe_has_literal_head(update)
+    // #5107: ...and behind field navigations, a marker must equal the child they reach (`.b as $x | ... .b | FE`), which
+    // has to exist.
+    let nav_head = update_nav_head(update);
+    let head_target = nav_head.as_ref().map(|fields| {
+        fields
+            .iter()
+            .try_fold(value.clone(), |current, field| match current {
+                OwnedValue::Object(obj) => obj.get(*field).cloned(),
+                _ => None,
+            })
+    });
+    let literal_head_markers_are_the_register = (!update_pipe_has_literal_head(update)
+        && head_target.is_none())
         || (cannot_move_register(input)
-            && !any_subexpr(
-                update,
-                &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
-            ));
+            && match &head_target {
+                Some(Some(target)) => !any_subexpr(
+                    update,
+                    &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *target),
+                ),
+                Some(None) => false,
+                None => !any_subexpr(
+                    update,
+                    &mut |e| matches!(e, Expr::TrackedVar(marker) if marker.value != *value),
+                ),
+            });
     let inner_bind_key = bare_bind_foreach_update_on_register
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
@@ -65264,13 +65327,32 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     .as_ref()
                                     .filter(|_| in_bind_item.get())
                                     .and_then(|key| {
-                                        let component =
-                                            key.component::<S>(&active_reg.value).ok()?;
-                                        let child = key.child::<S>(&active_reg.value).ok()?;
-                                        Some((
-                                            PathPrefix::extend(&active_reg.path, component),
-                                            child,
-                                        ))
+                                        // #5107: the bind steps from the child the field navigations ahead of
+                                        // the `foreach` reached, not from the step's register.
+                                        let (base_path, base_value) = match &nav_head {
+                                            None => (None, None),
+                                            Some(fields) => {
+                                                let mut path = Rc::clone(&active_reg.path);
+                                                let mut current = active_reg.value.clone();
+                                                for field in fields {
+                                                    path = PathPrefix::extend(
+                                                        &path,
+                                                        Expr::Field((*field).to_string()),
+                                                    );
+                                                    current = PatternKey::Field(field)
+                                                        .child::<S>(&current)
+                                                        .ok()?;
+                                                }
+                                                (Some(path), Some(current))
+                                            }
+                                        };
+                                        let register_value =
+                                            base_value.as_ref().unwrap_or(&active_reg.value);
+                                        let register_path =
+                                            base_path.as_ref().unwrap_or(&active_reg.path);
+                                        let component = key.component::<S>(register_value).ok()?;
+                                        let child = key.child::<S>(register_value).ok()?;
+                                        Some((PathPrefix::extend(register_path, component), child))
                                     }) {
                                     Some((path, child)) => {
                                         bind_moved = true;
