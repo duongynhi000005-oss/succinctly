@@ -41830,8 +41830,9 @@ enum FoldBody {
     /// after the `reduce` meets a `null` the resolver cannot tell from the register's (51 of 12,000 grid rows that
     /// matched jq turned into refusals).
     ReduceUpdateOtherInit,
-    /// A `foreach` EXTRACT: only the arms read before #5034 (16 of 12,000 grid rows that matched jq turned into
-    /// refusals when the `else` beyond `.` was read).
+    /// A `foreach` EXTRACT over a source with `.` among its elements: only the arms read before #5034 (16 of 12,000 grid
+    /// rows that matched jq turned into refusals when the `else` beyond `.` was read). A source that hands the
+    /// register off is [`FoldBody::ForeachExtractOffRegister`].
     ForeachExtract,
     /// A `foreach` EXTRACT of a fold whose source never hands the register on (`(.a,.b)`, `.[]`, [`source_hands_register_off`],
     /// #5044): its `$x` is a node the register is not on at any step, so the destructure always raises and the `foreach`
@@ -50597,6 +50598,7 @@ fn walk_falsy_else_chain<'e, S: EvalSemantics>(item: &'e Expr, state: &OwnedValu
 fn taken_then_branch<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
+    body: FoldBody,
 ) -> Option<&'e Expr> {
     let (item, _) = taken_if_item(update)?;
     let head = walk_falsy_else_chain::<S>(item, state);
@@ -50604,8 +50606,7 @@ fn taken_then_branch<'e, S: EvalSemantics>(
         Expr::If {
             cond, then_branch, ..
         } if cond_truthiness::<S>(cond, state) == Some(true)
-            && (core::ptr::eq(head, item)
-                || emptied_update_read(update, FoldBody::ForeachUpdate).is_some()) =>
+            && (core::ptr::eq(head, item) || emptied_update_read(update, body).is_some()) =>
         {
             Some(then_branch)
         }
@@ -50624,7 +50625,11 @@ fn taken_then_branch<'e, S: EvalSemantics>(
 /// The exception is a truthy state whose `then` cannot move the register ([`cannot_move_register`]): the `else` that
 /// navigates (`if .a then 7 else .a end`) did not run, so the step is that `then`, wrapped or not (#5082). A `then`
 /// that may navigate (`[.b]`) keeps the whole-`if` reading.
-fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
+fn taken_if_branch<'e, S: EvalSemantics>(
+    update: &'e Expr,
+    state: &OwnedValue,
+    body: FoldBody,
+) -> &'e Expr {
     let Some((item, wrapped)) = taken_if_item(update) else {
         return update;
     };
@@ -50633,7 +50638,7 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
     // whose truthy condition ran a `then` that moves no register (`if .a then 7 else .a end`): the `else` that
     // navigates did not run, so the step is that `then` (#5082).
     if core::ptr::eq(current, item) {
-        if let Some(then) = taken_then_branch::<S>(update, state) {
+        if let Some(then) = taken_then_branch::<S>(update, state, body) {
             if cannot_move_register(then) {
                 return then;
             }
@@ -64023,6 +64028,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     keep: Keep,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
+    // #5044: the fold bodies UPDATE and EXTRACT are read as, decided once by the source.
+    let (update_body, extract_body) = (FoldBody::update(input), FoldBody::extract(input));
     // #4041: read UPDATE with a neutral tail pushed into the siblings of a comma it follows.
     let distributed = (S::TAG == EvalTag::Jq)
         .then(|| distribute_neutral_tail(update))
@@ -64837,7 +64844,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 .then(fold_body::acc_off_register);
                                 // #4776: and an EXTRACT that is such a `foreach` emits nothing for the step.
                                 let _sole_extract_foreach =
-                                    sole_update_mark::<S>(ext_expr, FoldBody::extract(input));
+                                    sole_update_mark::<S>(ext_expr, extract_body);
                                 let _foreach_body = fold_body::foreach_body();
                                 // #4779: ...and the `foreach`es EXTRACT is made of read the register
                                 // this step left, as an UPDATE of that shape reads its fold's.
@@ -64961,7 +64968,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let then_branch_on_register = bare_bind_foreach_update_per_step
                             && active_at_register
                             && !live_stepped
-                            && taken_then_branch::<S>(&bound_update, &entry_state)
+                            && taken_then_branch::<S>(&bound_update, &entry_state, update_body)
                                 .is_some_and(|then| update_wraps_bare_bind_foreach(then, extract));
                         // #4694: a `foreach` that carries `.` through (its source cannot move the register
                         // and its INIT is `.`) runs its UPDATE on the state its enclosing body handed it,
@@ -64987,7 +64994,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         for (index, item) in comma_items.iter().enumerate() {
                             in_bind_item.set(bind_item.map_or(true, |at| at == index));
                             update_taken.set(if S::TAG == EvalTag::Jq {
-                                taken_if_branch::<S>(item, &entry_state)
+                                taken_if_branch::<S>(item, &entry_state, update_body)
                             } else {
                                 item
                             });
@@ -65035,8 +65042,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     .then(fold_body::acc_off_register);
                             // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                             // emits, so an inner source that is empty leaves this one emitting nothing.
-                            let _sole_update_foreach =
-                                sole_update_mark::<S>(item, FoldBody::update(input));
+                            let _sole_update_foreach = sole_update_mark::<S>(item, update_body);
                             // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
                             // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                             // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
@@ -155746,5 +155752,59 @@ mod node_below_tests_4252 {
         assert_eq!(none(&[index(0)]), None);
         assert_eq!(none(&[field("a"), field("b")]), None);
         assert_eq!(none(&[field("a"), Expr::Identity]), None);
+    }
+}
+
+#[cfg(test)]
+mod source_hands_register_off_tests_5044 {
+    use super::*;
+
+    fn off(source: &str) -> bool {
+        source_hands_register_off(&crate::jq::parse(source).unwrap())
+    }
+
+    /// #5044: a source of fields and iterations, behind parentheses or a `?`, never hands the register on.
+    #[test]
+    fn fields_and_iterations_hand_the_register_off() {
+        for source in [
+            ".a",
+            ".[]",
+            ".[]?",
+            "(.a,.b)",
+            "(.a,.a)",
+            "((.a))",
+            "((.a),(.b))",
+            "(.a,.b)?",
+            "(.a?,.[]?)",
+            "(.a, (.b, .[]))",
+        ] {
+            assert!(off(source), "{source}");
+        }
+    }
+
+    /// ...and anything that can emit the register, or a computed value, does.
+    #[test]
+    fn a_source_that_can_emit_the_register_or_a_computed_value_hands_it_on() {
+        for source in [
+            ".",
+            "(.a,.)",
+            "(.,.a)",
+            "(.a,1)",
+            "(.a,null)",
+            "..",
+            ".a.b",
+            ".a | .b",
+            ".a // .",
+            "empty",
+            "$x",
+            "(.a, (.b, .))",
+            "(.a,.)?",
+            "first(.a)",
+            "(.a | tostring)",
+            "1",
+            "[.a]",
+        ] {
+            assert!(!off(source), "{source}");
+        }
     }
 }
