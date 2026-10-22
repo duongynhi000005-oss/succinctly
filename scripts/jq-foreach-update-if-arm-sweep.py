@@ -6,16 +6,18 @@ are resolved when one arm is a literal and the other a `foreach` whose source de
 `$x` under `try`. Each justified the change with a grid against `/usr/bin/jq` that was never committed;
 this is that grid. `jq-fold-body-register-grid-sweep.py` has no `if` UPDATE, so it cannot gate this one.
 
-Grid: UPDATE (`if C then A else B end`, `C` in `.a`, `.`, `.b`, a literal in one arm and the fold FE in
-the other, both orders, plus `elif` chains) x FE (a `try`-caught `$x` destructure, a `?//` chain) x
-wrapper (none, `try .. catch`, comma siblings, `?`, `| .`, `label`) x loop source x EXTRACT x INIT x
-write context x document. The full product is large: `--n` samples it deterministically (`--seed`).
+Grid: UPDATE (`if C then A else B end`, `C` in `.a`, `.`, `.b`, a literal in one arm (`1`, `null`, `true`,
+`false`) and the fold FE in the other, both orders, plus `elif` chains) x FE (a `try`-caught `$x` destructure, a
+`?//` chain) x wrapper (none, `try .. catch`, comma siblings, `?`, `| .`, `label`) x loop source x EXTRACT x INIT (one,
+two and three values, and one whose count is unbounded) x the loop's pattern (`$i`, `?//` chains) x write context x
+document. The full product is large (about 3 million rows): `--n` samples it deterministically (`--seed`).
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-fold-body-register-grid-sweep.py`
 does: MATCH, ACCEPT_WRONG (jq refused, the build answered: the dangerous one, `del`/`|=` write through
 it), REFUSE_WRONG (the safe direction) and DIFF. Exit status 1 when, against `--base`, a row matched
 jq on the base and no longer does (a lost match: a refuse-only fallback has leaked under `try` before,
-#3186/#3267) or the candidate is ACCEPT_WRONG where the base was not, or on a candidate timeout.
+#3186/#3267), the candidate is ACCEPT_WRONG where the base was not, or a row the base refused (REFUSE_WRONG) now
+answers wrongly (DIFF: under a `?` a refusal can become a truncated answer, #5113, #5132), or on a candidate timeout.
 `--fixed` rows (wrong on the base, MATCH on the candidate) are counted and listed, so a change can
 show what it moved. Run it against a build from before the change as `--base`.
 
@@ -45,6 +47,13 @@ FOLDS = [
 ARMS = [
     ("lit-then", "1", "{F}"),
     ("lit-else", "{F}", "1"),
+    # #5132: `null` and the booleans are `jv_identical` to any equal value by kind, so a stored one is the register
+    # wherever it came from; a `1` cannot show the truncation that reading such a literal on a non-last step caused
+    # (#5113).
+    ("null-then", "null", "{F}"),
+    ("false-then", "false", "{F}"),
+    ("true-then", "true", "{F}"),
+    ("null-else", "{F}", "null"),
 ]
 CONDS = [("ca", ".a"), ("cdot", "."), ("cb", ".b")]
 # `elif` chains: the fold behind the second condition, or the last arm.
@@ -68,7 +77,10 @@ WRAPPERS = [
 ]
 SOURCES = [".a", "(.a,.)", "(.,.a)", ".", "(.a,.a)", "(.a,.b)"]
 EXTRACTS = [".a", "$i", "."]
-INITS = [("init1", "."), ("initN", "(., .a)")]
+INITS = [("init1", "."), ("initN", "(., .a)"), ("init3", "(., null, .a)"), ("initU", "(.,.) | .")]
+# #5132: the loop's own pattern, a `?//` chain included: a retry runs UPDATE again on the state a step stored, and a
+# change that reads an earlier INIT fork's step wrote through one where jq raises (#5113 review).
+PATS = [("p", "$i"), ("alt-obj", "{a:$i} ?// $i"), ("alt-arr", "[$i] ?// $i")]
 CONTEXTS = [
     ("paths", "[path(. as $x | {O})?]"),
     ("path", "path(. as $x | {O})"),
@@ -95,12 +107,12 @@ def build_rows(control):
     if not control:
         updates.extend(ELIFS)
     rows = []
-    for (un, u), (fn, f), (wn, w), src, ex, (inn, init), (cn, c), doc in itertools.product(
-        updates, FOLDS, WRAPPERS, SOURCES, EXTRACTS, INITS, CONTEXTS, DOCS
+    for (un, u), (fn, f), (wn, w), src, ex, (inn, init), (cn, c), doc, (pn, pat) in itertools.product(
+        updates, FOLDS, WRAPPERS, SOURCES, EXTRACTS, INITS, CONTEXTS, DOCS, PATS
     ):
         update = w.replace("{U}", u.replace("{F}", f))
-        outer = f"foreach {src} as $i ({init}; {update}; {ex})"
-        name = f"{un}/{fn}/{wn}/{src}/{ex}/{inn}/{cn}"
+        outer = f"foreach {src} as {pat} ({init}; {update}; {ex})"
+        name = f"{un}/{fn}/{wn}/{src}/{ex}/{inn}/{cn}/{pn}"
         rows.append((name, c.replace("{O}", outer), doc))
     return rows
 
@@ -129,7 +141,10 @@ def classify(oracle, got):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bin", required=True, help="succinctly build under test")
-    ap.add_argument("--base", help="reference succinctly build; a lost match or new ACCEPT_WRONG against it fails")
+    ap.add_argument(
+        "--base",
+        help="reference succinctly build; a lost match, a new ACCEPT_WRONG or a refusal now answered wrongly fails",
+    )
     ap.add_argument("--jq", default="/usr/bin/jq", help="the pinned oracle (jq 1.7.1)")
     ap.add_argument("--n", type=int, default=12000, help="rows to sample (0 = the whole grid)")
     ap.add_argument("--seed", type=int, default=0, help="sampling seed: the same seed and --n pick the same rows")
@@ -196,10 +211,16 @@ def main():
     elif args.base:
         lost = [r for r in out if r["bcls"] == "MATCH" and r["cls"] != "MATCH"]
         newly = [r for r in out if r["cls"] == "ACCEPT_WRONG" and r["bcls"] != "ACCEPT_WRONG"]
+        # #5132: a refusal the base made that is now another answer (under `?` a truncated one): neither a lost match
+        # nor an ACCEPT_WRONG, and the hazard #5113 named.
+        silenced = [r for r in out if r["bcls"] == "REFUSE_WRONG" and r["cls"] == "DIFF"]
         fixed = [r for r in out if r["bcls"] not in (None, "MATCH") and r["cls"] == "MATCH"]
-        print(f"fixed against --base: {len(fixed)}; lost matches: {len(lost)}; new ACCEPT_WRONG: {len(newly)}")
-        sections += [("LOST MATCH", lost), ("NEW ACCEPT_WRONG", newly)]
-        failed = failed or bool(lost or newly)
+        print(
+            f"fixed against --base: {len(fixed)}; lost matches: {len(lost)}; new ACCEPT_WRONG: {len(newly)}; "
+            f"refusals now answered wrongly: {len(silenced)}"
+        )
+        sections += [("LOST MATCH", lost), ("NEW ACCEPT_WRONG", newly), ("REFUSAL NOW WRONG", silenced)]
+        failed = failed or bool(lost or newly or silenced)
     else:
         print(f"ACCEPT_WRONG: {sum(r['cls'] == 'ACCEPT_WRONG' for r in out)} (pass --base to judge a change)")
         sections.append(("ACCEPT_WRONG", [r for r in out if r["cls"] == "ACCEPT_WRONG"]))
