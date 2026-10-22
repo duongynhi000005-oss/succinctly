@@ -41810,7 +41810,8 @@ struct EmptiedUpdate<'a> {
     /// Whether the `foreach` is what the `else` of an `if` is (`if C then B else FE end`, #5044), read only in a `reduce`
     /// UPDATE ([`emptied_update_read`]): in a `foreach` UPDATE the step after an emptied one cannot be placed at the
     /// register the bind moved (7 of 12,000 grid rows that matched jq turned into refusals), and in an EXTRACT the
-    /// reading is not measured.
+    /// reading is not measured. The exception is an `elif` chain whose inner `if` is on `.` (`if .b then 7 elif . then
+    /// FE else .a end`, #4800): `truthy` is set only there, and a `foreach` UPDATE reads it ([`emptied_update_read`]).
     mirrored: bool,
 }
 
@@ -41819,7 +41820,8 @@ struct EmptiedUpdate<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FoldBody {
     /// A `foreach` UPDATE: the comma branch beyond a bare `if .` and the `else` beyond `.` are read; the mirrored
-    /// `foreach` in the `else` is not (7 of 12,000 grid rows that matched jq turned into refusals).
+    /// `foreach` in the `else` is not (7 of 12,000 grid rows that matched jq turned into refusals), unless it is an
+    /// `elif` chain whose inner `if` is on `.` (`truthy`, #4800).
     ForeachUpdate,
     /// A `reduce` UPDATE with INIT `.`: the `else` beyond `.` and the mirrored `foreach` in the `else` are read.
     ReduceUpdate,
@@ -41855,14 +41857,17 @@ impl FoldBody {
 /// [`emptied_update`], for a fold body: a comma branch read beyond the bare `if .`
 /// ([`EmptiedUpdate::beyond_bare_if`]) only in a `foreach` UPDATE whose `if` [`taken_if_branch`] finds (#4800), an
 /// `else` beyond `.` ([`EmptiedUpdate::else_beyond_dot`]) in a `foreach` or `reduce` UPDATE (#5034, #5044), and the
-/// `foreach` in the `else` ([`EmptiedUpdate::mirrored`]) in a `reduce` UPDATE (#5044).
+/// `foreach` in the `else` ([`EmptiedUpdate::mirrored`]) in a `reduce` UPDATE (#5044), and in a `foreach` UPDATE when
+/// that `foreach` is behind an `elif` on `.` ([`EmptiedUpdate::truthy`], #4800).
 fn emptied_update_read(expr: &Expr, body: FoldBody) -> Option<EmptiedUpdate<'_>> {
     emptied_update(expr).filter(|emptied| {
         (!emptied.beyond_bare_if
             || body == FoldBody::ForeachUpdate && taken_if_item(expr).is_some())
             && (!emptied.else_beyond_dot
                 || matches!(body, FoldBody::ForeachUpdate | FoldBody::ReduceUpdate))
-            && (!emptied.mirrored || body == FoldBody::ReduceUpdate)
+            && (!emptied.mirrored
+                || body == FoldBody::ReduceUpdate
+                || body == FoldBody::ForeachUpdate && emptied.truthy)
     })
 }
 
@@ -42138,7 +42143,7 @@ fn is_value_head(e: &Expr) -> bool {
 /// (`if . then FE else .a end`, #5034): the `else` runs only on a step that never drives the `foreach`'s source,
 /// which [`EmptiedUpdate::else_beyond_dot`] records for [`emptied_update_read`] to withhold from a `foreach`
 /// EXTRACT. The mirrored `if C then B else FE end` is read the same way, in a `reduce` UPDATE only
-/// ([`EmptiedUpdate::mirrored`], #5044).
+/// ([`EmptiedUpdate::mirrored`], #5044), and in a `foreach` UPDATE where an `elif` on `.` holds the `foreach` (#4800).
 fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
     match unwrap_paren(without_empty_siblings(expr)) {
         Expr::Foreach { input, .. } => Some(EmptiedUpdate {
@@ -50503,18 +50508,50 @@ fn cond_truthiness<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> Option<
     }
 }
 
+/// The first `if` of the chain `item` heads that the state does not send down its `else`, and the `if` the walk
+/// started from (#4800). A condition that is `.` or a pure function of it ([`cond_truthiness`]) and emits one falsy
+/// value takes the `else`; anything else (truthy, raising, emitting twice, not pure) stops the walk. The result is the
+/// `if` the state reached, or the `else` expression that is not an `if` (the arm a falsy chain ran). Shared by
+/// [`taken_if_branch`] and [`taken_then_branch`] so the two read a chain alike.
+fn walk_falsy_else_chain<'e, S: EvalSemantics>(item: &'e Expr, state: &OwnedValue) -> &'e Expr {
+    let mut current = item;
+    while let Expr::If {
+        cond, else_branch, ..
+    } = unwrap_paren(current)
+    {
+        if cond_truthiness::<S>(cond, state) != Some(false) {
+            break;
+        }
+        current = else_branch;
+    }
+    current
+}
+
 /// The `then` branch a step with state `state` ran, for an `if` UPDATE ([`taken_if_item`]) whose condition is truthy
 /// on it: the `else` branch did not run, so what it holds (`else .a`) moved no register on this step (#4800). The
-/// twin of [`taken_if_branch`]'s `else` reading, for the marks that read the UPDATE as a whole.
+/// twin of [`taken_if_branch`]'s `else` reading, for the marks that read the UPDATE as a whole. An `elif` chain is
+/// walked as [`taken_if_branch`] walks it ([`walk_falsy_else_chain`]): the first `if` whose condition is not falsy
+/// names its `then` when it is truthy. A final `else` that ran, or a condition that is not a single pure value, is
+/// `None`. A `then` found past a falsy condition is read only where [`emptied_update_read`] reads the chain, which is
+/// what states the `foreach` empty on the earlier step that runs it with `$x` off the register: unread
+/// (`if .b then 7 elif .a then FE else .a end`, or a fold in two arms), that step emits, and the mark would let the
+/// next one through (a wrong accept in 4 rows of two 12,000-row grid runs). Those chains keep the whole-`if`
+/// refusal on the steps that run the later arm.
 fn taken_then_branch<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
 ) -> Option<&'e Expr> {
     let (item, _) = taken_if_item(update)?;
-    match unwrap_paren(item) {
+    let head = walk_falsy_else_chain::<S>(item, state);
+    match unwrap_paren(head) {
         Expr::If {
             cond, then_branch, ..
-        } if cond_truthiness::<S>(cond, state) == Some(true) => Some(then_branch),
+        } if cond_truthiness::<S>(cond, state) == Some(true)
+            && (core::ptr::eq(head, item)
+                || emptied_update_read(update, FoldBody::ForeachUpdate).is_some()) =>
+        {
+            Some(then_branch)
+        }
         _ => None,
     }
 }
@@ -50527,22 +50564,10 @@ fn taken_then_branch<'e, S: EvalSemantics>(
 /// register either, and only one that emits a single falsy value takes the `else` branch (one that raises keeps
 /// the whole `if`). The `if` is found where [`taken_if_item`] finds it.
 fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -> &'e Expr {
-    fn falsy_on<S: EvalSemantics>(cond: &Expr, state: &OwnedValue) -> bool {
-        cond_truthiness::<S>(cond, state) == Some(false)
-    }
     let Some((item, wrapped)) = taken_if_item(update) else {
         return update;
     };
-    let mut current = item;
-    while let Expr::If {
-        cond, else_branch, ..
-    } = unwrap_paren(current)
-    {
-        if !falsy_on::<S>(cond, state) {
-            break;
-        }
-        current = else_branch;
-    }
+    let current = walk_falsy_else_chain::<S>(item, state);
     // A step that took no `else` branch keeps the whole UPDATE, wrapper and stages included.
     if wrapped && core::ptr::eq(current, item) {
         update

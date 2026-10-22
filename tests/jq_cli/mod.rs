@@ -32,6 +32,7 @@ mod i4800_foreach_if_comma_branch;
 mod i4800_foreach_if_label_empty_siblings;
 mod i4800_foreach_label_empty_siblings;
 mod i4800_foreach_update_dead_select_stage;
+mod i4800_foreach_update_if_elif_chain;
 mod i4800_foreach_update_if_navigating_else;
 mod i4800_foreach_update_if_pure_condition_and_wrapped;
 mod i4800_nth_dropped_binds;
