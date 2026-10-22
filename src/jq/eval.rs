@@ -38572,8 +38572,8 @@ fn reads_foreign_marker_outside_a_fold(update: &Expr) -> bool {
     marker && !fold
 }
 
-/// Whether every bind of a `reduce` UPDATE is in tail position, so the `.` a bind's body ends on is
-/// the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
+/// Whether every bind of a `reduce` UPDATE (or, #5111, of a three-argument `foreach` UPDATE) is in tail
+/// position, so the `.` a bind's body ends on is the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
 /// the final emission is judged on the accumulator's provenance. The spine is paren, pipe (any
 /// stage but the last holds no bind) and the body of a bind with literal keys or a plain `$name` (one
 /// pattern, or since #4964 a `?//` chain of them), all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
@@ -53109,8 +53109,9 @@ impl FoldRegister {
             // register still resolves register-less here.
             // #4499, #4779: `fans_out` skips a marker-mentioning fold only when it is marked as
             // reading the register ([`is_register_fold`]).
-            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE that marked it
-            // ([`fold_body::state_handed_on_here`]), which is one sequence of path-checked steps.
+            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE (#5111: or three-argument `foreach`
+            // UPDATE) that marked it ([`fold_body::state_handed_on_here`]), which is one sequence of
+            // path-checked steps.
             // #5120: ...and a `foreach` body that is such a chain: its accumulator is no node of the register (a
             // computed INIT), but the bind's `$x` may be, and read against none its step was taken to raise and the
             // body emitted nothing (a silent no-op where jq refuses or writes).
@@ -75157,6 +75158,9 @@ mod fold_body {
     /// unchanged: jq backtracks the UPDATE, so no step checks it and the final emission is judged on
     /// the accumulator's provenance, whatever the destructures moved the register to. Unlike
     /// [`acc_is_register`] it does not say `.` is the register, which a moving source made untrue.
+    /// #5111: also set for the UPDATE of a three-argument `foreach` whose binds all sit in tail position
+    /// ([`update_binds_only_in_tail`]) -- jq stores that UPDATE's output as the next state unchecked too, and
+    /// EXTRACT judges the emission; not the `foreign_bind_chain_returning_dot` arm, which only `reduce` reads.
     pub(crate) fn state_handed_on() -> HandedGuard {
         let previous = HANDED_DEPTH.with(Cell::get);
         HANDED_DEPTH.with(|a| a.set(depth() + 1));

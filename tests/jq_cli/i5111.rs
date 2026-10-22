@@ -12,7 +12,7 @@ use crate::assert_path_rows_both_routes_3749;
 // refusal, as does an EXTRACT that is the checked `.`.
 
 /// #5111: the issue's row in `path`, `del`, `|=` and `[path(..)?]`, the controls that keep refusing as jq does (EXTRACT `.`,
-/// no EXTRACT, a register that is not `null`), and rows of a differential grid (document x bind site x head stage x bind x
+/// no EXTRACT, an EXTRACT that is the checked `.` through `(..)`, `.|.`, `first(.)`, `select(true)` or `label`, a register that is not `null`), and rows of a differential grid (document x bind site x head stage x bind x
 /// source x INIT x EXTRACT x context) that `main` refused or answered wrongly. Every row captured from `/usr/bin/jq` 1.7.1
 /// (stdout, exit code, message), both routes.
 #[test]
@@ -389,6 +389,48 @@ fn test_5111_body_dot_hand_on_of_a_marker_bind_in_a_three_argument_foreach_updat
             "{\"a\":{\"a\":9}}\n",
             "",
             0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); (.)))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); .|.))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); first(.)))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); select(true)))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); (.|.)))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); label $l | .))",
+            "",
+            "Invalid path expression with result 1",
+            5,
         ),
     ])
 }
