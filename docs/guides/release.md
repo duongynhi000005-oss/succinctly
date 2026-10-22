@@ -170,6 +170,18 @@ The release workflow produces:
 
 All Unix binaries are stripped for smaller size.
 
+The Linux x64 and Windows x64 archives are built with `RUSTFLAGS="-C target-feature=+popcnt"` (the `rustflags`
+field of their `build-release` matrix entries, #5035), so every per-word `count_ones()` is a `POPCNT` instruction
+instead of a 19-instruction broadword sequence. They need an x86-64 CPU with `POPCNT` (Intel Nehalem / AMD K10,
+2008, or newer), which Windows 11 24H2 requires of its own machines. `main` checks for the instruction first and,
+without it, prints a message naming the requirement and `cargo install succinctly --features cli` (a baseline
+build) instead of dying on `Illegal instruction`. State the CPU floor in the release notes of the first release
+that ships this. `cargo install` and the library keep the baseline target.
+
+A change to those flags is measured the way #5035 was: the same tree built with and without them, and
+`scripts/ab-cli.py` (`--control` first) over `yaml generate-suite` / `json generate-suite` inputs of 1 MB and 10 MB
+([simd.md](../optimizations/simd.md#per-word-popcounts-on-baseline-x86_64-5035)).
+
 ## Troubleshooting
 
 ### Release workflow failed

@@ -45,6 +45,15 @@ Or with cargo:
 cargo add succinctly
 ```
 
+### CLI release binaries
+
+The `succinctly-linux-x64` and `succinctly-windows-x64` archives are built with the x86-64 `POPCNT` instruction
+(Intel Nehalem / AMD K10, 2008, or newer): the rank/select hot paths are 30-70% faster in micro-benchmarks, and
+queries are typically 2-3% faster end to end, up to 20% on structure-heavy YAML, on a Ryzen 9 7950X (see
+[docs/optimizations/simd.md](docs/optimizations/simd.md)). On an older CPU
+the binary stops at startup with a message naming the requirement; `cargo install succinctly --features cli` builds
+for the baseline target and runs everywhere. The Linux and macOS ARM64 archives are unaffected.
+
 ## Quick Start
 
 ### Bitvector with Rank/Select
