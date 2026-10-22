@@ -50588,17 +50588,24 @@ fn taken_if_branch<'e, S: EvalSemantics>(update: &'e Expr, state: &OwnedValue) -
     current
 }
 
-/// What a `foreach` step resolves as its UPDATE item, given the arm `taken` that [`taken_if_branch`] named for it
-/// (#4800): the arm alone when the item is a bare `if`, the item itself otherwise. jq runs only the arm the state
-/// took, and resolving the whole `if` lets `cannot_move_register` read a nested `foreach` in the arm that did not run,
-/// which withholds the tracking of the `null` a literal arm stores (`if .a then FE else null end`, the `else` arm
-/// with a `.a` EXTRACT). A wrapped `if` (behind a `try`, a pipe, a comma or a `label`) stays whole: dropping the
-/// wrapper would drop what a handler catches or a scope breaks out of. `taken` is the item itself in yq mode.
+/// What a `foreach` step resolves as its UPDATE item, given what [`taken_if_branch`] named for it (`taken`, #4800).
+/// jq runs only the arm the state took, and resolving the whole `if` lets `cannot_move_register` read a nested
+/// `foreach` in the arm that did not run, which withholds the tracking of the `null` a literal arm stores
+/// (`if .a then FE else null end`, the `else` arm with a `.a` EXTRACT). So the `if` is resolved as `taken` when
+/// [`taken_if_item`] reads it as the whole item: bare, in a comma whose other items emit nothing, or alone in a
+/// `label` scope that does not `break` out of it (neither changes what the `if` emits). Behind a `try`/`?` or a pipe
+/// of `.`/`select(true)` stages the item is resolved as the arm only when the state took an `else` arm and that arm
+/// is a literal: it cannot raise, so the handler it would have dropped catches nothing. Anything else is the item
+/// itself.
 fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
-    if matches!(unwrap_paren(item), Expr::If { .. }) {
-        taken
-    } else {
-        item
+    match taken_if_item(item) {
+        Some((_, false)) => taken,
+        Some((_, true))
+            if !core::ptr::eq(taken, item) && matches!(unwrap_paren(taken), Expr::Literal(_)) =>
+        {
+            taken
+        }
+        _ => item,
     }
 }
 
