@@ -8990,7 +8990,9 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                                     let end = if is_truly_doc_root {
                                         self.parse_unquoted_value_doc_root(indent)
                                     } else {
-                                        self.parse_unquoted_value_with_indent(indent)
+                                        self.parse_unquoted_value_with_indent(
+                                            self.innermost_block_indent(),
+                                        )
                                     };
                                     self.reject_content_after_inline_value()?;
                                     end
@@ -9110,7 +9112,7 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
                             let end = if is_truly_doc_root {
                                 self.parse_unquoted_value_doc_root(indent)
                             } else {
-                                self.parse_unquoted_value_with_indent(indent)
+                                self.parse_unquoted_value_with_indent(self.innermost_block_indent())
                             };
                             self.check_json_strict_scalar(start, end)?;
                             self.reject_content_after_inline_value()?;
