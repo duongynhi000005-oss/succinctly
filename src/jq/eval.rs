@@ -40651,7 +40651,7 @@ fn same_frame_position(invocation: u64, lhs: &Rc<PathPrefix>, rhs: &Rc<PathPrefi
 }
 
 /// Whether `lhs` and `rhs`, two absolute positions in `invocation`, provably name different nodes
-/// (#5095) -- the proof `!`[`same_frame_position`] is not: that answers `false` for every pair it cannot
+/// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
 /// show to be one node, a full slice and its container among them (`.a[0:]` of a non-empty array *is*
 /// `.a` in jq), and paths of different depth. Only object keys and array indexes are read; any other
 /// step (a slice, a subarray search) answers `false`. The chains part where a step names a different
