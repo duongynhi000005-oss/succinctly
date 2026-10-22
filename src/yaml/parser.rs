@@ -7483,6 +7483,22 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
         })
     }
 
+    /// Whether the first non-blank line below a block scalar's header holds content indented less than
+    /// `content_indent`, so the scalar has no content of its own (#5067). End of input is not such a line.
+    fn first_block_content_line_is_dedented(&mut self, content_indent: usize) -> bool {
+        let saved_pos = self.pos;
+        let dedented = loop {
+            let indent = self.skip_spaces_simd();
+            match self.peek() {
+                None => break false,
+                Some(b'\n' | b'\r') => self.skip_line_break(),
+                Some(_) => break indent < content_indent,
+            }
+        };
+        self.pos = saved_pos;
+        dedented
+    }
+
     /// Detect content indentation from the first non-empty line.
     /// Returns the indentation level, or None if block is empty.
     fn detect_block_content_indent(&mut self, base_indent: usize) -> Option<usize> {
@@ -7613,7 +7629,16 @@ impl<'a, const HAS_CR: bool> Parser<'a, HAS_CR> {
 
         // Determine content indentation
         let content_indent = if header.explicit_indent > 0 {
-            base_indent + header.explicit_indent as usize
+            let content_indent = base_indent + header.explicit_indent as usize;
+            if self.first_block_content_line_is_dedented(content_indent) {
+                // An explicit indent with nothing indented that far below the header is an empty
+                // scalar, as with an auto-detected one: `|2` / `---` is not a scalar that swallows
+                // the marker (#5067). `find_block_scalar_end` never looks at the first line.
+                self.set_bp_text_end_position(self.pos);
+                self.write_bp_close();
+                return Ok(());
+            }
+            content_indent
         } else {
             // Auto-detect from first content line
             match self.detect_block_content_indent(base_indent) {
