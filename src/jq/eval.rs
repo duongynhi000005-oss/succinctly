@@ -38559,8 +38559,21 @@ fn emits_only_the_accumulator(e: &Expr) -> bool {
     }
 }
 
-/// Whether every bind of a `reduce` UPDATE is in tail position, so the `.` a bind's body ends on is
-/// the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
+/// Whether a fold's UPDATE reads a `$x` bound outside the fold ([`Expr::TrackedVar`]) with no fold of its own in the
+/// way (#4832). A nested fold's markers are certified by the source/body machinery against the persistent register
+/// (`foreign_register_markers_with`), which a per-step one would move out from under. Syntactic.
+fn reads_foreign_marker_outside_a_fold(update: &Expr) -> bool {
+    let (mut marker, mut fold) = (false, false);
+    any_subexpr(update, &mut |e| {
+        marker |= matches!(e, Expr::TrackedVar(_));
+        fold |= matches!(e, Expr::Reduce { .. } | Expr::Foreach { .. });
+        fold
+    });
+    marker && !fold
+}
+
+/// Whether every bind of a `reduce` UPDATE (or, #5111, of a three-argument `foreach` UPDATE) is in tail
+/// position, so the `.` a bind's body ends on is the UPDATE's own output (#4901): jq stores that output as the next state without a path check, and
 /// the final emission is judged on the accumulator's provenance. The spine is paren, pipe (any
 /// stage but the last holds no bind) and the body of a bind with literal keys or a plain `$name` (one
 /// pattern, or since #4964 a `?//` chain of them), all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
@@ -53096,8 +53109,9 @@ impl FoldRegister {
             // register still resolves register-less here.
             // #4499, #4779: `fans_out` skips a marker-mentioning fold only when it is marked as
             // reading the register ([`is_register_fold`]).
-            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE that marked it
-            // ([`fold_body::state_handed_on_here`]), which is one sequence of path-checked steps.
+            // #4901: ...or a bind chain in the tail of the `reduce` UPDATE (#5111: or three-argument `foreach`
+            // UPDATE) that marked it ([`fold_body::state_handed_on_here`]), which is one sequence of
+            // path-checked steps.
             // #5120: ...and a `foreach` body that is such a chain: its accumulator is no node of the register (a
             // computed INIT), but the bind's `$x` may be, and read against none its step was taken to raise and the
             // body emitted nothing (a silent no-op where jq refuses or writes).
@@ -63507,15 +63521,8 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // persistent register (`foreign_register_markers_with`), which a per-step one would move out from
     // under: the fold-body grid (`scripts/jq-fold-body-register-grid-sweep.py`) gained 300+ wrong accepts
     // when it was not excluded. Syntactic, so decided once, not per source element.
-    let update_reads_foreign_marker = S::TAG == EvalTag::Jq && {
-        let (mut marker, mut fold) = (false, false);
-        any_subexpr(update, &mut |e| {
-            marker |= matches!(e, Expr::TrackedVar(_));
-            fold |= matches!(e, Expr::Reduce { .. } | Expr::Foreach { .. });
-            fold
-        });
-        marker && !fold
-    };
+    let update_reads_foreign_marker =
+        S::TAG == EvalTag::Jq && reads_foreign_marker_outside_a_fold(update);
     // #4986: see [`is_first_of_recursive_descent`]. Syntactic, so decided once.
     let source_is_first_of_descent = is_first_of_recursive_descent(input);
     // #4969: whether UPDATE holds a `?//` chain with a bare `$name` alternative, the retry target that binds
@@ -64300,6 +64307,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     } else {
         update
     };
+    // #5111: `resolve_reduce`'s #4901 mark for a `foreach` whose EXTRACT judges the emission: jq stores UPDATE's output
+    // as the next state without a path check, so the `.` a bind in tail position ends on (`1 | ($x as P | .)`) is
+    // left unchecked. A two-argument `foreach` emits UPDATE's output, which is checked, so it is not marked.
+    let update_tail_unchecked = S::TAG == EvalTag::Jq
+        && extract.is_some()
+        && fold_body::depth() == 0
+        && patterns_all_bare(patterns)
+        && reads_foreign_marker_outside_a_fold(update)
+        && update_binds_only_in_tail(update);
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register =
         S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
@@ -65377,6 +65393,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // read the register the step left.
                             let _register_folds = (S::TAG == EvalTag::Jq)
                                 .then(|| fold_body::register_folds(register_fold_items(item)));
+                            let _state_handed_on =
+                                update_tail_unchecked.then(fold_body::state_handed_on);
                             let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                                 if flags.get().update_stays_if_stated {
                                     fold_body::foreach_body_stating()
@@ -75140,6 +75158,9 @@ mod fold_body {
     /// unchanged: jq backtracks the UPDATE, so no step checks it and the final emission is judged on
     /// the accumulator's provenance, whatever the destructures moved the register to. Unlike
     /// [`acc_is_register`] it does not say `.` is the register, which a moving source made untrue.
+    /// #5111: also set for the UPDATE of a three-argument `foreach` whose binds all sit in tail position
+    /// ([`update_binds_only_in_tail`]) -- jq stores that UPDATE's output as the next state unchecked too, and
+    /// EXTRACT judges the emission; not the `foreign_bind_chain_returning_dot` arm, which only `reduce` reads.
     pub(crate) fn state_handed_on() -> HandedGuard {
         let previous = HANDED_DEPTH.with(Cell::get);
         HANDED_DEPTH.with(|a| a.set(depth() + 1));
