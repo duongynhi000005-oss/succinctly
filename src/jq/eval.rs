@@ -50662,7 +50662,15 @@ fn taken_if_branch<'e, S: EvalSemantics>(
 /// (its `try` handlers, `foreach` sources and register folds) stay as they were: a dropped wrapper is a handler-less
 /// `try`, a comma or `label` that holds no other item, or a stage that changes nothing, so they describe nothing the
 /// narrowed expression can reach.
-fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
+///
+/// A `try` with a handler (`try (U) catch H`, which [`taken_if_item`] does not read) is resolved as the literal `else`
+/// arm its body reaches on `state` ([`literal_else_arm`]): the literal cannot raise, so `H` never runs and the `try`
+/// emits what the arm does. Its handler's marks are derived from the whole item, as the handler-less `try`'s are.
+fn resolved_if_arm<'e, S: EvalSemantics>(
+    item: &'e Expr,
+    taken: &'e Expr,
+    state: &OwnedValue,
+) -> &'e Expr {
     match taken_if_item(item) {
         Some((_, false)) => taken,
         Some((_, true))
@@ -50670,8 +50678,54 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
         {
             taken
         }
-        _ => item,
+        Some(_) => item,
+        None => match unwrap_paren(item) {
+            Expr::Try {
+                expr,
+                catch: Some(_),
+            } => literal_else_arm::<S>(expr, state).unwrap_or(item),
+            _ => item,
+        },
     }
+}
+
+/// The literal arm a falsy walk of the `if` that `item` is ([`taken_if_item`], [`walk_falsy_else_chain`]) reaches on
+/// `state`, where the `if` can move the register (#4800): `null` in `if .a then FE else null end` on `{"a":null}`.
+/// Resolving such an `if` whole lets `cannot_move_register` read the `foreach` in the arm that did not run, which
+/// withholds the tracking of the `null` the literal arm stores (jq: `jv_identical` by kind). An `if` that cannot move
+/// the register is resolved whole as before, and so is a step that ran a `then` (the #5082 reading) or a computed
+/// `else`: narrowed behind a handler or beside a comma sibling, those lost rows that match jq in a differential grid.
+fn literal_else_arm<'e, S: EvalSemantics>(item: &'e Expr, state: &OwnedValue) -> Option<&'e Expr> {
+    let (if_item, _) = taken_if_item(item)?;
+    let arm = walk_falsy_else_chain::<S>(if_item, state);
+    (!cannot_move_register(if_item)
+        && !core::ptr::eq(arm, if_item)
+        && matches!(unwrap_paren(arm), Expr::Literal(_)))
+    .then_some(arm)
+}
+
+/// The items of a fold UPDATE comma that a `foreach` step resolves one at a time because one of them is an `if` that
+/// reaches a literal `else` arm on `state` ([`literal_else_arm`], #4800: `(if .a then FE else null end), 7`): jq runs
+/// each comma item from the input the step entered UPDATE with, and each `if` item is resolved as its arm
+/// ([`resolved_if_arm`]). Every other item must be unable to move the register ([`cannot_move_register`]: `7`, `.`,
+/// `$i`), so the marks the step takes per item (a sole `foreach`, its register folds) describe nothing a sibling holds.
+/// `None` for anything else, which keeps the whole-comma resolve.
+fn if_arm_comma_items<'e, S: EvalSemantics>(
+    update: &'e Expr,
+    state: &OwnedValue,
+) -> Option<&'e [Expr]> {
+    let Expr::Comma(items) = unwrap_paren(update) else {
+        return None;
+    };
+    let mut narrowed = false;
+    for item in items {
+        if literal_else_arm::<S>(item, state).is_some() {
+            narrowed = true;
+        } else if !cannot_move_register(item) {
+            return None;
+        }
+    }
+    narrowed.then_some(items.as_slice())
 }
 
 /// Whether `update` is a `foreach` that leaves jq's register where it entered because its source
@@ -64990,9 +65044,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let bound_split =
                             comma_bind_item.and_then(|_| comma_bind_split(&bound_update));
                         debug_assert!(comma_bind_item.is_none() || bound_split.is_some());
+                        // #4800: ...and so is a comma one of whose items is an `if` resolved as its arm
+                        // ([`if_arm_comma_items`]).
+                        let if_arm_items = (S::TAG == EvalTag::Jq && bound_split.is_none())
+                            .then(|| if_arm_comma_items::<S>(&bound_update, &entry_state))
+                            .flatten();
                         let comma_items = bound_split
                             .as_ref()
-                            .map_or_else(|| core::slice::from_ref(&bound_update), |split| split.2);
+                            .map(|split| split.2)
+                            .or(if_arm_items)
+                            .unwrap_or_else(|| core::slice::from_ref(&bound_update));
                         let bind_item = bound_split.as_ref().map(|split| split.0);
                         let mut flow = ResolveFlow::Exhausted;
                         for (index, item) in comma_items.iter().enumerate() {
@@ -65121,7 +65182,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             };
                             // #4800: ...and the arm it ran is what is resolved ([`resolved_if_arm`]).
                             let resolved_item = if S::TAG == EvalTag::Jq {
-                                resolved_if_arm(item, update_taken.get())
+                                resolved_if_arm::<S>(item, update_taken.get(), &entry_state)
                             } else {
                                 item
                             };

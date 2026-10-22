@@ -196,22 +196,186 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_4800() -> Result<()> {
     ])
 }
 
-/// #4800: the wrappers `resolved_if_arm` does not read keep the whole-`if` resolve: a `try` with a handler and a comma
-/// with an item that emits, with a `$i` EXTRACT, answer `[]` where jq answers `[["a"]]` (`[["a"],["a"]]` for the
-/// comma). This pins the answer as it stands (a fix flips it), as the sibling tests pin their refusals.
+/// #4800: a `try` with a handler and a comma beside an item that emits are read too, where the state reaches a literal
+/// `else` arm of an `if` that can move the register (`literal_else_arm`): the literal cannot raise, so the handler
+/// never runs (`resolved_if_arm`), and the comma's items are resolved one at a time, the `if` as its arm
+/// (`if_arm_comma_items`). Every row fails on the base: the `.a` EXTRACT rows raised `Invalid path expression near
+/// attempt to access element "a" of null` and the `$i` rows answered `[]`. Rows captured from jq 1.7.1; disabling either
+/// new path fails the test.
 #[test]
-fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
+fn test_foreach_update_if_with_a_literal_else_behind_a_handler_or_beside_an_emitting_item_4800(
+) -> Result<()> {
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; .a))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
             r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))?]",
-            "[]\n",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; .a))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))",
+            "{}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; .a)) |= 9",
+            "{\"a\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch ($x | .a); .a))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) elif .b then 7 else null end) catch 1; .a))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, 7); .a))?]",
+            "[[\"a\",\"a\"]]\n",
             "",
             0,
         ),
         (
             r#"{"a":null}"#,
             r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, 7); .a))",
+            "[\"a\",\"a\"]\n",
+            "Invalid path expression near attempt to access element \"a\" of 7",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, 7); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (7, if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, $i); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (((if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end)?), 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: what the handler and comma reads leave alone, each matching jq on the base and pinned to keep matching. A
+/// `then` that ran (the #5082 reading) or a computed `else` (`[.a]`) behind a handler or beside a comma sibling, an
+/// `if` with no fold that can move the register, and a truthy state that runs the `foreach`, keep the whole-`if`
+/// resolve: narrowing the first three lost each of these rows in a differential grid.
+#[test]
+fn test_foreach_update_if_behind_a_handler_or_comma_keeps_the_whole_resolve_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"{}",
+            r"(. as $x | foreach . as $i (.; try (if .a then 7 else true end) catch ($x | .a); $i)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"del(. as $x | foreach (.,.a) as $i (.; (if .a then 7 else [.a] end, $i); $i))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"try path(. as $x | foreach .a as $i (.; try (if . then 7 else [.a] end) catch 1; $i)) catch "c""#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; .a))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers `[[]]`, `[["a"]]`,
+/// `[["a"],["a"]]` and `[["a"]]`: a handler around the `if` over a source that hands `$i` the root (the per-step flags
+/// are derived from the whole UPDATE, and a handler leaves them unable to state the entry register), a comma sibling
+/// that may move the register (`.a`), a `try ... catch` that is itself a comma item, and a computed `else`.
+#[test]
+fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach . as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end, .a); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; (try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1, 7); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"[path(. as $x | foreach .a as $i (.; try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else .a end) catch 1; $i))?]",
             "[]\n",
             "",
             0,
