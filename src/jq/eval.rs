@@ -41873,18 +41873,18 @@ impl FoldBody {
         matches!(self, Self::ForeachUpdate | Self::ForeachUpdateOffRegister)
     }
 
-    /// The UPDATE of a `foreach` over `source`.
-    fn update(source: &Expr) -> Self {
-        if source_hands_register_off(source) {
+    /// The UPDATE of a `foreach` whose source [`source_hands_register_off`] says `off_register` of.
+    fn update(off_register: bool) -> Self {
+        if off_register {
             Self::ForeachUpdateOffRegister
         } else {
             Self::ForeachUpdate
         }
     }
 
-    /// The EXTRACT of a `foreach` over `source`.
-    fn extract(source: &Expr) -> Self {
-        if source_hands_register_off(source) {
+    /// The EXTRACT of a `foreach` whose source [`source_hands_register_off`] says `off_register` of.
+    fn extract(off_register: bool) -> Self {
+        if off_register {
             Self::ForeachExtractOffRegister
         } else {
             Self::ForeachExtract
@@ -64029,7 +64029,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
     // #5044: the fold bodies UPDATE and EXTRACT are read as, decided once by the source.
-    let (update_body, extract_body) = (FoldBody::update(input), FoldBody::extract(input));
+    let off_register = S::TAG == EvalTag::Jq && source_hands_register_off(input);
+    let (update_body, extract_body) = (
+        FoldBody::update(off_register),
+        FoldBody::extract(off_register),
+    );
     // #4041: read UPDATE with a neutral tail pushed into the siblings of a comma it follows.
     let distributed = (S::TAG == EvalTag::Jq)
         .then(|| distribute_neutral_tail(update))
