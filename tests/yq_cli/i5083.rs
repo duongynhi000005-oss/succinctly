@@ -18,6 +18,8 @@ const REJECTED: &[&str] = &[
     "k:\n  a z\n  q: 1\n",
     "k:\n  a\n  z:\n",
     "a:\n  k:\n    x\n    y: 1\n",
+    "k:\r\n  a\r\n  z: 1\r\n",
+    "k:\n  a\n  z:	1\n",
 ];
 
 /// (document, `-o json -I0 .` output).
@@ -31,6 +33,8 @@ const ACCEPTED: &[(&str, &str)] = &[
         "a:\n  k:\n    x\n    y\n  m: 1\n",
         "{\"a\":{\"k\":\"x y\",\"m\":1}}\n",
     ),
+    ("k:\n  a # c\nm: 1\n", "{\"k\":\"a\",\"m\":1}\n"),
+    ("k:\n  a\n  ? z\n", "{\"k\":\"a ? z\"}\n"),
 ];
 
 #[test]
