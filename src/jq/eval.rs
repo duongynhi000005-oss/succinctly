@@ -145028,18 +145028,26 @@ mod tests {
         assert_eq!(sets, vec![vec![("x".to_string(), OwnedValue::Int(3))]]);
     }
 
+    /// #5103: a whole-range slice of a non-empty array is the array (`jvp_array_slice` shares the buffer), so jq's
+    /// `.a[0:3]` of a 3-array is `.a`; refuse-only in [`test_path_bind_origin_matrix_refuse_only_2042`] until then.
+    /// Read through the invocation's root, which only a `std` build records, so it is pinned outside the matrix.
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_path_bind_origin_full_slice_is_the_array_5103() {
+        let filter = "path(.a[0:3] as $y | .a | $y)";
+        match bind_origin_outputs(br#"{"a":[1,2,3]}"#, filter) {
+            Ok(got) => assert_eq!(got, r#"[["a"]]"#, "{filter}"),
+            Err(e) => panic!(
+                "{filter}: refused where jq answers [[\"a\"]]: {}",
+                e.message
+            ),
+        }
+    }
+
     #[test]
     fn test_path_bind_origin_matrix_accepts_2042() {
         // (input, filter, jq 1.7.1's `-c '[FILTER]'`)
         let rows: &[(&[u8], &str, &str)] = &[
-            // #5103: a whole-range slice of a non-empty array is the array (`jvp_array_slice` shares the
-            // buffer), so jq's `.a[0:3]` of a 3-array is `.a`; refuse-only until then.
-            // full-slice-is-the-array
-            (
-                br#"{"a":[1,2,3]}"#,
-                "path(.a[0:3] as $y | .a | $y)",
-                r#"[["a"]]"#,
-            ),
             // Refuse-only until #3795: the transparent witness grammar takes a
             // navigation of the register's node as a leaf, so a source wrapping
             // one in `select`/`//`/`if` is placed by the resolver, and `$y` is
