@@ -241,7 +241,8 @@ fn test_5120_register_x_bind_in_a_foreach_body_beside_a_computed_init() -> Resul
 /// #5121: a `null` or boolean emission after the bind of the register `$x` passed is accepted at the register the bind
 /// moved to, which jq names (`["a","b"]`); the `{}` document's `= 9` writes there. They were refused (and, before
 /// #5120, a silent no-op) until #5111 left the body's `.` hand-on unchecked in a three-argument `foreach` UPDATE. Every
-/// row captured from `/usr/bin/jq` 1.7.1, both routes.
+/// row captured from `/usr/bin/jq` 1.7.1, both routes. The last rows are the uncaught spelling, whose message names the
+/// EXTRACT's value (`with result 1`) where the accumulator (`{}`) was named.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5121_null_bool_emission_after_the_bind_moved_the_register() -> Result<()> {
@@ -273,6 +274,27 @@ fn test_5121_null_bool_emission_after_the_bind_moved_the_register() -> Result<()
             "{\"a\":[9],\"b\":null}\n",
             "",
             0,
+        ),
+        (
+            r#"{"a":{"a":1,"b":2},"b":[1,2]}"#,
+            r"path(. as $x | foreach 1 as $i ({}; ($x as {a:$q} | .)?; $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1,"b":2},"b":[1,2]}"#,
+            r"path(. as $x | foreach 1 as $i (0; try ($x as {a:$q} | .); $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1,"b":2},"b":[1,2]}"#,
+            r"del(. as $x | foreach (1,2) as $i (null; try ($x as {a:$q} | .); $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
         ),
     ])
 }
