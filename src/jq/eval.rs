@@ -50923,21 +50923,22 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
 /// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
 /// ([`walk_falsy_else_chain`]) reaches on `state`, or (on the last step) the `then` of the first `if`, where the `if`
 /// can move the register only through folds that head its arms (#4800): `null` in
-/// `if .a then FE else null end` on `{"a":null}`. Resolving such an `if` whole lets `cannot_move_register` read the fold
-/// in the arm that did not run, which withholds the tracking of the `null` the literal arm stores (jq: `jv_identical`
-/// by kind). Any other `if` is resolved whole as before, and so is a computed `else`: narrowed behind a handler or
-/// beside a comma sibling, it lost rows that match jq in differential grids. A literal `then` the state ran is named
-/// too, on the last step of an INIT fork only (`last_step`, #5113): the literal it stores would feed a later step of the
-/// fork that runs the fold arm on it, which the resolve cannot place (under a `?` that refusal truncated jq's output),
-/// while the next fork starts from INIT's own output. An `if` that navigates
-/// without a fold (`if .a then .b else 3 end`) already matches jq whole, and one that navigates ahead of a fold
-/// (`if . then (.b | FE) else 3 end`) names a path jq's register never reaches on the step that runs that arm, which a
-/// refusal on the literal arm's step used to mask (narrowing it turned that refusal into a write of `.b`). The shape
-/// is checked before the condition is evaluated, so an `if` it cannot read costs no evaluation.
+/// `if .a then FE else null end` on `{"a":null}`. Resolving such an `if` whole lets `cannot_move_register` read the
+/// fold in the arm that did not run, which withholds the tracking of the `null` the literal arm stores (jq:
+/// `jv_identical` by kind). Any other `if` is resolved whole as before, and so is a computed `else`: narrowed behind a
+/// handler or beside a comma sibling, it lost rows that match jq in differential grids. A literal `then` the state ran
+/// is named too, on the last step of an INIT fork only (`fork_last_step`, #5113): the literal it stores would feed a
+/// later step of the fork that runs the fold arm on it, which the resolve cannot place (under a `?` that refusal
+/// truncated jq's output), while the next fork starts from INIT's own output. A `?//` pattern retries UPDATE on the
+/// stored literal, so there it is the `foreach`'s last step only. An `if` that navigates without a fold (`if .a then .b
+/// else 3 end`) already matches jq whole, and one that navigates ahead of a fold (`if . then (.b | FE) else 3 end`)
+/// names a path jq's register never reaches on the step that runs that arm, which a refusal on the literal arm's step
+/// used to mask (narrowing it turned that refusal into a write of `.b`). The shape is checked before the condition is
+/// evaluated, so an `if` it cannot read costs no evaluation.
 fn literal_taken_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
-    last_step: bool,
+    fork_last_step: bool,
 ) -> Option<&'e Expr> {
     /// Whether `arm` is a fold, or a comma, handler-less `try`/`?` of such and of arms that cannot move the register,
     /// with nothing ahead of it to navigate.
@@ -50988,11 +50989,12 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
     if matches!(unwrap_paren(arm), Expr::Literal(_)) {
         return Some(arm);
     }
-    // The mirror shape: a literal `then` of the first `if` that the state ran, beside the fold in an `else`. It stores a
-    // literal the next step would run the fold arm on (`if .b then null else FE end`: `.b` of the stored `null` is
+    // The mirror shape: a literal `then` of the first `if` that the state ran, beside the fold in an `else`. It stores
+    // a literal the next step would run the fold arm on (`if .b then null else FE end`: `.b` of the stored `null` is
     // falsy), which the resolve cannot place, so it is read only on the last step of an INIT fork (#5113): the stored
-    // literal feeds no later UPDATE, the next fork starting from INIT's own output. A `then` past a falsy `elif` condition is not read ([`taken_then_branch`]).
-    (last_step && core::ptr::eq(arm, if_item))
+    // literal feeds no later UPDATE, the next fork starting from INIT's own output. A `then` past a falsy `elif`
+    // condition is not read ([`taken_then_branch`]).
+    (fork_last_step && core::ptr::eq(arm, if_item))
         .then(|| truthy_then::<S>(arm, state))
         .flatten()
         .filter(|then| matches!(unwrap_paren(then), Expr::Literal(_)))
@@ -51003,13 +51005,13 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
 fn handler_literal_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
-    last_step: bool,
+    fork_last_step: bool,
 ) -> Option<&'e Expr> {
     match unwrap_paren(item) {
         Expr::Try {
             expr,
             catch: Some(_),
-        } => literal_taken_arm::<S>(expr, state, last_step),
+        } => literal_taken_arm::<S>(expr, state, fork_last_step),
         _ => None,
     }
 }
@@ -51023,14 +51025,14 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
 fn if_arm_comma_items<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
-    last_step: bool,
+    fork_last_step: bool,
 ) -> Option<&'e [Expr]> {
     let Expr::Comma(items) = unwrap_paren(update) else {
         return None;
     };
     let mut narrowed = false;
     for item in items {
-        if literal_taken_arm::<S>(item, state, last_step).is_some()
+        if literal_taken_arm::<S>(item, state, fork_last_step).is_some()
             || if_cond_raises::<S>(item, state)
         {
             narrowed = true;
@@ -64840,6 +64842,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     let run_bounds = (S::TAG == EvalTag::Jq)
         .then(|| Some((source_output_bound(init)?, source_output_bound(input)?)))
         .flatten();
+    // #5113: ...and the source's alone, which says when a step is the last of its INIT fork, however many forks INIT
+    // runs. Only for a single pattern: a `?//` chain retries UPDATE on the state a step stored, so it keeps
+    // `last_step`.
+    let fork_source_bound = (S::TAG == EvalTag::Jq && patterns.len() == 1)
+        .then(|| source_output_bound(input))
+        .flatten();
     // #2979: see `resolve_reduce`'s identical hoist.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
@@ -65458,9 +65466,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             comma_bind_item.and_then(|_| comma_bind_split(&bound_update));
                         // The step that reaches both bounds of the source is the `foreach`'s last ([`run_bounds`]).
                         let last_step = run_bounds == Some((fork_index + 1, steps));
-                        // #5113: ...and the last step of this INIT fork, after which jq stores INIT's next output as the
-                        // state, so a literal this step stores feeds no later UPDATE ([`literal_taken_arm`]).
-                        let fork_last_step = run_bounds.is_some_and(|(_, items)| items == steps);
+                        // #5113: ...or, for a single pattern, the last step of this INIT fork, after which jq stores
+                        // INIT's next output as the state, so a literal this step stores feeds no later UPDATE
+                        // ([`literal_taken_arm`]).
+                        let fork_last_step = last_step || fork_source_bound == Some(steps);
                         debug_assert!(comma_bind_item.is_none() || bound_split.is_some());
                         // #4800: ...and so is a comma one of whose items is an `if` resolved as its arm
                         // ([`if_arm_comma_items`]).

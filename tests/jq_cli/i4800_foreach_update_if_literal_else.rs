@@ -551,8 +551,8 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
     ])
 }
 
-/// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers `[["a"]]`,
-/// `[["a"],["a"]]`, `[["a"]]`, `{"a":9}`, `[["a","a"],["a","a"]]` and `[["a"],[]]`: a comma sibling that may
+/// #4800: the shapes still resolved whole, pinned as they stand (a fix flips them). jq answers, row by row, `[["a"]]`,
+/// `[["a"],["a"]]`, `[["a"]]`, `{"a":9}`, `[["a","a"],["a","a"]]`, `[["a"]]`, `[["a"],[]]` and `[["a"]]`: a comma sibling that may
 /// move the register (`.a`), a `try ... catch` that is itself a comma item, a computed `else`, an arm that navigates
 /// ahead of its fold (`.b | FE`), and a literal `then` that ran beside a fold in the `else` over a source of two
 /// elements (the mirror shape off its last step). The `.b | FE` row stays a refusal on purpose: the step that runs it
