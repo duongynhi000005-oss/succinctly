@@ -50641,14 +50641,17 @@ fn taken_then_branch<'e, S: EvalSemantics>(
 ) -> Option<&'e Expr> {
     let (item, _) = taken_if_item(update)?;
     let head = walk_falsy_else_chain::<S>(item, state);
+    truthy_then::<S>(head, state)
+        .filter(|_| core::ptr::eq(head, item) || emptied_update_read(update, body).is_some())
+}
+
+/// The `then` branch of `head` when it is an `if` whose condition is truthy on `state` ([`cond_truthiness`]), the one
+/// rule [`taken_then_branch`] and [`literal_taken_arm`] share for which `then` a step ran (#4800).
+fn truthy_then<'e, S: EvalSemantics>(head: &'e Expr, state: &OwnedValue) -> Option<&'e Expr> {
     match unwrap_paren(head) {
         Expr::If {
             cond, then_branch, ..
-        } if cond_truthiness::<S>(cond, state) == Some(true)
-            && (core::ptr::eq(head, item) || emptied_update_read(update, body).is_some()) =>
-        {
-            Some(then_branch)
-        }
+        } if cond_truthiness::<S>(cond, state) == Some(true) => Some(then_branch),
         _ => None,
     }
 }
@@ -50717,18 +50720,24 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
     }
 }
 
-/// The literal arm a falsy walk of the `if` that `item` is ([`taken_if_item`], [`walk_falsy_else_chain`]) reaches on
-/// `state`, where the `if` can move the register only through folds that head its arms (#4800): `null` in
+/// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
+/// ([`walk_falsy_else_chain`]) reaches on `state`, or (on the last step) the `then` of the first `if`, where the `if`
+/// can move the register only through folds that head its arms (#4800): `null` in
 /// `if .a then FE else null end` on `{"a":null}`. Resolving such an `if` whole lets `cannot_move_register` read the fold
 /// in the arm that did not run, which withholds the tracking of the `null` the literal arm stores (jq: `jv_identical`
-/// by kind). Any other `if` is resolved whole as before, and so is a step that ran a `then` (the #5082 reading) or a
-/// computed `else`: narrowed behind a handler or beside a comma sibling, those lost rows that match jq in differential
-/// grids. An `if` that navigates without a fold (`if .a then .b else 3 end`) already matches jq whole, and one that
-/// navigates ahead of a fold (`if . then (.b | FE) else 3 end`) names a path jq's register never reaches on the step
-/// that runs that arm, which a refusal on the literal arm's step used to mask (narrowing it turned that refusal into a
-/// write of `.b`). The shape is checked before the condition is evaluated, so an `if` it cannot read costs no
-/// evaluation.
-fn literal_else_arm<'e, S: EvalSemantics>(item: &'e Expr, state: &OwnedValue) -> Option<&'e Expr> {
+/// by kind). Any other `if` is resolved whole as before, and so is a computed `else`: narrowed behind a handler or
+/// beside a comma sibling, it lost rows that match jq in differential grids. A literal `then` the state ran is named
+/// too, on the `foreach`'s last step only (`last_step`): the literal it stores would feed a later step that runs the fold
+/// arm on it, which the resolve cannot place (under a `?` that refusal truncated jq's output). An `if` that navigates
+/// without a fold (`if .a then .b else 3 end`) already matches jq whole, and one that navigates ahead of a fold
+/// (`if . then (.b | FE) else 3 end`) names a path jq's register never reaches on the step that runs that arm, which a
+/// refusal on the literal arm's step used to mask (narrowing it turned that refusal into a write of `.b`). The shape
+/// is checked before the condition is evaluated, so an `if` it cannot read costs no evaluation.
+fn literal_taken_arm<'e, S: EvalSemantics>(
+    item: &'e Expr,
+    state: &OwnedValue,
+    last_step: bool,
+) -> Option<&'e Expr> {
     /// Whether `arm` is a fold, or a comma, handler-less `try`/`?` of such and of arms that cannot move the register,
     /// with nothing ahead of it to navigate.
     fn fold_headed(arm: &Expr, budget: u8) -> bool {
@@ -50775,26 +50784,37 @@ fn literal_else_arm<'e, S: EvalSemantics>(item: &'e Expr, state: &OwnedValue) ->
         return None;
     }
     let arm = walk_falsy_else_chain::<S>(if_item, state);
-    matches!(unwrap_paren(arm), Expr::Literal(_)).then_some(arm)
+    if matches!(unwrap_paren(arm), Expr::Literal(_)) {
+        return Some(arm);
+    }
+    // The mirror shape: a literal `then` of the first `if` that the state ran, beside the fold in an `else`. It stores a
+    // literal the next step would run the fold arm on (`if .b then null else FE end`: `.b` of the stored `null` is
+    // falsy), which the resolve cannot place, so it is read only on the `foreach`'s last step: the stored literal feeds
+    // no later UPDATE. A `then` past a falsy `elif` condition is not read ([`taken_then_branch`]).
+    (last_step && core::ptr::eq(arm, if_item))
+        .then(|| truthy_then::<S>(arm, state))
+        .flatten()
+        .filter(|then| matches!(unwrap_paren(then), Expr::Literal(_)))
 }
 
-/// [`literal_else_arm`] of the body of a `try` with a handler (`try (U) catch H`), which a `foreach` step takes as
+/// [`literal_taken_arm`] of the body of a `try` with a handler (`try (U) catch H`), which a `foreach` step takes as
 /// the UPDATE it ran (`update_taken`) and resolves ([`resolved_if_arm`]) where it names one (#4800).
 fn handler_literal_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
+    last_step: bool,
 ) -> Option<&'e Expr> {
     match unwrap_paren(item) {
         Expr::Try {
             expr,
             catch: Some(_),
-        } => literal_else_arm::<S>(expr, state),
+        } => literal_taken_arm::<S>(expr, state, last_step),
         _ => None,
     }
 }
 
 /// The items of a fold UPDATE comma that a `foreach` step resolves one at a time because one of them is an `if` that
-/// reaches a literal `else` arm on `state` ([`literal_else_arm`], #4800: `(if .a then FE else null end), 7`): jq runs
+/// reaches a literal arm on `state` ([`literal_taken_arm`], #4800: `(if .a then FE else null end), 7`): jq runs
 /// each comma item from the input the step entered UPDATE with, and each `if` item is resolved as its arm
 /// ([`resolved_if_arm`]). Every other item must be unable to move the register ([`cannot_move_register`]: `7`, `.`,
 /// `$i`), so the marks the step takes per item (a sole `foreach`, its register folds) describe nothing a sibling holds.
@@ -50802,13 +50822,14 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
 fn if_arm_comma_items<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
+    last_step: bool,
 ) -> Option<&'e [Expr]> {
     let Expr::Comma(items) = unwrap_paren(update) else {
         return None;
     };
     let mut narrowed = false;
     for item in items {
-        if literal_else_arm::<S>(item, state).is_some() {
+        if literal_taken_arm::<S>(item, state, last_step).is_some() {
             narrowed = true;
         } else if !cannot_move_register(item) {
             return None;
@@ -65185,11 +65206,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // names the same item.
                         let bound_split =
                             comma_bind_item.and_then(|_| comma_bind_split(&bound_update));
+                        // The step that reaches both bounds of the source is the `foreach`'s last ([`run_bounds`]).
+                        let last_step = run_bounds == Some((fork_index + 1, steps));
                         debug_assert!(comma_bind_item.is_none() || bound_split.is_some());
                         // #4800: ...and so is a comma one of whose items is an `if` resolved as its arm
                         // ([`if_arm_comma_items`]).
                         let if_arm_items = (S::TAG == EvalTag::Jq && bound_split.is_none())
-                            .then(|| if_arm_comma_items::<S>(&bound_update, &entry_state))
+                            .then(|| {
+                                if_arm_comma_items::<S>(&bound_update, &entry_state, last_step)
+                            })
                             .flatten();
                         let comma_items = bound_split
                             .as_ref()
@@ -65201,11 +65226,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         for (index, item) in comma_items.iter().enumerate() {
                             in_bind_item.set(bind_item.map_or(true, |at| at == index));
                             update_taken.set(if S::TAG == EvalTag::Jq {
-                                // #4800: a `try` with a handler around an `if` that reaches a literal `else`
+                                // #4800: a `try` with a handler around an `if` that reaches a literal arm
                                 // ran that arm ([`handler_literal_arm`]).
-                                handler_literal_arm::<S>(item, &entry_state).unwrap_or_else(|| {
-                                    taken_if_branch::<S>(item, &entry_state, update_body)
-                                })
+                                handler_literal_arm::<S>(item, &entry_state, last_step)
+                                    .unwrap_or_else(|| {
+                                        taken_if_branch::<S>(item, &entry_state, update_body)
+                                    })
                             } else {
                                 item
                             });
@@ -65265,7 +65291,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // this one), whose handler the reading may not cover. Unseeded there, a refusal of a frozen
                             // `$x`/`$i` is read as exact, which a `try`/`?` around the fold swallows (#5012). What runs
                             // after the `foreach`'s outputs is newly reached, as after any refusal turned into an answer.
-                            let last_step = run_bounds == Some((fork_index + 1, steps));
                             // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
                             // `bind.apply` already copies the whole UPDATE for the step).
                             let seedable_step = bare_step && last_step;
