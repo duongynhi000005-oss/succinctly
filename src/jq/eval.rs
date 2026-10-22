@@ -40771,8 +40771,9 @@ fn same_node_through_full_slices(invocation: u64, lhs: &PathPrefix, rhs: &PathPr
 /// (#5095) -- the proof a negated [`same_frame_position`] is not: that answers `false` for every pair it cannot
 /// show to be one node. A slice spanning the whole of a non-empty array is read as the array first (#5103,
 /// [`walk_through_full_slices`]: `.a[0:]` *is* `.a` in jq). A chain that ends on an array jq builds afresh (an empty
-/// range, or a slice jq copies) names no node of the document, so it is distinct from any other spelling, though not
-/// from its own (one evaluation, bound as `. as $x`, is identical to itself). Otherwise only object keys and array
+/// range, or a slice jq copies) names no node of the document, and each evaluation of it is a new array, so it is
+/// distinct from every other chain, spelled alike or not, except the one chain it is (one evaluation bound as `. as
+/// $x` shares the register's chain, and is identical to itself). Otherwise only object keys and array
 /// indexes are read; any other step (another slice, a subarray search) answers `false`. The chains are distinct where a step names a different
 /// key or a different slot of the same array (a negative index is resolved against the invocation's
 /// root, and refuses without one); a chain that is a strict prefix of the other names an ancestor,
@@ -40790,7 +40791,9 @@ fn positions_provably_distinct(invocation: u64, lhs: &PathPrefix, rhs: &PathPref
         return false;
     };
     if left.ends_fresh || right.ends_fresh {
-        return left.kept != right.kept;
+        // Two chains spell two evaluations unless they are one chain: a `$x` bound as `. as $x` holds the very
+        // chain the register stands on.
+        return left.kept != right.kept || !core::ptr::eq(lhs, rhs);
     }
     let (left, right) = (left.kept, right.kept);
     if left
@@ -153325,8 +153328,8 @@ mod touched_edge_cases_2999 {
 
     /// #5103: jq's slice is a view of the array's buffer unless its offset passes 65,535 (then a copy) or its range is
     /// empty (then a new `[]`). A whole-range slice of a non-empty array is that array's node, a copy is a new array on
-    /// every evaluation (so two evaluations are two nodes, and positions cannot claim either verdict for the same
-    /// spelling), and an empty range's `[]` is no node of the document. Captured against jq 1.7.1 on a 70,003-array.
+    /// every evaluation (two chains are two arrays, one chain is one), and an empty range's `[]` is no node of the
+    /// document. Captured against jq 1.7.1 on a 70,003-array.
     #[test]
     #[cfg(feature = "std")]
     fn slice_identity_follows_jq_views_and_copies_5103() {
@@ -153376,19 +153379,21 @@ mod touched_edge_cases_2999 {
             vec![field("x")]
         ));
 
-        // The slice of an empty array is a new `[]`: another node than any other spelling, but not than its own (one
-        // evaluation bound as `. as $x` is identical to itself), and never folded onto its container (#3494).
+        // The slice of an empty array is a new `[]` on every evaluation: another node than every other chain, spelled
+        // alike or not, except the one chain it is (`. as $x` of it), and never folded onto its container (#3494).
         assert!(!same(vec![field("e"), slice(0, None)], vec![field("e")]));
         assert!(distinct(vec![field("e"), slice(0, None)], vec![field("e")]));
-        assert!(!distinct(
+        assert!(distinct(
             vec![field("e"), slice(0, None)],
             vec![field("e"), slice(0, None)]
         ));
+        let fresh = chain(vec![field("e"), slice(0, None)]);
+        assert!(!positions_provably_distinct(invocation, &fresh, &fresh));
         assert!(!same(
             vec![field("x"), slice(1, Some(1))],
             vec![field("x"), slice(0, None), slice(1, Some(1))]
         ));
-        assert!(!distinct(
+        assert!(distinct(
             vec![field("x"), slice(1, Some(1))],
             vec![field("x"), slice(0, None), slice(1, Some(1))]
         ));
@@ -153410,7 +153415,7 @@ mod touched_edge_cases_2999 {
             vec![field("big"), slice(70_000, None)],
             vec![field("big"), slice(70_000, None), slice(0, None)]
         ));
-        assert!(!distinct(
+        assert!(distinct(
             vec![field("big"), slice(70_000, None)],
             vec![field("big"), slice(70_000, None), slice(0, None)]
         ));
@@ -153421,6 +153426,7 @@ mod touched_edge_cases_2999 {
         // One evaluation shared by both chains is the same node, and a copy's elements are the array's own.
         let copy = chain(vec![field("big"), slice(70_000, None)]);
         assert!(same_frame_position(invocation, &copy, &copy));
+        assert!(!positions_provably_distinct(invocation, &copy, &copy));
         assert!(same(
             vec![field("big"), slice(70_000, None), index(0)],
             vec![field("big"), slice(70_000, None), index(0)]

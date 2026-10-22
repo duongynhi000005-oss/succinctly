@@ -300,6 +300,24 @@ fn test_5103_copied_slice_past_offset_65535_is_a_new_array_per_evaluation() -> R
             0,
         ),
         (
+            r#"{"a":[range(70003)]} | [path(.a[70000:] as $x | .a[70000:] | $x as [$q] | .)?]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[range(70003)]} | try path(.a[65536:] as $x | .a[65536:] | $x as [$q] | .) catch "c""#,
+            "\"c\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[range(70003)]} | [path(.a[70000:] | . as $x | 1 | $x as [$q] | $q)?]"#,
+            "[[\"a\",{\"start\":70000,\"end\":null},0]]\n",
+            "",
+            0,
+        ),
+        (
             r#"{"a":[range(70003)]} | path(.a[70000:] | . as $x | .[0:] | $x)"#,
             "[\"a\",{\"start\":70000,\"end\":null},{\"start\":0,\"end\":null}]\n",
             "",
