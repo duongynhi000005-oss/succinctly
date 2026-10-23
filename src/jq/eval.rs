@@ -36908,6 +36908,34 @@ fn update_path_steps<S: EvalSemantics>(
         let here = optional || first_optional;
         let noop_scalar = S::TAG == EvalTag::Yq && is_yq_field_index_noop_scalar(root);
 
+        // #5150: a real navigation step followed by nothing but a bare `.` (`(.a | .) |= empty`) names the same slot
+        // the step alone does, and an update that produces nothing deletes it from its parent (jq's `_modify` ends in
+        // `delpaths`). Navigated into, the slot has no way back to its container and the terminal `Expr::Identity`
+        // arm would null it in place, so the step is resolved as if it were the last, as `delete_path_steps` does
+        // for `del(.a | .)` (#2256). Jq mode only: yq has no `empty`. A filter that produces a value writes the same
+        // either way.
+        if S::TAG == EvalTag::Jq
+            && matches!(
+                component,
+                Expr::Field(_) | Expr::Index { .. } | Expr::Iterate | Expr::Slice { .. }
+            )
+            && trailing_identity_optional(rest, false).is_some()
+        {
+            let result = update_path_with_deletes::<S>(
+                root,
+                first,
+                filter_expr,
+                optional,
+                scalar_noop,
+                pos.as_ref(),
+                deletes.as_deref_mut(),
+            );
+            if let Some(deletes) = deletes.as_deref_mut() {
+                deletes.at.truncate(entry_depth);
+            }
+            return result;
+        }
+
         match component {
             Expr::Field(name) => {
                 let root_was_null = matches!(root, OwnedValue::Null);
