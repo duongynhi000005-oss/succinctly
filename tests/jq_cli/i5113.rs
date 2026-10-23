@@ -268,3 +268,230 @@ fn test_5113_lookahead_agrees_with_the_last_step_of_an_earlier_init_fork() -> Re
         5,
     )])
 }
+
+// A `foreach` that is the whole UPDATE of an enclosing `foreach` and whose source is a caught destructure of an outer
+// `$x` emits nothing on the steps where `$x` is not the register: the pattern's `INDEX` fails `path_intact`, the `try`
+// catches it, and the outer step stores `null`. The step's register is the element its source moved onto, so a `$x`
+// holding a container other than that element's value is never it, whatever position (or none) the `$x` was bound at.
+// `main` read the bind as passing whenever the nested `foreach` emitted, and stated EXTRACT from the bound child.
+
+/// #5113: the wrong write. `foreach (.a) as $i (.; FE; $i)` on `{"a":null}` is empty in jq (the one step's `$x` is the
+/// root, the register is on `.a`'s `null`), where `main` answered `["a","a"]` and `|= 9` wrote `{"a":{"a":9}}`. Every
+/// EXTRACT, the three origins a `$x` marker has (`. as`, `.b as`, `(.b|.) as`), the shapes of the caught source (`?`,
+/// `catch empty`, an array pattern) and a state-replacing UPDATE. Captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_caught_bind_foreach_update_is_empty_on_a_step_whose_element_is_not_the_marker(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | (foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | del(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))",
+            "{\"a\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); null))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); "k"))]"#,
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .a))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":true}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r". as $x | (foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":{"a":1}}"#,
+            r".b as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":{"a":1}}"#,
+            r"(.b|.) as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"c":[null]}"#,
+            r".c as $x | [path(foreach (.a) as $i (.; foreach (try ($x as [$a] | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (($x as {a:$a} | .)?) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .) catch empty) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; $y; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":null}"#,
+            r".b as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: the controls the reading above must not touch. A step whose element IS the root keeps the bind passing
+/// (`(.a,.)`: the first step is empty, the second states the root's `["a"]`); `foreach (.a) ... (.; FE; .)` on
+/// `{"a":{"a":null}}` is empty and `.a as $x` over `{"a":{"a":1}}` is the register's own node (equal container,
+/// not read), so both keep the answers they had. So does a `?//` chain source, whose retry is not modelled: read as empty
+/// on the steps its first alternative fails, `limit(1; FE) ... |= 9` over `..` wrote nothing where jq writes `9`. Captured
+/// from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_caught_bind_foreach_update_keeps_the_steps_where_the_marker_is_the_register(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | path(foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | path(foreach (.,.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r". as $x | path(foreach (.,.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" o",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "",
+            "Invalid path expression with result {\"a\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":1}}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))]",
+            "",
+            "Invalid path expression with result {\"a\":{\"a\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r". as $x | path(foreach (.a) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":false,"b":{"a":null}}"#,
+            r".b as $x | (foreach (..) as $i (null; limit(1; foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (null; .; .)); .)) |= 9",
+            "{\"a\":false,\"b\":{\"a\":9}}\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: not read, pinned as they stand (a fix flips them). jq answers `[]` to the first (a pipe-spelled `$x | . as P`
+/// source, which was not measured) and `[["a","a"]]` to the second, whose `null` marker is `jv_identical` to the `null`
+/// register of the first step and so passes it: reading the second step as empty there let the first step's own
+/// placement through, as `["a"]` (a grid of 40,000 rows turned five refusals into wrong answers, `del` among them).
+/// Both refuse as `main` does.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_caught_bind_foreach_update_leaves_a_null_marker_and_a_piped_destructure_refused(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x | . as {a:$a} | .)) as $y (.; .; .); $i))]",
+            "",
+            "Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r".a as $x | [path(foreach ((.a,.)) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; .; .) | .); $i))]",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+    ])
+}
