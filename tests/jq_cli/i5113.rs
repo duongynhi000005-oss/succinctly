@@ -253,3 +253,18 @@ fn test_5113_literal_then_lookahead_stops_at_eight_steps() -> Result<()> {
         0,
     )])
 }
+
+/// #5113 review: the lookahead reads a step's handler literal only where the real last step does. On a fork that is not
+/// INIT's last, the fork's last step takes the whole-`if` resolve and refuses, so the earlier step's literal `then` must
+/// not be read either: it printed `["a"]` before the refusal where `main` printed nothing. jq answers four `["a"]`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_lookahead_agrees_with_the_last_step_of_an_earlier_init_fork() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        "null",
+        r"path(. as $x | foreach (.a,.a) as $i ((.,.); try (if not then 0 elif .b then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 2; $i))",
+        "",
+        "Invalid path expression with result null",
+        5,
+    )])
+}
