@@ -557,7 +557,8 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
 /// ahead of its fold (`.b | FE`), and a literal `then` that ran beside a fold in the `else` over a source of two
 /// elements (the mirror shape off its last step). The `.b | FE` row stays a refusal on purpose: the step that runs it
 /// names `["b"]` where jq's register moved to `["a"]`, and narrowing the literal arm's step turned the refusal that
-/// masked it into a write of `.b`. The literal `then` is read only on the `foreach`'s last step: read on the first of
+/// masked it into a write of `.b`. The literal `then` is read only on the `foreach`'s last step, or on an earlier one when every later step stores a
+/// literal too (#5113, the seventh row, now jq's `[["a"],[]]`): read on the first of
 /// two, the `.a` EXTRACT row's refusal became a truncated `[["a","a"]]`, because the second step runs the fold arm on
 /// the stored literal and refuses where a `?` swallows it. The same holds for a `?//` retry that runs UPDATE again on
 /// the stored literal (the last row; the base answers `[]` there too). The last step of an earlier INIT fork is read
@@ -610,7 +611,7 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
         (
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
-            "[]\n",
+            "[[\"a\"],[]]\n",
             "",
             0,
         ),

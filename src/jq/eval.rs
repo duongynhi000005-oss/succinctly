@@ -51287,6 +51287,61 @@ fn arms_fold_headed(e: &Expr, budget: u8) -> Option<bool> {
     };
     arms_fold_headed(else_branch, budget).map(|rest| then || rest)
 }
+/// What [`literal_taken_arm`] and [`handler_literal_arm`] know of the steps that follow the one they read (#5113).
+#[derive(Clone, Copy)]
+struct ForkTail<'u> {
+    /// The step is the last of its INIT fork, so the next fork starts from INIT's own output.
+    fork_last: bool,
+    /// The step is the `foreach`'s last, of its last fork.
+    foreach_last: bool,
+    /// UPDATE and how many steps follow this one in the fork, when the source's bound says and there are any.
+    ahead: Option<(&'u Expr, usize)>,
+}
+
+/// The most steps [`ForkTail::stored_is_dead`] runs ahead.
+const FORK_LOOKAHEAD_STEPS: usize = 8;
+
+impl ForkTail<'_> {
+    /// A tail that is the last step of everything: the reading a step has when nothing follows it.
+    const LAST: ForkTail<'static> = ForkTail {
+        fork_last: true,
+        foreach_last: true,
+        ahead: None,
+    };
+
+    /// Whether the literal `stored` a step leaves as the state feeds no UPDATE that cannot read it: `last` says the
+    /// step ends what stores it, or every step that follows is itself resolved as the literal arm it stores
+    /// ([`later_steps_store_literals`]), so no step runs the fold arm on a stored literal the resolve cannot place
+    /// (under a `?` that refusal truncated jq's output, #5113).
+    fn stored_is_dead<S: EvalSemantics>(&self, last: bool, stored: &Literal) -> bool {
+        last || self.ahead.is_some_and(|(update, after)| {
+            later_steps_store_literals::<S>(update, literal_to_owned(stored), after)
+        })
+    }
+}
+
+/// Whether each of the `after` steps that follow one that stored `state` narrows to a literal arm, as the last step
+/// would ([`ForkTail::LAST`]), the literal it stores being the state the next one enters with (#5113). UPDATE must be
+/// the `if` itself, behind a handler, `?` or a no-op stage: a comma with a sibling that emits stores that sibling.
+fn later_steps_store_literals<S: EvalSemantics>(
+    update: &Expr,
+    mut state: OwnedValue,
+    after: usize,
+) -> bool {
+    if after > FORK_LOOKAHEAD_STEPS {
+        return false;
+    }
+    for _ in 0..after {
+        let arm = handler_literal_arm::<S>(update, &state, ForkTail::LAST, true)
+            .or_else(|| literal_taken_arm::<S>(update, &state, ForkTail::LAST));
+        let Some(Expr::Literal(lit)) = arm.map(unwrap_paren) else {
+            return false;
+        };
+        state = literal_to_owned(lit);
+    }
+    true
+}
+
 /// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
 /// ([`walk_falsy_else_chain`]) reaches on `state`, or (on the last step) the `then` of the first `if`, where the `if`
 /// can move the register only through folds that head its arms (#4800): `null` in
@@ -51305,7 +51360,7 @@ fn arms_fold_headed(e: &Expr, budget: u8) -> Option<bool> {
 fn literal_taken_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
-    fork_last_step: bool,
+    tail: ForkTail<'_>,
 ) -> Option<&'e Expr> {
     let (if_item, _) = taken_if_item(item)?;
     if cannot_move_register(if_item) || arms_fold_headed(if_item, WRAPPED_CHAIN_DEPTH) != Some(true)
@@ -51321,10 +51376,13 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
     // falsy), which the resolve cannot place, so it is read only on the last step of an INIT fork (#5113): the stored
     // literal feeds no later UPDATE, the next fork starting from INIT's own output. A `then` past a falsy `elif`
     // condition is not read ([`taken_then_branch`]).
-    (fork_last_step && core::ptr::eq(arm, if_item))
+    core::ptr::eq(arm, if_item)
         .then(|| truthy_then::<S>(arm, state))
         .flatten()
-        .filter(|then| matches!(unwrap_paren(then), Expr::Literal(_)))
+        .filter(|then| {
+            matches!(unwrap_paren(then), Expr::Literal(lit)
+                if tail.stored_is_dead::<S>(tail.fork_last, lit))
+        })
 }
 
 /// [`literal_taken_arm`] of the body of a `try` with a handler (`try (U) catch H`), which a `foreach` step takes as
@@ -51332,14 +51390,14 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
 fn handler_literal_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
-    fork_last_step: bool,
+    tail: ForkTail<'_>,
     single_pattern: bool,
 ) -> Option<&'e Expr> {
     match unwrap_paren(item) {
         Expr::Try {
             expr,
             catch: Some(handler),
-        } => literal_taken_arm::<S>(expr, state, fork_last_step).or_else(|| {
+        } => literal_taken_arm::<S>(expr, state, tail).or_else(|| {
             // #5113: an `if` whose condition raises on the state (`.a` of a number) never reaches an arm: the handler
             // answers, and a literal handler cannot raise in turn, so the `try` emits that literal. Only on the
             // `foreach`'s last step and not under a `?//` chain: a literal a step stored feeds the next step's condition,
@@ -51356,8 +51414,10 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
                 return None;
             }
             let head = walk_falsy_else_chain::<S>(if_item, state);
-            (matches!(unwrap_paren(handler), Expr::Literal(_)) && if_cond_raises::<S>(head, state))
-                .then_some(&**handler)
+            (matches!(unwrap_paren(handler), Expr::Literal(lit)
+                if tail.stored_is_dead::<S>(tail.foreach_last, lit))
+                && if_cond_raises::<S>(head, state))
+            .then_some(&**handler)
         }),
         _ => None,
     }
@@ -51445,16 +51505,14 @@ fn handler_computed_arm<'a, S: EvalSemantics>(
 fn if_arm_comma_items<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
-    fork_last_step: bool,
+    tail: ForkTail<'_>,
 ) -> Option<&'e [Expr]> {
     let Expr::Comma(items) = unwrap_paren(update) else {
         return None;
     };
     let mut narrowed = false;
     for item in items {
-        if literal_taken_arm::<S>(item, state, fork_last_step).is_some()
-            || if_cond_raises::<S>(item, state)
-        {
+        if literal_taken_arm::<S>(item, state, tail).is_some() || if_cond_raises::<S>(item, state) {
             narrowed = true;
         } else if !cannot_move_register(item) {
             return None;
@@ -66391,6 +66449,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // INIT's next output as the state, so a literal this step stores feeds no later UPDATE
                         // ([`literal_taken_arm`]).
                         let fork_last_step = last_step || fork_source_bound == Some(steps);
+                        let fork_tail = ForkTail {
+                            fork_last: fork_last_step,
+                            foreach_last: last_step,
+                            ahead: fork_source_bound
+                                .and_then(|bound| bound.checked_sub(steps))
+                                .filter(|after| *after > 0)
+                                .map(|after| (&bound_update, after)),
+                        };
                         // #5110: ...and `(LIT | FE) // R`, whose operands are the items, the right one run only when the left
                         // emitted nothing.
                         let bound_alt = alt_split.and_then(|_| alt_bind_split(&bound_update));
@@ -66403,7 +66469,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // ([`if_arm_comma_items`]).
                         let if_arm_items = (S::TAG == EvalTag::Jq && bound_split.is_none())
                             .then(|| {
-                                if_arm_comma_items::<S>(&bound_update, &entry_state, fork_last_step)
+                                if_arm_comma_items::<S>(&bound_update, &entry_state, fork_tail)
                             })
                             .flatten();
                         let comma_items = match bound_alt {
@@ -66440,15 +66506,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             update_taken.set(if S::TAG == EvalTag::Jq {
                                 // #4800: a `try` with a handler around an `if` that reaches a literal arm
                                 // ran that arm ([`handler_literal_arm`]).
-                                handler_literal_arm::<S>(
-                                    item,
-                                    &entry_state,
-                                    fork_last_step,
-                                    no_retry && last_step,
-                                )
-                                .unwrap_or_else(|| {
-                                    taken_if_branch::<S>(item, &entry_state, update_body)
-                                })
+                                handler_literal_arm::<S>(item, &entry_state, fork_tail, no_retry)
+                                    .unwrap_or_else(|| {
+                                        taken_if_branch::<S>(item, &entry_state, update_body)
+                                    })
                             } else {
                                 item
                             });
