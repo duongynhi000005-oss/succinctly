@@ -56268,6 +56268,18 @@ fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -
     })
 }
 
+/// Whether `source` is a caught destructure ([`caught_marker_destructure`]) of one pattern whose `$x` holds an object or
+/// an array. A `null` or boolean marker is `jv_identical` to a register of its kind, so the step of a `null` element
+/// passes it and a verdict that empties the other steps lets that step's placement through; a `?//` chain's retry is
+/// not modelled (#5113).
+fn caught_destructure_of_container_marker(source: &Expr) -> bool {
+    caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
+        matches!(bind, Expr::AsPattern { .. })
+            && routes_destructuring(patterns)
+            && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
+    })
+}
+
 /// Whether `value` holds a NaN at any depth. `==` is not reflexive on one, so a container that is the register's own
 /// node still compares unequal to itself (`{"a":[nan]}`) and [`caught_destructure_of_other_container`] would take it for
 /// another. The node is the same one, so scanning the register is enough.
@@ -60066,10 +60078,11 @@ fn drive_fold_source_with<S: EvalSemantics>(
         .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient, false))
             // #5176: ...or against the element a `foreach` source moved the register onto, where the state is
             // not it: a `$x` bound elsewhere fails `path_intact` on that node.
-            || with_foreach_register_ambient(ambient, |ambient| {
-                caught_foreign_destructure::<S>(source, ambient, false)
-            })
-            .unwrap_or(false)
+            || (caught_destructure_of_container_marker(source)
+                && with_foreach_register_ambient(ambient, |ambient| {
+                    caught_foreign_destructure::<S>(source, ambient, false)
+                })
+                .unwrap_or(false))
             // #5113: ...and against the value of the register the step's source left, which the frame of a
             // `foreach` UPDATE does not carry: a `$x` holding another container is no node of it, whatever
             // position (or none: `. as $x`, `.b as $x`) the marker was bound at.
