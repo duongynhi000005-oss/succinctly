@@ -61287,10 +61287,13 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // storage with the register exactly where jq's pointer comparison holds.
     // A single pattern only, as the `wrapped_marker` rule above: a `?//` chain's retry rules keep a head
     // unproven. Walked only for a `bound` that shares the register's storage.
+    // #5030: ...and so does a head navigating `.` where `.` is a `$x` marker's value a pipe stage handed on
+    // (`$x | .a as {b:$q} | $q`, read as `($x | .a) as {b:$q}`): the mark says it is that frozen node.
     let marker_navigation_head = || {
         S::TAG == EvalTag::Jq
             && patterns.len() == 1
-            && any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_)))
+            && (snapshot.is_marked()
+                || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
             && head_spine_navigates(head)
     };
     // #4831: the outputs of `head` without the stages that hand their input on unchanged, in the order

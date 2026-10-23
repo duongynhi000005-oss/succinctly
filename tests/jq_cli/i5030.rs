@@ -473,3 +473,85 @@ fn test_reduce_source_x_that_is_the_register_keeps_its_answer_5030() -> Result<(
         ),
     ])
 }
+
+/// #5030 (review 5): `$x | E as P | ..` where `E` navigates the `$x` stage's value. jq runs `E` as a subexp on `$x`'s
+/// node, so `$x | .a` hands on the child `jv` of that node, and the pattern's first step passes `path_intact` when the
+/// register stands there (INIT `.a`, or a stage `.a`): it moves the register onto `.a.b`, as `($x | .a) as P` does. The
+/// step was refused, so a plain pipe raised where jq answers `["a","b"]`, and a `try` around it swallowed the refusal:
+/// `del` left the document where jq raises at the end of the path. A head reaching another node (`.b`, or `$x | .b`
+/// off the register) still raises, or is caught. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_marker_stage_navigated_into_a_destructure_on_the_register_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | .a | $x | .a as {b:$q} | $q)",
+            "[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(. as $x | .a | $x | .a as {b:$q} | $q) |= 9",
+            "{\"a\":{\"b\":9,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach ($x | .a as {b:$q} | $q) as $y (.a; .; $y))",
+            "[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach (try ($x | .a as {b:$q} | .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (try ($x | .a as {b:$q} | .)) as $y (.a; .; .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(. as $x | foreach (try ($x | .a as {b:$q} | .)) as $y (.a; .; .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach ($x | .a as {b:$q} | .) as $y (.a; .; .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":{"b":1}},"b":{"b":1}}"#,
+            r"del(.a? as $x | .a.a | $x | .a? as {b:$q} | $q | .b?)",
+            "{\"a\":{\"a\":{\"b\":1}},\"b\":{\"b\":1}}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | .b | $x | .a as {b:$q} | $q)",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (try ($x | .b as {b:$q} | .)) as $y (.a; .; .))",
+            "",
+            "",
+            0,
+        ),
+    ])
+}
