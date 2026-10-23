@@ -197,3 +197,59 @@ fn test_5113_handler_try_around_an_if_stays_refused_under_a_retry_chain() -> Res
     }
     Ok(())
 }
+
+// A literal `then` a step stores feeds the next step's UPDATE. When every step after it is itself resolved as a literal
+// arm (the stored `1` makes `.a` raise and the handler's literal answer, or the condition takes a literal `else`), no
+// step runs the fold on a stored literal, so the `then` is read on a step that is not the fork's last.
+
+/// #5113 row 2: `(.a,.)` as the source, so the step that stores the literal `1` is not the last, and the one after it
+/// raises on that `1` and takes the handler. Longer sources and an `elif` chain whose later steps stay on the literal
+/// arms. Captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_then_read_when_every_later_step_stores_a_literal() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))",
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[[\"a\"],[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.a) as $i (.; try (if .a then 1 elif . then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else 2 end) catch 1; $i))?]",
+            "[[\"a\"],[],[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: the lookahead stops at eight steps, so a source of ten elements keeps the whole-`if` resolve on its first
+/// step, pinned as it stands (a fix flips it). jq answers `[["a"],[],[],[],[],[],[],[],[],[]]`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_then_lookahead_stops_at_eight_steps() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":{"a":null}}"#,
+        r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+        "[]\n",
+        "",
+        0,
+    )])
+}
