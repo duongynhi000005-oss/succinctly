@@ -42818,11 +42818,7 @@ fn source_destructures_onto_state_node<S: EvalSemantics>(
     else {
         return None;
     };
-    let derived_destructure = any_subexpr(source, &mut |e| {
-        matches!(e, Expr::AsPattern { expr, .. }
-            if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
-                && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
-    });
+    let derived_destructure = source_destructures_derived_value(source);
     if derived_destructure || !plain_chain(&state_path) {
         return None;
     }
@@ -42864,6 +42860,16 @@ fn marker_destructures_all_equal(source: &Expr, register: &OwnedValue) -> bool {
     })
 }
 
+/// Whether `source` destructures a value computed from a marker (`$x.a as {a:$q}`): that one steps from a node the
+/// walk does not look at, and moves the register somewhere it does not name.
+fn source_destructures_derived_value(source: &Expr) -> bool {
+    any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { expr, .. }
+            if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
+                && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
+    })
+}
+
 /// [`source_destructures_onto`], for a source with no destructure of a value computed from a marker (`$x.a as
 /// {a:$q}`): that one steps from a node the walk does not look at, and moves the register somewhere it does not name.
 fn source_destructures_only_onto(
@@ -42871,11 +42877,7 @@ fn source_destructures_only_onto(
     lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
     nested: bool,
 ) -> bool {
-    let derived_destructure = any_subexpr(source, &mut |e| {
-        matches!(e, Expr::AsPattern { expr, .. }
-            if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
-                && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
-    });
+    let derived_destructure = source_destructures_derived_value(source);
     !derived_destructure && source_destructures_onto(source, lands_ok, nested)
 }
 
@@ -43079,7 +43081,12 @@ fn nested_landing<'a>(pattern: &Pattern, value: Option<&'a OwnedValue>) -> Neste
                 match inner {
                     Pattern::Var(_) => return NestedLanding::Absent,
                     Pattern::Object(entries) => match entries.as_slice() {
-                        [entry] if entry.bind.is_none() => inner = &entry.pattern,
+                        [entry]
+                            if entry.bind.is_none()
+                                && matches!(entry.key, ObjectKey::Literal(_)) =>
+                        {
+                            inner = &entry.pattern;
+                        }
                         _ => return NestedLanding::Unread,
                     },
                     Pattern::Array(items) => match items.as_slice() {
@@ -67265,7 +67272,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             &elem.value,
                                         ))
                             };
-                            // #5179: ...and a landing that IS the state, by position.
+                            // #5179: ...and a landing whose position the state's is, or is not (`Some(true)`, `Some(false)`):
+                            // either way the handler is seeded the same, because the resolver hands the pattern's `.` on
+                            // as the untracked, register-carrying branch whether or not the state is the landing. Both
+                            // verdicts are pinned (`tests/jq_cli/i5179.rs`). `state_path` is set only for an UPDATE
+                            // output that sat at a document path, so a computed state (`0`, a `catch 7`) has none.
                             let on_state_node = |source: &Expr, init: &Expr, no_heads: bool| {
                                 bare_step
                                     && no_heads
