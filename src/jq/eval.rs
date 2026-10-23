@@ -42574,11 +42574,11 @@ fn is_identity_or_select_dot(stage: &Expr) -> bool {
 }
 
 /// The value heads (`not`, a literal, ..., [`is_value_head`]) that run ahead of a `foreach` that is the whole of a
-/// fold UPDATE and changes nothing about what it emits, with that `foreach`'s source (#4800): empty heads for the
-/// bare `foreach`. It may sit behind a `try`/`?`-like wrapper ([`emptied_wrapper_inner`]) and in a pipe whose
-/// other stages are `.` or `select(true)`, the value heads ahead of it only; anything else (a fallback, a gate, a
-/// comma, a stage that computes) is `None`.
-fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
+/// fold UPDATE and changes nothing about what it emits, with that `foreach`'s source and INIT (#4800, #5012): empty
+/// heads for the bare `foreach`. It may sit behind a `try`/`?`-like wrapper ([`emptied_wrapper_inner`]) and in a pipe
+/// whose other stages are `.` or `select(true)`, the value heads ahead of it only; anything else (a fallback, a gate,
+/// a comma, a stage that computes) is `None`.
+fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr, &Expr)> {
     fn pass_through(stage: &Expr) -> bool {
         match unwrap_paren(stage) {
             Expr::Identity => true,
@@ -42589,7 +42589,7 @@ fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
         }
     }
     match unwrap_paren(without_empty_siblings(expr)) {
-        Expr::Foreach { input, .. } => Some((Vec::new(), input)),
+        Expr::Foreach { input, init, .. } => Some((Vec::new(), input, init)),
         Expr::Pipe(stages) => {
             let at = stages
                 .iter()
@@ -42605,9 +42605,9 @@ fn plain_update_heads(expr: &Expr) -> Option<(Vec<&Expr>, &Expr)> {
             if !stages[at + 1..].iter().all(pass_through) {
                 return None;
             }
-            let (inner_heads, source) = plain_update_heads(&stages[at])?;
+            let (inner_heads, source, init) = plain_update_heads(&stages[at])?;
             heads.extend(inner_heads);
-            Some((heads, source))
+            Some((heads, source, init))
         }
         Expr::Label { name, body } => plain_update_heads(label_sole_item(name, body)?),
         other => emptied_wrapper_inner(other).and_then(plain_update_heads),
@@ -42686,17 +42686,94 @@ fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> boo
 /// better than the element (`LostAt` it), and called that error a guess. An absent key lands on `null` and is
 /// [`source_destructures_to_null_or_bool`]'s. Only bare `$name` entries of a pattern with literal keys are read.
 fn source_destructures_to_container(source: &Expr) -> bool {
-    // A destructure of a value computed from a marker (`$x.a as {a:$q}`) steps from a node the walk below
-    // does not look at, and moves the register somewhere it does not name.
+    source_destructures_only_onto(source, &|child| {
+        matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
+    })
+}
+
+/// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on a value that is not
+/// equal to `state`, the value the `foreach` is handed, and there is one (#5012): `$x as {a:$a} | .` with `$x.a`
+/// `true` and the state `"c"`, or the root an earlier step's `catch $i` left. jq's register is then that landing, which
+/// a value that differs from it is never `jv_identical` to, so the pattern's `.` body emits the state off the register
+/// as [`source_destructures_to_container`]'s `null`/boolean state does (of which this is the generalization, read for
+/// a step that binds one bare `$name` only). A state equal to the landing may be that very node (the landing an
+/// earlier step's handler emitted), which a value cannot say, and is not read.
+fn source_destructures_off_state(source: &Expr, state: &OwnedValue) -> bool {
+    source_destructures_only_onto(source, &|child| child.unwrap_or(&OwnedValue::Null) != state)
+}
+
+/// [`source_destructures_onto`], for a source with no destructure of a value computed from a marker (`$x.a as
+/// {a:$q}`): that one steps from a node the walk does not look at, and moves the register somewhere it does not name.
+fn source_destructures_only_onto(
+    source: &Expr,
+    lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
+) -> bool {
     let derived_destructure = any_subexpr(source, &mut |e| {
         matches!(e, Expr::AsPattern { expr, .. }
             if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
                 && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
     });
-    !derived_destructure
-        && source_destructures_onto(source, &|child| {
-            matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
-        })
+    !derived_destructure && source_destructures_onto(source, lands_ok)
+}
+
+/// Whether the `foreach` a fold UPDATE is made of ([`plain_update_heads`]: its `source` and `init`) raises at its
+/// source's destructure before it reads the state it is handed, when jq's register is `register` (#5012). Its INIT
+/// moves no register (`.`, a literal, a value head), and its source is a destructure of a `$x` (with no computed key)
+/// that raises, bare or behind a `try`/`?` that empties it; not a comma of such, whose items jq's `try`s empty one by
+/// one (#5004). jq's `INDEX` checks `path_intact` before it reads its input, so a `$x` that is not `register` raises at
+/// the pattern's first step, and a value not equal to the register is never `jv_identical` to it. One that is equal
+/// may be that node, and its pattern raises anyway where it is the register ([`pattern_raises_on_register`]). Either
+/// way the raise precedes the state, so the reading that [`source_destructures_to_null_or_bool`] and
+/// [`source_destructures_to_container`] give a `null`/boolean state holds for any state, such as the container an
+/// earlier step's handler leaves (`catch $i`).
+fn nested_source_destructures_off_register(
+    source: &Expr,
+    init: &Expr,
+    register: &OwnedValue,
+) -> bool {
+    fn raises(item: &Expr, register: &OwnedValue) -> bool {
+        match unwrap_paren(item) {
+            Expr::AsPattern { expr, patterns, .. } => {
+                match (unwrap_paren(expr), patterns.as_slice()) {
+                    (Expr::TrackedVar(marker), [pattern]) => {
+                        !matches!(pattern, Pattern::Var(_))
+                            && pattern_is_plain(pattern)
+                            && (marker.value != *register
+                                || pattern_raises_on_register(pattern, &marker.value))
+                    }
+                    _ => false,
+                }
+            }
+            // Emptied: the handler of a `try` that has one runs on the raise and emits from it.
+            Expr::Optional(inner)
+            | Expr::Try {
+                expr: inner,
+                catch: None,
+            } => raises(inner, register),
+            Expr::Try {
+                expr: inner,
+                catch: Some(handler),
+            } => emits_nothing(handler) && raises(inner, register),
+            _ => false,
+        }
+    }
+    (matches!(unwrap_paren(init), Expr::Identity) || is_value_head(unwrap_paren(init)))
+        && raises(source, register)
+}
+
+/// Whether destructuring `value` with `pattern` raises in jq when `value` is jq's register (#5012), so whether or not
+/// it is: an object pattern on a value that is neither an object nor `null`, an array pattern on one that is
+/// neither an array nor `null` (`Cannot index ...`), and a pattern of two or more entries on the container it names,
+/// whose second step is checked against the child the first moved the register onto, never `jv_identical` to the
+/// container (`Invalid path expression near attempt to access element ...`). A `null` is every `null` child by kind,
+/// so no pattern raises on it.
+fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
+    match (pattern, value) {
+        (Pattern::Var(_), _) | (_, OwnedValue::Null) => false,
+        (Pattern::Object(entries), OwnedValue::Object(_)) => entries.len() >= 2,
+        (Pattern::Array(items), OwnedValue::Array(_)) => items.len() >= 2,
+        _ => true,
+    }
 }
 
 /// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
@@ -65772,8 +65849,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // the same buffer-sharing slice `reduce` does (#3504).
     let slice_ok = fold_slice_ok(patterns, input);
     // #5004: the most INIT forks and source items this `foreach` can run, where their shapes say
-    // ([`source_output_bound`]): the step that reaches both is its last, and the only one a `try`'s handler is placed
-    // on ([`fold_body::update_try_entry`]). Jq mode only, as that placement is.
+    // ([`source_output_bound`]): the step that reaches both is its last, which the readings of a literal the step
+    // stores ([`ForkTail`]) and of a handler's computed arm ([`handler_computed_arm`]) ask for. Jq mode only.
     let run_bounds = (S::TAG == EvalTag::Jq)
         .then(|| Some((source_output_bound(init)?, source_output_bound(input)?)))
         .flatten();
@@ -66647,27 +66724,40 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // register, or retries an alternative on the body's raise, in ways the step does not report.
                             let bare_step =
                                 matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
-                            // And only on the `foreach`'s last step, of its last INIT fork: a step before it that placed
-                            // its handler would let the `foreach` reach later steps `main` never reached (it refused at
-                            // this one), whose handler the reading may not cover. Unseeded there, a refusal of a frozen
-                            // `$x`/`$i` is read as exact, which a `try`/`?` around the fold swallows (#5012). What runs
-                            // after the `foreach`'s outputs is newly reached, as after any refusal turned into an answer.
+                            // On every step the reading below covers (#5012): a step that places its handler lets the
+                            // `foreach` reach later steps a refusal at this one never reached, and the reading covers a
+                            // container state too where the nested source raises before reading it
+                            // ([`nested_source_destructures_off_register`]), as an earlier step's handler leaves one.
                             // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
                             // `bind.apply` already copies the whole UPDATE for the step).
-                            let seedable_step = bare_step && last_step;
+                            let seedable_step = bare_step;
                             let mut entry_tries = None;
                             // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                             // register onto, not the state the last step left. Where the pattern lands on a
                             // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
                             // handler that emits, only where #5004 places every such handler's output, or the handler
                             // is inside the nested `foreach`'s INIT, UPDATE or EXTRACT (it emits into that state).
+                            // #5012: ...and, for a step that binds one bare `$name` (a destructuring step moved the
+                            // register off the element), a landing that is not equal to the state, which it is then
+                            // never `jv_identical` to; or any state, where the source raises at its destructure before
+                            // the state is read.
+                            let any_state = |source: &Expr, init: &Expr, handed: &OwnedValue| {
+                                bare_step
+                                    && (source_destructures_off_state(source, handed)
+                                        || nested_source_destructures_off_register(
+                                            source,
+                                            init,
+                                            &elem.value,
+                                        ))
+                            };
                             let _register = (_sole_update_foreach.is_some()
                                 && elem.register_path.is_some()
-                                && plain_update_heads(item).is_some_and(|(heads, source)| {
+                                && plain_update_heads(item).is_some_and(|(heads, src, init)| {
                                     head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
-                                        source_destructures_to_null_or_bool(source, &handed)
-                                            || (is_null_or_bool(&handed)
-                                                && source_destructures_to_container(source)
+                                        source_destructures_to_null_or_bool(src, &handed)
+                                            || (((is_null_or_bool(&handed)
+                                                && source_destructures_to_container(src))
+                                                || any_state(src, init, &handed))
                                                 && match emitting_handler_count(item) {
                                                     0 => true,
                                                     // #5049: every emitting handler is inside the nested
