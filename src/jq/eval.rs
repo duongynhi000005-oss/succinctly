@@ -42911,11 +42911,15 @@ fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
 /// a `try` around it empties the nested `foreach`'s source ([`with_foreach_register_ambient`] decides that part).
 /// Only a destructure whose source is the bare marker is read, of patterns that destructure at their first step
 /// ([`routes_destructuring`], or a `?//` chain of such: a bare `$var` alternative recovers), and there must be one under
-/// a `try` or a `?` ([`catching_wrapper_inner`]): an uncaught raise is not an empty source (#5182).
+/// a `try` or a `?` ([`catching_wrapper_inner`]), or be the source whole ([`foreign_destructure_raise`]): an uncaught
+/// raise elsewhere in the source is not an empty source (#5182).
 fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) -> bool {
     let mut seen = false;
     let mut all = true;
     let mut caught = false;
+    // ...or the destructure itself, with nothing around it (#5182): its raise is what the step does.
+    let mut bare = matches!(unwrap_paren(source), Expr::AsPattern { expr, patterns, .. }
+        if routes_destructuring(patterns) && matches!(unwrap_paren(expr), Expr::TrackedVar(_)));
     any_subexpr(source, &mut |e| {
         caught |= catching_wrapper_inner(e).is_some();
         if let Expr::AsPattern { expr, patterns, .. } = e {
@@ -42932,7 +42936,8 @@ fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) 
         }
         false
     });
-    seen && all && caught
+    bare &= seen;
+    seen && all && (caught || bare)
 }
 
 /// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
@@ -56151,6 +56156,47 @@ fn with_foreach_register_ambient<T>(
     }))
 }
 
+/// The raise of a `foreach` source that is the bare destructure of a `$x` that is never the element the enclosing
+/// `foreach` source moved the register onto ([`fold_body::foreach_register`], #5182): jq's pattern step fails `path_intact`
+/// there, before it reads a key, and the error leaves the whole loop (a `try` or a `?` outside it catches it; one in the
+/// source would have emptied it instead, [`caught_foreign_destructure`]). The error is the walk's own, so a `{a:$a}`,
+/// an array pattern's last index and an `{a:$a,b:$b}` name the step jq's does. `None` where the source is not such a
+/// destructure or the walk does not raise.
+fn foreign_destructure_raise<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+) -> Option<Flow> {
+    let register = fold_body::foreach_register_here()?;
+    let Expr::AsPattern { expr, patterns, .. } = unwrap_paren(source) else {
+        return None;
+    };
+    let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
+        return None;
+    };
+    let [pattern] = patterns.as_slice() else {
+        return None;
+    };
+    if !routes_destructuring(patterns) || !never_identical(&marker.value, &register) {
+        return None;
+    }
+    let seed = PatternRegister {
+        path: PathPrefix::root(),
+        value: register,
+        is_input: false,
+        known: true,
+    };
+    let flow = each_pattern_walk_probed::<S>(
+        pattern,
+        &marker.value,
+        seed,
+        &ambient.frame,
+        false,
+        None,
+        &mut |_, _| Demand::Continue,
+    );
+    matches!(flow, Flow::Escaped(_)).then_some(flow)
+}
+
 /// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
 /// destructure of a `$x` that [`foreign_register_markers`] proves is not the register (#4709): the
 /// pattern's step raises, the `try` catches it and `source` is empty. Of a `foreach` that is the
@@ -59953,6 +59999,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
                 && !(update_needs_truthy && matches!(ambient.value, OwnedValue::Bool(false)))
                 && caught_foreign_destructure::<S>(source, ambient, true)));
     let marker_destructures_unplaced_register = equal_verdict || foreign_verdict;
+    // #5182: ...and the destructure with no `try` around it raises instead, out of the whole loop.
+    if S::TAG == EvalTag::Jq
+        && foreach_source
+        && fold_body::depth() != 0
+        && fold_body::sole_update_foreach_in_loop_here(source)
+    {
+        if let Some(flow) = foreign_destructure_raise::<S>(source, ambient) {
+            return flow;
+        }
+    }
     // #4723: ...and of one that is the whole UPDATE of an enclosing `foreach`, no state at all: the
     // loop emits nothing for the step.
     //
