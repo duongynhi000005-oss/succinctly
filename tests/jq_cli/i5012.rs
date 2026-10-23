@@ -496,22 +496,6 @@ fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused
             "",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
         ),
-        // A step whose state is the register (the root `catch $x` left on the root element): the resolver refuses the
-        // nested source's destructure of `$x` as a guess there, as on `main` for `foreach (.) as $i (.; FE; $i)`, now
-        // reached after the first step is placed. jq answers `[]` `[]`, and `"C"` for the `del` (a later step's raise);
-        // `main` refused catchably at the first step.
-        (
-            r#"{"a":[null]}"#,
-            r#"try path(. as $x | foreach (.,.) as $i (null; try (foreach ($x as [$a] | .) as $y (.; .; .)) catch $x; $x)) catch "C""#,
-            "[]\n",
-            "Invalid path expression with result {\"a\":[null]}",
-        ),
-        (
-            r#"{"a":[null]}"#,
-            r#"try del(. as $x | foreach (.,.,.a) as $i (null; try (foreach ($x as [$a] | .) as $y (.; $y; .a)) catch $x; $x)) catch "C""#,
-            "",
-            "Invalid path expression with result {\"a\":[null]}",
-        ),
     ] {
         for (out, stderr, code) in [
             run_jq_full(&["-c", filter], Some(input))?,

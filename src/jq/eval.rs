@@ -42794,30 +42794,32 @@ fn nested_source_destructures_off_register(
     init: &Expr,
     register: &OwnedValue,
 ) -> bool {
-    fn raises(item: &Expr, register: &OwnedValue) -> bool {
-        match unwrap_paren(item) {
-            Expr::AsPattern { expr, patterns, .. } => {
-                match (unwrap_paren(expr), patterns.as_slice()) {
-                    (Expr::TrackedVar(marker), [pattern]) => {
-                        !matches!(pattern, Pattern::Var(_))
-                            && pattern_is_plain(pattern)
-                            && (marker.value != *register
-                                || pattern_raises_on_register(pattern, &marker.value))
-                    }
-                    _ => false,
-                }
-            }
-            // Emptied, as [`is_single_caught_destructure`] reads it: a `try` with a handler runs it on the raise.
-            Expr::Optional(inner)
-            | Expr::Try {
-                expr: inner,
-                catch: None,
-            } => raises(inner, register),
-            _ => false,
-        }
-    }
     // The INIT test [`update_foreach_handlers`] places a handler behind.
-    cannot_move_register(init) && raises(source, register)
+    cannot_move_register(init) && source_destructure_raises(source, register)
+}
+
+/// Whether `item`, a fold source, raises at the destructure of a `$x` it opens with when jq's register is `register`
+/// (#5012, #5177): a bare destructure, or one behind a handler-less `try`/`?` that empties it. See
+/// [`nested_source_destructures_off_register`].
+fn source_destructure_raises(item: &Expr, register: &OwnedValue) -> bool {
+    match unwrap_paren(item) {
+        Expr::AsPattern { expr, patterns, .. } => match (unwrap_paren(expr), patterns.as_slice()) {
+            (Expr::TrackedVar(marker), [pattern]) => {
+                !matches!(pattern, Pattern::Var(_))
+                    && pattern_is_plain(pattern)
+                    && (marker.value != *register
+                        || pattern_raises_on_register(pattern, &marker.value))
+            }
+            _ => false,
+        },
+        // Emptied, as [`is_single_caught_destructure`] reads it: a `try` with a handler runs it on the raise.
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => source_destructure_raises(inner, register),
+        _ => false,
+    }
 }
 
 /// Whether destructuring `value` with `pattern` (one with no computed key, [`pattern_is_plain`]) raises in jq when
@@ -60166,11 +60168,23 @@ fn drive_fold_source_with<S: EvalSemantics>(
     if caught_foreign_verdict {
         return Flow::Exhausted;
     }
+    // #5177: ...except a `foreach` source that raises at the destructure of a `$x` where the UPDATE's state is the register
+    // the source moved it onto ([`fold_body::foreach_register`]): jq's pattern step raises its own, catchable error there, so
+    // the resolver decides rather than this guess nothing catches.
+    let raises_on_known_register = foreach_source
+        && ambient.trackable
+        && fold_body::foreach_register_here().is_some_and(|register| {
+            // A `null` or boolean state is the register by kind only, which says nothing of the node `$x` is.
+            !is_null_or_bool(&register)
+                && register == *ambient.value
+                && source_destructure_raises(source, &register)
+        });
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
         && ambient.trackable
         && !matches!(ambient.value, OwnedValue::Null)
         && fold_body::depth() != 0
+        && !raises_on_known_register
     {
         // #4637: in the body of a `reduce` whose source moved the register onto an element,
         // neither `.` nor a `$x` bound outside is that register ([`in_moved_body`]), so jq's
