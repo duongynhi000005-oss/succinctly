@@ -38851,6 +38851,19 @@ fn reads_foreign_marker_outside_a_fold(update: &Expr) -> bool {
 /// anywhere else (under a `try` with a handler, `//`, a call or a fold) may feed a later step, which does
 /// check it.
 fn update_binds_only_in_tail(e: &Expr) -> bool {
+    binds_only_in_tail(e, false)
+}
+
+/// [`update_binds_only_in_tail`] for a three-argument `foreach` UPDATE, which also reads through a `//` whose left operand
+/// is such a chain and whose right operand holds no bind (#5157): `a // b` tests the truthiness of `a`'s output and
+/// stores it, with no path check, as the next state, so the `.` a bind in `a` ends on is the UPDATE's own output as
+/// it is without the `//`. Not a `reduce`: its final emission is judged on the accumulator, and a `?//` chain behind a
+/// `//` there moved a message jq matched (`reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?)`).
+fn foreach_update_binds_only_in_tail(e: &Expr) -> bool {
+    binds_only_in_tail(e, true)
+}
+
+fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
     fn bind_free(e: &Expr) -> bool {
         !any_subexpr(e, &mut |inner| {
             matches!(
@@ -38873,7 +38886,9 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
     // a `try` and empties the UPDATE, which the resolver derives once the register is carried in.
     hands_outputs_on(e, &|leaf| match leaf {
         Expr::Pipe(stages) => match stages.split_last() {
-            Some((last, head)) => head.iter().all(bind_free) && update_binds_only_in_tail(last),
+            Some((last, head)) => {
+                head.iter().all(bind_free) && binds_only_in_tail(last, through_alternative)
+            }
             None => true,
         },
         Expr::AsPattern {
@@ -38883,9 +38898,14 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
         } => {
             bind_free(expr)
                 && !patterns.iter().any(pattern_has_computed_key)
-                && update_binds_only_in_tail(body)
+                && binds_only_in_tail(body, through_alternative)
         }
-        Expr::As { expr, body, .. } => bind_free(expr) && update_binds_only_in_tail(body),
+        Expr::As { expr, body, .. } => {
+            bind_free(expr) && binds_only_in_tail(body, through_alternative)
+        }
+        Expr::Alternative(left, right) if through_alternative => {
+            binds_only_in_tail(left, true) && bind_free(right)
+        }
         other => bind_free(other),
     })
 }
@@ -52657,6 +52677,11 @@ fn fans_out(expr: &Expr) -> bool {
 /// "Run once" is about the walk's siblings, not about emitting: a handler-less `try`/`?` around the
 /// chain (#4934) is read through too, and its body may raise and so emit nothing. That is the
 /// resolver's to derive once the register is carried in (see [`hands_outputs_on`]).
+///
+/// #5157: and a `//` whose left operand is such a chain and whose right operand is a literal. The right operand
+/// runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
+/// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a
+/// step whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register).
 fn is_single_output_bind(expr: &Expr) -> bool {
     let plain_source = |source: &Expr| {
         matches!(
@@ -52681,6 +52706,9 @@ fn is_single_output_bind(expr: &Expr) -> bool {
             Expr::As {
                 expr: source, body, ..
             } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
+            Expr::Alternative(left, right) => {
+                is_single_output_bind(left) && matches!(unwrap_paren(right), Expr::Literal(_))
+            }
             other => emits_only_the_accumulator(other),
         }
     }
@@ -65177,7 +65205,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
         && reads_foreign_marker_outside_a_fold(update)
-        && update_binds_only_in_tail(update);
+        && foreach_update_binds_only_in_tail(update);
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register =
         S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
