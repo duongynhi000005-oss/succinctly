@@ -66783,9 +66783,30 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // #4550: see `resolve_reduce`'s `_acc_off_register`.
                             // UPDATE only: EXTRACT resolves one body deeper, so it never reads this mark.
                             // Never together with the mark above.
-                            let _acc_off_register =
-                                (state_off_register && !live_stepped && _acc_is_register.is_none())
-                                    .then(fold_body::acc_off_register);
+                            // #5178: ...and a value head ahead of the nested `foreach` (`not | FE`) hands it a
+                            // value that is no node of the register, whatever the state is.
+                            let heads_off_register = outermost_fold
+                                && plain_update_heads(item).is_some_and(|(heads, ..)| {
+                                    !heads.is_empty()
+                                        && head_value::<S>(&heads, &entry_state).is_some_and(
+                                            |handed| {
+                                                if is_null_or_bool(&handed) {
+                                                    !null_bool_identical(&handed, &active_reg.value)
+                                                } else {
+                                                    // A number or a string is no `null`/boolean node.
+                                                    !matches!(
+                                                        handed.as_ref(),
+                                                        OwnedValue::Object(_)
+                                                            | OwnedValue::Array(_)
+                                                    ) && is_null_or_bool(&active_reg.value)
+                                                }
+                                            },
+                                        )
+                                });
+                            let _acc_off_register = ((state_off_register || heads_off_register)
+                                && !live_stepped
+                                && _acc_is_register.is_none())
+                            .then(fold_body::acc_off_register);
                             // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                             // emits, so an inner source that is empty leaves this one emitting nothing.
                             let _sole_update_foreach = sole_update_mark::<S>(item, update_body);
