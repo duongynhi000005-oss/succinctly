@@ -65242,6 +65242,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     } else {
         update
     };
+    // #5114: a `//` that is the whole UPDATE of a `foreach` with an EXTRACT is read as the `(..) // .. | .` jq runs it as
+    // (a `| .` changes nothing in jq). The pipe route already matched jq for a caught foreign `foreach` behind the `//`
+    // (`((FE) // 5) | .`), where the bare UPDATE refused a `$i` EXTRACT on the first step with the state where jq emits its
+    // path; reading the bare form as the pipe gives it that route. Differential grid in `tests/jq_cli/i5114.rs`.
+    let alt_piped = (S::TAG == EvalTag::Jq
+        && extract.is_some()
+        && matches!(unwrap_paren(update), Expr::Alternative(..)))
+    .then(|| Expr::Pipe(vec![update.clone(), Expr::Identity].into()));
+    let update = alt_piped.as_ref().unwrap_or(update);
     // #5111: `resolve_reduce`'s #4901 mark for a `foreach` whose EXTRACT judges the emission: jq stores UPDATE's output
     // as the next state without a path check, so the `.` a bind in tail position ends on (`1 | ($x as P | .)`) is
     // left unchecked. A two-argument `foreach` emits UPDATE's output, which is checked, so it is not marked.
