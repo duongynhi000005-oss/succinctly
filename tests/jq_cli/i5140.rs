@@ -1,0 +1,535 @@
+//! #5140: a `reduce` UPDATE that wraps a bind of `.` that ends on `.` in `first`, `limit`, `nth(0; ..)`, a comma or an `if`.
+
+use anyhow::Result;
+
+use crate::{assert_path_rows_both_routes_3749, run_jq_full};
+
+// `reduce SRC as $i (INIT; W(. as {b:$q} | .))`: every output of the UPDATE is the accumulator's own node, so jq's register
+// is INIT's however far the bind navigated, and the final check passes. `update_returns_its_input` read `.`, a pipe, a
+// `label`, a handler-less `try`/`?` (#5136) and a single-pattern bind of `.`, but none of the wrappers a bind chain of the
+// same UPDATE sits in (`hands_outputs_on`, #4932): `first(..)`, `limit(n; ..)` with a nonzero constant count, `nth(0; ..)`,
+// a comma, and an `if` whose condition cannot move the register. The UPDATE was read as computing a value and the final
+// emission was refused (`with result <accumulator>`): `path`, `del`, `|=` and `=` failed where jq answers, and
+// `[path(..)?]` lost the path.
+
+/// #5140: the wrappers around a bind of `.` (alone, nested, behind `try`/`label`/`| .`) under `path`, `[path(..)?]`,
+/// `del` and `|=`, with the controls where the pattern raises (the state becomes `null`, as in jq), a `foreach` UPDATE, and
+/// the wrappers that keep their refusal or their answer (a count of zero, a comma item that is not the accumulator).
+/// Every row captured from `/usr/bin/jq` 1.7.1 (stdout, exit code, message), both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5140_reduce_update_bind_of_dot_behind_first_limit_nth_comma_if() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; first(. as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; first(. as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; first(. as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; first(. as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(1; . as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(1; . as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; limit(1; . as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(1; . as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(2; . as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(2; . as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; limit(2; . as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(2; . as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; nth(0; . as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; nth(0; . as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; nth(0; . as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; nth(0; . as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; (. as {b:$q} | .), (. as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; (. as {b:$q} | .), (. as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; (. as {b:$q} | .), (. as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; (. as {b:$q} | .), (. as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; (. as {b:$q} | .), .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; (. as {b:$q} | .), .))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; (. as {b:$q} | .), .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; (. as {b:$q} | .), .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; if . then . as {b:$q} | . else . end))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; if . then . as {b:$q} | . else . end))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; if . then . as {b:$q} | . else . end))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; if . then . as {b:$q} | . else . end)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; if not then . else . as {b:$q} | . end))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; if not then . else . as {b:$q} | . end))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; if not then . else . as {b:$q} | . end))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; if not then . else . as {b:$q} | . end)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; if true then . as {b:$q} | . else . as {b:$q} | . end))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; if true then . as {b:$q} | . else . as {b:$q} | . end))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; if true then . as {b:$q} | . else . as {b:$q} | . end))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; if true then . as {b:$q} | . else . as {b:$q} | . end)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; first(limit(2; . as {b:$q} | .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; first(limit(2; . as {b:$q} | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; first(limit(2; . as {b:$q} | .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; first(limit(2; . as {b:$q} | .)))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $out | first(. as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; label $out | first(. as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; label $out | first(. as {b:$q} | .)))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $out | first(. as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; first(. as {b:$q} | .) | .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; first(. as {b:$q} | .) | .))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; first(. as {b:$q} | .) | .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; first(. as {b:$q} | .) | .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; try (first(. as {b:$q} | .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; try (first(. as {b:$q} | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; try (first(. as {b:$q} | .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; try (first(. as {b:$q} | .)))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; first(try (. as {b:$q} | .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; first(try (. as {b:$q} | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; first(try (. as {b:$q} | .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; first(try (. as {b:$q} | .)))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(1; try (. as {b:$q} | .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(1; try (. as {b:$q} | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"del(reduce (1,2) as $i (.; limit(1; try (. as {b:$q} | .))))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(1; try (. as {b:$q} | .)))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce . as $i (.; first(. as {a:{a:$q}} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; first(try (. as {b:$q} | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r"path(. as $x | reduce (.,.) as $i (.; first(try (. as [$q] | .))))",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+        (
+            r"{}",
+            r"(reduce (1,2) as $i (.; nth(0; . as {a:$q} | .))) = 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r"{}",
+            r"path(foreach (1,2) as $i (.; first(. as {a:$q} | .); .))",
+            "",
+            r"Invalid path expression with result {}",
+            5,
+        ),
+        (
+            r"[1,[2]]",
+            r"[path(reduce (1,2) as $i (.; first(try (. as [$q] | .))))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r"[1,[2]]",
+            r"[path(reduce (1,2) as $i (.; first(try (. as {a:$q} | .))))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(0; . as {b:$q} | .)))",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+    ])
+}
+
+/// #5140: the shapes the wrappers' arms do not read keep their refusal (`Invalid path expression with result ..`; jq
+/// answers each): a `//` whose right operand is not the accumulator when the left is falsy, an `if` whose condition
+/// navigates, and an INIT that navigated before a `limit`/`try` bind. Known divergences, listed in
+/// `docs/compliance/jq/limitations.md`: a change that answers one of them rewrites its row.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5140_wrappers_not_read_keep_their_refusal() -> Result<()> {
+    for (input, filter) in [
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(reduce (1,2) as $i (.a; limit(1; try (. as {b:$q} | .))))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; (first(. as {b:$q} | .)) // 5))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; if .a then . as {b:$q} | . else . end))",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", 5),
+            "`{filter}` on {input}: stderr {stderr:?}"
+        );
+        assert!(
+            stderr.contains("Invalid path expression with result"),
+            "`{filter}` on {input}: {stderr:?}"
+        );
+    }
+    Ok(())
+}

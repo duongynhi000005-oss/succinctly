@@ -38575,6 +38575,9 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
 /// A handler-less `try`/`?` is too (#5136): a bind that raises under it empties the UPDATE and the next state is `null`,
 /// which the resolver derives from the pattern's own walk (#4934), so the outputs it does emit are still the
 /// accumulator's own node.
+/// So are `first(..)`, `limit(n; ..)` with a nonzero constant count and `nth(0; ..)` (they emit some of their body's
+/// outputs), a comma whose every item returns the accumulator, and an `if` whose condition cannot move the register and
+/// whose branches both do (#5140); a `//` is not (its right operand is not the accumulator when the left is falsy).
 /// A `?//` chain is in as the nested fold's source (#4506), and as a nested `reduce`'s own loop
 /// pattern when [`reduce_alternative_is_immaterial`] holds; any other chain there is out (a failed
 /// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must
@@ -38584,13 +38587,33 @@ fn update_returns_its_input(e: &Expr) -> bool {
         Expr::Identity => true,
         Expr::Paren(inner) => update_returns_its_input(inner),
         // #4567: a `label` hands its body's outputs on, so it is read through. Sound only while no arm
-        // of this function admits a `break` (a comma, an `if`, a call or a `break` itself); the
-        // `break $q` rows of `test_reduce_update_label_wrapped_destructure_4567` fail if one starts to.
+        // of this function admits a `break` (a call, or a `break` itself, as a leaf; a comma's items and an
+        // `if`'s branches are vetted by this function, #5140); the `break $q` rows of
+        // `test_reduce_update_label_wrapped_destructure_4567` fail if one starts to.
         Expr::Label { body, .. } => update_returns_its_input(body),
         // #5136: a handler-less `try`/`?` hands its body's outputs on, and a bind that raises under it empties the UPDATE
         // (the next state is `null`), which the resolver derives from the pattern's own walk once the register is carried
         // in (#4934): every output that is emitted is still the accumulator's own node.
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => update_returns_its_input(expr),
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            update_returns_its_input(inner)
+        }
+        Expr::Limit { n, expr } if takes_outputs(n) => update_returns_its_input(expr),
+        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+            if is_nth_zero(n) =>
+        {
+            update_returns_its_input(expr)
+        }
+        Expr::Comma(items) => items.iter().all(update_returns_its_input),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            cannot_move_register(cond)
+                && update_returns_its_input(then_branch)
+                && update_returns_its_input(else_branch)
+        }
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
