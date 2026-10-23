@@ -275,27 +275,17 @@ fn test_5106_extract_caught_bind_foreach_restates_at_the_bound_child() -> Result
     ])
 }
 
-/// #5106: rows that stay wrong, pinned to jq's answers and ignored until they are fixed: an `if` whose other arm is `.`
-/// rather than `empty`, and INIT `.`, whose loud refusal `[path(..)?]` does not catch where jq's `FE` is empty. Every
-/// row captured from `/usr/bin/jq` 1.7.1, both routes.
+/// #5106: a row that stays wrong, pinned to jq's answer and ignored until it is fixed: INIT `.`, whose loud refusal
+/// `[path(..)?]` does not catch where jq's `FE` is empty. Captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 #[ignore = "#5106 residuals"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5106_known_gaps() -> Result<()> {
-    assert_path_rows_both_routes_3749(&[
-        (
-            r#"{"a":null,"b":2}"#,
-            r"[path(. as $x | foreach . as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else . end))?]",
-            "[[\"a\"]]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":null,"b":2}"#,
-            r"[path(. as $x | foreach . as $i (.; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
-            "[]\n",
-            "",
-            0,
-        ),
-    ])
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":null,"b":2}"#,
+        r"[path(. as $x | foreach . as $i (.; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
+        "[]\n",
+        "",
+        0,
+    )])
 }
