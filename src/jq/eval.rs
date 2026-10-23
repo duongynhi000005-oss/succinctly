@@ -38247,8 +38247,6 @@ fn update_wraps_bare_bind_foreach(e: &Expr, outer_extract: Option<&Expr>) -> boo
         // #5015: ...and the handler form, whose pass is decided per step.
         || handler_bind_foreach_update_key(e).is_some()
         || comma_bind_split(e).is_some()
-        // #5110: ...and `(LIT | FE) // R`, whose operands are resolved one at a time.
-        || alt_bind_split(e).is_some()
 }
 
 /// A fold UPDATE that is a comma of one bare caught-bind `foreach` ([`bare_bind_foreach_update_key`]) and literal
@@ -38298,22 +38296,39 @@ fn alt_bind_split(update: &Expr) -> Option<(PatternKey<'_>, [&Expr; 2])> {
     let [head, Expr::Foreach { input, .. }] = stages.as_slice() else {
         return None;
     };
-    (matches!(
-        unwrap_paren(head),
-        Expr::Literal(
-            Literal::NumberLiteral(..)
-                | Literal::Int(_)
-                | Literal::Float(_)
-                | Literal::String(_)
-                | Literal::Bool(true)
+    (is_truthy_literal(head)
+        && matches!(
+            unwrap_paren(input),
+            Expr::Try { catch: None, .. } | Expr::Optional(_)
         )
-    ) && matches!(
-        unwrap_paren(input),
-        Expr::Try { catch: None, .. } | Expr::Optional(_)
-    ) && matches!(unwrap_paren(right), Expr::Literal(_)))
+        && matches!(unwrap_paren(right), Expr::Literal(_)))
     .then(|| bare_bind_foreach_update_key(left))
     .flatten()
     .map(|key| (key, [&**left, &**right]))
+}
+
+/// The items a foreach step resolves one at a time: a comma's (or the one UPDATE), or the two operands of
+/// [`alt_bind_split`], neither of which is a slice of `Expr`s.
+#[derive(Clone, Copy)]
+enum UpdateItems<'e> {
+    Comma(&'e [Expr]),
+    Alternative([&'e Expr; 2]),
+}
+
+impl<'e> UpdateItems<'e> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Comma(items) => items.len(),
+            Self::Alternative(operands) => operands.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> &'e Expr {
+        match self {
+            Self::Comma(items) => &items[index],
+            Self::Alternative(operands) => operands[index],
+        }
+    }
 }
 
 /// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
@@ -64814,8 +64829,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
         && cannot_move_register(init);
-    let bare_bind_foreach_update_on_register =
-        bare_bind_foreach_gates && update_wraps_bare_bind_foreach(update, extract);
+    // #5110: ...and `(LIT | FE) // R`, whose left operand is the bind item and whose right one runs only when the left emitted
+    // nothing ([`alt_bind_split`]). Read as the whole UPDATE only: an `if` arm of that shape is not asked.
+    let alt_split = bare_bind_foreach_gates
+        .then(|| alt_bind_split(update))
+        .flatten();
+    let bare_bind_foreach_update_on_register = bare_bind_foreach_gates
+        && (update_wraps_bare_bind_foreach(update, extract) || alt_split.is_some());
     // #4800: the same gates, for the steps of an `if` UPDATE that [`update_wraps_bare_bind_foreach`] refuses as a whole
     // but whose `then` branch it reads ([`taken_then_branch`]).
     let bare_bind_foreach_update_per_step =
@@ -64829,13 +64849,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     let comma_split = bare_bind_foreach_update_on_register
         .then(|| comma_bind_split(update))
         .flatten();
-    // #5110: ...and `(LIT | FE) // R`, whose left operand is the bind item and whose right one runs only when the left emitted
-    // nothing ([`alt_bind_split`]).
-    let alt_split = bare_bind_foreach_update_on_register && alt_bind_split(update).is_some();
     let comma_bind_item = comma_split
         .as_ref()
         .map(|(index, _, _)| *index)
-        .or_else(|| alt_split.then_some(0));
+        .or_else(|| alt_split.map(|_| 0));
     // #5110: ...behind a literal stage only where every `$x` marker the UPDATE reads equals the value the fold was entered
     // with: a marker bound elsewhere (a `null` from an absent key beside a container register) is not the register, its
     // bind raises, and the stage-less reading's verdict for that is the source's own.
@@ -64881,12 +64898,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         .then(|| bare_bind_foreach_update_key(update))
         .flatten()
         .or_else(|| comma_split.map(|(_, key, _)| key))
-        .or_else(|| {
-            alt_split
-                .then(|| alt_bind_split(update))
-                .flatten()
-                .map(|(key, _)| key)
-        })
+        .or_else(|| alt_split.map(|(key, _)| key))
         .filter(|_| literal_head_markers_are_the_register)
         // #5015: for every EXTRACT but a `getpath`, which reads from the state's own node, not from where the
         // bind moved the register: over an `INIT .` it names the root's path where jq's does, so the restatement
@@ -65034,7 +65046,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             Some(update_flags(sibling, mentions_frozen_for(sibling)))
         })
         .or_else(|| {
-            let (_, [_, sibling]) = alt_bind_split(update)?;
+            let (_, [_, sibling]) = alt_split?;
             Some(update_flags(sibling, mentions_frozen_for(sibling)))
         });
     let mut fork_index = 0usize;
@@ -65737,7 +65749,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let fork_last_step = last_step || fork_source_bound == Some(steps);
                         // #5110: ...and `(LIT | FE) // R`, whose operands are the items, the right one run only when the left
                         // emitted nothing.
-                        let bound_alt = alt_split.then(|| alt_bind_split(&bound_update)).flatten();
+                        let bound_alt = alt_split.and_then(|_| alt_bind_split(&bound_update));
                         debug_assert!(
                             comma_bind_item.is_none()
                                 || bound_split.is_some()
@@ -65750,26 +65762,24 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 if_arm_comma_items::<S>(&bound_update, &entry_state, fork_last_step)
                             })
                             .flatten();
-                        let item_refs: Vec<&Expr>;
-                        let single_item;
-                        let comma_items: &[&Expr] = if let Some((_, operands)) = &bound_alt {
-                            operands
-                        } else if let Some(items) =
-                            bound_split.as_ref().map(|split| split.2).or(if_arm_items)
-                        {
-                            item_refs = items.iter().collect();
-                            &item_refs
-                        } else {
-                            single_item = [&bound_update];
-                            &single_item
+                        let comma_items = match bound_alt {
+                            Some((_, operands)) => UpdateItems::Alternative(operands),
+                            None => UpdateItems::Comma(
+                                bound_split
+                                    .as_ref()
+                                    .map(|split| split.2)
+                                    .or(if_arm_items)
+                                    .unwrap_or_else(|| core::slice::from_ref(&bound_update)),
+                            ),
                         };
                         let bind_item = bound_split
                             .as_ref()
                             .map(|split| split.0)
-                            .or_else(|| bound_alt.as_ref().map(|_| 0));
+                            .or_else(|| bound_alt.map(|_| 0));
                         let left_emitted = core::cell::Cell::new(false);
                         let mut flow = ResolveFlow::Exhausted;
-                        for (index, &item) in comma_items.iter().enumerate() {
+                        for index in 0..comma_items.len() {
+                            let item = comma_items.get(index);
                             in_bind_item.set(bind_item.map_or(true, |at| at == index));
                             update_taken.set(if S::TAG == EvalTag::Jq {
                                 // #4800: a `try` with a handler around an `if` that reaches a literal arm
@@ -65939,7 +65949,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 break;
                             }
                             // #5110: `//` runs its right operand only when the left one emitted nothing.
-                            if bound_alt.is_some() && left_emitted.get() {
+                            if index == 0 && bound_alt.is_some() && left_emitted.get() {
                                 break;
                             }
                         }
@@ -92997,6 +93007,7 @@ pub(crate) fn collect_pattern_var_names(pattern: &Pattern, names: &mut Vec<Strin
 
 /// One index step a destructuring pattern performs, as the matcher sees it
 /// before a [`PatternMode`] decides how to take it.
+#[derive(Clone, Copy)]
 enum PatternKey<'a> {
     /// A literal object key: `{a: P}`, `{"a": P}`, `{$a}`.
     Field(&'a str),

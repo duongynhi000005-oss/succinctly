@@ -778,6 +778,7 @@ fn test_5110_literal_stage_ahead_of_a_bare_bind_foreach_behind_an_alternative_up
 /// #5110: the shapes `alt_bind_split` does not read keep the refusal they had (`Invalid path expression with result
 /// null`, uncatchable; jq answers each): an alternate that is not a literal, an uncaught source (whose raise `//`
 /// swallows), and a wrapper around the `//` (`try`, `?`, `first`, a comma sibling, another `//`, a pipe tail).
+/// Known divergences, listed in `docs/compliance/jq/limitations.md`: a change that answers one of them rewrites its row.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5110_alternative_update_shapes_not_read_keep_their_refusal() -> Result<()> {
