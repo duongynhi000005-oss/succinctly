@@ -51289,8 +51289,9 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
             catch: Some(handler),
         } => literal_taken_arm::<S>(expr, state, fork_last_step).or_else(|| {
             // #5113: an `if` whose condition raises on the state (`.a` of a number) never reaches an arm: the handler
-            // answers, and a literal handler cannot raise in turn, so the `try` emits that literal. Not under a `?//`
-            // chain: it retries UPDATE on the literal a step stored, which the next step's condition raises on.
+            // answers, and a literal handler cannot raise in turn, so the `try` emits that literal. Only on the
+            // `foreach`'s last step and not under a `?//` chain: a literal a step stored feeds the next step's condition,
+            // which raises on it.
             if !single_pattern {
                 return None;
             }
@@ -66362,7 +66363,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     item,
                                     &entry_state,
                                     fork_last_step,
-                                    patterns.len() == 1,
+                                    no_retry && last_step,
                                 )
                                 .unwrap_or_else(|| {
                                     taken_if_branch::<S>(item, &entry_state, update_body)
