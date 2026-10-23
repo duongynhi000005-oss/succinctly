@@ -42696,10 +42696,22 @@ fn source_destructures_to_container(source: &Expr) -> bool {
 /// `true` and the state `"c"`, or the root an earlier step's `catch $i` left. jq's register is then that landing, which
 /// a value that differs from it is never `jv_identical` to, so the pattern's `.` body emits the state off the register
 /// as [`source_destructures_to_container`]'s `null`/boolean state does (of which this is the generalization, read for
-/// a step that binds one bare `$name` only). A state equal to the landing may be that very node (the landing an
-/// earlier step's handler emitted), which a value cannot say, and is not read.
-fn source_destructures_off_state(source: &Expr, state: &OwnedValue) -> bool {
+/// a step that binds one bare `$name` only). Only for a `$x` equal to the `register`, which may be it. A state equal
+/// to the landing may be that very node (the landing an earlier step's handler emitted), which a value cannot say, and
+/// is not read.
+fn source_destructures_off_state(source: &Expr, state: &OwnedValue, register: &OwnedValue) -> bool {
     source_destructures_only_onto(source, &|child| child.unwrap_or(&OwnedValue::Null) != state)
+        && marker_destructures_all_equal(source, register)
+}
+
+/// Whether every `$x` a destructure in `source` reads is equal to `register`, so may be it: one that is not is not the
+/// register and raises at its pattern's first step ([`nested_source_destructures_off_register`]), which reads no
+/// landing.
+fn marker_destructures_all_equal(source: &Expr, register: &OwnedValue) -> bool {
+    !any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { expr, .. }
+            if matches!(unwrap_paren(expr), Expr::TrackedVar(marker) if marker.value != *register))
+    })
 }
 
 /// [`source_destructures_onto`], for a source with no destructure of a value computed from a marker (`$x.a as
@@ -42718,9 +42730,9 @@ fn source_destructures_only_onto(
 
 /// Whether the `foreach` a fold UPDATE is made of ([`plain_update_heads`]: its `source` and `init`) raises at its
 /// source's destructure before it reads the state it is handed, when jq's register is `register` (#5012). Its INIT
-/// moves no register (`.`, a literal, a value head), and its source is a destructure of a `$x` (with no computed key)
-/// that raises, bare or behind a `try`/`?` that empties it; not a comma of such, whose items jq's `try`s empty one by
-/// one (#5004). jq's `INDEX` checks `path_intact` before it reads its input, so a `$x` that is not `register` raises at
+/// cannot move the register ([`cannot_move_register`]), and its source is a destructure of a `$x` (with no computed
+/// key) that raises, bare or behind a handler-less `try`/`?` that empties it; not a comma of such, whose items jq's
+/// `try`s empty one by one (#5004). jq's `INDEX` checks `path_intact` before it reads its input, so a `$x` that is not `register` raises at
 /// the pattern's first step, and a value not equal to the register is never `jv_identical` to it. One that is equal
 /// may be that node, and its pattern raises anyway where it is the register ([`pattern_raises_on_register`]). Either
 /// way the raise precedes the state, so the reading that [`source_destructures_to_null_or_bool`] and
@@ -42744,34 +42756,45 @@ fn nested_source_destructures_off_register(
                     _ => false,
                 }
             }
-            // Emptied: the handler of a `try` that has one runs on the raise and emits from it.
+            // Emptied, as [`is_single_caught_destructure`] reads it: a `try` with a handler runs it on the raise.
             Expr::Optional(inner)
             | Expr::Try {
                 expr: inner,
                 catch: None,
             } => raises(inner, register),
-            Expr::Try {
-                expr: inner,
-                catch: Some(handler),
-            } => emits_nothing(handler) && raises(inner, register),
             _ => false,
         }
     }
-    (matches!(unwrap_paren(init), Expr::Identity) || is_value_head(unwrap_paren(init)))
-        && raises(source, register)
+    // The INIT test [`update_foreach_handlers`] places a handler behind.
+    cannot_move_register(init) && raises(source, register)
 }
 
-/// Whether destructuring `value` with `pattern` raises in jq when `value` is jq's register (#5012), so whether or not
-/// it is: an object pattern on a value that is neither an object nor `null`, an array pattern on one that is
-/// neither an array nor `null` (`Cannot index ...`), and a pattern of two or more entries on the container it names,
-/// whose second step is checked against the child the first moved the register onto, never `jv_identical` to the
-/// container (`Invalid path expression near attempt to access element ...`). A `null` is every `null` child by kind,
-/// so no pattern raises on it.
+/// Whether destructuring `value` with `pattern` (one with no computed key, [`pattern_is_plain`]) raises in jq when
+/// `value` is jq's register (#5012), so whether or not it is: an object pattern on a value that is neither an object
+/// nor `null`, an array pattern on one that is neither an array nor `null` (`Cannot index ...`), a pattern of two or
+/// more entries on the container it names, whose second step is checked against the child the first moved the
+/// register onto, never `jv_identical` to the container (`Invalid path expression near attempt to access element
+/// ...`), and a one-entry pattern whose nested pattern raises on that child, which is then the register
+/// (`{a:{b:$b}}` on `{"a":[1]}`). A `null` is every `null` child by kind, so no pattern raises on it.
 fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
     match (pattern, value) {
         (Pattern::Var(_), _) | (_, OwnedValue::Null) => false,
-        (Pattern::Object(entries), OwnedValue::Object(_)) => entries.len() >= 2,
-        (Pattern::Array(items), OwnedValue::Array(_)) => items.len() >= 2,
+        (Pattern::Object(entries), OwnedValue::Object(fields)) => match entries.as_slice() {
+            [entry] => match &entry.key {
+                ObjectKey::Literal(key) => pattern_raises_on_register(
+                    &entry.pattern,
+                    fields.get(key.as_str()).unwrap_or(&OwnedValue::Null),
+                ),
+                _ => false,
+            },
+            _ => entries.len() >= 2,
+        },
+        (Pattern::Array(items), OwnedValue::Array(elements)) => match items.as_slice() {
+            [item] => {
+                pattern_raises_on_register(item, elements.first().unwrap_or(&OwnedValue::Null))
+            }
+            _ => items.len() >= 2,
+        },
         _ => true,
     }
 }
@@ -66724,13 +66747,12 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // register, or retries an alternative on the body's raise, in ways the step does not report.
                             let bare_step =
                                 matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
-                            // On every step the reading below covers (#5012): a step that places its handler lets the
-                            // `foreach` reach later steps a refusal at this one never reached, and the reading covers a
-                            // container state too where the nested source raises before reading it
-                            // ([`nested_source_destructures_off_register`]), as an earlier step's handler leaves one.
-                            // Asked per step, and only where a reading holds (the bodies copy the nested `foreach`, as
+                            // On every step the reading below covers, not only the run's last (#5012): a step that
+                            // places its handler lets the `foreach` reach later steps a refusal at this one never
+                            // reached, and the reading covers the container state an earlier step's handler leaves
+                            // ([`nested_source_destructures_off_register`], [`source_destructures_off_state`]). Asked
+                            // per step, and only where a reading holds (the bodies copy the nested `foreach`, as
                             // `bind.apply` already copies the whole UPDATE for the step).
-                            let seedable_step = bare_step;
                             let mut entry_tries = None;
                             // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                             // register onto, not the state the last step left. Where the pattern lands on a
@@ -66743,7 +66765,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // the state is read.
                             let any_state = |source: &Expr, init: &Expr, handed: &OwnedValue| {
                                 bare_step
-                                    && (source_destructures_off_state(source, handed)
+                                    && (source_destructures_off_state(source, handed, &elem.value)
                                         || nested_source_destructures_off_register(
                                             source,
                                             init,
@@ -66771,7 +66793,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                                         {
                                                             inner == emitting
                                                         }
-                                                        Some(handlers) if seedable_step => {
+                                                        Some(handlers) if bare_step => {
                                                             let placed = handlers.0.len()
                                                                 + handlers.1
                                                                 == emitting;
@@ -66788,7 +66810,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
                             // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
                             // grids turned 33 of 40,000 rows into wrong answers).
-                            let _update_try_entry = (seedable_step && _register.is_some())
+                            let _update_try_entry = (bare_step && _register.is_some())
                                 .then(|| {
                                     entry_tries
                                         .take()

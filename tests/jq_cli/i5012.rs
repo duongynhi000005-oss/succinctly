@@ -70,11 +70,26 @@ fn test_foreach_update_try_handler_on_a_container_state_sits_at_the_try_entry_50
 }
 
 /// #5012: a later step whose element is the root, which `$x` is (by value, and here by node). An array pattern on an
-/// object raises `Cannot index object with number` and `{a:$a,b:$b}` raises at `.b`, checked against `.a`, so the
-/// nested `foreach` raises whatever state the earlier step's handler left. Rows captured from jq 1.7.1, both routes.
+/// object raises `Cannot index object with number`, `{a:$a,b:$b}` raises at `.b`, checked against `.a`, and
+/// `{a:{b:$b}}` raises at `.b` of the array `.a` its first step moved the register onto, so the nested `foreach` raises
+/// whatever state the earlier step's handler left. Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_foreach_update_try_handler_where_the_pattern_raises_on_the_register_5012() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":[1]}"#,
+            r#"try path(. as $x | foreach (.a,.) as $i (0; try (foreach ($x as {a:{b:$b}} | .) as $y (.; error("x"); .a)) catch 7; $i)) catch "C""#,
+            "[\"a\"]\n[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1]}"#,
+            r#"[path(. as $x | foreach (.a,.) as $i (0; try (foreach ($x as {a:{b:$b}} | .) as $y (.; error("x"); .a)) catch 7; $i))?]"#,
+            "[[\"a\"],[]]\n",
+            "",
+            0,
+        ),
         (
             r#"{"a":null}"#,
             r"[path(. as $x | foreach (.a?,.) as $i (0; try (foreach ($x as [$a] | .) as $y (null; .; $y)) catch $i; $i))?]",
@@ -415,6 +430,22 @@ fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused
             "",
             "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
         ),
+        // A step whose state is the register (the root `catch $x` left on the root element): the resolver refuses the
+        // nested source's destructure of `$x` as a guess there, as on `main` for `foreach (.) as $i (.; FE; $i)`, now
+        // reached after the first step is placed. jq answers `[]` `[]`, and `"C"` for the `del` (a later step's raise);
+        // `main` refused catchably at the first step.
+        (
+            r#"{"a":[null]}"#,
+            r#"try path(. as $x | foreach (.,.) as $i (null; try (foreach ($x as [$a] | .) as $y (.; .; .)) catch $x; $x)) catch "C""#,
+            "[]\n",
+            "Invalid path expression with result {\"a\":[null]}",
+        ),
+        (
+            r#"{"a":[null]}"#,
+            r#"try del(. as $x | foreach (.,.,.a) as $i (null; try (foreach ($x as [$a] | .) as $y (.; $y; .a)) catch $x; $x)) catch "C""#,
+            "",
+            "Invalid path expression with result {\"a\":[null]}",
+        ),
     ] {
         for (out, stderr, code) in [
             run_jq_full(&["-c", filter], Some(input))?,
@@ -427,6 +458,28 @@ fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused
             );
             assert!(stderr.contains(message), "{input} | {filter}: {stderr:?}");
         }
+    }
+    Ok(())
+}
+
+/// #5012: the residual under a `?`. The second step's element is the root, which `$x` is, and its one-entry pattern
+/// lands on `.a`, `{"b":1}`, which the state the first step's `catch $i` left is equal to (in jq the very node): the
+/// step is not read, its unseeded handler's `$i` is refused as exact and the `?` drops it. jq answers
+/// `[["a"],[],["a"]]`; this keeps the first step's path, where `main` answered `[]`. Pinned so a change to it is seen.
+#[test]
+fn test_foreach_update_try_handler_on_a_landing_equal_to_the_state_keeps_the_earlier_paths_5012(
+) -> Result<()> {
+    let input = r#"{"a":{"b":1}}"#;
+    let filter = r"[path(. as $x | foreach (.a,.,.a) as $i (null; try (foreach ($x as {a:$a} | .) as $y (0; .a?; $y)) catch $i; .))?]";
+    for (out, stderr, code) in [
+        run_jq_full(&["-c", filter], Some(input))?,
+        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
+    ] {
+        assert_eq!(
+            (out.as_str(), code),
+            ("[[\"a\"]]\n", 0),
+            "{filter}: stderr {stderr:?}"
+        );
     }
     Ok(())
 }
