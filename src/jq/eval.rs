@@ -42853,16 +42853,26 @@ fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
 /// How deep [`never_identical`] walks two containers before it stops deciding.
 const NEVER_IDENTICAL_DEPTH: usize = 64;
 
+/// How many nodes [`never_identical`] reads before it stops deciding: a large document that differs only late is not
+/// walked on every step of a `foreach`.
+const NEVER_IDENTICAL_BUDGET: usize = 4096;
+
 /// Whether `a` and `b` can never be the same node to jq's `jv_identical` (#5176): two kinds (`null`, `true` and `false`
 /// are three), or two containers or strings that differ somewhere. Two equal values may or may not share a node,
 /// which a value cannot say, and numbers are compared by representation (a `NaN` is not equal to itself, yet one node
 /// is identical to itself), so none of those is decided: only a difference found is reported, and a pair nested
-/// deeper than [`NEVER_IDENTICAL_DEPTH`] is left undecided rather than walked.
+/// deeper than [`NEVER_IDENTICAL_DEPTH`], or past [`NEVER_IDENTICAL_BUDGET`] nodes, is left undecided rather than walked.
 fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
-    fn differs(a: &OwnedValue, b: &OwnedValue, depth: usize) -> bool {
-        if depth > NEVER_IDENTICAL_DEPTH {
+    fn differs(
+        a: &OwnedValue,
+        b: &OwnedValue,
+        depth: usize,
+        budget: &core::cell::Cell<usize>,
+    ) -> bool {
+        if depth > NEVER_IDENTICAL_DEPTH || budget.get() == 0 {
             return false;
         }
+        budget.set(budget.get() - 1);
         let number = |value: &OwnedValue| {
             matches!(
                 value,
@@ -42877,42 +42887,50 @@ fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
                 x.len() != y.len()
                     || x.iter()
                         .zip(y.iter())
-                        .any(|(p, q)| differs(p, q, depth + 1))
+                        .any(|(p, q)| differs(p, q, depth + 1, budget))
             }
             (OwnedValue::Object(x), OwnedValue::Object(y)) => {
                 x.len() != y.len()
-                    || x.iter()
-                        .any(|(key, p)| y.get(key).map_or(true, |q| differs(p, q, depth + 1)))
+                    || x.iter().any(|(key, p)| {
+                        y.get(key)
+                            .map_or(true, |q| differs(p, q, depth + 1, budget))
+                    })
             }
             (x, y) if number(x) && number(y) => false,
             _ => true,
         }
     }
-    differs(a, b, 0)
+    differs(a, b, 0, &core::cell::Cell::new(NEVER_IDENTICAL_BUDGET))
 }
 
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) is of a value that is never
 /// `register` (#5176): a `foreach` UPDATE's register is the element its source moved it onto, and a pattern step on
 /// a `$x` that is none of that node fails jq's `path_intact` before it reads a key, whatever the pattern lands on, so
 /// a `try` around it empties the nested `foreach`'s source ([`with_foreach_register_ambient`] decides that part).
-/// Only a destructure whose source is the bare marker is read, and there must be one.
+/// Only a destructure whose source is the bare marker is read, of patterns that destructure at their first step
+/// ([`routes_destructuring`], or a `?//` chain of such: a bare `$var` alternative recovers), and there must be one under
+/// a `try` or a `?` ([`catching_wrapper_inner`]): an uncaught raise is not an empty source (#5182).
 fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) -> bool {
     let mut seen = false;
     let mut all = true;
+    let mut caught = false;
     any_subexpr(source, &mut |e| {
-        if let Expr::AsPattern { expr, .. } = e {
+        caught |= catching_wrapper_inner(e).is_some();
+        if let Expr::AsPattern { expr, patterns, .. } = e {
             // A destructure of `.` or of a value computed from a marker steps from a node this does not read.
             match unwrap_paren(expr) {
                 Expr::TrackedVar(marker) => {
                     seen = true;
-                    all &= never_identical(&marker.value, register);
+                    all &= (routes_destructuring(patterns)
+                        || patterns_all_destructuring_chain(patterns))
+                        && never_identical(&marker.value, register);
                 }
                 _ => all = false,
             }
         }
         false
     });
-    seen && all
+    seen && all && caught
 }
 
 /// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
