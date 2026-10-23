@@ -166,3 +166,18 @@ fn test_5182_uncaught_foreign_foreach_where_the_marker_is_the_register_is_unchan
         ),
     ])
 }
+
+/// #5183: a `?` over a step the nested `foreach` still refuses used to be answered by step 1's wrong emission, which the raise
+/// removed. jq answers `[["a"]]`; the refusal is dropped by the `?` and the path is `[]`, pinned here (a divergence, not jq's
+/// answer) until #5183 reads that step.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5182_step_two_refusal_a_question_mark_drops_until_5183() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":null}"#,
+        r". as $x | [path(foreach (.a?, 1) as $i (null; try foreach ($x as {a:$a} | $a) as $y (.; .; .); .))?]",
+        "[]\n",
+        "",
+        0,
+    )])
+}

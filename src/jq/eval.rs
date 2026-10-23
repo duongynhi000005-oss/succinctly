@@ -42917,7 +42917,7 @@ fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) 
     let mut caught = false;
     // ...or the destructure itself, with nothing around it (#5182): its raise is what the step does.
     let mut bare = matches!(unwrap_paren(source), Expr::AsPattern { expr, patterns, .. }
-        if patterns.len() == 1 && matches!(unwrap_paren(expr), Expr::TrackedVar(_)));
+        if routes_destructuring(patterns) && matches!(unwrap_paren(expr), Expr::TrackedVar(_)));
     any_subexpr(source, &mut |e| {
         caught |= catching_wrapper_inner(e).is_some();
         if let Expr::AsPattern { expr, patterns, .. } = e {

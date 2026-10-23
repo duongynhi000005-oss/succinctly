@@ -2702,7 +2702,7 @@ is the revert that established what the other one costs.
    `. as $x | [path(foreach (.a) as $i (.; FE; $i))]` on `{"a":null}` is `[]` as in jq, where it answered `[["a","a"]]` and `|= 9` wrote `{"a":{"a":9}}` (pinned by `tests/jq_cli/i5176.rs`).
    Two equal values may be one node, which a value cannot say, so an element equal to the marker keeps its reading.
    The same destructure with no `try` raises instead ([#5182](https://github.com/rust-works/succinctly/issues/5182), `foreign_destructure_raise`, pinned by `tests/jq_cli/i5182.rs`).
-   The source is the bare destructure of one pattern that destructures at its first step, and the error is the pattern walk's own, so `near attempt to access element "a"` (an array pattern: its last index) names the step jq's does, out of the whole loop.
+   The source is `$x as P | BODY` with the one destructuring pattern `P`, whatever `BODY` is, and the error is the pattern walk's own, so `near attempt to access element "a"` (an array pattern: its last index) names the step jq's does, out of the whole loop.
    `. as $x | [path(foreach (.b) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .); $i))]` on `{"a":null}` is jq's exit 5 where it answered `[["b","a"]]`, and `del`/`|=` wrote through that path.
    Not read: a destructure that is not the whole source (`($x as {a:$a} | .) | .`, a comma, an `if`), and a `?//` chain, which keep their reading.
    A `$y` EXTRACT of the nested `foreach` on a step whose source element is a literal is refused where jq answers, which a `?` used to hide behind the wrong answer of an earlier step ([#5183](https://github.com/rust-works/succinctly/issues/5183)).
