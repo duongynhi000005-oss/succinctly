@@ -38572,6 +38572,7 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
 /// `reduce` with the same no-op INIT and UPDATE over such a SOURCE (#4320): it backtracks
 /// its source, so the register is restored on exit and the accumulator is INIT's node.
 /// A `label` is read through (#4567), since no shape admitted here can `break` out of it.
+/// A plain variable bind of `.` is read through when its body does not read the variable (#5146).
 /// A handler-less `try`/`?` is too (#5136): a bind that raises under it empties the UPDATE and the next state is `null`,
 /// which the resolver derives from the pattern's own walk (#4934), so the outputs it does emit are still the
 /// accumulator's own node.
@@ -38591,6 +38592,13 @@ fn update_returns_its_input(e: &Expr) -> bool {
     // derives from the pattern's own walk once the register is carried in (#4934).
     hands_outputs_on(e, &|leaf| match leaf {
         Expr::Identity => true,
+        // #5146: a plain variable bind of `.` moves nothing, so the body's outputs are the accumulator's own node when the
+        // body's are. Not a body that reads the variable at all: `$z` is the accumulator's value, not its node.
+        Expr::As { expr, var, body } => {
+            matches!(unwrap_paren(expr), Expr::Identity)
+                && !any_subexpr(body, &mut |e| matches!(e, Expr::Var(name) if name == var))
+                && update_returns_its_input(body)
+        }
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
