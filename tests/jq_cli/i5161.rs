@@ -43,6 +43,35 @@ fn test_5161_two_argument_foreach_update_alternative_over_a_bind() -> Result<()>
             "Invalid path expression with result 5",
             5,
         ),
+        // The right operand is any inert operand: the loop's `$i`, arithmetic of it, a comma of them, and a `//` of `//`s.
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // $i)))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // (6, $i))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // ($i + 1))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5) // 6) // 7)))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
         // The bind's `.` is falsy over a `false` state, so `//` replaces it: the error names the `6`; over a truthy `7`
         // it keeps it.
         (
@@ -80,6 +109,13 @@ fn test_5161_reduce_update_alternative_over_a_bind() -> Result<()> {
             r"path(. as $x | reduce (1,2) as $i (null; (($x as {a:$a} | 5) // 6)))",
             "",
             "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | reduce (1,2) as $i (null; try (($x as [$a] | $a) // $i)))",
+            "",
+            "Invalid path expression with result 2",
             5,
         ),
         (

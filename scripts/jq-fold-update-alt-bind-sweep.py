@@ -53,6 +53,12 @@ WRAPPERS = [
     "({S}) // [1]",
     "({S}) // {}",
     "({S}) // (1,2)",
+    # an operand that is not a constant: the loop's `$i` (inert), the outer `$x` and a navigation (neither is)
+    "({S}) // $i",
+    "({S}) // (6, $i)",
+    "try (({S}) // $i)",
+    "({S}) // $x",
+    "({S}) // .a",
     "(({S}) // 5) // 6",
     "(({S}) // 5) | .",
     "5 | (({S}) // 6)",
