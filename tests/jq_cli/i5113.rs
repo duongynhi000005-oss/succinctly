@@ -404,7 +404,8 @@ fn test_5113_caught_bind_foreach_update_is_empty_on_a_step_whose_element_is_not_
 /// `{"a":{"a":null}}` is empty and `.a as $x` over `{"a":{"a":1}}` is the register's own node (equal container,
 /// not read), so both keep the answers they had. So does a `?//` chain source, whose retry is not modelled: read as empty
 /// on the steps its first alternative fails, `limit(1; FE) ... |= 9` over `..` wrote nothing where jq writes `9`. Captured
-/// from `/usr/bin/jq` 1.7.1, both routes.
+/// from `/usr/bin/jq` 1.7.1, both routes. A register that holds a `nan` is its own node though `==` says otherwise
+/// (`holds_nan`): the marker equal to it still passes the step.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_caught_bind_foreach_update_keeps_the_steps_where_the_marker_is_the_register(
@@ -465,6 +466,20 @@ fn test_5113_caught_bind_foreach_update_keeps_the_steps_where_the_marker_is_the_
             "{\"a\":false,\"b\":{\"a\":9}}\n",
             "",
             0,
+        ),
+        (
+            r#"{"a":[nan],"b":1}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as [$q] | .)) as $y (.; .; .); $i))]",
+            "",
+            "Invalid path expression with result [null]",
+            5,
+        ),
+        (
+            r#"{"a":{"x":[nan]},"b":1}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as {x:$q} | .)) as $y (.; .; .); $i))]",
+            "",
+            "Invalid path expression with result {\"x\":[null]}",
+            5,
         ),
     ])
 }

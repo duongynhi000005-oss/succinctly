@@ -56264,7 +56264,20 @@ fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -
             && routes_destructuring(patterns)
             && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
             && marker.value != *register
+            && !holds_nan(register)
     })
+}
+
+/// Whether `value` holds a NaN at any depth. `==` is not reflexive on one, so a container that is the register's own
+/// node still compares unequal to itself (`{"a":[nan]}`) and [`caught_destructure_of_other_container`] would take it for
+/// another. The node is the same one, so scanning the register is enough.
+fn holds_nan(value: &OwnedValue) -> bool {
+    match value {
+        OwnedValue::Float(f) | OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => f.is_nan(),
+        OwnedValue::Array(items) => items.iter().any(holds_nan),
+        OwnedValue::Object(fields) => fields.values().any(holds_nan),
+        _ => false,
+    }
 }
 
 /// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
