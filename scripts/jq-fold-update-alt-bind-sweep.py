@@ -59,6 +59,13 @@ WRAPPERS = [
     "try (({S}) // $i)",
     "({S}) // $x",
     "({S}) // .a",
+    "({S}) // .",
+    "({S}) // not",
+    "({S}) // length",
+    "({S}) // ($i + 1)",
+    "({S}) // .a?",
+    "({S}) // (.a, 6)",
+    "try (({S}) // .)",
     "(({S}) // 5) // 6",
     "(({S}) // 5) | .",
     # #5162: the `| .` spelling, over the other constants and with a `def` in the left operand

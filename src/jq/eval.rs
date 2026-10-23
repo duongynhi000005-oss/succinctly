@@ -38937,39 +38937,51 @@ fn bind_free(e: &Expr) -> bool {
     })
 }
 
-/// Whether the right operand of a `//` over a bind chain is read as the operand jq runs from the register the `//` was
-/// entered with (#5157, #5161): it holds no bind or fold, cannot move the register ([`cannot_move_register`]: literals,
-/// the loop's own `$i`, arithmetic, a construction) and reads no outer `$x` marker, which could be the register's own node
-/// and so pass the emission's check. The one test the three readings of such a `//` apply to it, so they cannot disagree
-/// on which UPDATEs they read: [`binds_only_in_tail`], [`is_single_output_bind`] and [`update_binds_only_under_alternative`].
-fn alternative_operand_is_inert(right: &Expr) -> bool {
+/// Whether the right operand of a `//` over a bind chain is one the three readings of such a `//` accept (#5157, #5161,
+/// #5167): it holds no bind, fold, definition, call or `label` ([`bind_free`]). Anything else it may do: a constant, `.`,
+/// the loop's `$i` (a marker when the source navigates), an outer `$x`, a navigation, arithmetic. The operand's outputs are
+/// what the fold emits when the chain's are falsy, and the resolver resolves them as branches with their own provenance,
+/// so the emission's check decides: an operand that is the register's node passes where a constant raises (`$x`, `.`,
+/// `$i` over a source that navigates), and one that navigates moves the register. The one test the three readings apply
+/// to it, so they cannot disagree on which UPDATEs they read: [`binds_only_in_tail`], [`is_single_output_bind`] and
+/// [`update_binds_only_under_alternative`]. #5161 read constants, the loop's `$i` over a source that does not navigate,
+/// `.`, `not`, `length` and arithmetic; narrowing the operand to those left `// $x`, `// .a` and `// $i` over a
+/// navigating source a wrong accept under a `try`, and reading them moved no sampled row that matched jq.
+fn alternative_operand_is_readable(right: &Expr) -> bool {
     bind_free(right)
-        && cannot_move_register(right)
-        && !any_subexpr(right, &mut |inner| matches!(inner, Expr::TrackedVar(_)))
 }
 
 /// Whether every bind of an UPDATE that a two-argument `foreach` or a `reduce` path-checks at its own emission sits in the
-/// left operand of a `//` (and at least one does), the chain a single pattern in tail position and the right operand
-/// inert ([`alternative_operand_is_inert`], #5161). `a // b` filters `a`'s output by truthiness and hands the survivors on unchecked, so the `.` a bind
-/// in `a` ends on is checked where the fold emits it, which is what the result names: reading it as the bind's own
-/// tail, as the bare bind is, refused a falsy `.` that `//` replaces (`($x as {a:$a} | .) // 5` over a `false` state
-/// is jq's `result 5`, not `result false`). Marks the body as [`fold_body::state_handed_on`] like a three-argument
-/// `foreach`'s ([`foreach_update_binds_only_in_tail`]); a bind outside a `//` is the emission itself and stays checked.
-fn update_binds_only_under_alternative(e: &Expr) -> bool {
-    fn go(e: &Expr, found: &core::cell::Cell<bool>) -> bool {
+/// left operand of a `//` (and at least one does), the chain in tail position and the right operand readable
+/// ([`alternative_operand_is_readable`], #5161, #5167). `a // b` filters `a`'s output by truthiness and hands the survivors
+/// on unchecked, so the `.` a bind in `a` ends on is checked where the fold emits it, which is what the result names:
+/// reading it as the bind's own tail, as the bare bind is, refused a falsy `.` that `//` replaces
+/// (`($x as {a:$a} | .) // 5` over a `false` state is jq's `result 5`, not `result false`). Marks the body as
+/// [`fold_body::state_handed_on`] like a three-argument `foreach`'s ([`foreach_update_binds_only_in_tail`]); a bind
+/// outside a `//` is the emission itself and stays checked.
+///
+/// `alternative_patterns`: whether a `?//` chain is read (a two-argument `foreach`'s). A `reduce`'s is not: its final
+/// accumulator is judged after jq retried a failed alternative on the state it left, and 3 of 30,450 sampled rows named
+/// the stored value where jq names `null` (`reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?)`) and 3 more
+/// were refused (`try (($x as {a:$a} ?// $a | .) // $i)` over `(.a,.)`), against 2,122 that matched.
+fn update_binds_only_under_alternative(e: &Expr, alternative_patterns: bool) -> bool {
+    fn go(e: &Expr, alternative_patterns: bool, found: &core::cell::Cell<bool>) -> bool {
         hands_outputs_on(e, &|leaf| match leaf {
             Expr::Pipe(stages) => match stages.split_last() {
-                Some((last, head)) => head.iter().all(bind_free) && go(last, found),
+                Some((last, head)) => {
+                    head.iter().all(bind_free) && go(last, alternative_patterns, found)
+                }
                 None => true,
             },
             Expr::Alternative(left, right) if !bind_free(left) => {
-                let single_pattern = !any_subexpr(
-                    left,
-                    &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
-                );
+                let single_pattern = alternative_patterns
+                    || !any_subexpr(
+                        left,
+                        &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
+                    );
                 let ok = single_pattern
                     && binds_only_in_tail(left, true)
-                    && alternative_operand_is_inert(right);
+                    && alternative_operand_is_readable(right);
                 found.set(found.get() || ok);
                 ok
             }
@@ -38977,12 +38989,12 @@ fn update_binds_only_under_alternative(e: &Expr) -> bool {
         })
     }
     let found = core::cell::Cell::new(false);
-    go(e, &found) && found.get()
+    go(e, alternative_patterns, &found) && found.get()
 }
 
 /// The walk behind [`update_binds_only_in_tail`] and [`foreach_update_binds_only_in_tail`]; `through_alternative` is
 /// whether a `//` is read through (the `foreach` one's), its left operand a chain in tail position and its right an
-/// inert operand ([`alternative_operand_is_inert`]: [`is_single_output_bind`] asks the same of the operand when it
+/// inert operand ([`alternative_operand_is_readable`]: [`is_single_output_bind`] asks the same of the operand when it
 /// carries the register in, so the two cannot disagree on which `//` UPDATEs are read).
 fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
     // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/
@@ -39009,7 +39021,7 @@ fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
             bind_free(expr) && binds_only_in_tail(body, through_alternative)
         }
         Expr::Alternative(left, right) if through_alternative => {
-            binds_only_in_tail(left, true) && alternative_operand_is_inert(right)
+            binds_only_in_tail(left, true) && alternative_operand_is_readable(right)
         }
         other => bind_free(other),
     })
@@ -52855,7 +52867,7 @@ fn fans_out(expr: &Expr) -> bool {
 /// resolver's to derive once the register is carried in (see [`hands_outputs_on`]).
 ///
 /// #5157: and, where `through_alternative` is set, a `//` whose left operand is such a chain and whose right operand is a
-/// inert operand ([`alternative_operand_is_inert`], the one test [`binds_only_in_tail`] applies to the same operand). The right
+/// inert operand ([`alternative_operand_is_readable`], the one test [`binds_only_in_tail`] applies to the same operand). The right
 /// operand runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
 /// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a step
 /// whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register). Set for the
@@ -52895,7 +52907,7 @@ fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
                     && (is_single_output_bind(body, through_alternative) || !fans_out(body))
             }
             Expr::Alternative(left, right) if through_alternative => {
-                is_single_output_bind(left, true) && alternative_operand_is_inert(right)
+                is_single_output_bind(left, true) && alternative_operand_is_readable(right)
             }
             other => emits_only_the_accumulator(other),
         }
@@ -64650,7 +64662,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     let update_tail_unchecked = foreign_bind_update
         && (update_binds_only_in_tail(update)
             || foreign_bind_chain_returning_dot(update)
-            || update_binds_only_under_alternative(update));
+            || update_binds_only_under_alternative(update, false));
     let update_hands_state_on = foreign_bind_update
         && cannot_move_register(init)
         && foreign_bind_chain_returning_dot(update);
@@ -65423,7 +65435,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
         && if extract.is_some() {
             foreach_update_binds_only_in_tail(update)
         } else {
-            update_binds_only_under_alternative(update)
+            update_binds_only_under_alternative(update, true)
         };
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register =
