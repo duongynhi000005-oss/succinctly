@@ -82,6 +82,7 @@ mod i5112;
 mod i5113;
 mod i5118;
 mod i5120;
+mod i5126;
 mod i5136;
 mod i5140;
 mod i5141;

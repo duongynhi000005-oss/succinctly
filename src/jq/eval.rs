@@ -38383,7 +38383,9 @@ fn bare_bind_foreach_extract_key(extract: &Expr) -> Option<PatternKey<'_>> {
                 } else if emits_nothing(then_branch) {
                     go(else_branch, budget)
                 } else {
-                    None
+                    // #5126: a constant condition names the arm that runs, whatever the other holds.
+                    constant_condition_arm(cond, then_branch, else_branch)
+                        .and_then(|arm| go(arm, budget))
                 }
             }
             other => bare_bind_foreach_update_key(other),
@@ -38408,11 +38410,13 @@ fn bare_bind_foreach_extract_is_caught(extract: &Expr) -> bool {
             Expr::Try { expr, catch: None } | Expr::Optional(expr) => go(expr, budget),
             Expr::Pipe(stages) => stages.first().is_some_and(|head| go(head, budget)),
             Expr::If {
+                cond,
                 then_branch,
                 else_branch,
-                ..
             } => {
-                if emits_nothing(else_branch) {
+                if let Some(arm) = constant_condition_arm(cond, then_branch, else_branch) {
+                    go(arm, budget)
+                } else if emits_nothing(else_branch) {
                     go(then_branch, budget)
                 } else {
                     go(else_branch, budget)
@@ -38422,6 +38426,20 @@ fn bare_bind_foreach_extract_is_caught(extract: &Expr) -> bool {
         }
     }
     go(extract, WRAPPED_CHAIN_DEPTH)
+}
+
+/// The arm an `if` with a literal condition runs (`if true then A else B end` is `A`; `false` and `null` run `B`), `None`
+/// for any other condition (#5126).
+fn constant_condition_arm<'e>(
+    cond: &Expr,
+    then_branch: &'e Expr,
+    else_branch: &'e Expr,
+) -> Option<&'e Expr> {
+    match unwrap_paren(cond) {
+        Expr::Literal(Literal::Bool(true)) => Some(then_branch),
+        Expr::Literal(Literal::Bool(false) | Literal::Null) => Some(else_branch),
+        _ => None,
+    }
 }
 
 /// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
