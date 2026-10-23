@@ -38457,14 +38457,18 @@ fn alt_bind_piped_to_identity(update: &Expr) -> Option<&Expr> {
     if rest.is_empty() || !rest.iter().all(|stage| matches!(stage, Expr::Identity)) {
         return None;
     }
+    // The bare `//` has to be one #5157 reads (a bind chain in tail position over a constant), or the rewrite hands
+    // the UPDATE to a route that was not validated for it (a `def`). A comma in the chain is left piped: the bare
+    // spelling answers `($x as {a:$a} | (.,.)) // 5` two steps short of jq's three (#5170).
     match unwrap_paren(alt) {
-        Expr::Alternative(left, right)
-            if is_constant_construction(right)
-                && any_subexpr(left, &mut |e| {
-                    matches!(e, Expr::As { .. } | Expr::AsPattern { .. })
-                })
+        Expr::Alternative(left, _)
+            if foreach_update_binds_only_in_tail(alt)
+                && is_single_output_bind(left, true)
                 && !any_subexpr(left, &mut |e| {
-                    matches!(e, Expr::Foreach { .. } | Expr::Reduce { .. })
+                    matches!(
+                        e,
+                        Expr::Foreach { .. } | Expr::Reduce { .. } | Expr::Comma(_)
+                    )
                 }) =>
         {
             Some(alt)
