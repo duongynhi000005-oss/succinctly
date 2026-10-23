@@ -84,5 +84,26 @@ fn test_5193_foreach_update_generator_delivers_every_output() -> Result<()> {
             "",
             0,
         ),
+        (
+            r"null",
+            r"first(path(foreach .a as $i (5; range(100000000000); $i)))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"isempty(path(foreach .a as $i (5; range(100000000000); $i)))",
+            "false\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(foreach .a as $i (5; .; range(3)))",
+            "",
+            "Invalid path expression with result",
+            5,
+        ),
     ])
 }
