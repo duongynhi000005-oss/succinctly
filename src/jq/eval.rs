@@ -63381,6 +63381,87 @@ fn update_definitely_navigates(expr: &Expr) -> bool {
     update_navigates_within(expr, false)
 }
 
+/// Whether a `reduce` UPDATE navigates the accumulator on a path that always runs ([`update_definitely_navigates`]), or
+/// destructures it with a bind of `.` ([`update_indexes_accumulator`], #5141).
+fn update_navigates_accumulator(update: &Expr) -> bool {
+    update_definitely_navigates(update) || update_indexes_accumulator(update)
+}
+
+/// Whether a `reduce` UPDATE indexes the accumulator at a step that always runs without being a navigation
+/// [`update_definitely_navigates`] reads (#5141): a single-pattern destructuring bind of `.` (`. as {b:$q} | ..` indexes
+/// it at its pattern's first step, whichever way its body goes), or one of the builtins jq defines with `.[..]`/`.[]` on
+/// their input and no condition on its contents (`map`, `add`, `first`, `last`, `nth`, `flatten`, `join`: a path-checked
+/// `INDEX`/`EACH`, raised even on an empty container; not `reverse`, `transpose` or `indices`, which index only a
+/// non-empty array). Whether or not its output is the step's last (a `reduce` keeps only the last), after a source that
+/// moved jq's register that step is path-checked against the element and raises, as `.b` does, so such an UPDATE navigates:
+/// `(. as {b:$q} | 1), .` ends on `.`, whose final check passes, and the raise of the discarded item was never modelled.
+/// Only the wrappers the step always runs through are read (a comma's items, a pipe's head, `first`/`limit`/`nth(0)`, a
+/// `label`, a `try`, an `if` whose branches both do, a `//`'s left operand), and not a nested fold's source, whose
+/// destructures the fold-body machinery routes itself. A `?//` chain retries on the raise, so it is not read. Under
+/// `first(f)` only the head of a comma is (a later item may never run).
+fn update_indexes_accumulator(expr: &Expr) -> bool {
+    /// `caught`: under a `try`/`?`, whose catch of a builtin's raise the resolver does not model (a bind's step it does:
+    /// the pattern walk is the resolver's own), so only a bind is read there.
+    fn within(expr: &Expr, first_only: bool, caught: bool) -> bool {
+        match expr {
+            Expr::Paren(inner) | Expr::Label { body: inner, .. } | Expr::As { body: inner, .. } => {
+                within(inner, first_only, caught)
+            }
+            Expr::Try {
+                expr: inner,
+                catch: None,
+            }
+            | Expr::Optional(inner) => within(inner, first_only, true),
+            Expr::AsPattern {
+                expr,
+                patterns,
+                body,
+            } => {
+                (matches!(unwrap_paren(expr), Expr::Identity)
+                    && matches!(
+                        patterns.as_slice(),
+                        [Pattern::Object(_) | Pattern::Array(_)]
+                    ))
+                    || within(body, first_only, caught)
+            }
+            Expr::Comma(items) if first_only => {
+                items.first().is_some_and(|head| within(head, true, caught))
+            }
+            Expr::Comma(items) => items.iter().any(|item| within(item, false, caught)),
+            Expr::Pipe(stages) => stages
+                .first()
+                .is_some_and(|head| within(head, first_only, caught)),
+            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                within(inner, true, caught)
+            }
+            Expr::Limit { n, expr } if takes_outputs(n) => within(expr, true, caught),
+            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+                if is_nth_zero(n) =>
+            {
+                within(expr, true, caught)
+            }
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => within(then_branch, first_only, caught) && within(else_branch, first_only, caught),
+            Expr::Alternative(left, _) => within(left, first_only, caught),
+            Expr::Builtin(
+                Builtin::Map(_)
+                | Builtin::Add
+                | Builtin::First
+                | Builtin::Last
+                | Builtin::Nth(_)
+                | Builtin::Flatten
+                | Builtin::FlattenDepth(_)
+                | Builtin::Join(_),
+            ) => !caught,
+            _ => false,
+        }
+    }
+    within(expr, false, false)
+}
+
 /// [`update_definitely_navigates`] for the outputs a consumer reads: every output
 /// (`first_only` false, a `reduce` takes the last) or only the first (`first(f)`
 /// stops at it, so `first(., .k)` never runs `.k` and is `[]` in jq).
@@ -63898,7 +63979,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #3780: whether UPDATE navigates the accumulator on a path that always runs --
     // syntactic, so decided once, not per source element
     // ([`reduce_update_at_register`]).
-    let update_navigates = S::TAG == EvalTag::Jq && update_definitely_navigates(update);
+    let update_navigates = S::TAG == EvalTag::Jq && update_navigates_accumulator(update);
     // #4832: whether UPDATE reads a `$x` bound outside the fold ([`Expr::TrackedVar`]) with no fold of
     // its own in the way. A nested fold's markers are certified by the source/body machinery against the
     // persistent register (`foreign_register_markers_with`), which a per-step one would move out from
@@ -64285,7 +64366,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                             && !(update_has_caught_nav
                                 && silence_failing_caught_navs::<S>(update, acc_effective)
                                     .is_some_and(|silenced| {
-                                        !update_definitely_navigates(&silenced)
+                                        !update_navigates_accumulator(&silenced)
                                     }));
                         let update_at_register = reduce_update_at_register::<S>(
                             update_navigates_here,
