@@ -5153,15 +5153,15 @@ fn build_context(args: &JqCommand) -> Result<EvalContext, BuildContextError> {
 fn build_args_var(context: &EvalContext) -> OwnedValue {
     let mut args_obj = IndexMap::new();
 
-    // Build named object from context.named
-    let named_obj: IndexMap<String, OwnedValue> = context.named.clone();
-    args_obj.insert("named".to_string(), OwnedValue::Object(named_obj.into()));
-
-    // Build positional array from context.positional
+    // `positional` first, as jq builds it (#5152): `$ARGS`, `$ARGS | keys_unsorted` and `$ARGS | tojson` show the order.
     args_obj.insert(
         "positional".to_string(),
         OwnedValue::Array(context.positional.clone().into()),
     );
+
+    // Build named object from context.named
+    let named_obj: IndexMap<String, OwnedValue> = context.named.clone();
+    args_obj.insert("named".to_string(), OwnedValue::Object(named_obj.into()));
 
     OwnedValue::Object(args_obj.into())
 }
