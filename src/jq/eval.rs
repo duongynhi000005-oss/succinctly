@@ -40988,7 +40988,7 @@ fn walk_through_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Opt
         if let Expr::Slice { start, end, .. } = component {
             let current = node?;
             let len = current.items()?.len();
-            let range = SliceBounds::from_literals(*start, *end).resolve(len);
+            let range = SliceBounds::from_literals(*start, *end).resolve_walk(len);
             if len > 0 && range == (0..len) {
                 continue;
             }
@@ -41207,7 +41207,12 @@ impl<'v> FoldNode<'v> {
             Self::Value(_) => (0, false),
         };
         let start = offset + range.start;
-        let copies = start > usize::from(u16::MAX);
+        // #5118: a node reached below the root is recorded at offset 0, though it may be a view of a longer buffer
+        // (`[range(70003)] | .[60000:]`) that this walk cannot see. Once a slice has been resolved against a container
+        // that long, a slice that starts past 0 may be a copy: read it as one (two evaluations are then two nodes, which
+        // refuses where jq refuses and over-refuses the views jq still shares).
+        let copies =
+            start > usize::from(u16::MAX) || (range.start > 0 && slice::large_container_sliced());
         Some(Self::Items {
             items: &items[range],
             offset: if copies { 0 } else { start },
@@ -41293,8 +41298,9 @@ fn folded_component_step<'v>(node: Option<FoldNode<'v>>, lhs: &Expr, rhs: &Expr)
                     FoldedStep::Differs
                 };
             };
-            let left = SliceBounds::from_literals(*left_start, *left_end).resolve(items.len());
-            let right = SliceBounds::from_literals(*right_start, *right_end).resolve(items.len());
+            let left = SliceBounds::from_literals(*left_start, *left_end).resolve_walk(items.len());
+            let right =
+                SliceBounds::from_literals(*right_start, *right_end).resolve_walk(items.len());
             // An empty range is not a node the walk can vouch for (`[] |
             // .[0:0]` is a fresh array in jq); two slices spelled alike
             // still agree, as they always did.

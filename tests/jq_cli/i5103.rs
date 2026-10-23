@@ -319,11 +319,13 @@ fn test_5103_copied_slice_past_offset_65535_is_a_new_array_per_evaluation() -> R
             "",
             0,
         ),
+        // jq answers (a view at offset 65,535); since #5118 a slice resolved against a container this long raises the gate
+        // that reads a slice starting past 0 as possibly copied, so this is refused loudly.
         (
             r"path(.a[65535:] as $x | .a[65535:] | $x)",
-            "[\"a\",{\"start\":65535,\"end\":null}]\n",
             "",
-            0,
+            "Invalid path expression with result [65535,65536",
+            5,
         ),
     ];
     let document = big_document_5103();
