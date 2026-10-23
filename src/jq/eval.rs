@@ -42850,6 +42850,89 @@ fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
     }
 }
 
+/// How deep [`never_identical`] walks two containers before it stops deciding.
+const NEVER_IDENTICAL_DEPTH: usize = 64;
+
+/// How many nodes [`never_identical`] reads before it stops deciding: a large document that differs only late is not
+/// walked on every step of a `foreach`.
+const NEVER_IDENTICAL_BUDGET: usize = 4096;
+
+/// Whether `a` and `b` can never be the same node to jq's `jv_identical` (#5176): two kinds (`null`, `true` and `false`
+/// are three), or two containers or strings that differ somewhere. Two equal values may or may not share a node,
+/// which a value cannot say, and numbers are compared by representation (a `NaN` is not equal to itself, yet one node
+/// is identical to itself), so none of those is decided: only a difference found is reported, and a pair nested
+/// deeper than [`NEVER_IDENTICAL_DEPTH`], or past [`NEVER_IDENTICAL_BUDGET`] nodes, is left undecided rather than walked.
+fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
+    fn differs(
+        a: &OwnedValue,
+        b: &OwnedValue,
+        depth: usize,
+        budget: &core::cell::Cell<usize>,
+    ) -> bool {
+        if depth > NEVER_IDENTICAL_DEPTH || budget.get() == 0 {
+            return false;
+        }
+        budget.set(budget.get() - 1);
+        let number = |value: &OwnedValue| {
+            matches!(
+                value,
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
+            )
+        };
+        match (a, b) {
+            (OwnedValue::Null, OwnedValue::Null) => false,
+            (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x != y,
+            (OwnedValue::String(x), OwnedValue::String(y)) => x != y,
+            (OwnedValue::Array(x), OwnedValue::Array(y)) => {
+                x.len() != y.len()
+                    || x.iter()
+                        .zip(y.iter())
+                        .any(|(p, q)| differs(p, q, depth + 1, budget))
+            }
+            (OwnedValue::Object(x), OwnedValue::Object(y)) => {
+                x.len() != y.len()
+                    || x.iter().any(|(key, p)| {
+                        y.get(key)
+                            .map_or(true, |q| differs(p, q, depth + 1, budget))
+                    })
+            }
+            (x, y) if number(x) && number(y) => false,
+            _ => true,
+        }
+    }
+    differs(a, b, 0, &core::cell::Cell::new(NEVER_IDENTICAL_BUDGET))
+}
+
+/// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) is of a value that is never
+/// `register` (#5176): a `foreach` UPDATE's register is the element its source moved it onto, and a pattern step on
+/// a `$x` that is none of that node fails jq's `path_intact` before it reads a key, whatever the pattern lands on, so
+/// a `try` around it empties the nested `foreach`'s source ([`with_foreach_register_ambient`] decides that part).
+/// Only a destructure whose source is the bare marker is read, of patterns that destructure at their first step
+/// ([`routes_destructuring`], or a `?//` chain of such: a bare `$var` alternative recovers), and there must be one under
+/// a `try` or a `?` ([`catching_wrapper_inner`]): an uncaught raise is not an empty source (#5182).
+fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) -> bool {
+    let mut seen = false;
+    let mut all = true;
+    let mut caught = false;
+    any_subexpr(source, &mut |e| {
+        caught |= catching_wrapper_inner(e).is_some();
+        if let Expr::AsPattern { expr, patterns, .. } = e {
+            // A destructure of `.` or of a value computed from a marker steps from a node this does not read.
+            match unwrap_paren(expr) {
+                Expr::TrackedVar(marker) => {
+                    seen = true;
+                    all &= (routes_destructuring(patterns)
+                        || patterns_all_destructuring_chain(patterns))
+                        && never_identical(&marker.value, register);
+                }
+                _ => all = false,
+            }
+        }
+        false
+    });
+    seen && all && caught
+}
+
 /// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
 /// `try`, so its outputs carry the register the `try` entered with, which [`source_destructures_to_container`]'s
 /// reading states only for the ones [`update_entry_try_bodies`] names. A handler that emits nothing (`catch empty`)
@@ -55935,6 +56018,10 @@ fn foreign_register_markers_with<S: EvalSemantics>(
                 // A marker with no position (`Snapshot`, `Untracked`, `Unproven`) is not provably elsewhere.
                 _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
             };
+            // #5176: against the node a `foreach` source moved the register onto, a marker of another kind is
+            // not it whatever position it was bound at (`jv_identical` compares the kind first).
+            let elsewhere = elsewhere
+                || (ambient.value_is_register && never_identical(&marker.value, ambient.value));
             let provably_other = if off_body || moved_at.is_some() {
                 matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
                     // #5030: a `null` marker is no node of a register known not to be `null`: INIT moved the
@@ -55990,6 +56077,28 @@ fn with_register_ambient<T>(
         register_null: ambient.register_null,
         register_null_off_root: ambient.register_null_off_root,
         frame_names_register: false,
+        value_is_register: false,
+    }))
+}
+
+/// [`with_register_ambient`] for the UPDATE of a `foreach` whose source named the element it moved the register onto
+/// ([`fold_body::foreach_register`], #5176): the markers are compared with that element, which the state the steps
+/// before left says nothing of. `None` where no element was named.
+fn with_foreach_register_ambient<T>(
+    ambient: &FoldSourceAmbient<'_>,
+    check: impl FnOnce(&FoldSourceAmbient<'_>) -> T,
+) -> Option<T> {
+    let register = fold_body::foreach_register_here()?;
+    Some(check(&FoldSourceAmbient {
+        value: &register,
+        trackable: true,
+        snapshot: ambient.snapshot.clone(),
+        frame: ambient.frame.clone(),
+        register_non_null: !matches!(register, OwnedValue::Null),
+        register_null: matches!(register, OwnedValue::Null),
+        register_null_off_root: false,
+        frame_names_register: false,
+        value_is_register: true,
     }))
 }
 
@@ -59806,10 +59915,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::sole_update_foreach_in_loop_here(source)
         // #4782: against the register the frame names where a computed stage ahead of the fold left
         // the ambient off it; the ambient itself where the frame does not say.
-        && with_register_ambient(ambient, |ambient| {
+        && (with_register_ambient(ambient, |ambient| {
             caught_foreign_destructure::<S>(source, ambient, false)
         })
         .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient, false))
+            // #5176: ...or against the element a `foreach` source moved the register onto, where the state is
+            // not it: a `$x` bound elsewhere fails `path_intact` on that node.
+            || with_foreach_register_ambient(ambient, |ambient| {
+                caught_foreign_destructure::<S>(source, ambient, false)
+            })
+            .unwrap_or(false))
     {
         return Flow::Exhausted;
     }
@@ -62283,6 +62398,10 @@ struct FoldSourceAmbient<'v> {
     /// of the fold). A marker bound elsewhere than where it names is then provably not the register, as in
     /// a body whose accumulator is off it ([`foreign_in_off_body`]).
     frame_names_register: bool,
+    /// `value` is the node jq's register holds, not the state of a `foreach` that the register is off
+    /// ([`with_foreach_register_ambient`], #5176): a marker of another kind is then provably not it, whatever
+    /// position it was bound at.
+    value_is_register: bool,
 }
 
 impl FoldSourceAmbient<'_> {
@@ -62477,6 +62596,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             register_null: reg.register_is_null(),
             register_null_off_root,
             frame_names_register: init_moved_off_entry || entered_on_register,
+            value_is_register: false,
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s
@@ -62520,6 +62640,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         register_null: reg.register_is_null(),
         register_null_off_root: false,
         frame_names_register: init_moved_off_entry || entered_on_register,
+        value_is_register: false,
     }
 }
 
@@ -66856,11 +66977,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             &elem.value,
                                         ))
                             };
+                            // #5176: ...and where no `$x` it destructures can be the element at all (another kind, or a
+                            // different value), whatever the pattern lands on.
                             let _register = (_sole_update_foreach.is_some()
                                 && elem.register_path.is_some()
                                 && plain_update_heads(item).is_some_and(|(heads, src, init)| {
                                     head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
                                         source_destructures_to_null_or_bool(src, &handed)
+                                            || source_destructures_only_foreign_nodes(
+                                                src,
+                                                &elem.value,
+                                            )
                                             || (((is_null_or_bool(&handed)
                                                 && source_destructures_to_container(src))
                                                 || any_state(src, init, &handed))
@@ -157839,5 +157966,103 @@ mod source_hands_register_off_tests_5044 {
         ] {
             assert!(!off(source), "{source}");
         }
+    }
+}
+
+#[cfg(test)]
+mod never_identical_tests_5176 {
+    use super::*;
+
+    fn obj(pairs: &[(&str, OwnedValue)]) -> OwnedValue {
+        OwnedValue::object_from(pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())))
+    }
+
+    /// #5176: two kinds are two nodes (`null`, `true` and `false` are three), a number against anything else too.
+    #[test]
+    fn different_kinds_never_are_one_node() {
+        let kinds = [
+            OwnedValue::Null,
+            OwnedValue::Bool(false),
+            OwnedValue::Bool(true),
+            OwnedValue::Int(1),
+            OwnedValue::string("s"),
+            OwnedValue::array(),
+            OwnedValue::object(),
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                // `Int` against `Int`, `null` against `null` and so on are equal, hence undecided.
+                assert_eq!(never_identical(a, b), i != j, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// ...but equal values, and two numbers, are not decided: one node is equal to itself, and a number is
+    /// compared by representation.
+    #[test]
+    fn equal_values_and_numbers_are_undecided() {
+        let nan = OwnedValue::array_from(alloc::vec![OwnedValue::Float(f64::NAN)]);
+        assert!(!never_identical(&nan, &nan.clone()));
+        assert!(!never_identical(&OwnedValue::Int(1), &OwnedValue::Int(2)));
+        assert!(!never_identical(
+            &OwnedValue::Int(1),
+            &OwnedValue::Float(1.0)
+        ));
+        let a = obj(&[("a", OwnedValue::string("x")), ("b", OwnedValue::Null)]);
+        assert!(!never_identical(&a, &a.clone()));
+        assert!(!never_identical(
+            &OwnedValue::string("x"),
+            &OwnedValue::string("x")
+        ));
+    }
+
+    /// A difference anywhere found is reported: a bool, a string, a length, a key, a nested element.
+    #[test]
+    fn a_found_difference_is_reported() {
+        assert!(never_identical(
+            &OwnedValue::Bool(true),
+            &OwnedValue::Bool(false)
+        ));
+        assert!(never_identical(
+            &OwnedValue::string("x"),
+            &OwnedValue::string("y")
+        ));
+        let one = OwnedValue::array_from(alloc::vec![OwnedValue::Null]);
+        let two = OwnedValue::array_from(alloc::vec![OwnedValue::Null, OwnedValue::Null]);
+        assert!(never_identical(&one, &two));
+        let here = obj(&[("a", OwnedValue::Null)]);
+        let there = obj(&[("b", OwnedValue::Null)]);
+        assert!(never_identical(&here, &there));
+        let deep = obj(&[("a", obj(&[("b", OwnedValue::string("x"))]))]);
+        let other = obj(&[("a", obj(&[("b", OwnedValue::string("y"))]))]);
+        assert!(never_identical(&deep, &other));
+    }
+
+    /// A pair nested deeper than the limit, or read past the node budget, is left undecided rather than walked.
+    #[test]
+    fn deep_and_large_pairs_are_left_undecided() {
+        let nest = |leaf: OwnedValue| {
+            (0..=NEVER_IDENTICAL_DEPTH + 1)
+                .fold(leaf, |inner, _| OwnedValue::array_from(alloc::vec![inner]))
+        };
+        assert!(!never_identical(
+            &nest(OwnedValue::Bool(true)),
+            &nest(OwnedValue::Bool(false))
+        ));
+        let strings = |last: &str| {
+            let mut items: alloc::vec::Vec<OwnedValue> = (0..NEVER_IDENTICAL_BUDGET + 8)
+                .map(|_| OwnedValue::string("same"))
+                .collect();
+            items.push(OwnedValue::string(last));
+            OwnedValue::array_from(items)
+        };
+        assert!(!never_identical(&strings("x"), &strings("y")));
+        let short = |last: &str| {
+            OwnedValue::array_from(alloc::vec![
+                OwnedValue::string("same"),
+                OwnedValue::string(last)
+            ])
+        };
+        assert!(never_identical(&short("x"), &short("y")));
     }
 }
