@@ -159,6 +159,72 @@ fn test_foreach_update_try_handler_where_the_landing_is_not_the_state_5012() -> 
     ])
 }
 
+/// #5012: with no handler, a two-entry pattern on the root element, which `$x` is: its second step is checked against
+/// the child the first moved the register onto and raises, the source's own `try` empties it, and the `foreach` emits
+/// nothing, so `path` is empty and `del`/`|=` leave the document. Read now that a pattern that raises on the register
+/// is read whatever the state (#4800 pinned these refused). Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_caught_two_entry_destructure_on_the_register_empties_the_step_5012() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":false}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$p,b:$q} | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":false}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$p,b:$q} | .)) as $y (.; .; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":false}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$p,b:$q} | .)) as $y (.; .; .); .))",
+            "{\"a\":null,\"b\":false}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":false}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$p,b:$q} | .)) as $y (.; .; .); .)) |= 9",
+            "{\"a\":null,\"b\":false}\n",
+            "",
+            0,
+        ),
+        (
+            r"[null,true]",
+            r"path(. as $x | foreach (.[0],.) as $i (.; foreach (try ($x as [$p,$q] | .)) as $y (.; .; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r"[null,true]",
+            r"[path(. as $x | foreach (.[0],.) as $i (.; foreach (try ($x as [$p,$q] | .)) as $y (.; .; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r"[null,true]",
+            r"del(. as $x | foreach (.[0],.) as $i (.; foreach (try ($x as [$p,$q] | .)) as $y (.; .; .); .))",
+            "[null,true]\n",
+            "",
+            0,
+        ),
+        (
+            r"[null,true]",
+            r"(. as $x | foreach (.[0],.) as $i (.; foreach (try ($x as [$p,$q] | .)) as $y (.; .; .); .)) |= 9",
+            "[null,true]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
 /// #5012: every step of `..`: the root (whose state is `null`, #4800's reading), then `.a` and `.a.a`, whose state is
 /// the root the previous handler emitted. Rows captured from jq 1.7.1, both routes.
 #[test]
