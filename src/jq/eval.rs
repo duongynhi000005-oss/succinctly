@@ -42850,6 +42850,42 @@ fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
     }
 }
 
+/// Whether `a` and `b` can never be the same node to jq's `jv_identical` (#5176): two values that differ are two
+/// nodes, and so are two kinds (`null`, `true` and `false` are three). Two equal values may or may not share a
+/// node, which a value cannot say, and numbers are compared by representation, so neither is decided here.
+fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
+    let number = |value: &OwnedValue| {
+        matches!(
+            value,
+            OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
+        )
+    };
+    if number(a) || number(b) {
+        return !(number(a) && number(b));
+    }
+    a != b
+}
+
+/// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) is of a value that is never
+/// `register` (#5176): a `foreach` UPDATE's register is the element its source moved it onto, and a pattern step on
+/// a `$x` that is none of that node fails jq's `path_intact` before it reads a key, whatever the pattern lands on, so
+/// a `try` around it empties the nested `foreach`'s source ([`with_foreach_register_ambient`] decides that part).
+/// Only a destructure whose source is the bare marker is read, and there must be one.
+fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) -> bool {
+    let mut seen = false;
+    let mut all = true;
+    any_subexpr(source, &mut |e| {
+        if let Expr::AsPattern { expr, .. } = e {
+            if let Expr::TrackedVar(marker) = unwrap_paren(expr) {
+                seen = true;
+                all &= never_identical(&marker.value, register);
+            }
+        }
+        false
+    });
+    seen && all
+}
+
 /// How many `try`s in `expr` have a handler that can emit (#4800, #5004): jq runs a handler after backtracking to its
 /// `try`, so its outputs carry the register the `try` entered with, which [`source_destructures_to_container`]'s
 /// reading states only for the ones [`update_entry_try_bodies`] names. A handler that emits nothing (`catch empty`)
@@ -55935,6 +55971,10 @@ fn foreign_register_markers_with<S: EvalSemantics>(
                 // A marker with no position (`Snapshot`, `Untracked`, `Unproven`) is not provably elsewhere.
                 _ => false, // patchcov: coverage tolerate-line reason="conservative arm: no suite filter binds a marker without a position that a fold source destructures; read as possibly the register, as before (#4588)"
             };
+            // #5176: against the node a `foreach` source moved the register onto, a marker of another kind is
+            // not it whatever position it was bound at (`jv_identical` compares the kind first).
+            let elsewhere = elsewhere
+                || (ambient.value_is_register && never_identical(&marker.value, ambient.value));
             let provably_other = if off_body || moved_at.is_some() {
                 matches!(&marker.value, OwnedValue::Array(_) | OwnedValue::Object(_))
                     // #5030: a `null` marker is no node of a register known not to be `null`: INIT moved the
@@ -55990,6 +56030,28 @@ fn with_register_ambient<T>(
         register_null: ambient.register_null,
         register_null_off_root: ambient.register_null_off_root,
         frame_names_register: false,
+        value_is_register: false,
+    }))
+}
+
+/// [`with_register_ambient`] for the UPDATE of a `foreach` whose source named the element it moved the register onto
+/// ([`fold_body::foreach_register`], #5176): the markers are compared with that element, which the state the steps
+/// before left says nothing of. `None` where no element was named.
+fn with_foreach_register_ambient<T>(
+    ambient: &FoldSourceAmbient<'_>,
+    check: impl FnOnce(&FoldSourceAmbient<'_>) -> T,
+) -> Option<T> {
+    let register = fold_body::foreach_register_here()?;
+    Some(check(&FoldSourceAmbient {
+        value: &register,
+        trackable: true,
+        snapshot: ambient.snapshot.clone(),
+        frame: ambient.frame.clone(),
+        register_non_null: ambient.register_non_null,
+        register_null: ambient.register_null,
+        register_null_off_root: ambient.register_null_off_root,
+        frame_names_register: false,
+        value_is_register: true,
     }))
 }
 
@@ -59806,10 +59868,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
         && fold_body::sole_update_foreach_in_loop_here(source)
         // #4782: against the register the frame names where a computed stage ahead of the fold left
         // the ambient off it; the ambient itself where the frame does not say.
-        && with_register_ambient(ambient, |ambient| {
+        && (with_register_ambient(ambient, |ambient| {
             caught_foreign_destructure::<S>(source, ambient, false)
         })
         .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient, false))
+            // #5176: ...or against the element a `foreach` source moved the register onto, where the state is
+            // not it: a `$x` bound elsewhere fails `path_intact` on that node.
+            || with_foreach_register_ambient(ambient, |ambient| {
+                caught_foreign_destructure::<S>(source, ambient, false)
+            })
+            .unwrap_or(false))
     {
         return Flow::Exhausted;
     }
@@ -62283,6 +62351,10 @@ struct FoldSourceAmbient<'v> {
     /// of the fold). A marker bound elsewhere than where it names is then provably not the register, as in
     /// a body whose accumulator is off it ([`foreign_in_off_body`]).
     frame_names_register: bool,
+    /// `value` is the node jq's register holds, not the state of a `foreach` that the register is off
+    /// ([`with_foreach_register_ambient`], #5176): a marker of another kind is then provably not it, whatever
+    /// position it was bound at.
+    value_is_register: bool,
 }
 
 impl FoldSourceAmbient<'_> {
@@ -62477,6 +62549,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
             register_null: reg.register_is_null(),
             register_null_off_root,
             frame_names_register: init_moved_off_entry || entered_on_register,
+            value_is_register: false,
         };
     }
     // A later fork's ambient is `null`, so `branch_provenance`'s
@@ -62520,6 +62593,7 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         register_null: reg.register_is_null(),
         register_null_off_root: false,
         frame_names_register: init_moved_off_entry || entered_on_register,
+        value_is_register: false,
     }
 }
 
@@ -66856,11 +66930,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             &elem.value,
                                         ))
                             };
+                            // #5176: ...and where no `$x` it destructures can be the element at all (another kind, or a
+                            // different value), whatever the pattern lands on.
                             let _register = (_sole_update_foreach.is_some()
                                 && elem.register_path.is_some()
                                 && plain_update_heads(item).is_some_and(|(heads, src, init)| {
                                     head_value::<S>(&heads, &entry_state).is_some_and(|handed| {
                                         source_destructures_to_null_or_bool(src, &handed)
+                                            || source_destructures_only_foreign_nodes(
+                                                src,
+                                                &elem.value,
+                                            )
                                             || (((is_null_or_bool(&handed)
                                                 && source_destructures_to_container(src))
                                                 || any_state(src, init, &handed))
