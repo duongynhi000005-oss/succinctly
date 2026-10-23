@@ -53,12 +53,20 @@ WRAPPERS = [
     "({S}) // [1]",
     "({S}) // {}",
     "({S}) // (1,2)",
-    # an operand that is not a constant: the loop's `$i` (inert), the outer `$x` and a navigation (neither is)
+    # an operand that is not a constant: the loop's `$i` (a marker over a source that navigates), the outer `$x`, `.` and
+    # navigations can be the register's node, which the emission's check accepts where a constant raises (#5167)
     "({S}) // $i",
     "({S}) // (6, $i)",
     "try (({S}) // $i)",
     "({S}) // $x",
     "({S}) // .a",
+    "({S}) // .",
+    "({S}) // not",
+    "({S}) // length",
+    "({S}) // ($i + 1)",
+    "({S}) // .a?",
+    "({S}) // (.a, 6)",
+    "try (({S}) // .)",
     "(({S}) // 5) // 6",
     "(({S}) // 5) | .",
     # #5162: the `| .` spelling, over the other constants and with a `def` in the left operand
