@@ -64210,7 +64210,9 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
         && cannot_move_register(input)
-        && cannot_move_register(init);
+        // #5148: ...or an INIT that navigates by fields, which leaves jq's register on the node it reached and the
+        // accumulator on that node: UPDATE meets `.` there as after `INIT .`.
+        && (cannot_move_register(init) || nav_head_fields(init).is_some());
     // #4126: an UPDATE that is itself a `try` runs its body and its handler with `.` on the
     // accumulator, which a source and INIT that cannot move jq's register leave on the
     // register at the first step -- the same standing [`update_returns_its_input`] vets for,
