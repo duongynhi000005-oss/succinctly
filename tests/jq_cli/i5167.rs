@@ -117,3 +117,26 @@ fn test_5167_reduce_alternative_with_a_marker_operand_and_an_alternation() -> Re
         ),
     ])
 }
+
+/// #5167: the same operands behind a three-argument `foreach`'s `//` (#5157), which refused the loop's `$i` and a
+/// comma of a navigation and a constant after the first step.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5167_three_argument_foreach_alternative_with_a_non_constant_operand() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // ($i + 1); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // (.a, 6); $i))",
+            "[\"a\",\"a\"]\n[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+    ])
+}
