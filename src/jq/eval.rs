@@ -67124,7 +67124,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 },
                                 active_at_register,
                                 &entry_snapshot,
-                                keep,
+                                // #5193: `foreach` consumes every output of its UPDATE, so a generator in it
+                                // (`range(3)`) is asked for all of them, not the first `path()` asks of a leaf.
+                                Keep::AtMost(usize::MAX),
                                 &mut |update_branch| {
                                     left_emitted.set(true);
                                     let demand = on_update(update_branch);

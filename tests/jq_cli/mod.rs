@@ -103,3 +103,4 @@ mod i5176;
 mod i5177;
 mod i5178;
 mod i5185;
+mod i5193;
