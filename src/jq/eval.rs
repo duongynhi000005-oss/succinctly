@@ -51298,6 +51298,11 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
             let (if_item, false) = taken_if_item(expr)? else {
                 return None;
             };
+            if cannot_move_register(if_item)
+                || arms_fold_headed(if_item, WRAPPED_CHAIN_DEPTH) != Some(true)
+            {
+                return None;
+            }
             let head = walk_falsy_else_chain::<S>(if_item, state);
             (matches!(unwrap_paren(handler), Expr::Literal(_)) && if_cond_raises::<S>(head, state))
                 .then_some(&**handler)
@@ -65809,7 +65814,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let mut entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
                         // #5018: per UPDATE item of a comma ([`comma_bind_split`]), set below.
-                        let handler_arm_tries = if S::TAG == EvalTag::Jq {
+                        let handler_arm_tries = if S::TAG == EvalTag::Jq
+                            && no_retry
+                            && run_bounds == Some((fork_index + 1, steps))
+                        {
                             handler_arm_tries(&bound_update)
                         } else {
                             Vec::new()
