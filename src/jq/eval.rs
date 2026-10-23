@@ -63383,55 +63383,79 @@ fn update_definitely_navigates(expr: &Expr) -> bool {
 
 /// Whether a `reduce` UPDATE navigates the accumulator on a path that always runs ([`update_definitely_navigates`]), or
 /// indexes it at a step that does ([`update_indexes_accumulator`], #5141), for the accumulator a step holds when given.
-fn update_navigates_accumulator<S: EvalSemantics>(update: &Expr, acc: Option<&OwnedValue>) -> bool {
-    update_definitely_navigates(update) || update_indexes_accumulator::<S>(update, acc)
+fn update_navigates_accumulator<S: EvalSemantics>(update: &Expr, mode: IndexMode<'_>) -> bool {
+    update_definitely_navigates(update) || update_indexes_accumulator::<S>(update, mode)
+}
+
+/// How [`update_indexes_accumulator`] decides what depends on the accumulator (#5143).
+#[derive(Clone, Copy)]
+enum IndexMode<'a> {
+    /// Syntactically, once per fold: only what indexes on every accumulator is read.
+    Static,
+    /// Whether the walk could read more per step: every builtin and `if` it decides per step counts.
+    Possible,
+    /// For the accumulator a step holds: `reverse`/`transpose` index only a container with something to index,
+    /// `index`/`rindex`/`indices` (`.[[$i]]`) all but a string, and an effect-free `if` condition is evaluated on it, each
+    /// output running its branch.
+    At(&'a OwnedValue),
 }
 
 /// Whether a `reduce` UPDATE indexes the accumulator at a step that always runs without being a navigation
 /// [`update_definitely_navigates`] reads (#5141): a single-pattern destructuring bind of `.` (`. as {b:$q} | ..` indexes
-/// it at its pattern's first step, whichever way its body goes), or one of the builtins jq defines with `.[..]`/`.[]` on
-/// their input and no condition on its contents (`map`, `add`, `first`, `last`, `nth`, `flatten`, `join`: a path-checked
-/// `INDEX`/`EACH`, raised even on an empty container; not `reverse`, `transpose` or `indices`, which index only a
-/// non-empty array). Whether or not its output is the step's last (a `reduce` keeps only the last), after a source that
-/// moved jq's register that step is path-checked against the element and raises, as `.b` does, so such an UPDATE navigates:
-/// `(. as {b:$q} | 1), .` ends on `.`, whose final check passes, and the raise of the discarded item was never modelled.
+/// it at its pattern's first step, whichever way its body goes), the builtins jq defines with `.[..]`/`.[]` on their input
+/// (`map`, `add`, `first`, `last`, `nth`, `flatten`, `join`: a path-checked `INDEX`/`EACH`, raised even on an empty
+/// container), a variable bound to the accumulator (`. as $z | $z.b`) and the generator of `any`/`all(gen; cond)`. Whether or
+/// not its output is the step's last (a `reduce` keeps only the last), after a source that moved jq's register that step is
+/// path-checked against the element and raises, as `.b` does, so such an UPDATE navigates: `(. as {b:$q} | 1), .` ends on
+/// `.`, whose final check passes, and the raise of the discarded item was never modelled.
+///
 /// Only the wrappers the step always runs through are read (a comma's items, a pipe's head, `first`/`limit`/`nth(0)`, a
-/// `label`, a `try`, an `if` whose condition is certain to yield and whose branches both do, a collect, a `def` call, a
-/// `//`'s left operand), and not a nested fold's source, whose
+/// `label`, a `try`, an `if`, a collect, a `def` call, a `//`'s left operand), and not a nested fold's source, whose
 /// destructures the fold-body machinery routes itself. A `?//` chain retries on the raise, so it is not read. Under
-/// `first(f)` only the head of a comma is (a later item may never run).
-fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedValue>) -> bool {
-    struct Walk<'a> {
-        /// The accumulator the step holds, when asked per step: `reverse`/`transpose` index only a non-empty one, and
-        /// `index`/`rindex`/`indices` index (`.[[$i]]`) all but a string, and an `if` takes the branch its condition picks (#5143).
-        acc: Option<&'a OwnedValue>,
-    }
-    /// A non-empty array, object or string: what `reverse` and `transpose` index (`.[length - 1 - range(0;length)]`).
-    fn non_empty_container(acc: &OwnedValue) -> bool {
-        matches!(
-            acc,
-            OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::String(_)
-        ) && acc.length() != Some(0)
+/// `first(f)` only the head of a comma is (a later item may never run). A `try` hides a builtin's raise from the resolver,
+/// which models a bind's: only a bind is read under one.
+///
+/// [`IndexMode::At`] adds what depends on the accumulator (#5143): `reverse`, `transpose` and `index`/`rindex`/`indices`, and
+/// an `if` is read through the branches its condition picks; without it (`Static`, `Possible`) an `if` is read only when its
+/// condition is certain to yield and both branches index, and those builtins are not read (`Possible` reads them, to say
+/// whether `At` has anything to decide).
+fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, mode: IndexMode<'_>) -> bool {
+    /// A non-empty array, object or string, or a nonzero number: what `reverse` indexes
+    /// (`.[length - 1 - range(0;length)]`).
+    fn non_empty(acc: &OwnedValue) -> bool {
+        match acc {
+            OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::String(_) => {
+                acc.length() != Some(0)
+            }
+            other => other.as_f64().is_some_and(|n| n != 0.0),
+        }
     }
     /// A container holding an array, object or string that is not empty: `transpose` indexes (`$in[$i][$j]`, over
     /// `range(0; $max)` for the largest length) only then, its `map(length)` running in a subexpression.
     fn has_non_empty_element(acc: &OwnedValue) -> bool {
-        let non_empty = |v: &OwnedValue| {
+        let element = |v: &OwnedValue| {
             matches!(
                 v,
                 OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::String(_)
             ) && v.length() != Some(0)
         };
         match acc {
-            OwnedValue::Array(items) => items.iter().any(non_empty),
-            OwnedValue::Object(entries) => entries.values().any(non_empty),
+            OwnedValue::Array(items) => items.iter().any(element),
+            OwnedValue::Object(entries) => entries.values().any(element),
             _ => false,
         }
     }
+    /// Whether evaluating `cond` by value is safe to repeat: no effect, no call whose body is unseen.
+    fn effect_free(cond: &Expr) -> bool {
+        !walk_body_may_have_effects(cond)
+            && !any_subexpr(cond, &mut |e| matches!(e, Expr::DefCall { .. }))
+    }
+    struct Walk<'a> {
+        mode: IndexMode<'a>,
+    }
     impl Walk<'_> {
-        /// `caught`: under a `try`/`?`, whose catch of a builtin's raise the resolver does not model (a bind's step it
-        /// does: the pattern walk is the resolver's own), so only a bind is read there. `vars`: the variables bound to
-        /// the accumulator itself (`. as $z`), whose indexing is path-checked against the register as `.` is.
+        /// `caught`: under a `try`/`?`. `vars`: the variables bound to the accumulator itself (`. as $z`), whose indexing is
+        /// path-checked against the register as `.` is.
         fn within<S: EvalSemantics>(
             &self,
             expr: &Expr,
@@ -63440,10 +63464,15 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
             vars: &[&str],
         ) -> bool {
             let go = |e: &Expr, first_only: bool| self.within::<S>(e, first_only, caught, vars);
+            let is_acc = |e: &Expr| match unwrap_paren(e) {
+                Expr::Identity => true,
+                Expr::Var(name) => vars.contains(&name.as_str()),
+                _ => false,
+            };
             match expr {
                 Expr::Paren(inner) | Expr::Label { body: inner, .. } => go(inner, first_only),
                 Expr::As { expr, var, body } => {
-                    if matches!(unwrap_paren(expr), Expr::Identity) {
+                    if is_acc(expr) {
                         let mut bound = vars.to_vec();
                         bound.push(var);
                         self.within::<S>(body, first_only, caught, &bound)
@@ -63462,7 +63491,7 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
                     patterns,
                     body,
                 } => {
-                    (matches!(unwrap_paren(expr), Expr::Identity)
+                    (is_acc(expr)
                         && matches!(
                             patterns.as_slice(),
                             [Pattern::Object(_) | Pattern::Array(_)]
@@ -63483,12 +63512,11 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
                     false
                 }
                 Expr::Comma(items) => items.iter().any(|item| go(item, false)),
-                // `$z | .b`: a variable bound to the accumulator is not the register, so its navigation raises.
+                // `$z | f`: a variable bound to the accumulator is the accumulator, so `f` indexes it as it would `.`.
                 Expr::Pipe(stages) if matches!(stages.first(), Some(Expr::Var(name)) if vars.contains(&name.as_str())) => {
-                    !caught
-                        && stages
-                            .get(1)
-                            .is_some_and(|stage| update_navigates_within(stage, false))
+                    stages.get(1).is_some_and(|stage| {
+                        go(stage, first_only) || (!caught && update_navigates_within(stage, false))
+                    })
                 }
                 Expr::Pipe(stages) => stages.first().is_some_and(|head| go(head, first_only)),
                 // A collect runs its body and drains every output of it.
@@ -63511,28 +63539,41 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
                 {
                     go(expr, true)
                 }
-                // The condition decides which branch runs. Asked per step, a pure condition of `.` ([`is_pure_of_dot`]) is evaluated on the
-                // accumulator and each output runs its branch; otherwise both branches must index, and only under a
-                // condition that is certain to yield (`.`, a literal, a variable): `if empty then A else B end` runs
-                // neither.
+                // The condition decides which branch runs: evaluated on the accumulator when it is effect-free (each
+                // output runs its branch), else read only when it is certain to yield (`.`, a literal, a variable) and both
+                // branches index (`if empty then A else B end` runs neither).
                 Expr::If {
                     cond,
                     then_branch,
                     else_branch,
-                } => match self.acc.filter(|_| is_pure_of_dot(cond)) {
-                    Some(acc) => eval_owned_multi::<S>(cond, acc).is_ok_and(|outputs| {
-                        outputs.iter().any(|output| {
-                            go(
-                                if output.is_truthy() {
-                                    then_branch
-                                } else {
-                                    else_branch
-                                },
-                                first_only,
-                            )
-                        })
-                    }),
-                    None => {
+                } => match self.mode {
+                    IndexMode::At(acc) if effect_free(cond) => {
+                        // The variables bound to the accumulator are the accumulator the condition runs on.
+                        let bound = vars
+                            .iter()
+                            .fold(cond.as_ref().clone(), |body, var| Expr::As {
+                                expr: Box::new(Expr::Identity),
+                                var: (*var).to_string(),
+                                body: Box::new(body),
+                            });
+                        match eval_owned_multi::<S>(&bound, acc) {
+                            Ok(outputs) => outputs.iter().any(|output| {
+                                go(
+                                    if output.is_truthy() {
+                                        then_branch
+                                    } else {
+                                        else_branch
+                                    },
+                                    first_only,
+                                )
+                            }),
+                            Err(_) => false,
+                        }
+                    }
+                    IndexMode::Possible => {
+                        go(then_branch, first_only) || go(else_branch, first_only)
+                    }
+                    _ => {
                         yields_for_certain(cond)
                             && go(then_branch, first_only)
                             && go(else_branch, first_only)
@@ -63555,7 +63596,7 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
                     .is_ok_and(|body| go(&body, first_only)),
                 // `any(gen; cond)`/`all(gen; cond)` run their generator on the accumulator.
                 Expr::Builtin(Builtin::AnyCond(generator, _) | Builtin::AllCond(generator, _)) => {
-                    !caught && update_navigates_within(generator, true)
+                    go(generator, true) || (!caught && update_navigates_within(generator, true))
                 }
                 Expr::Builtin(
                     Builtin::Map(_)
@@ -63567,42 +63608,43 @@ fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedV
                     | Builtin::FlattenDepth(_)
                     | Builtin::Join(_),
                 ) => !caught,
-                // Indexed only for a container of the right kind: asked per step.
+                // Indexed only for an accumulator of the right kind: read per step.
                 Expr::Builtin(Builtin::Reverse) => {
-                    !caught && self.acc.is_some_and(non_empty_container)
+                    !caught
+                        && match self.mode {
+                            IndexMode::Static => false,
+                            IndexMode::Possible => true,
+                            IndexMode::At(acc) => non_empty(acc),
+                        }
                 }
                 Expr::Builtin(Builtin::Transpose) => {
-                    !caught && self.acc.is_some_and(has_non_empty_element)
+                    !caught
+                        && match self.mode {
+                            IndexMode::Static => false,
+                            IndexMode::Possible => true,
+                            IndexMode::At(acc) => has_non_empty_element(acc),
+                        }
                 }
                 Expr::Builtin(Builtin::Index(_) | Builtin::Rindex(_) | Builtin::Indices(_)) => {
                     !caught
-                        && self
-                            .acc
-                            .is_some_and(|acc| !matches!(acc, OwnedValue::String(_)))
+                        && match self.mode {
+                            IndexMode::Static => false,
+                            IndexMode::Possible => true,
+                            IndexMode::At(acc) => !matches!(acc, OwnedValue::String(_)),
+                        }
                 }
                 _ => false,
             }
         }
     }
-    Walk { acc }.within::<S>(expr, false, false, &[])
+    Walk { mode }.within::<S>(expr, false, false, &[])
 }
 
-/// Whether [`update_indexes_accumulator`] has anything to decide per step: a builtin it indexes with only for the
-/// right kind of accumulator, or an `if` whose condition it evaluates on it (#5143).
-fn update_indexes_accumulator_per_step(update: &Expr) -> bool {
-    any_subexpr(update, &mut |e| {
-        matches!(
-            e,
-            Expr::If { .. }
-                | Expr::Builtin(
-                    Builtin::Reverse
-                        | Builtin::Transpose
-                        | Builtin::Index(_)
-                        | Builtin::Rindex(_)
-                        | Builtin::Indices(_)
-                )
-        )
-    })
+/// Whether [`update_indexes_accumulator`] has anything to decide per step ([`IndexMode::Possible`] reads more than
+/// [`IndexMode::Static`] does), which is when the fold asks it per step (#5143).
+fn update_indexes_accumulator_per_step<S: EvalSemantics>(update: &Expr) -> bool {
+    update_indexes_accumulator::<S>(update, IndexMode::Possible)
+        && !update_indexes_accumulator::<S>(update, IndexMode::Static)
 }
 
 /// [`update_definitely_navigates`] for the outputs a consumer reads: every output
@@ -64122,10 +64164,12 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #3780: whether UPDATE navigates the accumulator on a path that always runs --
     // syntactic, so decided once, not per source element
     // ([`reduce_update_at_register`]).
-    let update_navigates = S::TAG == EvalTag::Jq && update_navigates_accumulator::<S>(update, None);
+    let update_navigates =
+        S::TAG == EvalTag::Jq && update_navigates_accumulator::<S>(update, IndexMode::Static);
     // #5143: ...and for the steps whose accumulator makes a builtin index or an `if` pick the indexing branch.
-    let update_indexes_per_step =
-        S::TAG == EvalTag::Jq && !update_navigates && update_indexes_accumulator_per_step(update);
+    let update_indexes_per_step = S::TAG == EvalTag::Jq
+        && !update_navigates
+        && update_indexes_accumulator_per_step::<S>(update);
     // #4832: whether UPDATE reads a `$x` bound outside the fold ([`Expr::TrackedVar`]) with no fold of
     // its own in the way. A nested fold's markers are certified by the source/body machinery against the
     // persistent register (`foreign_register_markers_with`), which a per-step one would move out from
@@ -64510,14 +64554,17 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // so UPDATE navigates it only on the steps it succeeds on.
                         let update_navigates_step = update_navigates
                             || (update_indexes_per_step
-                                && update_indexes_accumulator::<S>(update, Some(acc_effective)));
+                                && update_indexes_accumulator::<S>(
+                                    update,
+                                    IndexMode::At(acc_effective),
+                                ));
                         let update_navigates_here = update_navigates_step
                             && !(update_has_caught_nav
                                 && silence_failing_caught_navs::<S>(update, acc_effective)
                                     .is_some_and(|silenced| {
                                         !update_navigates_accumulator::<S>(
                                             &silenced,
-                                            Some(acc_effective),
+                                            IndexMode::At(acc_effective),
                                         )
                                     }));
                         let update_at_register = reduce_update_at_register::<S>(
