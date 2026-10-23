@@ -54,27 +54,37 @@ pub(crate) enum NamedFlag {
     RawFile,
 }
 
-/// The named-variable flags of `argv` in the order given (#5154): each takes two words, which are skipped, so a flag's
-/// value that spells another flag (`--arg --arg v`) is not read as one. Stops at a `--`.
+/// The named-variable flags of `argv` in the order given (#5154). Every option takes the words
+/// [`super::jq_option_arity`] reads off clap's own definition, so a word that spells one of the four flags as the value of
+/// another option (`-f --arg`, `--arg --arg v`) is a value, not a flag. A `--` ends the scan.
 pub(crate) fn named_flag_order(argv: &[String]) -> Vec<NamedFlag> {
+    use clap::CommandFactory;
+    let mut cmd = JqCommand::command();
+    // `get_num_args` is only filled in once the command is built.
+    cmd.build();
     let mut order = Vec::new();
     let mut i = 0;
     while i < argv.len() {
-        let flag = match argv[i].as_str() {
-            "--" => break,
+        let word = argv[i].as_str();
+        if word == "--" {
+            break;
+        }
+        let flag = match word {
             "--arg" => Some(NamedFlag::Arg),
             "--argjson" => Some(NamedFlag::ArgJson),
             "--slurpfile" => Some(NamedFlag::SlurpFile),
             "--rawfile" => Some(NamedFlag::RawFile),
             _ => None,
         };
-        match flag {
+        i += 1 + match flag {
             Some(flag) => {
                 order.push(flag);
-                i += 3;
+                2
             }
-            None => i += 1,
-        }
+            // A value-taking option's words are skipped; a positional word has no arity (it is not option-shaped).
+            None if word.starts_with('-') && word.len() > 1 => super::jq_option_arity(&cmd, word),
+            None => 0,
+        };
     }
     order
 }
@@ -3870,7 +3880,10 @@ fn get_error_line(input: &[u8], line: usize, column: usize) -> Option<(String, u
 /// Returns the exit code (0 for success, non-zero for various errors).
 pub fn run_jq(mut args: JqCommand) -> Result<i32> {
     args.resolve_positional_args();
-    args.named_order = named_flag_order(&std::env::args().collect::<Vec<_>>());
+    // The order only matters between two or more named flags: a command line with fewer builds no clap definition for it.
+    if (args.arg.len() + args.argjson.len() + args.slurpfile.len() + args.rawfile.len()) / 2 >= 2 {
+        args.named_order = named_flag_order(&std::env::args().collect::<Vec<_>>());
+    }
 
     // Handle --version flag
     if args.version {
@@ -11160,6 +11173,21 @@ mod tests {
                     "jq", "--arg", "--arg", "v", "--", "--arg", "x", "y"
                 ])),
                 vec![Arg]
+            );
+            // ...whichever option takes it (`-f FILE`)
+            assert_eq!(
+                named_flag_order(&argv(&[
+                    "jq",
+                    "-f",
+                    "--arg",
+                    "--rawfile",
+                    "r",
+                    "/dev/null",
+                    "--arg",
+                    "a",
+                    "1",
+                ])),
+                vec![RawFile, Arg]
             );
             assert_eq!(named_flag_order(&argv(&["jq", "-n", "."])), vec![]);
         }
