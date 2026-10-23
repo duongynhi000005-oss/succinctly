@@ -38885,6 +38885,20 @@ fn emits_only_the_accumulator(e: &Expr) -> bool {
     }
 }
 
+/// Whether `e`, one for which [`emits_only_the_accumulator`] holds, emits the accumulator more than once (#5185):
+/// a comma of them (`(.,.)`), at the top or behind a `try`/`?`. A `first`/`limit`/`nth(0; ..)` bounds its comma to one.
+fn delivers_accumulator_repeatedly(e: &Expr) -> bool {
+    match unwrap_paren(e) {
+        Expr::Comma(items) => items.len() > 1,
+        Expr::Try { expr, .. } | Expr::Optional(expr) => delivers_accumulator_repeatedly(expr),
+        // A count of one stops at the first output; any other (or unlimited) one lets the comma through.
+        Expr::Limit { n, expr } | Expr::Builtin(Builtin::Limit(n, expr)) => {
+            constant_number(n) != Some(1.0) && delivers_accumulator_repeatedly(expr)
+        }
+        _ => false,
+    }
+}
+
 /// Whether a fold's UPDATE reads a `$x` bound outside the fold ([`Expr::TrackedVar`]) with no fold of its own in the
 /// way (#4832). A nested fold's markers are certified by the source/body machinery against the persistent register
 /// (`foreign_register_markers_with`), which a per-step one would move out from under. Syntactic.
@@ -61632,7 +61646,8 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                                 // #4932: ...or a body that hands the accumulator on in a `reduce` UPDATE whose
                                 // state is handed on ([`emits_only_the_accumulator`]).
                                 || (fold_body::state_handed_on_here()
-                                    && emits_only_the_accumulator(&substituted)))
+                                    && emits_only_the_accumulator(&substituted)
+                                    && !delivers_accumulator_repeatedly(&substituted)))
                         {
                             match sink(seed) {
                                 Demand::Continue => ResolveFlow::Exhausted,
