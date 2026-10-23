@@ -63396,7 +63396,8 @@ fn update_navigates_accumulator(update: &Expr) -> bool {
 /// moved jq's register that step is path-checked against the element and raises, as `.b` does, so such an UPDATE navigates:
 /// `(. as {b:$q} | 1), .` ends on `.`, whose final check passes, and the raise of the discarded item was never modelled.
 /// Only the wrappers the step always runs through are read (a comma's items, a pipe's head, `first`/`limit`/`nth(0)`, a
-/// `label`, a `try`, an `if` whose branches both do, a `//`'s left operand), and not a nested fold's source, whose
+/// `label`, a `try`, an `if` whose condition is certain to yield and whose branches both do, a collect, a `def` call, a
+/// `//`'s left operand), and not a nested fold's source, whose
 /// destructures the fold-body machinery routes itself. A `?//` chain retries on the raise, so it is not read. Under
 /// `first(f)` only the head of a comma is (a later item may never run).
 fn update_indexes_accumulator(expr: &Expr) -> bool {
@@ -63407,6 +63408,7 @@ fn update_indexes_accumulator(expr: &Expr) -> bool {
             Expr::Paren(inner) | Expr::Label { body: inner, .. } | Expr::As { body: inner, .. } => {
                 within(inner, first_only, caught)
             }
+            Expr::Shared(inner) => !native_stack_exhausted() && within(inner, first_only, caught),
             Expr::Try {
                 expr: inner,
                 catch: None,
@@ -63424,28 +63426,74 @@ fn update_indexes_accumulator(expr: &Expr) -> bool {
                     ))
                     || within(body, first_only, caught)
             }
+            // `first(f)` stops at the first output: a head that is certain to yield one ends the read there, and any
+            // other head may yield nothing, so a later item is the first output and runs (`first(empty, bind)`).
             Expr::Comma(items) if first_only => {
-                items.first().is_some_and(|head| within(head, true, caught))
+                for item in items {
+                    if within(item, true, caught) {
+                        return true;
+                    }
+                    if yields_for_certain(item) {
+                        break;
+                    }
+                }
+                false
             }
             Expr::Comma(items) => items.iter().any(|item| within(item, false, caught)),
             Expr::Pipe(stages) => stages
                 .first()
                 .is_some_and(|head| within(head, first_only, caught)),
+            // A collect runs its body and drains every output of it.
+            Expr::Array(inner) => within(inner, false, caught),
             Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
                 within(inner, true, caught)
             }
-            Expr::Limit { n, expr } if takes_outputs(n) => within(expr, true, caught),
+            // A count of at most one stops at the first output; a larger or negative one (unlimited in jq 1.7.1) reads
+            // the body as it is read outside it.
+            Expr::Limit { n, expr } | Expr::Builtin(Builtin::Limit(n, expr))
+                if takes_outputs(n) =>
+            {
+                within(
+                    expr,
+                    first_only || constant_number(n).is_some_and(|n| n > 0.0 && n <= 1.0),
+                    caught,
+                )
+            }
             Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
                 if is_nth_zero(n) =>
             {
                 within(expr, true, caught)
             }
+            // The condition decides which branch runs, so both read it as indexing only when it is certain to yield
+            // (`.`, a literal, a variable): `if empty then A else B end` runs neither.
             Expr::If {
+                cond,
                 then_branch,
                 else_branch,
-                ..
-            } => within(then_branch, first_only, caught) && within(else_branch, first_only, caught),
+            } => {
+                yields_for_certain(cond)
+                    && within(then_branch, first_only, caught)
+                    && within(else_branch, first_only, caught)
+            }
             Expr::Alternative(left, _) => within(left, first_only, caught),
+            Expr::FuncDef {
+                name,
+                params,
+                body,
+                then,
+                bound,
+            } => within(
+                &bind_def(name, params, body, then, bound),
+                first_only,
+                caught,
+            ),
+            Expr::DefCall {
+                def,
+                args,
+                frames,
+                bound,
+            } => probe_def_call(def, args, *frames, bound)
+                .is_ok_and(|body| within(&body, first_only, caught)),
             Expr::Builtin(
                 Builtin::Map(_)
                 | Builtin::Add
