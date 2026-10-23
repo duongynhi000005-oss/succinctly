@@ -38885,27 +38885,62 @@ fn foreach_update_binds_only_in_tail(e: &Expr) -> bool {
     binds_only_in_tail(e, true)
 }
 
+/// Whether `e` holds no bind, fold, definition, call or `label`: nothing in it moves jq's register by a step of its own
+/// or hands a stage a value the register could be mistaken for.
+fn bind_free(e: &Expr) -> bool {
+    !any_subexpr(e, &mut |inner| {
+        matches!(
+            inner,
+            Expr::As { .. }
+                | Expr::AsPattern { .. }
+                | Expr::Reduce { .. }
+                | Expr::Foreach { .. }
+                | Expr::FuncDef { .. }
+                | Expr::FuncCall { .. }
+                | Expr::DefCall { .. }
+                | Expr::NamespacedCall { .. }
+                | Expr::Label { .. }
+        )
+    })
+}
+
+/// Whether every bind of an UPDATE that a two-argument `foreach` or a `reduce` path-checks at its own emission sits in the
+/// left operand of a `//` (and at least one does), the chain a single pattern in tail position and the right operand a
+/// constant (#5161). `a // b` filters `a`'s output by truthiness and hands the survivors on unchecked, so the `.` a bind
+/// in `a` ends on is checked where the fold emits it, which is what the result names: reading it as the bind's own
+/// tail, as the bare bind is, refused a falsy `.` that `//` replaces (`($x as {a:$a} | .) // 5` over a `false` state
+/// is jq's `result 5`, not `result false`). Marks the body as [`fold_body::state_handed_on`] like a three-argument
+/// `foreach`'s ([`foreach_update_binds_only_in_tail`]); a bind outside a `//` is the emission itself and stays checked.
+fn update_binds_only_under_alternative(e: &Expr) -> bool {
+    fn go(e: &Expr, found: &core::cell::Cell<bool>) -> bool {
+        hands_outputs_on(e, &|leaf| match leaf {
+            Expr::Pipe(stages) => match stages.split_last() {
+                Some((last, head)) => head.iter().all(bind_free) && go(last, found),
+                None => true,
+            },
+            Expr::Alternative(left, right) if !bind_free(left) => {
+                let single_pattern = !any_subexpr(
+                    left,
+                    &mut |inner| matches!(inner, Expr::AsPattern { patterns, .. } if patterns.len() > 1),
+                );
+                let ok = single_pattern
+                    && binds_only_in_tail(left, true)
+                    && is_constant_construction(right);
+                found.set(found.get() || ok);
+                ok
+            }
+            other => bind_free(other),
+        })
+    }
+    let found = core::cell::Cell::new(false);
+    go(e, &found) && found.get()
+}
+
 /// The walk behind [`update_binds_only_in_tail`] and [`foreach_update_binds_only_in_tail`]; `through_alternative` is
 /// whether a `//` is read through (the `foreach` one's), its left operand a chain in tail position and its right a
 /// constant ([`is_constant_construction`]: [`is_single_output_bind`] asks the same of the operand when it carries the
 /// register in, so the two cannot disagree on which `//` UPDATEs are read).
 fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
-    fn bind_free(e: &Expr) -> bool {
-        !any_subexpr(e, &mut |inner| {
-            matches!(
-                inner,
-                Expr::As { .. }
-                    | Expr::AsPattern { .. }
-                    | Expr::Reduce { .. }
-                    | Expr::Foreach { .. }
-                    | Expr::FuncDef { .. }
-                    | Expr::FuncCall { .. }
-                    | Expr::DefCall { .. }
-                    | Expr::NamespacedCall { .. }
-                    | Expr::Label { .. }
-            )
-        })
-    }
     // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/
     // `nth(0; ..)`, an `if`, a handler-less `try`/`?`), which hand their body's outputs on, so the tail
     // a bind in one of them ends on is still the UPDATE's own output. A raise in the chain is caught by
@@ -64560,8 +64595,11 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         && update_reads_foreign_marker
         && fold_body::depth() == 0
         && patterns_all_bare(patterns);
+    // #5161: ...and a `//` over a single-pattern chain ([`update_binds_only_under_alternative`]).
     let update_tail_unchecked = foreign_bind_update
-        && (update_binds_only_in_tail(update) || foreign_bind_chain_returning_dot(update));
+        && (update_binds_only_in_tail(update)
+            || foreign_bind_chain_returning_dot(update)
+            || update_binds_only_under_alternative(update));
     let update_hands_state_on = foreign_bind_update
         && cannot_move_register(init)
         && foreign_bind_chain_returning_dot(update);
@@ -65303,12 +65341,17 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #5111: `resolve_reduce`'s #4901 mark for a `foreach` whose EXTRACT judges the emission: jq stores UPDATE's output
     // as the next state without a path check, so the `.` a bind in tail position ends on (`1 | ($x as P | .)`) is
     // left unchecked. A two-argument `foreach` emits UPDATE's output, which is checked, so it is not marked.
+    // #5161: ...and, with no EXTRACT, one whose binds all sit in the left operand of a `//` ([`update_binds_only_under_alternative`]),
+    // which hands the survivors on to the emission that is checked.
     let update_tail_unchecked = S::TAG == EvalTag::Jq
-        && extract.is_some()
         && fold_body::depth() == 0
         && patterns_all_bare(patterns)
         && reads_foreign_marker_outside_a_fold(update)
-        && foreach_update_binds_only_in_tail(update);
+        && if extract.is_some() {
+            foreach_update_binds_only_in_tail(update)
+        } else {
+            update_binds_only_under_alternative(update)
+        };
     // #4013: see `FoldRegister::enter`. Jq mode only, like every register admission here.
     let init_keeps_register =
         S::TAG != EvalTag::Jq || collect_leaves_register(init) || cannot_move_register(init);
