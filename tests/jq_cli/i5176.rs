@@ -154,7 +154,7 @@ fn test_5176_caught_foreign_foreach_array_pattern_and_optional_source() -> Resul
     ])
 }
 
-/// #5176: the sources on which the root `$x` is the register on a step (`.`, `(.a, .)`, `(., .a)`), and a `$x` that is the element itself, are not read as foreign: they match jq as they did.
+/// #5176: the sources on which the root `$x` is the register on a step (`.`, `(.a, .)`, `(., .a)`), and a `$x` that is the element itself (a container, a string, a number, a container holding a `NaN`), are not read as foreign: they match jq as they did.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5176_caught_foreign_foreach_where_the_marker_is_the_register_is_unchanged() -> Result<()> {
@@ -187,5 +187,48 @@ fn test_5176_caught_foreign_foreach_where_the_marker_is_the_register_is_unchange
             r#"Invalid path expression with result {"a":1}"#,
             5,
         ),
+        (
+            r#"{"a":[nan]}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as [$q] | .)) as $y (.; .; .); $i))]",
+            "",
+            "Invalid path expression with result [null]",
+            5,
+        ),
+        (
+            r#"{"a":[1,2]}"#,
+            r".a as $x | (foreach (.a) as $i (.; foreach (try ($x as [$q] | .)) as $y (.; .; .); $i)) |= 9",
+            "",
+            "Invalid path expression with result [1,2]",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r".a as $x | (foreach (.a) as $i (.; foreach (try ($x as [$q] | .)) as $y (.; .; .); $i)) |= 9",
+            "{\"a\":1}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":"s"}"#,
+            r".a as $x | [path(foreach (.a) as $i (.; foreach (try ($x as [$q] | .)) as $y (.; .; .); $i))]",
+            "[]\n",
+            "",
+            0,
+        ),
     ])
+}
+
+/// #5183: a `?` over a step the nested `foreach` still refuses (the `$y` EXTRACT on a literal element, where jq's register is the
+/// root and `$x` is it) used to be hidden by step 1's wrong emission, which #5176 removed. jq answers `[["a"]]`; this pins what is
+/// answered until #5183 reads that step.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5176_hidden_step_two_refusal_shows_until_5183() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":null}"#,
+        r". as $x | [path(foreach (.a?, 1) as $i (null; try foreach (try ($x as {a:$a} | .)) as $y (.; .; $y); null))?]",
+        "[]\n",
+        "",
+        0,
+    )])
 }

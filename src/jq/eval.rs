@@ -42850,20 +42850,45 @@ fn pattern_raises_on_register(pattern: &Pattern, value: &OwnedValue) -> bool {
     }
 }
 
-/// Whether `a` and `b` can never be the same node to jq's `jv_identical` (#5176): two values that differ are two
-/// nodes, and so are two kinds (`null`, `true` and `false` are three). Two equal values may or may not share a
-/// node, which a value cannot say, and numbers are compared by representation, so neither is decided here.
+/// How deep [`never_identical`] walks two containers before it stops deciding.
+const NEVER_IDENTICAL_DEPTH: usize = 64;
+
+/// Whether `a` and `b` can never be the same node to jq's `jv_identical` (#5176): two kinds (`null`, `true` and `false`
+/// are three), or two containers or strings that differ somewhere. Two equal values may or may not share a node,
+/// which a value cannot say, and numbers are compared by representation (a `NaN` is not equal to itself, yet one node
+/// is identical to itself), so none of those is decided: only a difference found is reported, and a pair nested
+/// deeper than [`NEVER_IDENTICAL_DEPTH`] is left undecided rather than walked.
 fn never_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
-    let number = |value: &OwnedValue| {
-        matches!(
-            value,
-            OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
-        )
-    };
-    if number(a) || number(b) {
-        return !(number(a) && number(b));
+    fn differs(a: &OwnedValue, b: &OwnedValue, depth: usize) -> bool {
+        if depth > NEVER_IDENTICAL_DEPTH {
+            return false;
+        }
+        let number = |value: &OwnedValue| {
+            matches!(
+                value,
+                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
+            )
+        };
+        match (a, b) {
+            (OwnedValue::Null, OwnedValue::Null) => false,
+            (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x != y,
+            (OwnedValue::String(x), OwnedValue::String(y)) => x != y,
+            (OwnedValue::Array(x), OwnedValue::Array(y)) => {
+                x.len() != y.len()
+                    || x.iter()
+                        .zip(y.iter())
+                        .any(|(p, q)| differs(p, q, depth + 1))
+            }
+            (OwnedValue::Object(x), OwnedValue::Object(y)) => {
+                x.len() != y.len()
+                    || x.iter()
+                        .any(|(key, p)| y.get(key).map_or(true, |q| differs(p, q, depth + 1)))
+            }
+            (x, y) if number(x) && number(y) => false,
+            _ => true,
+        }
     }
-    a != b
+    differs(a, b, 0)
 }
 
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) is of a value that is never
@@ -42876,9 +42901,13 @@ fn source_destructures_only_foreign_nodes(source: &Expr, register: &OwnedValue) 
     let mut all = true;
     any_subexpr(source, &mut |e| {
         if let Expr::AsPattern { expr, .. } = e {
-            if let Expr::TrackedVar(marker) = unwrap_paren(expr) {
-                seen = true;
-                all &= never_identical(&marker.value, register);
+            // A destructure of `.` or of a value computed from a marker steps from a node this does not read.
+            match unwrap_paren(expr) {
+                Expr::TrackedVar(marker) => {
+                    seen = true;
+                    all &= never_identical(&marker.value, register);
+                }
+                _ => all = false,
             }
         }
         false
@@ -56047,9 +56076,9 @@ fn with_foreach_register_ambient<T>(
         trackable: true,
         snapshot: ambient.snapshot.clone(),
         frame: ambient.frame.clone(),
-        register_non_null: ambient.register_non_null,
-        register_null: ambient.register_null,
-        register_null_off_root: ambient.register_null_off_root,
+        register_non_null: !matches!(register, OwnedValue::Null),
+        register_null: matches!(register, OwnedValue::Null),
+        register_null_off_root: false,
         frame_names_register: false,
         value_is_register: true,
     }))
