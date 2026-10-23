@@ -51186,11 +51186,55 @@ fn resolved_if_arm<'e>(item: &'e Expr, taken: &'e Expr) -> &'e Expr {
     match (taken_if_item(item), unwrap_paren(item)) {
         (Some((_, false)), _) => taken,
         (Some((_, true)), _) if literal_taken => taken,
-        (None, Expr::Try { catch: Some(_), .. }) if literal_taken => taken,
+        (None, Expr::Try { catch: Some(_), .. })
+            if literal_taken || matches!(taken, Expr::Try { catch: Some(_), .. }) =>
+        {
+            taken
+        }
         _ => item,
     }
 }
 
+/// Whether `arm` is a fold, or a comma, handler-less `try`/`?` of such and of arms that cannot move the register,
+/// with nothing ahead of it to navigate.
+fn fold_headed(arm: &Expr, budget: u8) -> bool {
+    let Some(budget) = budget.checked_sub(1) else {
+        return false;
+    };
+    match unwrap_paren(arm) {
+        Expr::Foreach { .. } | Expr::Reduce { .. } => true,
+        Expr::Try { expr, catch: None } | Expr::Optional(expr) => fold_headed(expr, budget),
+        Expr::Comma(items) => {
+            items.iter().any(|item| fold_headed(item, budget))
+                && items
+                    .iter()
+                    .all(|item| fold_headed(item, budget) || cannot_move_register(item))
+        }
+        _ => false,
+    }
+}
+/// Whether every arm of the `if` chain moves the register at most through a fold that heads it, and one does.
+fn arms_fold_headed(e: &Expr, budget: u8) -> Option<bool> {
+    let budget = budget.checked_sub(1)?;
+    let Expr::If {
+        then_branch,
+        else_branch,
+        ..
+    } = unwrap_paren(e)
+    else {
+        return cannot_move_register(e)
+            .then_some(false)
+            .or_else(|| fold_headed(e, WRAPPED_CHAIN_DEPTH).then_some(true));
+    };
+    let then = if fold_headed(then_branch, WRAPPED_CHAIN_DEPTH) {
+        true
+    } else if cannot_move_register(then_branch) {
+        false
+    } else {
+        return None;
+    };
+    arms_fold_headed(else_branch, budget).map(|rest| then || rest)
+}
 /// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
 /// ([`walk_falsy_else_chain`]) reaches on `state`, or (on the last step) the `then` of the first `if`, where the `if`
 /// can move the register only through folds that head its arms (#4800): `null` in
@@ -51211,46 +51255,6 @@ fn literal_taken_arm<'e, S: EvalSemantics>(
     state: &OwnedValue,
     fork_last_step: bool,
 ) -> Option<&'e Expr> {
-    /// Whether `arm` is a fold, or a comma, handler-less `try`/`?` of such and of arms that cannot move the register,
-    /// with nothing ahead of it to navigate.
-    fn fold_headed(arm: &Expr, budget: u8) -> bool {
-        let Some(budget) = budget.checked_sub(1) else {
-            return false;
-        };
-        match unwrap_paren(arm) {
-            Expr::Foreach { .. } | Expr::Reduce { .. } => true,
-            Expr::Try { expr, catch: None } | Expr::Optional(expr) => fold_headed(expr, budget),
-            Expr::Comma(items) => {
-                items.iter().any(|item| fold_headed(item, budget))
-                    && items
-                        .iter()
-                        .all(|item| fold_headed(item, budget) || cannot_move_register(item))
-            }
-            _ => false,
-        }
-    }
-    /// Whether every arm of the `if` chain moves the register at most through a fold that heads it, and one does.
-    fn arms_fold_headed(e: &Expr, budget: u8) -> Option<bool> {
-        let budget = budget.checked_sub(1)?;
-        let Expr::If {
-            then_branch,
-            else_branch,
-            ..
-        } = unwrap_paren(e)
-        else {
-            return cannot_move_register(e)
-                .then_some(false)
-                .or_else(|| fold_headed(e, WRAPPED_CHAIN_DEPTH).then_some(true));
-        };
-        let then = if fold_headed(then_branch, WRAPPED_CHAIN_DEPTH) {
-            true
-        } else if cannot_move_register(then_branch) {
-            false
-        } else {
-            return None;
-        };
-        arms_fold_headed(else_branch, budget).map(|rest| then || rest)
-    }
     let (if_item, _) = taken_if_item(item)?;
     if cannot_move_register(if_item) || arms_fold_headed(if_item, WRAPPED_CHAIN_DEPTH) != Some(true)
     {
@@ -51277,14 +51281,101 @@ fn handler_literal_arm<'e, S: EvalSemantics>(
     item: &'e Expr,
     state: &OwnedValue,
     fork_last_step: bool,
+    single_pattern: bool,
 ) -> Option<&'e Expr> {
     match unwrap_paren(item) {
         Expr::Try {
             expr,
-            catch: Some(_),
-        } => literal_taken_arm::<S>(expr, state, fork_last_step),
+            catch: Some(handler),
+        } => literal_taken_arm::<S>(expr, state, fork_last_step).or_else(|| {
+            // #5113: an `if` whose condition raises on the state (`.a` of a number) never reaches an arm: the handler
+            // answers, and a literal handler cannot raise in turn, so the `try` emits that literal. Not under a `?//`
+            // chain: it retries UPDATE on the literal a step stored, which the next step's condition raises on.
+            if !single_pattern {
+                return None;
+            }
+            let (if_item, false) = taken_if_item(expr)? else {
+                return None;
+            };
+            let head = walk_falsy_else_chain::<S>(if_item, state);
+            (matches!(unwrap_paren(handler), Expr::Literal(_)) && if_cond_raises::<S>(head, state))
+                .then_some(&**handler)
+        }),
         _ => None,
     }
+}
+
+/// A `try (if C then A else FE end) catch H` item of a fold UPDATE with the `try` rebuilt around its final `else` arm
+/// alone (`try (FE) catch H`), for [`handler_computed_arm`] (#5113). The `if` is a fold the resolve reads whole only
+/// when no handler hides it: with the handler, the arm the state took (`FE`) is lost behind the other arms.
+struct HandlerArmTry<'e> {
+    item: &'e Expr,
+    arm: &'e Expr,
+    narrowed: Expr,
+}
+
+/// The [`HandlerArmTry`] of every item of `update` (itself, or the items of its comma) that is a `try` with a handler
+/// around an `if` chain whose arms move the register only through the folds that head them
+/// ([`arms_fold_headed`], as [`literal_taken_arm`] gates), with a computed final `else`.
+fn handler_arm_tries(update: &Expr) -> Vec<HandlerArmTry<'_>> {
+    let items = match unwrap_paren(update) {
+        Expr::Comma(items) => items.as_slice(),
+        _ => core::slice::from_ref(update),
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let Expr::Try {
+                expr,
+                catch: Some(handler),
+            } = unwrap_paren(item)
+            else {
+                return None;
+            };
+            let (if_item, false) = taken_if_item(expr)? else {
+                return None;
+            };
+            if cannot_move_register(if_item)
+                || arms_fold_headed(if_item, WRAPPED_CHAIN_DEPTH) != Some(true)
+            {
+                return None;
+            }
+            let mut arm = if_item;
+            while let Expr::If { else_branch, .. } = unwrap_paren(arm) {
+                arm = else_branch;
+            }
+            // A literal arm is [`handler_literal_arm`]'s.
+            if matches!(unwrap_paren(arm), Expr::Literal(_)) {
+                return None;
+            }
+            Some(HandlerArmTry {
+                item,
+                arm,
+                narrowed: Expr::Try {
+                    expr: Box::new(arm.clone()),
+                    catch: Some(handler.clone()),
+                },
+            })
+        })
+        .collect()
+}
+
+/// The `try (E) catch H` a step with state `state` ran for the `item` of `tries` ([`handler_arm_tries`]) when the
+/// state sent every condition of its `if` chain down the `else` to the computed final arm `E` (#5113): the step is
+/// that arm under the handler, as a bare `FE` or `try (FE) catch H` is, which the resolve answers where it refuses the
+/// whole `try`.
+fn handler_computed_arm<'a, S: EvalSemantics>(
+    tries: &'a [HandlerArmTry<'_>],
+    item: &Expr,
+    state: &OwnedValue,
+) -> Option<&'a Expr> {
+    let entry = tries.iter().find(|entry| core::ptr::eq(entry.item, item))?;
+    let Expr::Try { expr, .. } = unwrap_paren(item) else {
+        return None;
+    };
+    let (if_item, _) = taken_if_item(expr)?;
+    let arm = walk_falsy_else_chain::<S>(if_item, state);
+    (!core::ptr::eq(arm, if_item) && core::ptr::eq(arm, entry.arm)).then_some(&entry.narrowed)
 }
 
 /// The items of a fold UPDATE comma that a `foreach` step resolves one at a time because one of them is an `if` that
@@ -65486,6 +65577,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // #2979: see `resolve_reduce`'s identical hoist.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
+    // #5113: no `?//` chain in the loop's patterns or UPDATE retries UPDATE on the state a step stored.
+    let no_retry = patterns.len() == 1 && !has_pattern_alternatives(update);
     let mut drive_fork = |init_branch: PathBranch<'a>| -> Demand {
         let init_branch = &init_branch;
         fork_outcome.begin(); // #3293
@@ -65715,6 +65808,11 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let mut entry_state = core::mem::replace(&mut state, OwnedValue::Null);
                         let entry_state_by_kind = is_null_or_bool(&entry_state);
                         // #5018: per UPDATE item of a comma ([`comma_bind_split`]), set below.
+                        let handler_arm_tries = if S::TAG == EvalTag::Jq {
+                            handler_arm_tries(&bound_update)
+                        } else {
+                            Vec::new()
+                        };
                         let update_taken = core::cell::Cell::new(&bound_update);
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
@@ -66245,13 +66343,30 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         for index in 0..comma_items.len() {
                             let item = comma_items.get(index);
                             in_bind_item.set(bind_item.map_or(true, |at| at == index));
+                            // #5113: a lone `try (if .. else FE end) catch H` whose state took the computed `else` is
+                            // the step `try (FE) catch H`, for the marks derived from the item as well as the resolve.
+                            let item = if S::TAG == EvalTag::Jq
+                                && comma_items.len() == 1
+                                && no_retry
+                                && last_step
+                            {
+                                handler_computed_arm::<S>(&handler_arm_tries, item, &entry_state)
+                                    .unwrap_or(item)
+                            } else {
+                                item
+                            };
                             update_taken.set(if S::TAG == EvalTag::Jq {
                                 // #4800: a `try` with a handler around an `if` that reaches a literal arm
                                 // ran that arm ([`handler_literal_arm`]).
-                                handler_literal_arm::<S>(item, &entry_state, fork_last_step)
-                                    .unwrap_or_else(|| {
-                                        taken_if_branch::<S>(item, &entry_state, update_body)
-                                    })
+                                handler_literal_arm::<S>(
+                                    item,
+                                    &entry_state,
+                                    fork_last_step,
+                                    patterns.len() == 1,
+                                )
+                                .unwrap_or_else(|| {
+                                    taken_if_branch::<S>(item, &entry_state, update_body)
+                                })
                             } else {
                                 item
                             });
