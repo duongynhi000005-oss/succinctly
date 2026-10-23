@@ -74,6 +74,7 @@ mod i5082;
 mod i5095;
 mod i5102;
 mod i5103;
+mod i5106;
 mod i5107;
 mod i5110;
 mod i5111;

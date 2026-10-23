@@ -412,28 +412,14 @@ fn test_5102_the_wrappers_sources_and_bodies_around_the_navigated_foreach() -> R
     ])
 }
 
-/// #5102: rows that stay wrong, pinned to jq's answers and ignored until they are fixed. The `INIT null` EXTRACT rows
-/// matched `main` through the first step's wrong emission (#5106); the last is the converse, `$x` the node the stage
-/// navigates to (#5107). Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+/// #5102: rows that stay wrong, pinned to jq's answers and ignored until they are fixed. The first is an `INIT null`
+/// EXTRACT whose `if` has an `elif` and a pipe after the nested `foreach` (#5106's other arms); the last is the
+/// converse, `$x` the node the stage navigates to (#5107). Every row captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 #[ignore = "#5106, #5107"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5102_known_gaps_next_to_the_navigated_foreach() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
-        (
-            r#"{"a":null,"b":2}"#,
-            r"[path(. as $x | foreach . as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
-            "[[\"a\"]]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":null,"b":2}"#,
-            r"[path(. as $x | foreach (.a,.) as $i (null; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
-            "[[\"a\"]]\n",
-            "",
-            0,
-        ),
         (
             r"{}",
             r"[path(. as $x | foreach (.a,.) as $i (null; .; if true then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | .) elif .b then .[0]? else .[0]? end))?]",
