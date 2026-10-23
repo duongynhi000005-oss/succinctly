@@ -119,3 +119,81 @@ fn test_5113_literal_then_stays_unread_under_a_retry_or_before_the_forks_last_st
     }
     Ok(())
 }
+
+// A handler `try` around an `if` hid the arm the state took from the resolve, which narrows a handler `try` only to a
+// literal arm: `try (if .b then null else FE end) catch 1` on a `null` state ran the computed `else` and was refused
+// where the bare `FE` and `try (FE) catch 1` answer. And an `if` whose condition raises on the state (`.a` of the
+// stored `1`) never reaches an arm: the literal handler answers.
+
+/// #5113 rows 2-3: the two single-step reductions from the findings comment, with `path`, `[path()?]` and `del`, on
+/// both routes. Captured from `/usr/bin/jq` 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_handler_try_around_an_if_takes_the_arm_or_the_handler_the_state_ran() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"b":true}"#,
+            r"path(. as $x | foreach (.) as $i (null; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach (.) as $i (null; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))?]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"del(. as $x | foreach (.) as $i (null; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))",
+            "{\"b\":true}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.) as $i (1; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.) as $i (1; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.) as $i (1; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))",
+            "null\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: under a `?//` loop pattern the same step is the retry case (the stored literal feeds the next step), which
+/// is not modelled: jq's answers are read there only where they match, and `main`'s refusal is kept otherwise. A row
+/// of the sweep where reading the handler's literal after a raising condition wrote `null` where jq leaves the
+/// document alone.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_handler_try_around_an_if_stays_refused_under_a_retry_chain() -> Result<()> {
+    let input = r#"{"b":true}"#;
+    let filter = r"del(. as $x | foreach . as {a:$i} ?// $i (.; try (if .a then foreach (try ($x as {a:$a} ?// [$a] | .)) as $y (.; .; .) elif . then 1 else 2 end) catch 1; $i))";
+    for (stdout, stderr, code) in [
+        run_jq_full(&["-c", filter], Some(input))?,
+        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
+    ] {
+        assert!(
+            (code == 0 && stdout == "{\"b\":true}\n" && stderr.is_empty())
+                || (code == 5 && stdout.is_empty()),
+            "`{filter}`: neither jq's answer nor a refusal: {stdout:?} {stderr:?} exit {code}"
+        );
+    }
+    Ok(())
+}
