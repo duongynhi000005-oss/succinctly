@@ -8,7 +8,7 @@ use crate::assert_path_rows_both_routes_3749;
 // (a bind of `.`, a `try`, an `if`, a comma ending in `.`, `first`, a `label`). `update_returns_its_input` read a bind of
 // `.` that returns it (#3953), a handler-less `try`/`?` (#5136) and the wrappers a bind chain sits in (#5140), but not a
 // plain variable bind, so the UPDATE was read as computing a value and the final emission was refused with the accumulator
-// as the result (`[path(..)?]` lost the path). A body that returns `$z` is not read.
+// as the result (`[path(..)?]` lost the path). A body that reads `$z` at all is not read (`$z` is the accumulator's value, not its node); nor is a body that computes a value.
 
 /// #5146: a variable bind of `.` around each body shape and wrapper, under `path`, `[path(..)?]` and `|=`, over documents
 /// where the pattern passes and where it raises (the state becomes `null`, as in jq), the bodies that return `$z`, and a
@@ -676,6 +676,62 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
             5,
         ),
         (
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | 1))",
+            "",
+            r"Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | (. as {a:$q} | 5)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
+        (
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | ., 5))",
+            "",
+            r"Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | (. as {a:$q} | $q)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of null"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; . as $z | 1))",
+            "",
+            r"Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; . as $z | (. as {a:$q} | 5)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 5"#,
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; . as $z | ., 5))",
+            "",
+            r"Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; . as $z | (. as {a:$q} | $q)))",
+            "",
+            r#"Invalid path expression near attempt to access element "a" of 1"#,
+            5,
+        ),
+        (
             r#"{"a":{"b":1},"b":2}"#,
             r"path(reduce .a as $i (.; . as $z | (. as {b:$q} | .)))",
             "",
@@ -760,9 +816,9 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
             0,
         ),
         (
-            r"null",
-            r"[path(reduce (1,2) as $i (.; . as $z | (. as [$q] | .), .))?]",
-            "[[]]\n",
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | $z))",
+            "[]\n",
             "",
             0,
         ),
@@ -831,7 +887,7 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r#"{"a":1}"#,
-            r"path(reduce (1,2) as $i (.; . as $z | $z))",
+            r"path(reduce (1,2) as $i (.; . as $z | $z | .))",
             "[]\n",
             "",
             0,
@@ -950,6 +1006,13 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
+            r"(reduce (1,2) as $i (.; . as $z | . as $y | first(. as {a:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
             r"[path(reduce (1,2) as $i (.; . as $z | try (try (. as {a:$q} | .)) | .))?]",
             "[[]]\n",
             "",
@@ -985,8 +1048,8 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"(reduce (1,2) as $i (.; . as $z | label $l | first(. as {a:$q} | .))) |= 9",
-            "9\n",
+            r"[path(reduce (1,2) as $i (.; . as $z | first(first(. as {a:$q} | .))))?]",
+            "[[]]\n",
             "",
             0,
         ),
@@ -1019,9 +1082,9 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
             0,
         ),
         (
-            r"null",
-            r"(reduce (1,2) as $i (.; . as $z | (. as [$q] | .), .)) |= 9",
-            "9\n",
+            r"{}",
+            r"path(reduce (1,2) as $i (.; . as $z | $z | .))",
+            "[]\n",
             "",
             0,
         ),
@@ -1041,7 +1104,7 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r#"{"a":1}"#,
-            r"path(reduce (1,2) as $i (.; . as $z | $z | .))",
+            r"path(reduce (1,2) as $i (.; . as $z | ($z, .)))",
             "[]\n",
             "",
             0,
@@ -1097,8 +1160,8 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"(reduce (1,2) as $i (.; . as $z | . as $y | first(. as {a:$q} | .))) |= 9",
-            "9\n",
+            r"[path(reduce (1,2) as $i (.; . as $z | label $l | first(. as {a:$q} | .)))?]",
+            "[[]]\n",
             "",
             0,
         ),
@@ -1125,8 +1188,8 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"[path(reduce (1,2) as $i (.; . as $z | try (first(. as {a:$q} | .)) | .))?]",
-            "[[]]\n",
+            r"(reduce (1,2) as $i (.; . as $z | try (first(. as {a:$q} | .)) | .)) |= 9",
+            "9\n",
             "",
             0,
         ),
@@ -1194,16 +1257,16 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
             0,
         ),
         (
-            r"{}",
-            r"path(reduce (1,2) as $i (.; . as $z | ($z, .)))",
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; . as $z | $z))",
             "[]\n",
             "",
             0,
         ),
         (
             r"null",
-            r"[path(reduce (1,2) as $i (.; . as $z | label $l | first(. as {a:$q} | .)))?]",
-            "[[]]\n",
+            r"path(reduce (1,2) as $i (.; . as $z | first(first(. as {a:$q} | .))))",
+            "[]\n",
             "",
             0,
         ),
@@ -1230,8 +1293,8 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"(reduce (1,2) as $i (.; . as $z | first((. as {a:$q} | .)?))) |= 9",
-            "9\n",
+            r"path(reduce (1,2) as $i (.; . as $z | ((. as {a:$q} | .)?), .))",
+            "[]\n",
             "",
             0,
         ),
@@ -1251,8 +1314,8 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"path(reduce (1,2) as $i (.; . as $z | label $l | . as [$q] | .))",
-            "[]\n",
+            r"(reduce (1,2) as $i (.; . as $z | label $l | . as [$q] | .)) |= 9",
+            "9\n",
             "",
             0,
         ),
@@ -1265,7 +1328,7 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"null",
-            r"path(reduce (1,2) as $i (.; . as $z | . as $y | . as [$q] | .))",
+            r"path(reduce (1,2) as $i (.; . as $z | label $l | first(. as {a:$q} | .)))",
             "[]\n",
             "",
             0,
@@ -1293,21 +1356,14 @@ fn test_5146_reduce_update_as_var_bind_of_dot_keeps_the_accumulator() -> Result<
         ),
         (
             r"{}",
-            r"path(reduce (1,2) as $i (.; . as $z | $z))",
+            r"path(reduce (1,2) as $i (.; . as $z | ($z, .)))",
             "[]\n",
             "",
             0,
         ),
         (
             r"null",
-            r"[path(reduce (1,2) as $i (.; . as $z | if . then try (. as {a:$q} | .) else . end))?]",
-            "[[]]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":null}"#,
-            r"path(reduce (1,2) as $i (.; . as $z | . as $y | try (. as {a:$q} | .)))",
+            r"path(reduce (1,2) as $i (.; . as $z | (. as [$q] | .), .))",
             "[]\n",
             "",
             0,
