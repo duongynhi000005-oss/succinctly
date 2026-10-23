@@ -44,7 +44,7 @@ BINDS = [
     "$x as {a:$a} ?// $a",
 ]
 # What the bind ends on: the accumulator, a literal, the bound variable, a navigation, the outer marker.
-TAILS = [".", "5", "$a", ".a", "$x", "(.,.)"]
+TAILS = [".", "5", "$a", ".a", "$x", "(.,.)", "range(2)"]
 # {S} is the bind plus its tail, parenthesised.
 WRAPPERS = [
     "({S}) // 5",
@@ -79,6 +79,12 @@ WRAPPERS = [
     "try (({S}) // 5)",
     "(({S}) // 5)?",
     "(({S}), 7) // 5",
+    "(7, ({S})) // 5",
+    "(({S}), null) // 5",
+    "(({S}), $i) // 5",
+    "(({S}), .a) // 5",
+    "({S}), 7",
+    "7, ({S})",
     "if true then (({S}) // 5) else . end",
     "limit(1; ({S}) // 5)",
     "(try ({S})) // 5",

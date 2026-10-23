@@ -53065,7 +53065,48 @@ fn fans_out(expr: &Expr) -> bool {
 /// under a `//` ([`update_binds_only_under_alternative`], #5161). Carrying the register into the bind of any other body
 /// named a different value in the error on 314 of 53,550 sampled rows of
 /// `scripts/jq-fold-update-alt-bind-sweep.py --fold foreach2`, where the bind's own tail is the emission and stays checked.
+///
+/// #5170: and, under that same `//` (`through_alternative`), a comma sibling that is [`bind_free`] and cannot move the
+/// register ([`cannot_move_register`]), where the accumulator-only siblings of #4932 stopped: `(B, 7) // 5`. Such a sibling
+/// runs from the register the comma was entered with, as the chain's siblings do. Read only where every bind body emits at
+/// most once ([`emits_at_most_one`]; #5185 for why).
 fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
+    // #5170: under a `//` a comma sibling that is bind-free and cannot move the register runs from the register the
+    // comma was entered with, so it is one more item of the sequence. Only where every bind body emits at most once
+    // ([`emits_at_most_one`]): the resolver delivers only the first output of a generator body (`range(2)`) when the
+    // state is not the register (#5193; a comma of dots was #5185), where it used to refuse the comma, so reading the
+    // sibling would turn a refusal into a truncated answer. A comma of dots is kept out too, unmeasured. Asked once,
+    // over the whole chain.
+    let siblings_read = through_alternative
+        && !any_subexpr(expr, &mut |inner| {
+            matches!(
+                inner,
+                Expr::AsPattern { body, .. } | Expr::As { body, .. } if !emits_at_most_one(body)
+            )
+        });
+    single_output_chain(expr, through_alternative, siblings_read)
+}
+
+/// Whether `e` emits at most one output whatever it is run on: a literal, `.`, a variable, a field or an index, and a
+/// pipe, parenthesis, `?` or bind chain of such. Syntactic and conservative: a comma, a generator (`range`, `.[]`,
+/// `..`), a call and the rest are `false`.
+fn emits_at_most_one(e: &Expr) -> bool {
+    match e {
+        Expr::Identity
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::TrackedVar(_)
+        | Expr::Field(_)
+        | Expr::Index { .. } => true,
+        Expr::Paren(inner) | Expr::Optional(inner) => emits_at_most_one(inner),
+        Expr::Pipe(stages) => stages.iter().all(emits_at_most_one),
+        Expr::AsPattern { body, .. } | Expr::As { body, .. } => emits_at_most_one(body),
+        _ => false,
+    }
+}
+
+/// [`is_single_output_bind`]'s walk, with `siblings_read` decided once for the whole expression.
+fn single_output_chain(expr: &Expr, through_alternative: bool, siblings_read: bool) -> bool {
     let plain_source = |source: &Expr| {
         matches!(
             unwrap_paren(source),
@@ -53079,6 +53120,7 @@ fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
         expr: &Expr,
         plain_source: &dyn Fn(&Expr) -> bool,
         through_alternative: bool,
+        siblings_read: bool,
     ) -> bool {
         match expr {
             Expr::AsPattern {
@@ -53088,22 +53130,27 @@ fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
             } => {
                 plain_source(source)
                     && !patterns.iter().any(pattern_has_computed_key)
-                    && (is_single_output_bind(body, through_alternative) || !fans_out(body))
+                    && (single_output_chain(body, through_alternative, siblings_read)
+                        || !fans_out(body))
             }
             Expr::As {
                 expr: source, body, ..
             } => {
                 plain_source(source)
-                    && (is_single_output_bind(body, through_alternative) || !fans_out(body))
+                    && (single_output_chain(body, through_alternative, siblings_read)
+                        || !fans_out(body))
             }
             Expr::Alternative(left, right) if through_alternative => {
-                is_single_output_bind(left, true) && bind_free(right)
+                single_output_chain(left, true, siblings_read) && bind_free(right)
             }
-            other => emits_only_the_accumulator(other),
+            other => {
+                emits_only_the_accumulator(other)
+                    || (siblings_read && bind_free(other) && cannot_move_register(other))
+            }
         }
     }
     hands_outputs_on(expr, &|leaf| {
-        leaves(leaf, &plain_source, through_alternative)
+        leaves(leaf, &plain_source, through_alternative, siblings_read)
     }) && any_subexpr(expr, &mut |e| {
         matches!(e, Expr::As { .. } | Expr::AsPattern { .. })
     })
