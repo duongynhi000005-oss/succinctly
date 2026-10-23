@@ -88,6 +88,18 @@ WRAPPERS = [
     "if true then (({S}) // 5) else . end",
     "limit(1; ({S}) // 5)",
     "(try ({S})) // 5",
+    # #5175: a right operand that holds a bind (jq runs it from the register the `//` was entered with, only after the left
+    # operand backtracked) or a call
+    "try (({S}) // .a as $q | 1)",
+    "try (({S}) // (.a as $q | $q))",
+    "try (({S}) // ($x as {a:$a} | .))",
+    "({S}) // ($x as {a:$a} | .)",
+    "try (({S}) // (def f: .; f))",
+    # #5175 residuals: a comma, an `if` or a `?//` chain around the binds, a generator source
+    "try (({S}) // ((.a as $q | $q), 3))",
+    "try (({S}) // (if .a then (.a as $q | $q) else 1 end))",
+    "try (({S}) // ($x as {a:$a} ?// $a | $a))",
+    "try (({S}) // ((1,2) as $q | $q))",
     # controls: no `//`, so a change to the `//` code must not move them
     "{S}",
     "try ({S})",
