@@ -2792,7 +2792,7 @@ is the revert that established what the other one costs.
    Since [#5126](https://github.com/rust-works/succinctly/issues/5126) an `if` with a constant condition (`true`, `false`, `null`) names the live arm whatever the other arm holds (`if true then FE else . end`).
    Not changed: an `if` with another condition whose other arm is `.` rather than `empty`, an INIT that is not a `null` or boolean literal for the dropped emissions (INIT `.` meets a loud refusal that the dropped emission used to end the run before), INIT `.` otherwise, whose loud refusal `[path(..)?]` does not catch where jq's `FE` is empty, and an UPDATE that stores a variable (`$x`), whose loud refusal at the step where the bind passes is older than #5106 and which dropping an earlier step's emission would have unmasked (3 of 12,000 rows turned into refusals when it was tried).
    A source variable `$i` as the bind's source (`FE = foreach ($i as {a:$a} | .) ..`) over a `false` element still over-emits on the later step (1-2 of 12,000 rows answer the first path and then a refusal where `main` answered `[]` and jq answers the path alone).
-   Pinned, ignored, in `tests/jq_cli/i5106.rs` and `tests/jq_cli/i5102.rs`.
+   Pinned, ignored, in `tests/jq_cli/i5106.rs` and `tests/jq_cli/i5102.rs` (the constant-condition rows of #5126 in `tests/jq_cli/i5126.rs`).
 
    In the body of a `reduce` whose source moves the register (`..`, `recurse`, `(.,.a)`) the same `foreach` is read by the position of each step's element
    ([#4777](https://github.com/rust-works/succinctly/issues/4777), `foreign_register_markers_with`'s `moved_at`, pinned by

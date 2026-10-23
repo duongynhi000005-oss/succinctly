@@ -275,8 +275,8 @@ fn test_5106_extract_caught_bind_foreach_restates_at_the_bound_child() -> Result
     ])
 }
 
-/// #5106: a row that stays wrong, pinned to jq's answer and ignored until it is fixed: INIT `.`, whose loud refusal `[path(..)?]` does not catch where jq's `FE` is empty. Every
-/// row captured from `/usr/bin/jq` 1.7.1, both routes.
+/// #5106: a row that stays wrong, pinned to jq's answer and ignored until it is fixed: INIT `.`, whose loud refusal
+/// `[path(..)?]` does not catch where jq's `FE` is empty. Captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 #[ignore = "#5106 residuals"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments

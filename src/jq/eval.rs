@@ -38362,7 +38362,7 @@ impl<'e> UpdateItems<'e> {
 }
 
 /// The key a fold's EXTRACT restates its emission at (#5106): the EXTRACT is, or holds through a handler-less
-/// `try`/`?`, an `if` whose other arm emits nothing, a bare caught-bind `foreach` ([`bare_bind_foreach_update_key`]).
+/// `try`/`?`, an `if` whose other arm emits nothing or whose condition is a constant (the arm it runs, #5126), a bare caught-bind `foreach` ([`bare_bind_foreach_update_key`]).
 /// Every emission the EXTRACT makes is then the `foreach`'s, made where its bind passed, which moved jq's register
 /// onto the bound child, as it does for the same `foreach` as an UPDATE.
 fn bare_bind_foreach_extract_key(extract: &Expr) -> Option<PatternKey<'_>> {
@@ -38378,14 +38378,16 @@ fn bare_bind_foreach_extract_key(extract: &Expr) -> Option<PatternKey<'_>> {
                 if !(cannot_move_register(cond) || is_pure_of_dot(cond)) {
                     return None;
                 }
-                if emits_nothing(else_branch) {
+                // #5126: a constant condition names the arm that runs, whatever the other holds (and whether it is
+                // the empty one), as [`bare_bind_foreach_extract_is_caught`] reads it.
+                if let Some(arm) = constant_condition_arm(cond, then_branch, else_branch) {
+                    go(arm, budget)
+                } else if emits_nothing(else_branch) {
                     go(then_branch, budget)
                 } else if emits_nothing(then_branch) {
                     go(else_branch, budget)
                 } else {
-                    // #5126: a constant condition names the arm that runs, whatever the other holds.
-                    constant_condition_arm(cond, then_branch, else_branch)
-                        .and_then(|arm| go(arm, budget))
+                    None
                 }
             }
             other => bare_bind_foreach_update_key(other),
