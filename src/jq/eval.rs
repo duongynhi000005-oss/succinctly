@@ -3726,7 +3726,7 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // is a character count — the bound arithmetic is the same
                 // either way.
                 let len = s_str.chars().count();
-                let range = SliceBounds::from_literals(*start, *end).resolve(len);
+                let range = SliceBounds::from_literals(*start, *end).resolve_walk(len);
 
                 // Fast path: if the resolved slice is the whole string, return
                 // the original rather than rebuilding it.
@@ -23576,7 +23576,9 @@ fn string_slice_pattern<W>(
         Err(e) => return Some(Err(EvalError::decode_failure(e.message()))),
     };
     Some(SliceBounds::from_descriptor(desc).map(|bounds| {
-        OwnedValue::String(slice::slice_str(&text, bounds.resolve(text.chars().count())).into())
+        OwnedValue::String(
+            slice::slice_str(&text, bounds.resolve_walk(text.chars().count())).into(),
+        )
     }))
 }
 
@@ -24331,7 +24333,7 @@ pub(crate) fn getpath_walk_owned_segments<'a, W: Clone + AsRef<[u64]>, S: EvalSe
             }
             (OwnedValue::String(s), OwnedValue::Object(desc)) => {
                 let range = match SliceBounds::from_descriptor(desc) {
-                    Ok(bounds) => bounds.resolve(s.chars().count()),
+                    Ok(bounds) => bounds.resolve_walk(s.chars().count()),
                     Err(_) if optional => return QueryResult::None,
                     Err(e) => return e.into(),
                 };
@@ -30753,7 +30755,7 @@ pub(crate) fn slice_owned_value(
         OwnedValue::Null => Ok(Some(OwnedValue::Null)),
         OwnedValue::String(s) => {
             let len = s.chars().count();
-            let range = SliceBounds::from_literals(start, end).resolve(len);
+            let range = SliceBounds::from_literals(start, end).resolve_walk(len);
             Ok(Some(OwnedValue::String(slice::slice_str(s, range).into())))
         }
         _ if optional => Ok(None),
@@ -40988,7 +40990,7 @@ fn walk_through_full_slices<'c>(root: &OwnedValue, chain: &'c PathPrefix) -> Opt
         if let Expr::Slice { start, end, .. } = component {
             let current = node?;
             let len = current.items()?.len();
-            let range = SliceBounds::from_literals(*start, *end).resolve(len);
+            let range = SliceBounds::from_literals(*start, *end).resolve_walk(len);
             if len > 0 && range == (0..len) {
                 continue;
             }
@@ -41207,7 +41209,12 @@ impl<'v> FoldNode<'v> {
             Self::Value(_) => (0, false),
         };
         let start = offset + range.start;
-        let copies = start > usize::from(u16::MAX);
+        // #5118: a node reached below the root is recorded at offset 0, though it may be a view of a longer buffer
+        // (`[range(70003)] | .[60000:]`) that this walk cannot see. Once a slice has been resolved against a container
+        // that long, a slice that starts past 0 may be a copy: read it as one (two evaluations are then two nodes, which
+        // refuses where jq refuses and over-refuses the views jq still shares).
+        let copies =
+            start > usize::from(u16::MAX) || (range.start > 0 && slice::large_container_sliced());
         Some(Self::Items {
             items: &items[range],
             offset: if copies { 0 } else { start },
@@ -41293,8 +41300,9 @@ fn folded_component_step<'v>(node: Option<FoldNode<'v>>, lhs: &Expr, rhs: &Expr)
                     FoldedStep::Differs
                 };
             };
-            let left = SliceBounds::from_literals(*left_start, *left_end).resolve(items.len());
-            let right = SliceBounds::from_literals(*right_start, *right_end).resolve(items.len());
+            let left = SliceBounds::from_literals(*left_start, *left_end).resolve_walk(items.len());
+            let right =
+                SliceBounds::from_literals(*right_start, *right_end).resolve_walk(items.len());
             // An empty range is not a node the walk can vouch for (`[] |
             // .[0:0]` is a fresh array in jq); two slices spelled alike
             // still agree, as they always did.
