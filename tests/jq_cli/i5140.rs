@@ -491,6 +491,90 @@ fn test_5140_reduce_update_bind_of_dot_behind_first_limit_nth_comma_if() -> Resu
         ),
         (
             r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $f | (break $f, (. as {b:$q} | .))))",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; label $f | (break $f, (. as {b:$q} | .))))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $f | (break $f, (. as {b:$q} | .)))) |= 9",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(-1; . as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(-1; . as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(-1; . as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(0; . as {b:$q} | .)))",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(0; . as {b:$q} | .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(0; . as {b:$q} | .))) |= 9",
+            "",
+            r"Invalid path expression with result null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(1.5; . as {b:$q} | .)))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"[path(reduce (1,2) as $i (.; limit(1.5; . as {b:$q} | .)))?]",
+            "[[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(1.5; . as {b:$q} | .))) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
             r"path(reduce (1,2) as $i (.; limit(0; . as {b:$q} | .)))",
             "",
             r"Invalid path expression with result null",
@@ -501,7 +585,8 @@ fn test_5140_reduce_update_bind_of_dot_behind_first_limit_nth_comma_if() -> Resu
 
 /// #5140: the shapes the wrappers' arms do not read keep their refusal (`Invalid path expression with result ..`; jq
 /// answers each): a `//` whose right operand is not the accumulator when the left is falsy, an `if` whose condition
-/// navigates, and an INIT that navigated before a `limit`/`try` bind. Known divergences, listed in
+/// navigates, an INIT that navigated before a `limit`/`try` bind, a `break` out of a `label` under a comma, `if`, `first`
+/// or `limit` (which is why the `label` read-through stays sound), and a `limit` count that is not a finite nonzero constant. Known divergences, listed in
 /// `docs/compliance/jq/limitations.md`: a change that answers one of them rewrites its row.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
@@ -510,6 +595,46 @@ fn test_5140_wrappers_not_read_keep_their_refusal() -> Result<()> {
         (
             r#"{"a":{"a":null}}"#,
             r"path(reduce (1,2) as $i (.a; limit(1; try (. as {b:$q} | .))))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $f | ((. as {b:$q} | .), break $f)))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $f | ((. as {b:$q} | .), break $f))) |= 9",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $f | if . then (. as {b:$q} | .), break $f else . end))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $f | if . then (. as {b:$q} | .), break $f else . end)) |= 9",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $f | first((. as {b:$q} | .), break $f)))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $f | first((. as {b:$q} | .), break $f))) |= 9",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; label $f | limit(2; (. as {b:$q} | .), break $f)))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; label $f | limit(2; (. as {b:$q} | .), break $f))) |= 9",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"path(reduce (1,2) as $i (.; limit(1e1000; . as {b:$q} | .)))",
+        ),
+        (
+            r#"{"a":{"b":1},"b":2}"#,
+            r"(reduce (1,2) as $i (.; limit(1e1000; . as {b:$q} | .))) |= 9",
         ),
         (
             r#"{"a":{"b":1},"b":2}"#,

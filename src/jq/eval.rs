@@ -38583,37 +38583,14 @@ fn update_is_input_chain_under_bound(update: &Expr) -> bool {
 /// alternative leaves `null`), and so is any pattern whose `$var` could be returned: the body must
 /// itself hand its input on.
 fn update_returns_its_input(e: &Expr) -> bool {
-    match e {
+    // The wrappers (a `label`, #4567; a handler-less `try`/`?`, #5136; `first`, `limit`, `nth(0; ..)`, a comma and an `if`,
+    // #5140) are `hands_outputs_on`'s, so this and the bind chains of the same UPDATE read them in one place. Sound for the
+    // `label` only while no leaf below admits a `break` (a call, or a `break` itself): the `break $q` rows of
+    // `test_reduce_update_label_wrapped_destructure_4567` and of `test_5140_*` fail if one starts to. A `try` hands on
+    // what it emits, and a bind that raises under it empties the UPDATE (the next state is `null`), which the resolver
+    // derives from the pattern's own walk once the register is carried in (#4934).
+    hands_outputs_on(e, &|leaf| match leaf {
         Expr::Identity => true,
-        Expr::Paren(inner) => update_returns_its_input(inner),
-        // #4567: a `label` hands its body's outputs on, so it is read through. Sound only while no arm
-        // of this function admits a `break` (a call, or a `break` itself, as a leaf; a comma's items and an
-        // `if`'s branches are vetted by this function, #5140); the `break $q` rows of
-        // `test_reduce_update_label_wrapped_destructure_4567` fail if one starts to.
-        Expr::Label { body, .. } => update_returns_its_input(body),
-        // #5136: a handler-less `try`/`?` hands its body's outputs on, and a bind that raises under it empties the UPDATE
-        // (the next state is `null`), which the resolver derives from the pattern's own walk once the register is carried
-        // in (#4934): every output that is emitted is still the accumulator's own node.
-        Expr::Try { expr, catch: None } | Expr::Optional(expr) => update_returns_its_input(expr),
-        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-            update_returns_its_input(inner)
-        }
-        Expr::Limit { n, expr } if takes_outputs(n) => update_returns_its_input(expr),
-        Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
-            if is_nth_zero(n) =>
-        {
-            update_returns_its_input(expr)
-        }
-        Expr::Comma(items) => items.iter().all(update_returns_its_input),
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            cannot_move_register(cond)
-                && update_returns_its_input(then_branch)
-                && update_returns_its_input(else_branch)
-        }
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
@@ -38645,7 +38622,7 @@ fn update_returns_its_input(e: &Expr) -> bool {
             update,
         } => nested_fold_keeps_state(input, patterns, init, update, true),
         _ => false,
-    }
+    })
 }
 
 /// Whether `e` hands its outputs on unchanged through the wrappers a `reduce` UPDATE's bind chain may sit
@@ -38653,7 +38630,7 @@ fn update_returns_its_input(e: &Expr) -> bool {
 /// count)/`nth(0; ..)`, and an `if` whose condition cannot move the register and whose branches are each
 /// such a shape. None of them but the last wrapper below catches anything, so a raise in a leaf is the
 /// wrapper's raise too. One walk for [`foreign_bind_chain_returning_dot`] and [`is_single_output_bind`],
-/// so the wrappers they read through cannot drift apart.
+/// so the wrappers they read through cannot drift apart; [`update_returns_its_input`] reads them through it too (#5140).
 ///
 /// #4934: and a `try`/`?` with no handler. That one does catch: a bind step that raises makes the UPDATE
 /// empty and the next state `null`, whether it raises depends on the register being where the bind's
