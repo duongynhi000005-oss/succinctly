@@ -38877,10 +38877,12 @@ fn update_binds_only_in_tail(e: &Expr) -> bool {
 }
 
 /// [`update_binds_only_in_tail`] for a three-argument `foreach` UPDATE, which also reads through a `//` whose left operand
-/// is such a chain and whose right operand holds no bind (#5157): `a // b` tests the truthiness of `a`'s output and
-/// stores it, with no path check, as the next state, so the `.` a bind in `a` ends on is the UPDATE's own output as
-/// it is without the `//`. Not a `reduce`: its final emission is judged on the accumulator, and a `?//` chain behind a
-/// `//` there moved a message jq matched (`reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?)`).
+/// is such a chain and whose right operand is inert ([`alternative_operand_is_inert`], #5157): `a // b` tests the
+/// truthiness of `a`'s output and stores it, with no path check, as the next state, so the `.` a bind in `a` ends on is
+/// the UPDATE's own output as it is without the `//`. A two-argument `foreach` and a `reduce` check that output at their
+/// own emission and read the `//` through [`update_binds_only_under_alternative`] (#5161), a single pattern only: a `?//`
+/// chain behind the `//` there moved a message jq matched
+/// (`reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?)`).
 fn foreach_update_binds_only_in_tail(e: &Expr) -> bool {
     binds_only_in_tail(e, true)
 }
@@ -38904,11 +38906,19 @@ fn bind_free(e: &Expr) -> bool {
     })
 }
 
-/// Whether the right operand of a `//` over a bind chain is read as the operand jq runs from the register the `//` was
-/// entered with (#5157, #5161): it holds no bind or fold, cannot move the register ([`cannot_move_register`]: literals,
-/// the loop's own `$i`, arithmetic, a construction) and reads no outer `$x` marker, which could be the register's own node
-/// and so pass the emission's check. The one test the three readings of such a `//` apply to it, so they cannot disagree
-/// on which UPDATEs they read: [`binds_only_in_tail`], [`is_single_output_bind`] and [`update_binds_only_under_alternative`].
+/// Whether the right operand of a `//` over a bind chain is one the three readings of such a `//` accept (#5157, #5161):
+/// it holds no bind or fold, cannot move the register ([`cannot_move_register`]: a literal, the loop's `$i`, `.`, `not`,
+/// `length`, arithmetic and constructions of them) and reads no outer `$x` marker. The one test they apply to it, so they
+/// cannot disagree on which UPDATEs they read: [`binds_only_in_tail`], [`is_single_output_bind`] and
+/// [`update_binds_only_under_alternative`].
+///
+/// This is not a proof that the operand cannot be the register's node, and the grid only vouches for the constants: the
+/// operand's outputs are what the fold emits when the chain's are falsy, and the emission is path-checked, so an operand
+/// that is the register's node passes where a constant raises. `.`, and the loop's `$i` over a source that navigates (it
+/// is that element), can be; read through, such a `//` stays a wrong accept under a `try` (#5167), as it was before the
+/// reading. No sampled row of `scripts/jq-fold-update-alt-bind-sweep.py` that matched jq stopped matching with the wider
+/// set than constants, and 892 more rows matched (238 in a two-argument `foreach`, 311 in a `reduce`, 343 in a
+/// three-argument `foreach`).
 fn alternative_operand_is_inert(right: &Expr) -> bool {
     bind_free(right)
         && cannot_move_register(right)
@@ -52825,11 +52835,12 @@ fn fans_out(expr: &Expr) -> bool {
 /// inert operand ([`alternative_operand_is_inert`], the one test [`binds_only_in_tail`] applies to the same operand). The right
 /// operand runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
 /// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a step
-/// whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register). Set for the
-/// body of a three-argument `foreach` whose UPDATE [`foreach_update_binds_only_in_tail`] marked
-/// ([`fold_body::state_handed_on_here`]) and nowhere else: a two-argument `foreach` emits the UPDATE's output, which is
-/// path-checked, and 314 of 53,550 sampled rows of `scripts/jq-fold-update-alt-bind-sweep.py --fold foreach2` named a
-/// different value in the error when the register was carried in.
+/// whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register). Set for a body
+/// marked [`fold_body::state_handed_on`] and nowhere else: a three-argument `foreach` whose UPDATE
+/// [`foreach_update_binds_only_in_tail`] marked (#5157), and a two-argument `foreach` or a `reduce` whose binds all sit
+/// under a `//` ([`update_binds_only_under_alternative`], #5161). Carrying the register into the bind of any other body
+/// named a different value in the error on 314 of 53,550 sampled rows of
+/// `scripts/jq-fold-update-alt-bind-sweep.py --fold foreach2`, where the bind's own tail is the emission and stays checked.
 fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
     let plain_source = |source: &Expr| {
         matches!(
