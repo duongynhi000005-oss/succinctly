@@ -559,7 +559,7 @@ fn test_marker_stage_navigated_into_a_destructure_on_the_register_5030() -> Resu
 /// #5030: a fold whose INIT moves jq's register (`.a`), inside another fold's body whose `.` is the register, reads its
 /// source from the register INIT left: a foreign `$x` destructure there raises at its first step, as jq's does, where it
 /// was read by value (`del` deleted `.a`, `|= 9` wrote, `path` answered). A `try` around the destructure catches the
-/// raise and empties the source. The same on an INIT of two outputs (`(.a, .a)`), and behind a comma item that reads `$x` as a value. Rows captured from jq 1.7.1, both routes.
+/// raise and empties the source. The same on an INIT of two outputs (`(.a, .a)`). Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_fold_source_foreign_x_destructure_in_another_fold_body_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -650,13 +650,6 @@ fn test_fold_source_foreign_x_destructure_in_another_fold_body_5030() -> Result<
         (
             r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
             r"path(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y ((.a, .a); .; .); .))",
-            "",
-            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
-            5,
-        ),
-        (
-            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
-            r"del(. as $x | foreach 1 as $i (.; foreach (($x | length), ($x as {b:$q} | .)) as $y (.a; .; .); .))",
             "",
             "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
             5,

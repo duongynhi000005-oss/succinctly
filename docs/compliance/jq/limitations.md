@@ -2584,6 +2584,7 @@ is the revert that established what the other one costs.
    Since [#5030](https://github.com/rust-works/succinctly/issues/5030) `del(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .))` raises `near attempt to access element "b"` as jq does, in the outer fold's UPDATE or EXTRACT and under a `reduce` or `foreach` outer, where it deleted `.a`.
    A `try` around the destructure empties the source as jq's does, and the `[ .. ? ]` and `|= 9` spellings follow.
    Pinned by `test_fold_source_foreign_x_destructure_in_another_fold_body_5030`.
+   Read only for a source whose every `$x` is destructured as it stands (`$x as P`, `$x | . as P`), and not in a body that holds a `try`, `?` or `//` around a fold: a raise caught inside the body is not undone by the outer fold's step.
    Still by value, where jq raises or leaves the document: a `try` around a nested `reduce`/`foreach` in the source in another fold's body (`foreach 1 as $i (.; . as $x | foreach (try reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .); .)` deletes `.a`).
    Also still wrong: a source whose `$x` *is* the register INIT moved onto (`.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .); .)`).
    The destructure passes and moves jq's register, and the outer fold's step does not account for that move, so `del` writes where jq raises at the `.c?` (the same row outside a fold body is right).

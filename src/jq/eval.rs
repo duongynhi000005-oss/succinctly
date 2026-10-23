@@ -53977,6 +53977,8 @@ impl FoldRegister {
         // #3790: whatever this resolves is a fold's UPDATE or EXTRACT, where `.` is the
         // accumulator and jq's register may have been moved by the fold's own source.
         let _in_fold_body = fold_body::enter();
+        let _catching_fold =
+            (S::TAG == EvalTag::Jq && body_catches_a_fold(expr)).then(fold_body::catching_fold);
         // #5004: the body this resolves, which a `catch` handler's statement is read for.
         let body_depth = fold_body::depth();
         let tr = self.trackable && at_register;
@@ -62562,7 +62564,10 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     // body's `.` is at the register, which `reg` was entered from) and no `$x` SOURCE reads is the register
     // ([`source_markers_all_off_register`]). Asked last, by [`init_moved_register_frame`]: it walks SOURCE.
     let in_body_certified = || {
-        trackable && fold_body::depth() != 0 && source_markers_all_off_register::<S>(source, reg)
+        trackable
+            && fold_body::depth() != 0
+            && !fold_body::catching_fold_active()
+            && source_markers_all_off_register::<S>(source, reg)
     };
     if fork_index == 0 {
         // #2031: `doc_branch` stands for the document itself (SOURCE's own
@@ -62715,19 +62720,57 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     }
 }
 
-/// Whether `source` reads a frozen `$x` and none of them is jq's register `reg` ([`marker_identical`] against the
-/// register's own frame, #5030): a destructure of any of them raises at its first step, as one outside every fold body does,
-/// and any other read of them (a value, a `length`) navigates nothing, so the frame is not asked.
+/// Whether `body` holds a `try`, `?` or `//` (its left operand) around a fold (#5030): a raise in that fold is caught
+/// within the body, which the enclosing fold's step does not undo for a register the fold's source moved.
+fn body_catches_a_fold(body: &Expr) -> bool {
+    let has_fold = |e: &Expr| {
+        any_subexpr(e, &mut |x| {
+            matches!(x, Expr::Foreach { .. } | Expr::Reduce { .. })
+        })
+    };
+    any_subexpr(body, &mut |e| match e {
+        Expr::Try { expr, .. } | Expr::Optional(expr) => has_fold(expr),
+        Expr::Alternative(left, _) => has_fold(left),
+        _ => false,
+    })
+}
+
+/// Whether every frozen `$x` `source` reads is destructured as it stands (`$x as P`, `$x | . as P`) and none of them is
+/// jq's register `reg` ([`marker_identical`] against the register's own frame, #5030): the pattern's first step then
+/// raises, as one outside every fold body does. A `$x` read any other way is not asked: `$x | .a as P` destructures a
+/// child of it, which can be the register, and a value read navigates nothing.
 fn source_markers_all_off_register<S: EvalSemantics>(source: &Expr, reg: &FoldRegister) -> bool {
-    let (mut seen, mut all_off) = (false, true);
-    any_subexpr(source, &mut |e| {
-        if let Expr::TrackedVar(marker) = e {
-            seen = true;
+    let is_marker = |e: &Expr| matches!(unwrap_paren(e), Expr::TrackedVar(_));
+    let (mut total, mut destructured, mut all_off) = (0usize, 0usize, true);
+    let mut check = |e: &Expr| {
+        if let Expr::TrackedVar(marker) = unwrap_paren(e) {
+            destructured += 1;
             all_off &= !marker_identical::<S>(marker, &reg.value, &reg.frame);
+        }
+    };
+    any_subexpr(source, &mut |e| {
+        match e {
+            Expr::TrackedVar(_) => total += 1,
+            Expr::AsPattern { expr, .. } if is_marker(expr) => check(expr),
+            Expr::Pipe(stages) => {
+                for pair in stages.windows(2) {
+                    let hands_on = match unwrap_paren(&pair[1]) {
+                        Expr::Identity => true,
+                        Expr::AsPattern { expr, .. } => {
+                            matches!(unwrap_paren(expr), Expr::Identity)
+                        }
+                        _ => false,
+                    };
+                    if hands_on && is_marker(&pair[0]) {
+                        check(&pair[0]);
+                    }
+                }
+            }
+            _ => {}
         }
         false
     });
-    seen && all_off
+    total > 0 && total == destructured && all_off
 }
 
 /// Whether SOURCE of a fold runs from the register INIT moved off the fold's entry, in that register's own
@@ -76620,6 +76663,8 @@ mod fold_body {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known to be jq's register (#3953), 0 for none.
         static ACC_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// How many enclosing fold bodies hold a construct that catches a raise of a fold inside it (#5030), 0 for none.
+        static CATCHING: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose UPDATE hands the accumulator on untouched behind destructures of a
         /// foreign `$x` (#4901), 0 for none.
         static HANDED_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -76864,6 +76909,28 @@ mod fold_body {
     struct Moved {
         depth: u32,
         onto_null: Option<bool>,
+    }
+
+    /// Restores the count [`catching_fold`] raised.
+    pub(crate) struct CatchGuard;
+
+    /// Marks the body being resolved as one holding a `try`, `?` or `//` around a fold (#5030,
+    /// [`super::body_catches_a_fold`]): a raise of a fold inside it can be caught within the body, where the enclosing
+    /// fold's step then has to put the register back, which it does not for a fold that moved it.
+    pub(crate) fn catching_fold() -> CatchGuard {
+        CATCHING.with(|a| a.set(a.get() + 1));
+        CatchGuard
+    }
+
+    impl Drop for CatchGuard {
+        fn drop(&mut self) {
+            CATCHING.with(|a| a.set(a.get() - 1));
+        }
+    }
+
+    /// Whether a body being resolved holds a construct that catches a raise of a fold ([`catching_fold`]).
+    pub(crate) fn catching_fold_active() -> bool {
+        CATCHING.with(Cell::get) > 0
     }
 
     /// Restores the previous [`acc_is_register`] mark.
@@ -77278,6 +77345,16 @@ mod fold_body {
 #[cfg(not(feature = "std"))]
 mod fold_body {
     pub(crate) struct Guard;
+
+    pub(crate) struct CatchGuard;
+
+    pub(crate) fn catching_fold() -> CatchGuard {
+        CatchGuard
+    }
+
+    pub(crate) fn catching_fold_active() -> bool {
+        false
+    }
 
     pub(crate) struct AccGuard;
 
