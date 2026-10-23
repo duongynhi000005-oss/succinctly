@@ -62556,7 +62556,14 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     snapshot: &Snapshot,
     frame: &Frame,
     init_moved: bool,
+    source: &Expr,
 ) -> FoldSourceAmbient<'v> {
+    // #5030: inside a fold body, the frame names the register for SOURCE only where the fold's ambient is tracked (the
+    // body's `.` is at the register, which `reg` was entered from) and no `$x` SOURCE reads is the register
+    // ([`source_markers_all_off_register`]). Asked last, by [`init_moved_register_frame`]: it walks SOURCE.
+    let in_body_certified = || {
+        trackable && fold_body::depth() != 0 && source_markers_all_off_register::<S>(source, reg)
+    };
     if fork_index == 0 {
         // #2031: `doc_branch` stands for the document itself (SOURCE's own
         // ambient `.`) at its pre-fold position; comparing it to `reg` via
@@ -62634,9 +62641,11 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         // deleted `.a`). Only for an INIT whose navigation is tracked (its position is the
         // register's; an INIT that navigated and then computed has none), and outside every fold
         // body: inside one, a `$x` the frame then certifies walks the register somewhere the body's
-        // own accumulator does not follow.
+        // own accumulator does not follow. #5030: except where the body's `.` is the register and no
+        // `$x` SOURCE reads is it (`in_body_certified`): none walks, each raises at its first step.
         // An INIT that lands on a `null` below the root keeps that live `null` on the frame.
-        let init_moved_off_entry = init_moved_register_frame::<S>(source_trackable, reg);
+        let init_moved_off_entry =
+            init_moved_register_frame::<S>(source_trackable, in_body_certified, reg);
         // #5017: ...and a fold whose INIT cannot move the register, entered on a frame that already names
         // where jq's register is and holds its value (an enclosing fold source after a navigating INIT, a
         // computed stage ahead of the fold): SOURCE runs from that register as well, so a `$x` bound
@@ -62683,7 +62692,8 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     let at_register = reg.identical::<S>(null, &Snapshot::No, true);
     // #5013: a later fork's INIT may navigate too (`(., .a)`), and SOURCE then runs from where it left
     // the register, as on the first fork.
-    let init_moved_off_entry = init_moved_register_frame::<S>(at_register, reg);
+    // #5030: not certified inside a body here: this ambient is the `null` one, not the body's `.`, and no row needed it.
+    let init_moved_off_entry = init_moved_register_frame::<S>(at_register, || false, reg);
     // #5017: ...and an INIT fork that cannot move it, on a fold entered on a frame that names it.
     let entered_on_register = entered_on_register::<S>(at_register, reg, frame);
     FoldSourceAmbient {
@@ -62705,19 +62715,40 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     }
 }
 
+/// Whether `source` reads a frozen `$x` and none of them is jq's register `reg` ([`marker_identical`] against the
+/// register's own frame, #5030): a destructure of any of them raises at its first step, as one outside every fold body does,
+/// and any other read of them (a value, a `length`) navigates nothing, so the frame is not asked.
+fn source_markers_all_off_register<S: EvalSemantics>(source: &Expr, reg: &FoldRegister) -> bool {
+    let (mut seen, mut all_off) = (false, true);
+    any_subexpr(source, &mut |e| {
+        if let Expr::TrackedVar(marker) = e {
+            seen = true;
+            all_off &= !marker_identical::<S>(marker, &reg.value, &reg.frame);
+        }
+        false
+    });
+    seen && all_off
+}
+
 /// Whether SOURCE of a fold runs from the register INIT moved off the fold's entry, in that register's own
 /// frame ([`FoldSourceAmbient::frame_names_register`], #5013): outside every fold body, for an INIT whose
 /// navigation is tracked (its position is the register's; one that navigated and then computed has none),
 /// on a fork whose ambient is not itself the register (`source_trackable`). Inside a fold body a `$x` that
 /// frame certifies walks the register somewhere the body's own accumulator does not follow, which lost
-/// matched rows.
-fn init_moved_register_frame<S: EvalSemantics>(source_trackable: bool, reg: &FoldRegister) -> bool {
+/// matched rows; so there it applies only where the body's `.` is the register and every `$x` SOURCE reads is
+/// provably not it (`in_body_certified`, [`source_markers_all_off_register`], #5030), which raise at their first
+/// step and walk nothing.
+fn init_moved_register_frame<S: EvalSemantics>(
+    source_trackable: bool,
+    in_body_certified: impl FnOnce() -> bool,
+    reg: &FoldRegister,
+) -> bool {
     S::TAG == EvalTag::Jq
-        && fold_body::depth() == 0
         && !source_trackable
         && reg.trackable
         && reg.path.depth() > 0
         && !reg.frame.register_loss.is_lost()
+        && (fold_body::depth() == 0 || in_body_certified())
 }
 
 /// Whether a fold whose INIT cannot move jq's register ([`FoldRegister::enter`]'s `live_register_known`) was
@@ -65060,6 +65091,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
             snapshot,
             frame,
             init_moved_register::<S>(init_branch, trackable),
+            input,
         );
         let relocate_base = ambient.relocate_base(&reg.path);
 
@@ -66170,6 +66202,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
             snapshot,
             frame,
             init_moved_register::<S>(init_branch, trackable),
+            input,
         );
         let relocate_base = ambient.relocate_base(&reg.path);
 
