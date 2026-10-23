@@ -36,6 +36,20 @@ fn test_5118_small_arrays_still_answer_as_jq_does() -> Result<()> {
     let (stdout, stderr, code) =
         run_jq_full(&["-nc", "[1,2,3] | del(.[1:] as $x | .[1:] | $x)"], None)?;
     assert_eq!((stdout.as_str(), code), ("[1]\n", 0), "{stderr}");
+    // The gate stays down for an array of up to 65,536 elements (a copy needs a buffer longer than that), and a long
+    // string does not raise it.
+    for filter in [
+        "[range(65536)] | del(.[6000:] as $x | .[6000:] | $x) | length",
+        r#"("x" * 70000 | .[1:] | length) as $n | [range(10)] | del(.[6:] as $x | .[6:] | $x) | length"#,
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-nc", filter], None)?;
+        let jq = if filter.starts_with("[range") {
+            "6000\n"
+        } else {
+            "6\n"
+        };
+        assert_eq!((stdout.as_str(), code), (jq, 0), "`{filter}`: {stderr}");
+    }
     for filter in [
         "[range(70003)] | del(.[6000:] as $x | .[6000:] | $x) | length",
         "[range(70003)] | .[60000:] | del(.[5535:] as $x | .[5535:] | $x) | length",

@@ -30,7 +30,7 @@ use super::value::{NumberRepr, OwnedValue};
 /// jq's slice is a view of the array's buffer whose offset is 16 bits wide: from offset 65,536 it copies. A copy is a new
 /// array, so two evaluations of the same slice are two nodes where a view's are one (#5103). The offset of a value that
 /// is itself a view is not recorded here, so a slice past 65,535 of a view is invisible to the resolver. It can only
-/// happen in a buffer longer than 65,535 elements, so a thread that has never resolved a slice against a container that
+/// happen in a buffer longer than 65,536 elements, so a thread that has never resolved a slice against a container that
 /// long cannot hit it: [`large_container_sliced`] is the gate for reading every non-zero-start slice as possibly copied.
 /// One-way for the thread (a stale `true` only makes the gated reading refuse, never answer wrongly), and `std` only: a
 /// `no_std` build records no roots for the reading to apply to.
@@ -43,7 +43,7 @@ mod large_slice {
     }
 }
 
-/// Whether a slice has been resolved against a container of more than 65,535 elements on this thread (#5118).
+/// Whether a slice has been resolved against a container of more than 65,536 elements on this thread (#5118).
 pub(crate) fn large_container_sliced() -> bool {
     #[cfg(feature = "std")]
     {
@@ -113,14 +113,14 @@ impl SliceBounds {
     /// `[1,2,3] | setpath([{"start":2,"end":1}]; ["x"])` is `[1,2,"x",3]`.
     pub(crate) fn resolve(&self, len: usize) -> Range<usize> {
         #[cfg(feature = "std")]
-        if len > usize::from(u16::MAX) {
+        if len > usize::from(u16::MAX) + 1 {
             large_slice::SLICED.with(|sliced| sliced.set(true));
         }
         self.resolve_with_end_default(len, len as f64)
     }
 
     /// [`resolve`](Self::resolve) for the resolver's own walk of a path (`same_frame_position`), which reads slices the
-    /// program evaluates rather than evaluating one: it must not raise the [`large_container_sliced`] gate it consults
+    /// program evaluates rather than evaluating one, and for string slices (a string is never a 16-bit-offset array view): it must not raise the [`large_container_sliced`] gate it consults
     /// (#5118), or a document whose only large slice is the one being resolved would refuse the views jq shares.
     pub(crate) fn resolve_walk(&self, len: usize) -> Range<usize> {
         self.resolve_with_end_default(len, len as f64)

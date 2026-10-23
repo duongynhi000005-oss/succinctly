@@ -3726,7 +3726,7 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // is a character count — the bound arithmetic is the same
                 // either way.
                 let len = s_str.chars().count();
-                let range = SliceBounds::from_literals(*start, *end).resolve(len);
+                let range = SliceBounds::from_literals(*start, *end).resolve_walk(len);
 
                 // Fast path: if the resolved slice is the whole string, return
                 // the original rather than rebuilding it.
@@ -23576,7 +23576,9 @@ fn string_slice_pattern<W>(
         Err(e) => return Some(Err(EvalError::decode_failure(e.message()))),
     };
     Some(SliceBounds::from_descriptor(desc).map(|bounds| {
-        OwnedValue::String(slice::slice_str(&text, bounds.resolve(text.chars().count())).into())
+        OwnedValue::String(
+            slice::slice_str(&text, bounds.resolve_walk(text.chars().count())).into(),
+        )
     }))
 }
 
@@ -24331,7 +24333,7 @@ pub(crate) fn getpath_walk_owned_segments<'a, W: Clone + AsRef<[u64]>, S: EvalSe
             }
             (OwnedValue::String(s), OwnedValue::Object(desc)) => {
                 let range = match SliceBounds::from_descriptor(desc) {
-                    Ok(bounds) => bounds.resolve(s.chars().count()),
+                    Ok(bounds) => bounds.resolve_walk(s.chars().count()),
                     Err(_) if optional => return QueryResult::None,
                     Err(e) => return e.into(),
                 };
@@ -30753,7 +30755,7 @@ pub(crate) fn slice_owned_value(
         OwnedValue::Null => Ok(Some(OwnedValue::Null)),
         OwnedValue::String(s) => {
             let len = s.chars().count();
-            let range = SliceBounds::from_literals(start, end).resolve(len);
+            let range = SliceBounds::from_literals(start, end).resolve_walk(len);
             Ok(Some(OwnedValue::String(slice::slice_str(s, range).into())))
         }
         _ if optional => Ok(None),
