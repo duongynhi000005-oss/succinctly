@@ -5,12 +5,13 @@ use anyhow::Result;
 use crate::assert_path_rows_both_routes_3749;
 
 // `foreach (.a,.) as $i (.; (FE) // 5; $i)` with `FE = foreach (try ($x as {a:$a} | .)) as $y (.; .; .)` over a moving
-// source: jq emits the first step's path before the second step raises, and `main` refused the first step
+// source: jq emits the first step's path before the second step raises, and the bare UPDATE refused the first step
 // (`with result <the source element>`) with nothing on stdout. The same `//` behind a no-op `| .` already matched,
-// so a `//` that is a `foreach`'s whole UPDATE is read as that pipe.
+// so a `//` with a literal alternate that is a `foreach`'s whole UPDATE is read as that pipe. A non-literal alternate
+// (`// .`, `// $x`) is refused on both routes and is not covered.
 
 /// #5114: the issue's rows and rows of a differential grid (document x source x caught-bind shape x `//` wrapper x
-/// EXTRACT x `path`/`|=`/`del`) that `main` refused or answered wrongly and now match. Every row captured from
+/// EXTRACT x `path`/`|=`/`del`) that were refused or answered wrongly before the fix. Every row captured from
 /// `/usr/bin/jq` 1.7.1 (stdout, exit code, message), both routes.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments

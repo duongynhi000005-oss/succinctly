@@ -65242,13 +65242,19 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     } else {
         update
     };
-    // #5114: a `//` that is the whole UPDATE of a `foreach` with an EXTRACT is read as the `(..) // .. | .` jq runs it as
-    // (a `| .` changes nothing in jq). The pipe route already matched jq for a caught foreign `foreach` behind the `//`
-    // (`((FE) // 5) | .`), where the bare UPDATE refused a `$i` EXTRACT on the first step with the state where jq emits its
-    // path; reading the bare form as the pipe gives it that route. Differential grid in `tests/jq_cli/i5114.rs`.
+    // #5114: a `//` with a literal alternate that is the whole UPDATE of a `foreach` with an EXTRACT is read as the
+    // `(..) // 5 | .` jq runs it as (a `| .` changes nothing in jq). The pipe route matches jq for a caught foreign
+    // `foreach` behind such a `//` (`((FE) // 5) | .`), where the bare UPDATE refused a `$i` EXTRACT on the first step
+    // with the state where jq emits its path. A non-literal alternate (`// .`, `// $x`) is refused on both routes and is
+    // left as it is, and so is an UPDATE holding a literal-headed pipe (`(1 | FE) // 5`), which #5110's bare-bind key reads
+    // at the register its bind moved to. A left operand with no `foreach` in it (`($x as P | .) // 5`) is #5157's, read at
+    // the register its bind moved to. Differential grid in `tests/jq_cli/i5114.rs`.
     let alt_piped = (S::TAG == EvalTag::Jq
         && extract.is_some()
-        && matches!(unwrap_paren(update), Expr::Alternative(..)))
+        && !update_pipe_has_literal_head(update)
+        && matches!(unwrap_paren(update), Expr::Alternative(left, right)
+            if matches!(unwrap_paren(right), Expr::Literal(_))
+                && any_subexpr(left, &mut |e| matches!(e, Expr::Foreach { .. }))))
     .then(|| Expr::Pipe(vec![update.clone(), Expr::Identity].into()));
     let update = alt_piped.as_ref().unwrap_or(update);
     // #5111: `resolve_reduce`'s #4901 mark for a `foreach` whose EXTRACT judges the emission: jq stores UPDATE's output
