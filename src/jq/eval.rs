@@ -42724,9 +42724,11 @@ fn head_value<'a, S: EvalSemantics>(
 /// seed the state does not have, and a boolean the state is not refuses the emission where jq only
 /// meets that at the end of the path. Only bare `$name` entries of a pattern with literal keys are read.
 fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> bool {
-    source_destructures_onto(source, &|child| {
-        null_bool_identical(state, child.unwrap_or(&OwnedValue::Null))
-    })
+    source_destructures_onto(
+        source,
+        &|child| null_bool_identical(state, child.unwrap_or(&OwnedValue::Null)),
+        false,
+    )
 }
 
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on an object or an
@@ -42737,9 +42739,11 @@ fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> boo
 /// better than the element (`LostAt` it), and called that error a guess. An absent key lands on `null` and is
 /// [`source_destructures_to_null_or_bool`]'s. Only bare `$name` entries of a pattern with literal keys are read.
 fn source_destructures_to_container(source: &Expr) -> bool {
-    source_destructures_only_onto(source, &|child| {
-        matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_)))
-    })
+    source_destructures_only_onto(
+        source,
+        &|child| matches!(child, Some(OwnedValue::Object(_) | OwnedValue::Array(_))),
+        false,
+    )
 }
 
 /// Whether every destructure of a bound `$x` in `source` (the source of a `foreach`) lands on a value that is not
@@ -42751,8 +42755,103 @@ fn source_destructures_to_container(source: &Expr) -> bool {
 /// to the landing may be that very node (the landing an earlier step's handler emitted), which a value cannot say, and
 /// is not read.
 fn source_destructures_off_state(source: &Expr, state: &OwnedValue, register: &OwnedValue) -> bool {
-    source_destructures_only_onto(source, &|child| child.unwrap_or(&OwnedValue::Null) != state)
-        && marker_destructures_all_equal(source, register)
+    source_destructures_only_onto(
+        source,
+        &|child| child.unwrap_or(&OwnedValue::Null) != state,
+        true,
+    ) && marker_destructures_all_equal(source, register)
+}
+
+/// Whether the landing of every destructure of a bound `$x` in `source` (the source of a `foreach`) is the node the state
+/// was last reached at (`state_path`) or is not, by position (#5179): `Some(true)` when each is that node, `Some(false)`
+/// when none is, `None` where a destructure is not read or they differ. `$x` must be the element the outer source moved
+/// jq's register onto (`element_path`, by position), and its one-entry pattern, nested or not, must walk present keys.
+/// A position settles what a value cannot ([`source_destructures_off_state`] reads a landing equal to the state as "may
+/// be it"): in an unmodified document two nodes are the same node exactly where they sit at the same path
+/// ([`same_frame_position`]). The pattern's `.` body then emits the state *on* the register, as jq's `jv_identical`
+/// does for the node an earlier step's `catch $i` left as the state, or off it for an equal value at another position.
+/// Both paths are read only when every component is a field or a non-negative index, spelled one way, so that a
+/// structural mismatch is a different node.
+fn source_destructures_onto_state_node<S: EvalSemantics>(
+    source: &Expr,
+    frame: &Frame,
+    element_path: &Rc<PathPrefix>,
+    state_path: &Rc<PathPrefix>,
+) -> Option<bool> {
+    fn landing<S: EvalSemantics>(
+        pattern: &Pattern,
+        value: &OwnedValue,
+        path: &Rc<PathPrefix>,
+    ) -> Option<Rc<PathPrefix>> {
+        let (key, child, inner) = match (pattern, value) {
+            (Pattern::Var(_), _) => return Some(Rc::clone(path)),
+            (Pattern::Object(entries), OwnedValue::Object(fields)) => match entries.as_slice() {
+                [entry] if entry.bind.is_none() => match &entry.key {
+                    ObjectKey::Literal(key) => (
+                        PatternKey::Field(key.as_str()),
+                        fields.get(key.as_str())?,
+                        &entry.pattern,
+                    ),
+                    _ => return None,
+                },
+                _ => return None,
+            },
+            (Pattern::Array(items), OwnedValue::Array(elements)) => match items.as_slice() {
+                [item] => (PatternKey::Position(0), elements.first()?, item),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let component = key.component::<S>(value).ok()?;
+        landing::<S>(inner, child, &PathPrefix::extend(path, component))
+    }
+    /// A chain of fields and non-negative indexes only: two such chains name one node exactly when they are equal.
+    fn plain_chain(path: &PathPrefix) -> bool {
+        path.to_vec().iter().all(|component| {
+            matches!(component, Expr::Field(_))
+                || matches!(component, Expr::Index { idx, .. } if *idx >= 0)
+        })
+    }
+    // The fold's paths are relative to the frame; a marker's position is absolute in its invocation.
+    let (Some(element_path), Some(state_path)) =
+        (frame.extend(element_path).at, frame.extend(state_path).at)
+    else {
+        return None;
+    };
+    let derived_destructure = any_subexpr(source, &mut |e| {
+        matches!(e, Expr::AsPattern { expr, .. }
+            if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
+                && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
+    });
+    if derived_destructure || !plain_chain(&state_path) {
+        return None;
+    }
+    let mut verdicts = Vec::new();
+    any_subexpr(source, &mut |e| {
+        if let Expr::AsPattern { expr, patterns, .. } = e {
+            if let Expr::TrackedVar(marker) = unwrap_paren(expr) {
+                verdicts.push(match (&marker.origin, patterns.as_slice()) {
+                    (
+                        Origin::At { invocation, path } | Origin::SnapshotAt { invocation, path },
+                        [pattern],
+                    ) if *invocation == frame.invocation
+                        && same_frame_position(*invocation, &path.0, &element_path) =>
+                    {
+                        landing::<S>(pattern, &marker.value, &path.0)
+                            .filter(|landed| plain_chain(landed))
+                            .map(|landed| same_frame_position(*invocation, &landed, &state_path))
+                    }
+                    _ => None,
+                });
+            }
+        }
+        false
+    });
+    let first = (*verdicts.first()?)?;
+    verdicts
+        .iter()
+        .all(|verdict| *verdict == Some(first))
+        .then_some(first)
 }
 
 /// Whether every `$x` a destructure in `source` reads is equal to `register`, so may be it: one that is not is not the
@@ -42770,13 +42869,14 @@ fn marker_destructures_all_equal(source: &Expr, register: &OwnedValue) -> bool {
 fn source_destructures_only_onto(
     source: &Expr,
     lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
+    nested: bool,
 ) -> bool {
     let derived_destructure = any_subexpr(source, &mut |e| {
         matches!(e, Expr::AsPattern { expr, .. }
             if !matches!(unwrap_paren(expr), Expr::TrackedVar(_))
                 && any_subexpr(expr, &mut |inner| matches!(inner, Expr::TrackedVar(_))))
     });
-    !derived_destructure && source_destructures_onto(source, lands_ok)
+    !derived_destructure && source_destructures_onto(source, lands_ok, nested)
 }
 
 /// Whether the `foreach` a fold UPDATE is made of ([`plain_update_heads`]: its `source` and `init`) raises at its
@@ -42955,31 +43055,102 @@ fn emitting_handler_count(expr: &Expr) -> usize {
     count
 }
 
+/// Where [`nested_landing`] ends up.
+enum NestedLanding<'a> {
+    /// The node the innermost entry reaches.
+    Node(&'a OwnedValue),
+    /// An absent key or index, or a `null` on the way: a `null`.
+    Absent,
+    /// A pattern of another shape, or one that raises on the way.
+    Unread,
+}
+
+/// The node a one-entry `pattern` (no computed key, no `$name:` binding) reaches from `value` when `value` is jq's
+/// register (#5179), following nested one-entry patterns down to the innermost bare `$name` ([`NestedLanding::Unread`]
+/// where the pattern is not that shape or raises on the way, which [`pattern_raises_on_register`] reads). A `null` on
+/// the way is every `null` below it by kind, so the landing is that `null`.
+fn nested_landing<'a>(pattern: &Pattern, value: Option<&'a OwnedValue>) -> NestedLanding<'a> {
+    match (pattern, value) {
+        (Pattern::Var(_), Some(landing)) => NestedLanding::Node(landing),
+        (Pattern::Var(_), None) => NestedLanding::Absent,
+        (_, None | Some(OwnedValue::Null)) => {
+            let mut inner = pattern;
+            loop {
+                match inner {
+                    Pattern::Var(_) => return NestedLanding::Absent,
+                    Pattern::Object(entries) => match entries.as_slice() {
+                        [entry] if entry.bind.is_none() => inner = &entry.pattern,
+                        _ => return NestedLanding::Unread,
+                    },
+                    Pattern::Array(items) => match items.as_slice() {
+                        [item] => inner = item,
+                        _ => return NestedLanding::Unread,
+                    },
+                }
+            }
+        }
+        (Pattern::Object(entries), Some(OwnedValue::Object(fields))) => match entries.as_slice() {
+            [entry] if entry.bind.is_none() => match &entry.key {
+                ObjectKey::Literal(key) => nested_landing(&entry.pattern, fields.get(key.as_str())),
+                _ => NestedLanding::Unread,
+            },
+            _ => NestedLanding::Unread,
+        },
+        (Pattern::Array(items), Some(OwnedValue::Array(elements))) => match items.as_slice() {
+            [item] => nested_landing(item, elements.first()),
+            _ => NestedLanding::Unread,
+        },
+        _ => NestedLanding::Unread,
+    }
+}
+
 /// The walk [`source_destructures_to_null_or_bool`] and [`source_destructures_to_container`] share: whether
 /// `source` destructures a `$x` marker at all, and every destructure is one pattern of bare `$name` entries with
-/// literal keys whose landing child (`None` for an absent key or index) satisfies `lands_ok`.
-fn source_destructures_onto(source: &Expr, lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool) -> bool {
+/// literal keys whose landing child (`None` for an absent key or index) satisfies `lands_ok`. With `nested`
+/// (#5179), a one-entry pattern may also nest one-entry patterns that do not raise ([`nested_landing`]), and the
+/// landing is the node the innermost one reaches.
+fn source_destructures_onto(
+    source: &Expr,
+    lands_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
+    nested: bool,
+) -> bool {
     fn lands(
         value: &OwnedValue,
         patterns: &[Pattern],
         kind_ok: &dyn Fn(Option<&OwnedValue>) -> bool,
+        nested: bool,
     ) -> bool {
         let [pattern] = patterns else {
             return false;
         };
+        let entry_ok = |item: &Pattern, child: Option<&OwnedValue>| match item {
+            Pattern::Var(_) => kind_ok(child),
+            _ => {
+                nested
+                    && match nested_landing(item, child) {
+                        NestedLanding::Node(landing) => kind_ok(Some(landing)),
+                        NestedLanding::Absent => kind_ok(None),
+                        NestedLanding::Unread => false,
+                    }
+            }
+        };
         match (pattern, value) {
             (Pattern::Object(entries), OwnedValue::Object(fields)) => entries.iter().all(|entry| {
-                matches!(&entry.pattern, Pattern::Var(_))
-                    && entry.bind.is_none()
+                entry.bind.is_none()
+                    && (matches!(&entry.pattern, Pattern::Var(_)) || entries.len() == 1)
                     && match &entry.key {
-                        ObjectKey::Literal(key) => kind_ok(fields.get(key.as_str())),
+                        ObjectKey::Literal(key) => {
+                            entry_ok(&entry.pattern, fields.get(key.as_str()))
+                        }
                         _ => false,
                     }
             }),
-            (Pattern::Array(items), OwnedValue::Array(elements)) => items
-                .iter()
-                .enumerate()
-                .all(|(at, item)| matches!(item, Pattern::Var(_)) && kind_ok(elements.get(at))),
+            (Pattern::Array(items), OwnedValue::Array(elements)) => {
+                items.iter().enumerate().all(|(at, item)| {
+                    (matches!(item, Pattern::Var(_)) || items.len() == 1)
+                        && entry_ok(item, elements.get(at))
+                })
+            }
             _ => false,
         }
     }
@@ -42989,7 +43160,7 @@ fn source_destructures_onto(source: &Expr, lands_ok: &dyn Fn(Option<&OwnedValue>
         if let Expr::AsPattern { expr, patterns, .. } = e {
             if let Expr::TrackedVar(marker) = unwrap_paren(expr) {
                 seen = true;
-                all &= lands(&marker.value, patterns, lands_ok);
+                all &= lands(&marker.value, patterns, lands_ok, nested);
             }
         }
         false
@@ -66434,7 +66605,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         // `state_path` describes `state`, which is `Null` until an
                         // UPDATE output replaces it (a step that delivers nothing, or
                         // escapes first, must not leave the old node's path behind).
-                        state_path = None;
+                        let entry_state_path = state_path.take();
                         let entry_snapshot = state_snapshot.clone();
                         // #4480/#4446: `resolve_reduce`'s #4131 widening, for the step of a
                         // `foreach`. An untracked entry whose stage carries a `null`/boolean
@@ -67094,6 +67265,21 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             &elem.value,
                                         ))
                             };
+                            // #5179: ...and a landing that IS the state, by position.
+                            let on_state_node = |source: &Expr, init: &Expr, no_heads: bool| {
+                                bare_step
+                                    && no_heads
+                                    && cannot_move_register(init)
+                                    && match (&elem.register_path, &entry_state_path) {
+                                        (Some(element), Some(state_at)) => {
+                                            source_destructures_onto_state_node::<S>(
+                                                source, frame, element, state_at,
+                                            )
+                                            .is_some()
+                                        }
+                                        _ => false,
+                                    }
+                            };
                             // #5176: ...and where no `$x` it destructures can be the element at all (another kind, or a
                             // different value), whatever the pattern lands on.
                             let _register = (_sole_update_foreach.is_some()
@@ -67107,7 +67293,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                             )
                                             || (((is_null_or_bool(&handed)
                                                 && source_destructures_to_container(src))
-                                                || any_state(src, init, &handed))
+                                                || any_state(src, init, &handed)
+                                                || on_state_node(src, init, heads.is_empty()))
                                                 && match emitting_handler_count(item) {
                                                     0 => true,
                                                     // #5049: every emitting handler is inside the nested

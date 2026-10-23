@@ -464,10 +464,8 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_placed_5012() -> 
 
 /// #5012: what the reading does not cover keeps `main`'s behaviour. A nested INIT that navigates (`.a?`) runs before
 /// the source in jq and moves the register first; a `try .. catch 1` around the source's destructure emits from the
-/// raise. And a step whose element `$x` is, with a one-entry pattern and a container state: whether jq raises there
-/// depends on whether the state is the very node the pattern lands on, which a value cannot say, so the step stays
-/// unseeded. After an earlier step that is now placed, it refuses loudly (jq answers `["a"]` and raises catchably).
-/// Both routes.
+/// raise. (A step whose element `$x` is, with a one-entry pattern landing on the state, is read by position since
+/// #5179, `tests/jq_cli/i5179.rs`.) Both routes.
 #[test]
 fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused_5012() -> Result<()>
 {
@@ -484,18 +482,6 @@ fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused
             "",
             "Invalid path expression near attempt to access element \"a\" of null",
         ),
-        (
-            r#"{"a":{"a":null}}"#,
-            r"path(. as $x | foreach (.a,.) as $i (.; try (foreach ($x as {a:$a} | .) as $y (.; .a?; .)) catch $i; $i))",
-            "[\"a\"]\n",
-            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
-        ),
-        (
-            r#"{"a":{"a":null}}"#,
-            r"[path(. as $x | foreach (.a,.) as $i (.; try (foreach ($x as {a:$a} | .) as $y (.; .a?; .)) catch $i; $i))?]",
-            "",
-            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
-        ),
     ] {
         for (out, stderr, code) in [
             run_jq_full(&["-c", filter], Some(input))?,
@@ -508,28 +494,6 @@ fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused
             );
             assert!(stderr.contains(message), "{input} | {filter}: {stderr:?}");
         }
-    }
-    Ok(())
-}
-
-/// #5012: the residual under a `?`. The second step's element is the root, which `$x` is, and its one-entry pattern
-/// lands on `.a`, `{"b":1}`, which the state the first step's `catch $i` left is equal to (in jq the very node): the
-/// step is not read, its unseeded handler's `$i` is refused as exact and the `?` drops it. jq answers
-/// `[["a"],[],["a"]]`; this keeps the first step's path, where `main` answered `[]`. Pinned so a change to it is seen.
-#[test]
-fn test_foreach_update_try_handler_on_a_landing_equal_to_the_state_keeps_the_earlier_paths_5012(
-) -> Result<()> {
-    let input = r#"{"a":{"b":1}}"#;
-    let filter = r"[path(. as $x | foreach (.a,.,.a) as $i (null; try (foreach ($x as {a:$a} | .) as $y (0; .a?; $y)) catch $i; .))?]";
-    for (out, stderr, code) in [
-        run_jq_full(&["-c", filter], Some(input))?,
-        run_jq_full(&["-nc", &format!("{input} | {filter}")], None)?,
-    ] {
-        assert_eq!(
-            (out.as_str(), code),
-            ("[[\"a\"]]\n", 0),
-            "{filter}: stderr {stderr:?}"
-        );
     }
     Ok(())
 }
