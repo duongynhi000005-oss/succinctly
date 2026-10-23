@@ -42794,11 +42794,11 @@ fn source_destructures_onto_state_node<S: EvalSemantics>(
                     ),
                     _ => return None,
                 },
-                _ => return None,
+                _ => return None, // patchcov: coverage tolerate-line reason="not reached today: a pattern of several entries is answered by `any_state`'s earlier reading before the position walk runs, and none of 10,368 pattern, input, step, INIT and body variants swept for #5179 reached it; kept so a shape the walk cannot follow is never read as a landing"
             },
             (Pattern::Array(items), OwnedValue::Array(elements)) => match items.as_slice() {
                 [item] => (PatternKey::Position(0), elements.first()?, item),
-                _ => return None,
+                _ => return None, // patchcov: coverage tolerate-line reason="see the arm above: a pattern of several elements (#5179)"
             },
             _ => return None,
         };
@@ -42816,7 +42816,7 @@ fn source_destructures_onto_state_node<S: EvalSemantics>(
     let (Some(element_path), Some(state_path)) =
         (frame.extend(element_path).at, frame.extend(state_path).at)
     else {
-        return None;
+        return None; // patchcov: coverage tolerate-line reason="not reached today: none of 1,584 pattern, input, prefix (`tojson|fromjson`, `[.]|.[0]`, `first(.)`, `reduce`), step, INIT and body variants swept for #5179 left the element's or the state's path without an absolute position; kept so a path the frame cannot place is never read as a position"
     };
     let derived_destructure = source_destructures_derived_value(source);
     if derived_destructure || !plain_chain(&state_path) {
