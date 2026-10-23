@@ -38904,9 +38904,20 @@ fn bind_free(e: &Expr) -> bool {
     })
 }
 
+/// Whether the right operand of a `//` over a bind chain is read as the operand jq runs from the register the `//` was
+/// entered with (#5157, #5161): it holds no bind or fold, cannot move the register ([`cannot_move_register`]: literals,
+/// the loop's own `$i`, arithmetic, a construction) and reads no outer `$x` marker, which could be the register's own node
+/// and so pass the emission's check. The one test the three readings of such a `//` apply to it, so they cannot disagree
+/// on which UPDATEs they read: [`binds_only_in_tail`], [`is_single_output_bind`] and [`update_binds_only_under_alternative`].
+fn alternative_operand_is_inert(right: &Expr) -> bool {
+    bind_free(right)
+        && cannot_move_register(right)
+        && !any_subexpr(right, &mut |inner| matches!(inner, Expr::TrackedVar(_)))
+}
+
 /// Whether every bind of an UPDATE that a two-argument `foreach` or a `reduce` path-checks at its own emission sits in the
-/// left operand of a `//` (and at least one does), the chain a single pattern in tail position and the right operand a
-/// constant (#5161). `a // b` filters `a`'s output by truthiness and hands the survivors on unchecked, so the `.` a bind
+/// left operand of a `//` (and at least one does), the chain a single pattern in tail position and the right operand
+/// inert ([`alternative_operand_is_inert`], #5161). `a // b` filters `a`'s output by truthiness and hands the survivors on unchecked, so the `.` a bind
 /// in `a` ends on is checked where the fold emits it, which is what the result names: reading it as the bind's own
 /// tail, as the bare bind is, refused a falsy `.` that `//` replaces (`($x as {a:$a} | .) // 5` over a `false` state
 /// is jq's `result 5`, not `result false`). Marks the body as [`fold_body::state_handed_on`] like a three-argument
@@ -38925,7 +38936,7 @@ fn update_binds_only_under_alternative(e: &Expr) -> bool {
                 );
                 let ok = single_pattern
                     && binds_only_in_tail(left, true)
-                    && is_constant_construction(right);
+                    && alternative_operand_is_inert(right);
                 found.set(found.get() || ok);
                 ok
             }
@@ -38937,9 +38948,9 @@ fn update_binds_only_under_alternative(e: &Expr) -> bool {
 }
 
 /// The walk behind [`update_binds_only_in_tail`] and [`foreach_update_binds_only_in_tail`]; `through_alternative` is
-/// whether a `//` is read through (the `foreach` one's), its left operand a chain in tail position and its right a
-/// constant ([`is_constant_construction`]: [`is_single_output_bind`] asks the same of the operand when it carries the
-/// register in, so the two cannot disagree on which `//` UPDATEs are read).
+/// whether a `//` is read through (the `foreach` one's), its left operand a chain in tail position and its right an
+/// inert operand ([`alternative_operand_is_inert`]: [`is_single_output_bind`] asks the same of the operand when it
+/// carries the register in, so the two cannot disagree on which `//` UPDATEs are read).
 fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
     // #4953: through the wrappers [`hands_outputs_on`] reads (a comma, `label`, `first`/`limit`/
     // `nth(0; ..)`, an `if`, a handler-less `try`/`?`), which hand their body's outputs on, so the tail
@@ -38965,7 +38976,7 @@ fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
             bind_free(expr) && binds_only_in_tail(body, through_alternative)
         }
         Expr::Alternative(left, right) if through_alternative => {
-            binds_only_in_tail(left, true) && is_constant_construction(right)
+            binds_only_in_tail(left, true) && alternative_operand_is_inert(right)
         }
         other => bind_free(other),
     })
@@ -52811,7 +52822,7 @@ fn fans_out(expr: &Expr) -> bool {
 /// resolver's to derive once the register is carried in (see [`hands_outputs_on`]).
 ///
 /// #5157: and, where `through_alternative` is set, a `//` whose left operand is such a chain and whose right operand is a
-/// constant ([`is_constant_construction`], the one test [`binds_only_in_tail`] applies to the same operand). The right
+/// inert operand ([`alternative_operand_is_inert`], the one test [`binds_only_in_tail`] applies to the same operand). The right
 /// operand runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
 /// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a step
 /// whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register). Set for the
@@ -52851,7 +52862,7 @@ fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
                     && (is_single_output_bind(body, through_alternative) || !fans_out(body))
             }
             Expr::Alternative(left, right) if through_alternative => {
-                is_single_output_bind(left, true) && is_constant_construction(right)
+                is_single_output_bind(left, true) && alternative_operand_is_inert(right)
             }
             other => emits_only_the_accumulator(other),
         }
