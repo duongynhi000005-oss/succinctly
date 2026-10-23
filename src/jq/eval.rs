@@ -157968,3 +157968,101 @@ mod source_hands_register_off_tests_5044 {
         }
     }
 }
+
+#[cfg(test)]
+mod never_identical_tests_5176 {
+    use super::*;
+
+    fn obj(pairs: &[(&str, OwnedValue)]) -> OwnedValue {
+        OwnedValue::object_from(pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())))
+    }
+
+    /// #5176: two kinds are two nodes (`null`, `true` and `false` are three), a number against anything else too.
+    #[test]
+    fn different_kinds_never_are_one_node() {
+        let kinds = [
+            OwnedValue::Null,
+            OwnedValue::Bool(false),
+            OwnedValue::Bool(true),
+            OwnedValue::Int(1),
+            OwnedValue::string("s"),
+            OwnedValue::array(),
+            OwnedValue::object(),
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                // `Int` against `Int`, `null` against `null` and so on are equal, hence undecided.
+                assert_eq!(never_identical(a, b), i != j, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// ...but equal values, and two numbers, are not decided: one node is equal to itself, and a number is
+    /// compared by representation.
+    #[test]
+    fn equal_values_and_numbers_are_undecided() {
+        let nan = OwnedValue::array_from(alloc::vec![OwnedValue::Float(f64::NAN)]);
+        assert!(!never_identical(&nan, &nan.clone()));
+        assert!(!never_identical(&OwnedValue::Int(1), &OwnedValue::Int(2)));
+        assert!(!never_identical(
+            &OwnedValue::Int(1),
+            &OwnedValue::Float(1.0)
+        ));
+        let a = obj(&[("a", OwnedValue::string("x")), ("b", OwnedValue::Null)]);
+        assert!(!never_identical(&a, &a.clone()));
+        assert!(!never_identical(
+            &OwnedValue::string("x"),
+            &OwnedValue::string("x")
+        ));
+    }
+
+    /// A difference anywhere found is reported: a bool, a string, a length, a key, a nested element.
+    #[test]
+    fn a_found_difference_is_reported() {
+        assert!(never_identical(
+            &OwnedValue::Bool(true),
+            &OwnedValue::Bool(false)
+        ));
+        assert!(never_identical(
+            &OwnedValue::string("x"),
+            &OwnedValue::string("y")
+        ));
+        let one = OwnedValue::array_from(alloc::vec![OwnedValue::Null]);
+        let two = OwnedValue::array_from(alloc::vec![OwnedValue::Null, OwnedValue::Null]);
+        assert!(never_identical(&one, &two));
+        let here = obj(&[("a", OwnedValue::Null)]);
+        let there = obj(&[("b", OwnedValue::Null)]);
+        assert!(never_identical(&here, &there));
+        let deep = obj(&[("a", obj(&[("b", OwnedValue::string("x"))]))]);
+        let other = obj(&[("a", obj(&[("b", OwnedValue::string("y"))]))]);
+        assert!(never_identical(&deep, &other));
+    }
+
+    /// A pair nested deeper than the limit, or read past the node budget, is left undecided rather than walked.
+    #[test]
+    fn deep_and_large_pairs_are_left_undecided() {
+        let nest = |leaf: OwnedValue| {
+            (0..=NEVER_IDENTICAL_DEPTH + 1)
+                .fold(leaf, |inner, _| OwnedValue::array_from(alloc::vec![inner]))
+        };
+        assert!(!never_identical(
+            &nest(OwnedValue::Bool(true)),
+            &nest(OwnedValue::Bool(false))
+        ));
+        let strings = |last: &str| {
+            let mut items: alloc::vec::Vec<OwnedValue> = (0..NEVER_IDENTICAL_BUDGET + 8)
+                .map(|_| OwnedValue::string("same"))
+                .collect();
+            items.push(OwnedValue::string(last));
+            OwnedValue::array_from(items)
+        };
+        assert!(!never_identical(&strings("x"), &strings("y")));
+        let short = |last: &str| {
+            OwnedValue::array_from(alloc::vec![
+                OwnedValue::string("same"),
+                OwnedValue::string(last)
+            ])
+        };
+        assert!(never_identical(&short("x"), &short("y")));
+    }
+}
