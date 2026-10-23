@@ -89,3 +89,4 @@ mod i5146;
 mod i5148;
 mod i5150;
 mod i5152;
+mod i5154;

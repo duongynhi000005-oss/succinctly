@@ -988,6 +988,12 @@ struct JqCommand {
     #[arg(skip)]
     positional_words: Vec<jq_runner::PositionalWord>,
 
+    /// The kinds of `--arg`/`--argjson`/`--slurpfile`/`--rawfile` in argv order, filled by `run_jq` (#5154). clap keeps
+    /// each flag's values in a `Vec` of its own, and jq applies the four in the order given, keeping the first value of a
+    /// name.
+    #[arg(skip)]
+    named_order: Vec<jq_runner::NamedFlag>,
+
     /// Whether `--args`/`--jsonargs` captured anything, so a later input
     /// file is a positional word rather than a file (#3412).
     #[arg(skip)]

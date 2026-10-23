@@ -45,6 +45,40 @@ pub(crate) enum PositionalWord {
     Json(String),
 }
 
+/// The four flags that bind a named variable (#5154), each taking a name and a value or file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedFlag {
+    Arg,
+    ArgJson,
+    SlurpFile,
+    RawFile,
+}
+
+/// The named-variable flags of `argv` in the order given (#5154): each takes two words, which are skipped, so a flag's
+/// value that spells another flag (`--arg --arg v`) is not read as one. Stops at a `--`.
+pub(crate) fn named_flag_order(argv: &[String]) -> Vec<NamedFlag> {
+    let mut order = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        let flag = match argv[i].as_str() {
+            "--" => break,
+            "--arg" => Some(NamedFlag::Arg),
+            "--argjson" => Some(NamedFlag::ArgJson),
+            "--slurpfile" => Some(NamedFlag::SlurpFile),
+            "--rawfile" => Some(NamedFlag::RawFile),
+            _ => None,
+        };
+        match flag {
+            Some(flag) => {
+                order.push(flag);
+                i += 3;
+            }
+            None => i += 1,
+        }
+    }
+    order
+}
+
 impl JqCommand {
     /// Turn clap's greedy `--args`/`--jsonargs` captures into the filter and
     /// the ordered positional words jq's own `main.c` produces (#3412).
@@ -3836,6 +3870,7 @@ fn get_error_line(input: &[u8], line: usize, column: usize) -> Option<(String, u
 /// Returns the exit code (0 for success, non-zero for various errors).
 pub fn run_jq(mut args: JqCommand) -> Result<i32> {
     args.resolve_positional_args();
+    args.named_order = named_flag_order(&std::env::args().collect::<Vec<_>>());
 
     // Handle --version flag
     if args.version {
@@ -5057,66 +5092,108 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
 fn build_context(args: &JqCommand) -> Result<EvalContext, BuildContextError> {
     let mut context = EvalContext::default();
 
-    // Process --arg name value pairs
-    for chunk in args.arg.chunks(2) {
-        if let [name, value] = chunk {
-            context
-                .named
-                .insert(name.clone(), OwnedValue::String(value.clone().into()));
-        }
-    }
-
-    // Process --argjson name value pairs. jq's own wording and usage-hint
-    // trailer, confirmed live (#3051) -- unlike --slurpfile/--rawfile below,
-    // there's no file read here to report a `strerror` detail for.
-    for chunk in args.argjson.chunks(2) {
-        if let [name, value] = chunk {
-            // jq's own wording doesn't name the flag's variable (`x`) at all.
-            let json_value = parse_json_value(value).map_err(|_| {
-                BuildContextError::Usage(
-                    "invalid JSON text passed to --argjson\n\
-                     Use jq --help for help with command-line options,\n\
-                     or see the jq manpage, or online docs  at https://jqlang.github.io/jq"
-                        .to_string(),
-                )
-            })?;
-            context.named.insert(name.clone(), json_value);
-        }
-    }
-
-    // Process --slurpfile name file pairs. jq wraps both an unreadable file
-    // and malformed JSON in it under the identical "Bad JSON in --slurpfile
-    // ..." wording (#3051, confirmed live) -- succinctly's own detail text
-    // after the colon is not jq's (see `docs/compliance/jq/limitations.md`),
-    // but the flag, exit code (2) and single-line shape now match. `{e:#}`,
-    // not `{e}`: `parse_json_stream`'s own `.context("Invalid JSON in
-    // stream")` call replaces (not chains onto) the wrapped `serde_json`
-    // error's own Display, so a bare `{e}` here would silently drop its
-    // line/column detail entirely rather than merely wording it differently
-    // from jq's own diagnostic -- `anyhow::Error`'s alternate Display joins
-    // the whole context chain instead.
-    for chunk in args.slurpfile.chunks(2) {
-        if let [name, file] = chunk {
-            let contents = read_arg_file("slurpfile", name, file)?;
-            let values = parse_json_stream(&contents).map_err(|e| {
-                BuildContextError::Usage(format!("Bad JSON in --slurpfile {name} {file}: {e:#}"))
-            })?;
-            context
-                .named
-                .insert(name.clone(), OwnedValue::array_from(values));
-        }
-    }
-
-    // Process --rawfile name file pairs. Same "Bad JSON in --rawfile ..."
-    // wrapper as --slurpfile above even though a raw file is never actually
-    // parsed as JSON -- jq's own generic arg-file reader uses this wording
-    // unconditionally (#3051, confirmed live).
-    for chunk in args.rawfile.chunks(2) {
-        if let [name, file] = chunk {
-            let contents = read_arg_file("rawfile", name, file)?;
-            context
-                .named
-                .insert(name.clone(), OwnedValue::String(contents.into()));
+    // The four flags apply in the order given, and a name keeps its first value (#5154). `named_order` comes from argv; when
+    // it does not account for exactly the values clap captured (a flag spelled some way this scan does not see), the flags
+    // apply grouped by kind, as they did before.
+    let mut arg_pairs = args.arg.chunks_exact(2);
+    let mut argjson_pairs = args.argjson.chunks_exact(2);
+    let mut slurpfile_pairs = args.slurpfile.chunks_exact(2);
+    let mut rawfile_pairs = args.rawfile.chunks_exact(2);
+    let counted = |kind: NamedFlag| args.named_order.iter().filter(|k| **k == kind).count();
+    let order: Vec<NamedFlag> = if counted(NamedFlag::Arg) == args.arg.len() / 2
+        && counted(NamedFlag::ArgJson) == args.argjson.len() / 2
+        && counted(NamedFlag::SlurpFile) == args.slurpfile.len() / 2
+        && counted(NamedFlag::RawFile) == args.rawfile.len() / 2
+    {
+        args.named_order.clone()
+    } else {
+        let grouped = [
+            (NamedFlag::Arg, args.arg.len() / 2),
+            (NamedFlag::ArgJson, args.argjson.len() / 2),
+            (NamedFlag::SlurpFile, args.slurpfile.len() / 2),
+            (NamedFlag::RawFile, args.rawfile.len() / 2),
+        ];
+        grouped
+            .into_iter()
+            .flat_map(|(kind, n)| (0..n).map(move |_| kind))
+            .collect()
+    };
+    for kind in order {
+        match kind {
+            // Process --arg name value pairs
+            NamedFlag::Arg => {
+                if let Some([name, value]) = arg_pairs.next() {
+                    if !context.named.contains_key(name) {
+                        context
+                            .named
+                            .insert(name.clone(), OwnedValue::String(value.clone().into()));
+                    }
+                }
+            }
+            // Process --argjson name value pairs. jq's own wording and usage-hint
+            // trailer, confirmed live (#3051) -- unlike --slurpfile/--rawfile below,
+            // there's no file read here to report a `strerror` detail for.
+            NamedFlag::ArgJson => {
+                // A repeated name is skipped before its value is read or parsed, as jq does: a malformed later duplicate is
+                // not an error (`--arg a 1 --argjson a '{bad'`).
+                if let Some([name, value]) = argjson_pairs
+                    .next()
+                    .filter(|pair| !context.named.contains_key(&pair[0]))
+                {
+                    // jq's own wording doesn't name the flag's variable (`x`) at all.
+                    let json_value = parse_json_value(value).map_err(|_| {
+                        BuildContextError::Usage(
+                            "invalid JSON text passed to --argjson\n\
+                             Use jq --help for help with command-line options,\n\
+                             or see the jq manpage, or online docs  at https://jqlang.github.io/jq"
+                                .to_string(),
+                        )
+                    })?;
+                    context.named.insert(name.clone(), json_value);
+                }
+            }
+            // Process --slurpfile name file pairs. jq wraps both an unreadable file
+            // and malformed JSON in it under the identical "Bad JSON in --slurpfile
+            // ..." wording (#3051, confirmed live) -- succinctly's own detail text
+            // after the colon is not jq's (see `docs/compliance/jq/limitations.md`),
+            // but the flag, exit code (2) and single-line shape now match. `{e:#}`,
+            // not `{e}`: `parse_json_stream`'s own `.context("Invalid JSON in
+            // stream")` call replaces (not chains onto) the wrapped `serde_json`
+            // error's own Display, so a bare `{e}` here would silently drop its
+            // line/column detail entirely rather than merely wording it differently
+            // from jq's own diagnostic -- `anyhow::Error`'s alternate Display joins
+            // the whole context chain instead.
+            NamedFlag::SlurpFile => {
+                if let Some([name, file]) = slurpfile_pairs
+                    .next()
+                    .filter(|pair| !context.named.contains_key(&pair[0]))
+                {
+                    let contents = read_arg_file("slurpfile", name, file)?;
+                    let values = parse_json_stream(&contents).map_err(|e| {
+                        BuildContextError::Usage(format!(
+                            "Bad JSON in --slurpfile {name} {file}: {e:#}"
+                        ))
+                    })?;
+                    context
+                        .named
+                        .insert(name.clone(), OwnedValue::array_from(values));
+                }
+            }
+            // Process --rawfile name file pairs. Same "Bad JSON in --rawfile ..."
+            // wrapper as --slurpfile above even though a raw file is never actually
+            // parsed as JSON -- jq's own generic arg-file reader uses this wording
+            // unconditionally (#3051, confirmed live).
+            NamedFlag::RawFile => {
+                if let Some([name, file]) = rawfile_pairs
+                    .next()
+                    .filter(|pair| !context.named.contains_key(&pair[0]))
+                {
+                    let contents = read_arg_file("rawfile", name, file)?;
+                    context
+                        .named
+                        .insert(name.clone(), OwnedValue::String(contents.into()));
+                }
+            }
         }
     }
 
@@ -11030,6 +11107,113 @@ mod tests {
             "min_by(.a)",
         ] {
             assert!(!has(filter), "{filter}");
+        }
+    }
+
+    /// #5154: the named-variable flags apply in argv order and a name keeps its first value.
+    mod named_flag_order_5154 {
+        use super::*;
+        use clap::Parser;
+
+        fn argv(words: &[&str]) -> Vec<String> {
+            words.iter().map(|w| (*w).to_string()).collect()
+        }
+
+        fn context(words: &[&str], with_order: bool) -> EvalContext {
+            let mut cmd = JqCommand::try_parse_from(words.iter().copied()).unwrap();
+            if with_order {
+                cmd.named_order = named_flag_order(&argv(words));
+            }
+            build_context(&cmd).unwrap_or_else(|_| panic!("build_context refused {words:?}"))
+        }
+
+        fn names(context: &EvalContext) -> Vec<&str> {
+            context.named.keys().map(String::as_str).collect()
+        }
+
+        #[test]
+        fn the_scan_keeps_the_order_and_skips_each_flags_two_words() {
+            use NamedFlag::*;
+            assert_eq!(
+                named_flag_order(&argv(&[
+                    "jq",
+                    "-n",
+                    "--rawfile",
+                    "r",
+                    "/dev/null",
+                    "--arg",
+                    "a",
+                    "1",
+                    "--slurpfile",
+                    "s",
+                    "/dev/null",
+                    "--argjson",
+                    "j",
+                    "2",
+                    ".",
+                ])),
+                vec![RawFile, Arg, SlurpFile, ArgJson]
+            );
+            // a value that spells a flag is a value; a `--` ends the scan
+            assert_eq!(
+                named_flag_order(&argv(&[
+                    "jq", "--arg", "--arg", "v", "--", "--arg", "x", "y"
+                ])),
+                vec![Arg]
+            );
+            assert_eq!(named_flag_order(&argv(&["jq", "-n", "."])), vec![]);
+        }
+
+        #[test]
+        fn flags_of_different_kinds_apply_in_the_order_given_and_the_first_name_wins() {
+            let words = [
+                "jq",
+                "-n",
+                "--argjson",
+                "j",
+                "1",
+                "--arg",
+                "a",
+                "2",
+                "--arg",
+                "j",
+                "3",
+                ".",
+            ];
+            let ctx = context(&words, true);
+            assert_eq!(names(&ctx), ["j", "a"]);
+            assert_eq!(ctx.named["j"], OwnedValue::Int(1));
+        }
+
+        #[test]
+        fn without_an_argv_order_the_flags_apply_grouped_by_kind() {
+            // `named_order` empty (a caller that did not scan argv): the order clap's per-flag vectors give
+            let words = ["jq", "-n", "--argjson", "j", "1", "--arg", "a", "2", "."];
+            let ctx = context(&words, false);
+            assert_eq!(names(&ctx), ["a", "j"]);
+        }
+
+        #[test]
+        fn a_malformed_later_duplicate_is_not_read() {
+            let words = [
+                "jq",
+                "-n",
+                "--arg",
+                "a",
+                "1",
+                "--argjson",
+                "a",
+                "{bad",
+                "--slurpfile",
+                "a",
+                "/nonexistent",
+                "--rawfile",
+                "a",
+                "/nonexistent",
+                ".",
+            ];
+            let ctx = context(&words, true);
+            assert_eq!(ctx.named["a"], OwnedValue::String("1".into()));
         }
     }
 
