@@ -62,5 +62,26 @@ fn test_5185_comma_of_dots_in_a_bind_body_delivers_each_output() -> Result<()> {
             "",
             0,
         ),
+        (
+            "null",
+            r"path(. as $x | foreach .a as $i (5; $x as {a:$a} | limit(2; .,.); $i))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach .a as $i (5; $x as {a:$a} | limit(1; .,.); $i))",
+            "[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            "null",
+            r"path(. as $x | foreach .a as $i (5; $x as {a:$a} | limit(5; .,.); $i))",
+            "[\"a\",\"a\"]\n[\"a\",\"a\"]\n",
+            "",
+            0,
+        ),
     ])
 }

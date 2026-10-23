@@ -38891,6 +38891,10 @@ fn delivers_accumulator_repeatedly(e: &Expr) -> bool {
     match unwrap_paren(e) {
         Expr::Comma(items) => items.len() > 1,
         Expr::Try { expr, .. } | Expr::Optional(expr) => delivers_accumulator_repeatedly(expr),
+        // A count of one stops at the first output; any other (or unlimited) one lets the comma through.
+        Expr::Limit { n, expr } | Expr::Builtin(Builtin::Limit(n, expr)) => {
+            constant_number(n) != Some(1.0) && delivers_accumulator_repeatedly(expr)
+        }
         _ => false,
     }
 }
