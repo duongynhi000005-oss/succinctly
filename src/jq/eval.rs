@@ -38444,6 +38444,39 @@ fn constant_condition_arm<'e>(
     }
 }
 
+/// The `//` of a UPDATE that is `(..) // 5 | .` (or `| . | .`), for a `//` whose left operand holds a bind and no fold (#5162); `None`
+/// for any other UPDATE. `X | .` is `X` in jq, so the pipe's `.` is dropped to give the UPDATE the bare spelling
+/// [`foreach_update_binds_only_in_tail`] reads through.
+fn alt_bind_piped_to_identity(update: &Expr) -> Option<&Expr> {
+    let Expr::Pipe(stages) = unwrap_paren(update) else {
+        return None;
+    };
+    let [alt, rest @ ..] = &stages[..] else {
+        return None;
+    };
+    if rest.is_empty() || !rest.iter().all(|stage| matches!(stage, Expr::Identity)) {
+        return None;
+    }
+    // The bare `//` has to be one #5157 reads (a bind chain in tail position over a constant), or the rewrite hands
+    // the UPDATE to a route that was not validated for it (a `def`). A comma in the chain is left piped: the bare
+    // spelling answers `($x as {a:$a} | (.,.)) // 5` two steps short of jq's three (#5170).
+    match unwrap_paren(alt) {
+        Expr::Alternative(left, _)
+            if foreach_update_binds_only_in_tail(alt)
+                && is_single_output_bind(left, true)
+                && !any_subexpr(left, &mut |e| {
+                    matches!(
+                        e,
+                        Expr::Foreach { .. } | Expr::Reduce { .. } | Expr::Comma(_)
+                    )
+                }) =>
+        {
+            Some(alt)
+        }
+        _ => None,
+    }
+}
+
 /// A fold UPDATE with the no-op pipes (`.|.`, [`is_identity_pipe`]) in its output positions replaced by the `.` they
 /// are (#5023); `None` when it holds none, so the common case allocates nothing. `.|.` is `.` in jq wherever it
 /// stands, so the rewrite changes no meaning: it only keeps the resolver's pipe route, which raises #530's terminal
@@ -65363,6 +65396,13 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // left as it is, and so is an UPDATE holding a literal-headed pipe (`(1 | FE) // 5`), which #5110's bare-bind key reads
     // at the register its bind moved to. A left operand with no `foreach` in it (`($x as P | .) // 5`) is #5157's, read at
     // the register its bind moved to. Differential grid in `tests/jq_cli/i5114.rs`.
+    // #5162: the converse, for a `//` over a bind with no `foreach` in it that is already piped into `.`
+    // (`($x as P | .) // 5 | .`): the `| .` is a no-op in jq, and the bare form is the shape #5157 reads at the register
+    // its bind moved to, where the piped spelling refused a step jq answers.
+    let alt_unpiped = (S::TAG == EvalTag::Jq && extract.is_some())
+        .then(|| alt_bind_piped_to_identity(update))
+        .flatten();
+    let update = alt_unpiped.unwrap_or(update);
     let alt_piped = (S::TAG == EvalTag::Jq
         && extract.is_some()
         && !update_pipe_has_literal_head(update)

@@ -44,7 +44,7 @@ BINDS = [
     "$x as {a:$a} ?// $a",
 ]
 # What the bind ends on: the accumulator, a literal, the bound variable, a navigation, the outer marker.
-TAILS = [".", "5", "$a", ".a", "$x"]
+TAILS = [".", "5", "$a", ".a", "$x", "(.,.)"]
 # {S} is the bind plus its tail, parenthesised.
 WRAPPERS = [
     "({S}) // 5",
@@ -61,6 +61,12 @@ WRAPPERS = [
     "({S}) // .a",
     "(({S}) // 5) // 6",
     "(({S}) // 5) | .",
+    # #5162: the `| .` spelling, over the other constants and with a `def` in the left operand
+    "(({S}) // (1,2)) | .",
+    "(({S}) // {}) | .",
+    "(({S}) // [1]) | .",
+    "({S}) // 5 | . | .",
+    "(def f: .; {S}) // 5 | .",
     "5 | (({S}) // 6)",
     "try (({S}) // 5)",
     "(({S}) // 5)?",
