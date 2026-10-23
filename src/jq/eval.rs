@@ -38851,7 +38851,7 @@ fn reads_foreign_marker_outside_a_fold(update: &Expr) -> bool {
 /// stage but the last holds no bind) and the body of a bind with literal keys or a plain `$name` (one
 /// pattern, or since #4964 a `?//` chain of them), all inside the wrappers [`hands_outputs_on`] reads through (#4953). A bind
 /// anywhere else (under a `try` with a handler, `//`, a call or a fold) may feed a later step, which does
-/// check it.
+/// check it. Not a `//` here: [`foreach_update_binds_only_in_tail`] reads that through for a `foreach`.
 fn update_binds_only_in_tail(e: &Expr) -> bool {
     binds_only_in_tail(e, false)
 }
@@ -38865,6 +38865,10 @@ fn foreach_update_binds_only_in_tail(e: &Expr) -> bool {
     binds_only_in_tail(e, true)
 }
 
+/// The walk behind [`update_binds_only_in_tail`] and [`foreach_update_binds_only_in_tail`]; `through_alternative` is
+/// whether a `//` is read through (the `foreach` one's), its left operand a chain in tail position and its right a
+/// constant ([`is_constant_construction`]: [`is_single_output_bind`] asks the same of the operand when it carries the
+/// register in, so the two cannot disagree on which `//` UPDATEs are read).
 fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
     fn bind_free(e: &Expr) -> bool {
         !any_subexpr(e, &mut |inner| {
@@ -38906,7 +38910,7 @@ fn binds_only_in_tail(e: &Expr, through_alternative: bool) -> bool {
             bind_free(expr) && binds_only_in_tail(body, through_alternative)
         }
         Expr::Alternative(left, right) if through_alternative => {
-            binds_only_in_tail(left, true) && bind_free(right)
+            binds_only_in_tail(left, true) && is_constant_construction(right)
         }
         other => bind_free(other),
     })
@@ -52686,11 +52690,16 @@ fn fans_out(expr: &Expr) -> bool {
 /// chain (#4934) is read through too, and its body may raise and so emit nothing. That is the
 /// resolver's to derive once the register is carried in (see [`hands_outputs_on`]).
 ///
-/// #5157: and a `//` whose left operand is such a chain and whose right operand is a literal. The right operand
-/// runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
-/// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a
-/// step whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register).
-fn is_single_output_bind(expr: &Expr) -> bool {
+/// #5157: and, where `through_alternative` is set, a `//` whose left operand is such a chain and whose right operand is a
+/// constant ([`is_constant_construction`], the one test [`binds_only_in_tail`] applies to the same operand). The right
+/// operand runs only after jq backtracked out of the left one, from the register the `//` was entered with, and a truthy
+/// left output keeps the register the chain moved, so the operands are one sequence of path-checked steps and a step
+/// whose state is not the register still meets the chain with it (a `null` `$x` against a `null` register). Set for the
+/// body of a three-argument `foreach` whose UPDATE [`foreach_update_binds_only_in_tail`] marked
+/// ([`fold_body::state_handed_on_here`]) and nowhere else: a two-argument `foreach` emits the UPDATE's output, which is
+/// path-checked, and 314 of 53,550 sampled rows of `scripts/jq-fold-update-alt-bind-sweep.py --fold foreach2` named a
+/// different value in the error when the register was carried in.
+fn is_single_output_bind(expr: &Expr, through_alternative: bool) -> bool {
     let plain_source = |source: &Expr| {
         matches!(
             unwrap_paren(source),
@@ -52700,7 +52709,11 @@ fn is_single_output_bind(expr: &Expr) -> bool {
     // #4932: the wrappers [`hands_outputs_on`] reads through hand their body's outputs on, so a chain inside
     // one is the same sequence of path-checked steps; a leaf is a bind or an accumulator-only shape, and
     // at least one bind has to be there (a bind-free body keeps the `fans_out` verdict it always had).
-    fn leaves(expr: &Expr, plain_source: &dyn Fn(&Expr) -> bool) -> bool {
+    fn leaves(
+        expr: &Expr,
+        plain_source: &dyn Fn(&Expr) -> bool,
+        through_alternative: bool,
+    ) -> bool {
         match expr {
             Expr::AsPattern {
                 expr: source,
@@ -52709,21 +52722,25 @@ fn is_single_output_bind(expr: &Expr) -> bool {
             } => {
                 plain_source(source)
                     && !patterns.iter().any(pattern_has_computed_key)
-                    && (is_single_output_bind(body) || !fans_out(body))
+                    && (is_single_output_bind(body, through_alternative) || !fans_out(body))
             }
             Expr::As {
                 expr: source, body, ..
-            } => plain_source(source) && (is_single_output_bind(body) || !fans_out(body)),
-            Expr::Alternative(left, right) => {
-                is_single_output_bind(left) && matches!(unwrap_paren(right), Expr::Literal(_))
+            } => {
+                plain_source(source)
+                    && (is_single_output_bind(body, through_alternative) || !fans_out(body))
+            }
+            Expr::Alternative(left, right) if through_alternative => {
+                is_single_output_bind(left, true) && is_constant_construction(right)
             }
             other => emits_only_the_accumulator(other),
         }
     }
-    hands_outputs_on(expr, &|leaf| leaves(leaf, &plain_source))
-        && any_subexpr(expr, &mut |e| {
-            matches!(e, Expr::As { .. } | Expr::AsPattern { .. })
-        })
+    hands_outputs_on(expr, &|leaf| {
+        leaves(leaf, &plain_source, through_alternative)
+    }) && any_subexpr(expr, &mut |e| {
+        matches!(e, Expr::As { .. } | Expr::AsPattern { .. })
+    })
 }
 
 /// [`fans_out`] with `patterns_fan_out` saying whether a destructuring `as` counts.
@@ -53735,7 +53752,7 @@ impl FoldRegister {
                 && !tr
                 && (!fans_out(expr)
                     || ((fold_body::state_handed_on_here() || fold_body::foreach_body_here())
-                        && is_single_output_bind(expr)));
+                        && is_single_output_bind(expr, fold_body::state_handed_on_here())));
             let update_frame = update_frame
                 .with_register(if carries {
                     Some(&self.value)

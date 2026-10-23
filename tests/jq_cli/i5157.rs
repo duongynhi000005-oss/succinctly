@@ -72,6 +72,50 @@ fn test_5157_foreach_update_alternative_over_a_bind_of_a_null_x() -> Result<()> 
             "",
             0,
         ),
+        // The right operand is any constant: an array, an object, a comma of them.
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // [1]; $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // {}; $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // (1,2); $i))",
+            "[\"a\"]\n[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        // ...and the wrappers a chain is read through.
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; try (($x as {a:$a} | .) // 5); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; limit(1; ($x as {a:$a} | .) // 5); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; 5 | (($x as {a:$a} | .) // 6); $i))",
+            "[\"a\",\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
     ])
 }
 
@@ -93,6 +137,44 @@ fn test_5157_rows_that_still_refuse() -> Result<()> {
             r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | .) // 5; .))",
             "",
             "Invalid path expression with result 5",
+            5,
+        ),
+    ])
+}
+
+/// #5157: the shapes the fix leaves as they were. A two-argument `foreach` emits its UPDATE's output, which jq
+/// path-checks (`5` here); a `reduce` is judged on its final accumulator, and a `?//` chain behind the `//` there names
+/// `null` in jq, where reading the `//` through named the stored `5`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5157_two_argument_foreach_and_reduce_keep_their_readings() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | $a) // 5))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.) as $i (.; ($x as {a:$a} | 5) // 6))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"path(. as $x | foreach (.a,.a) as $i (false; (try ($x as {a:$a} | .)) // 5))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?))",
+            "",
+            "Invalid path expression with result null",
             5,
         ),
     ])
