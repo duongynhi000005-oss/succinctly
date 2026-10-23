@@ -51294,8 +51294,9 @@ struct ForkTail<'u> {
     fork_last: bool,
     /// The step is the `foreach`'s last, of its last fork.
     foreach_last: bool,
-    /// UPDATE and how many steps follow this one in the fork, when the source's bound says and there are any.
-    ahead: Option<(&'u Expr, usize)>,
+    /// UPDATE, how many steps follow this one in the fork (when the source's bound says and there are any), and
+    /// whether the fork's last of them is the `foreach`'s last step (the fork is INIT's last).
+    ahead: Option<(&'u Expr, usize, bool)>,
 }
 
 /// The most steps [`ForkTail::stored_is_dead`] runs ahead.
@@ -51314,26 +51315,32 @@ impl ForkTail<'_> {
     /// ([`later_steps_store_literals`]), so no step runs the fold arm on a stored literal the resolve cannot place
     /// (under a `?` that refusal truncated jq's output, #5113).
     fn stored_is_dead<S: EvalSemantics>(&self, last: bool, stored: &Literal) -> bool {
-        last || self.ahead.is_some_and(|(update, after)| {
-            later_steps_store_literals::<S>(update, literal_to_owned(stored), after)
+        last || self.ahead.is_some_and(|(update, after, ends_foreach)| {
+            later_steps_store_literals::<S>(update, literal_to_owned(stored), after, ends_foreach)
         })
     }
 }
 
 /// Whether each of the `after` steps that follow one that stored `state` narrows to a literal arm, as the last step
-/// would ([`ForkTail::LAST`]), the literal it stores being the state the next one enters with (#5113). UPDATE must be
+/// would ([`ForkTail::LAST`]), the literal it stores being the state the next one enters with (#5113). The fork's last
+/// step is the `foreach`'s only when `ends_foreach`: on an earlier INIT fork's it reads no handler literal. UPDATE must be
 /// the `if` itself, behind a handler, `?` or a no-op stage: a comma with a sibling that emits stores that sibling.
 fn later_steps_store_literals<S: EvalSemantics>(
     update: &Expr,
     mut state: OwnedValue,
     after: usize,
+    ends_foreach: bool,
 ) -> bool {
     if after > FORK_LOOKAHEAD_STEPS {
         return false;
     }
-    for _ in 0..after {
-        let arm = handler_literal_arm::<S>(update, &state, ForkTail::LAST, true)
-            .or_else(|| literal_taken_arm::<S>(update, &state, ForkTail::LAST));
+    for step in 1..=after {
+        let tail = ForkTail {
+            foreach_last: step < after || ends_foreach,
+            ..ForkTail::LAST
+        };
+        let arm = handler_literal_arm::<S>(update, &state, tail, true)
+            .or_else(|| literal_taken_arm::<S>(update, &state, tail));
         let Some(Expr::Literal(lit)) = arm.map(unwrap_paren) else {
             return false;
         };
@@ -66455,7 +66462,14 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             ahead: fork_source_bound
                                 .and_then(|bound| bound.checked_sub(steps))
                                 .filter(|after| *after > 0)
-                                .map(|after| (&bound_update, after)),
+                                .map(|after| {
+                                    (
+                                        &bound_update,
+                                        after,
+                                        run_bounds
+                                            .is_some_and(|(forks, _)| forks == fork_index + 1),
+                                    )
+                                }),
                         };
                         // #5110: ...and `(LIT | FE) // R`, whose operands are the items, the right one run only when the left
                         // emitted nothing.
