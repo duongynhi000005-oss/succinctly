@@ -6,7 +6,8 @@ with a bind, so neither gates the shape #5157 changed: `(B | .) // 5` as the UPD
 a `$x` bound outside the fold. jq's `a // b` does not restore its path register when `a` emits a truthy
 output, so a bind that stepped a `null` `$x` against a `null` register has moved the register for every
 later step, while a falsy output backtracks to the entry register and runs `b` from there. The grid here is
-document x INIT x SOURCE x BIND x TAIL x WRAPPER x EXTRACT x write context (`--fold reduce` drops EXTRACT).
+document x INIT x SOURCE x BIND x TAIL x WRAPPER x EXTRACT x write context (`--fold foreach2` is the
+two-argument `foreach`, whose UPDATE output is emitted and path-checked, and `--fold reduce` drops EXTRACT).
 
 Rows are classified against jq (`/usr/bin/jq`) per build, as `jq-reduce-update-bind-sweep.py` does:
 MATCH, MSGDIFF (same stdout and exit code, different error wording), ACCEPT_WRONG (jq refused, the build
@@ -14,10 +15,10 @@ answered: the dangerous one, `del`/`=`/`|=` write through it), REFUSE_WRONG (the
 With `--base`, exit status 1 when a row that matched jq on the base no longer does (a lost match: a
 refuse-only fallback leaked under `try` before, #3186/#3267), a row that was not an ACCEPT_WRONG on the
 base is one on `--bin`, or a row the base refused now answers wrongly (DIFF). A wrong answer both builds
-share is listed, not failed. A timeout of `--bin` always fails. The full product is large, so `--sample K`
+share is listed, not failed. A timeout of `--bin` that `--base` did not have fails. The full product is large, so `--sample K`
 runs every Kth row of a fixed shuffle (`--seed`) and `--only` narrows to rows containing a substring.
 
-Usage: scripts/jq-fold-update-alt-bind-sweep.py --bin BIN [--base BIN] [--jq JQ] [--fold foreach|reduce]
+Usage: scripts/jq-fold-update-alt-bind-sweep.py --bin BIN [--base BIN] [--jq JQ] [--fold foreach|foreach2|reduce]
                                                 [--sample K] [--seed S] [--only SUBSTR[,SUBSTR...]]
                                                 [--jobs N] [--show N] [--dump FILE]
 """
@@ -49,6 +50,9 @@ WRAPPERS = [
     "({S}) // 5",
     "({S}) // null",
     "({S}) // false",
+    "({S}) // [1]",
+    "({S}) // {}",
+    "({S}) // (1,2)",
     "(({S}) // 5) // 6",
     "(({S}) // 5) | .",
     "5 | (({S}) // 6)",
@@ -68,13 +72,15 @@ PREFIX = ". as $x | {R}"
 
 
 def grid(fold):
-    extracts = EXTRACTS if fold == "foreach" else [None]
+    extracts = EXTRACTS if fold == "foreach" else [None]  # `foreach2` and `reduce` have no EXTRACT
     for init, src, bind, tail, wrapper, extract in itertools.product(
         INITS, SRCS, BINDS, TAILS, WRAPPERS, extracts
     ):
         upd = wrapper.replace("{S}", f"{bind} | {tail}")
         if fold == "foreach":
             body = f"foreach {src} as $i ({init}; {upd}; {extract})"
+        elif fold == "foreach2":
+            body = f"foreach {src} as $i ({init}; {upd})"
         else:
             body = f"reduce {src} as $i ({init}; {upd})"
         for ctx in CONTEXTS:
@@ -112,7 +118,7 @@ def main():
     ap.add_argument("--bin", required=True, help="the build under test")
     ap.add_argument("--base", help="a reference build (a `main` binary)")
     ap.add_argument("--jq", default="/usr/bin/jq")
-    ap.add_argument("--fold", choices=["foreach", "reduce"], default="foreach")
+    ap.add_argument("--fold", choices=["foreach", "foreach2", "reduce"], default="foreach")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--show", type=int, default=10, help="rows printed per transition")
     ap.add_argument("--sample", type=int, default=1, help="run every Kth row of the shuffled grid")
