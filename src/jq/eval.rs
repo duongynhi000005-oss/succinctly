@@ -38591,6 +38591,11 @@ fn update_returns_its_input(e: &Expr) -> bool {
     // derives from the pattern's own walk once the register is carried in (#4934).
     hands_outputs_on(e, &|leaf| match leaf {
         Expr::Identity => true,
+        // #5146: a plain variable bind of `.` moves nothing and `$z` is not a leaf here, so the body's outputs are the
+        // accumulator's own node when the body's are.
+        Expr::As { expr, body, .. } => {
+            matches!(unwrap_paren(expr), Expr::Identity) && update_returns_its_input(body)
+        }
         Expr::Pipe(stages) => stages.iter().all(update_returns_its_input),
         Expr::AsPattern {
             expr,
