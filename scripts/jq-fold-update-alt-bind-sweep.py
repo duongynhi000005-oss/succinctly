@@ -95,6 +95,11 @@ WRAPPERS = [
     "try (({S}) // ($x as {a:$a} | .))",
     "({S}) // ($x as {a:$a} | .)",
     "try (({S}) // (def f: .; f))",
+    # #5175 residuals: a comma, an `if` or a `?//` chain around the binds, a generator source
+    "try (({S}) // ((.a as $q | $q), 3))",
+    "try (({S}) // (if .a then (.a as $q | $q) else 1 end))",
+    "try (({S}) // ($x as {a:$a} ?// $a | $a))",
+    "try (({S}) // ((1,2) as $q | $q))",
     # controls: no `//`, so a change to the `//` code must not move them
     "{S}",
     "try ({S})",

@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use crate::assert_path_rows_both_routes_3749;
+use crate::{assert_path_rows_both_routes_3749, run_jq_stdin};
 
 // #5167 read the right operand of the `//` only when it held no bind. An operand with one (`.a as $q | 1`,
 // `$x as {a:$a} | .`) kept the resolver's refusal, a guess that a `try`/`?` around the `//` swallowed, so the UPDATE
@@ -98,4 +98,52 @@ fn test_5175_alternative_with_a_destructuring_bind_in_the_right_operand() -> Res
             0,
         ),
     ])
+}
+
+/// #5175: the three-argument `foreach`, whose EXTRACT is the emission, reads the same right operand. Rows captured from
+/// `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_three_argument_foreach_with_a_bind_in_the_right_operand() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // .a as $q | 1); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | foreach (.a,.) as $i (5; try (($x as {a:$a} | .) // (.a as $q | $q)); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; try (($x as {a:$a} | false) // .a as $q | .); $i))",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
+}
+
+/// #5175: a right operand with a bind behind a left operand that fans out stays refused. The bare reading answered
+/// `["a"]` once where jq answers it twice (the #5170 under-count), and `del`/`=` write through such a count.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_left_operand_that_fans_out_is_not_read_with_a_bind_in_the_right_operand() -> Result<()>
+{
+    let (stdout, _code) = run_jq_stdin(
+        r"path(. as $x | foreach . as $i (5; ($x as {a:$a} | (.,.)) // ($x as {a:$a} | .); $x))",
+        "null",
+        &["-c"],
+    )?;
+    assert_ne!(
+        stdout, "[\"a\"]\n",
+        "answered one path where jq answers two"
+    );
+    Ok(())
 }
