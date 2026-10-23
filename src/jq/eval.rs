@@ -63382,9 +63382,9 @@ fn update_definitely_navigates(expr: &Expr) -> bool {
 }
 
 /// Whether a `reduce` UPDATE navigates the accumulator on a path that always runs ([`update_definitely_navigates`]), or
-/// destructures it with a bind of `.` ([`update_indexes_accumulator`], #5141).
-fn update_navigates_accumulator(update: &Expr) -> bool {
-    update_definitely_navigates(update) || update_indexes_accumulator(update)
+/// indexes it at a step that does ([`update_indexes_accumulator`], #5141), for the accumulator a step holds when given.
+fn update_navigates_accumulator<S: EvalSemantics>(update: &Expr, acc: Option<&OwnedValue>) -> bool {
+    update_definitely_navigates(update) || update_indexes_accumulator::<S>(update, acc)
 }
 
 /// Whether a `reduce` UPDATE indexes the accumulator at a step that always runs without being a navigation
@@ -63400,114 +63400,209 @@ fn update_navigates_accumulator(update: &Expr) -> bool {
 /// `//`'s left operand), and not a nested fold's source, whose
 /// destructures the fold-body machinery routes itself. A `?//` chain retries on the raise, so it is not read. Under
 /// `first(f)` only the head of a comma is (a later item may never run).
-fn update_indexes_accumulator(expr: &Expr) -> bool {
-    /// `caught`: under a `try`/`?`, whose catch of a builtin's raise the resolver does not model (a bind's step it does:
-    /// the pattern walk is the resolver's own), so only a bind is read there.
-    fn within(expr: &Expr, first_only: bool, caught: bool) -> bool {
-        match expr {
-            Expr::Paren(inner) | Expr::Label { body: inner, .. } | Expr::As { body: inner, .. } => {
-                within(inner, first_only, caught)
-            }
-            Expr::Shared(inner) => !native_stack_exhausted() && within(inner, first_only, caught),
-            Expr::Try {
-                expr: inner,
-                catch: None,
-            }
-            | Expr::Optional(inner) => within(inner, first_only, true),
-            Expr::AsPattern {
-                expr,
-                patterns,
-                body,
-            } => {
-                (matches!(unwrap_paren(expr), Expr::Identity)
-                    && matches!(
-                        patterns.as_slice(),
-                        [Pattern::Object(_) | Pattern::Array(_)]
-                    ))
-                    || within(body, first_only, caught)
-            }
-            // `first(f)` stops at the first output: a head that is certain to yield one ends the read there, and any
-            // other head may yield nothing, so a later item is the first output and runs (`first(empty, bind)`).
-            Expr::Comma(items) if first_only => {
-                for item in items {
-                    if within(item, true, caught) {
-                        return true;
-                    }
-                    if yields_for_certain(item) {
-                        break;
-                    }
-                }
-                false
-            }
-            Expr::Comma(items) => items.iter().any(|item| within(item, false, caught)),
-            Expr::Pipe(stages) => stages
-                .first()
-                .is_some_and(|head| within(head, first_only, caught)),
-            // A collect runs its body and drains every output of it.
-            Expr::Array(inner) => within(inner, false, caught),
-            Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
-                within(inner, true, caught)
-            }
-            // A count of at most one stops at the first output; a larger or negative one (unlimited in jq 1.7.1) reads
-            // the body as it is read outside it.
-            Expr::Limit { n, expr } | Expr::Builtin(Builtin::Limit(n, expr))
-                if takes_outputs(n) =>
-            {
-                within(
-                    expr,
-                    first_only || constant_number(n).is_some_and(|n| n > 0.0 && n <= 1.0),
-                    caught,
-                )
-            }
-            Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
-                if is_nth_zero(n) =>
-            {
-                within(expr, true, caught)
-            }
-            // The condition decides which branch runs, so both read it as indexing only when it is certain to yield
-            // (`.`, a literal, a variable): `if empty then A else B end` runs neither.
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                yields_for_certain(cond)
-                    && within(then_branch, first_only, caught)
-                    && within(else_branch, first_only, caught)
-            }
-            Expr::Alternative(left, _) => within(left, first_only, caught),
-            Expr::FuncDef {
-                name,
-                params,
-                body,
-                then,
-                bound,
-            } => within(
-                &bind_def(name, params, body, then, bound),
-                first_only,
-                caught,
-            ),
-            Expr::DefCall {
-                def,
-                args,
-                frames,
-                bound,
-            } => probe_def_call(def, args, *frames, bound)
-                .is_ok_and(|body| within(&body, first_only, caught)),
-            Expr::Builtin(
-                Builtin::Map(_)
-                | Builtin::Add
-                | Builtin::First
-                | Builtin::Last
-                | Builtin::Nth(_)
-                | Builtin::Flatten
-                | Builtin::FlattenDepth(_)
-                | Builtin::Join(_),
-            ) => !caught,
+fn update_indexes_accumulator<S: EvalSemantics>(expr: &Expr, acc: Option<&OwnedValue>) -> bool {
+    struct Walk<'a> {
+        /// The accumulator the step holds, when asked per step: `reverse`/`transpose` index only a non-empty one, and
+        /// `index`/`rindex`/`indices` index (`.[[$i]]`) all but a string, and an `if` takes the branch its condition picks (#5143).
+        acc: Option<&'a OwnedValue>,
+    }
+    /// A non-empty array, object or string: what `reverse` and `transpose` index (`.[length - 1 - range(0;length)]`).
+    fn non_empty_container(acc: &OwnedValue) -> bool {
+        matches!(
+            acc,
+            OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::String(_)
+        ) && acc.length() != Some(0)
+    }
+    /// A container holding an array, object or string that is not empty: `transpose` indexes (`$in[$i][$j]`, over
+    /// `range(0; $max)` for the largest length) only then, its `map(length)` running in a subexpression.
+    fn has_non_empty_element(acc: &OwnedValue) -> bool {
+        let non_empty = |v: &OwnedValue| {
+            matches!(
+                v,
+                OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::String(_)
+            ) && v.length() != Some(0)
+        };
+        match acc {
+            OwnedValue::Array(items) => items.iter().any(non_empty),
+            OwnedValue::Object(entries) => entries.values().any(non_empty),
             _ => false,
         }
     }
-    within(expr, false, false)
+    impl Walk<'_> {
+        /// `caught`: under a `try`/`?`, whose catch of a builtin's raise the resolver does not model (a bind's step it
+        /// does: the pattern walk is the resolver's own), so only a bind is read there. `vars`: the variables bound to
+        /// the accumulator itself (`. as $z`), whose indexing is path-checked against the register as `.` is.
+        fn within<S: EvalSemantics>(
+            &self,
+            expr: &Expr,
+            first_only: bool,
+            caught: bool,
+            vars: &[&str],
+        ) -> bool {
+            let go = |e: &Expr, first_only: bool| self.within::<S>(e, first_only, caught, vars);
+            match expr {
+                Expr::Paren(inner) | Expr::Label { body: inner, .. } => go(inner, first_only),
+                Expr::As { expr, var, body } => {
+                    if matches!(unwrap_paren(expr), Expr::Identity) {
+                        let mut bound = vars.to_vec();
+                        bound.push(var);
+                        self.within::<S>(body, first_only, caught, &bound)
+                    } else {
+                        go(body, first_only)
+                    }
+                }
+                Expr::Shared(inner) => !native_stack_exhausted() && go(inner, first_only),
+                Expr::Try {
+                    expr: inner,
+                    catch: None,
+                }
+                | Expr::Optional(inner) => self.within::<S>(inner, first_only, true, vars),
+                Expr::AsPattern {
+                    expr,
+                    patterns,
+                    body,
+                } => {
+                    (matches!(unwrap_paren(expr), Expr::Identity)
+                        && matches!(
+                            patterns.as_slice(),
+                            [Pattern::Object(_) | Pattern::Array(_)]
+                        ))
+                        || go(body, first_only)
+                }
+                // `first(f)` stops at the first output: a head that is certain to yield one ends the read there, and any
+                // other head may yield nothing, so a later item is the first output and runs (`first(empty, bind)`).
+                Expr::Comma(items) if first_only => {
+                    for item in items {
+                        if go(item, true) {
+                            return true;
+                        }
+                        if yields_for_certain(item) {
+                            break;
+                        }
+                    }
+                    false
+                }
+                Expr::Comma(items) => items.iter().any(|item| go(item, false)),
+                // `$z | .b`: a variable bound to the accumulator is not the register, so its navigation raises.
+                Expr::Pipe(stages) if matches!(stages.first(), Some(Expr::Var(name)) if vars.contains(&name.as_str())) => {
+                    !caught
+                        && stages
+                            .get(1)
+                            .is_some_and(|stage| update_navigates_within(stage, false))
+                }
+                Expr::Pipe(stages) => stages.first().is_some_and(|head| go(head, first_only)),
+                // A collect runs its body and drains every output of it.
+                Expr::Array(inner) => go(inner, false),
+                Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+                    go(inner, true)
+                }
+                // A count of at most one stops at the first output; a larger or negative one (unlimited in jq 1.7.1)
+                // reads the body as it is read outside it.
+                Expr::Limit { n, expr } | Expr::Builtin(Builtin::Limit(n, expr))
+                    if takes_outputs(n) =>
+                {
+                    go(
+                        expr,
+                        first_only || constant_number(n).is_some_and(|n| n > 0.0 && n <= 1.0),
+                    )
+                }
+                Expr::NthExpr { n, expr } | Expr::Builtin(Builtin::NthStream(n, expr))
+                    if is_nth_zero(n) =>
+                {
+                    go(expr, true)
+                }
+                // The condition decides which branch runs. Asked per step, a pure condition of `.` ([`is_pure_of_dot`]) is evaluated on the
+                // accumulator and each output runs its branch; otherwise both branches must index, and only under a
+                // condition that is certain to yield (`.`, a literal, a variable): `if empty then A else B end` runs
+                // neither.
+                Expr::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => match self.acc.filter(|_| is_pure_of_dot(cond)) {
+                    Some(acc) => eval_owned_multi::<S>(cond, acc).is_ok_and(|outputs| {
+                        outputs.iter().any(|output| {
+                            go(
+                                if output.is_truthy() {
+                                    then_branch
+                                } else {
+                                    else_branch
+                                },
+                                first_only,
+                            )
+                        })
+                    }),
+                    None => {
+                        yields_for_certain(cond)
+                            && go(then_branch, first_only)
+                            && go(else_branch, first_only)
+                    }
+                },
+                Expr::Alternative(left, _) => go(left, first_only),
+                Expr::FuncDef {
+                    name,
+                    params,
+                    body,
+                    then,
+                    bound,
+                } => go(&bind_def(name, params, body, then, bound), first_only),
+                Expr::DefCall {
+                    def,
+                    args,
+                    frames,
+                    bound,
+                } => probe_def_call(def, args, *frames, bound)
+                    .is_ok_and(|body| go(&body, first_only)),
+                // `any(gen; cond)`/`all(gen; cond)` run their generator on the accumulator.
+                Expr::Builtin(Builtin::AnyCond(generator, _) | Builtin::AllCond(generator, _)) => {
+                    !caught && update_navigates_within(generator, true)
+                }
+                Expr::Builtin(
+                    Builtin::Map(_)
+                    | Builtin::Add
+                    | Builtin::First
+                    | Builtin::Last
+                    | Builtin::Nth(_)
+                    | Builtin::Flatten
+                    | Builtin::FlattenDepth(_)
+                    | Builtin::Join(_),
+                ) => !caught,
+                // Indexed only for a container of the right kind: asked per step.
+                Expr::Builtin(Builtin::Reverse) => {
+                    !caught && self.acc.is_some_and(non_empty_container)
+                }
+                Expr::Builtin(Builtin::Transpose) => {
+                    !caught && self.acc.is_some_and(has_non_empty_element)
+                }
+                Expr::Builtin(Builtin::Index(_) | Builtin::Rindex(_) | Builtin::Indices(_)) => {
+                    !caught
+                        && self
+                            .acc
+                            .is_some_and(|acc| !matches!(acc, OwnedValue::String(_)))
+                }
+                _ => false,
+            }
+        }
+    }
+    Walk { acc }.within::<S>(expr, false, false, &[])
+}
+
+/// Whether [`update_indexes_accumulator`] has anything to decide per step: a builtin it indexes with only for the
+/// right kind of accumulator, or an `if` whose condition it evaluates on it (#5143).
+fn update_indexes_accumulator_per_step(update: &Expr) -> bool {
+    any_subexpr(update, &mut |e| {
+        matches!(
+            e,
+            Expr::If { .. }
+                | Expr::Builtin(
+                    Builtin::Reverse
+                        | Builtin::Transpose
+                        | Builtin::Index(_)
+                        | Builtin::Rindex(_)
+                        | Builtin::Indices(_)
+                )
+        )
+    })
 }
 
 /// [`update_definitely_navigates`] for the outputs a consumer reads: every output
@@ -64027,7 +64122,10 @@ fn resolve_reduce<'a, S: EvalSemantics>(
     // #3780: whether UPDATE navigates the accumulator on a path that always runs --
     // syntactic, so decided once, not per source element
     // ([`reduce_update_at_register`]).
-    let update_navigates = S::TAG == EvalTag::Jq && update_navigates_accumulator(update);
+    let update_navigates = S::TAG == EvalTag::Jq && update_navigates_accumulator::<S>(update, None);
+    // #5143: ...and for the steps whose accumulator makes a builtin index or an `if` pick the indexing branch.
+    let update_indexes_per_step =
+        S::TAG == EvalTag::Jq && !update_navigates && update_indexes_accumulator_per_step(update);
     // #4832: whether UPDATE reads a `$x` bound outside the fold ([`Expr::TrackedVar`]) with no fold of
     // its own in the way. A nested fold's markers are certified by the source/body machinery against the
     // persistent register (`foreign_register_markers_with`), which a per-step one would move out from
@@ -64410,11 +64508,17 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                         // #3780: see [`reduce_update_at_register`].
                         // #4486: a caught navigation that raises on this accumulator emits nothing,
                         // so UPDATE navigates it only on the steps it succeeds on.
-                        let update_navigates_here = update_navigates
+                        let update_navigates_step = update_navigates
+                            || (update_indexes_per_step
+                                && update_indexes_accumulator::<S>(update, Some(acc_effective)));
+                        let update_navigates_here = update_navigates_step
                             && !(update_has_caught_nav
                                 && silence_failing_caught_navs::<S>(update, acc_effective)
                                     .is_some_and(|silenced| {
-                                        !update_navigates_accumulator(&silenced)
+                                        !update_navigates_accumulator::<S>(
+                                            &silenced,
+                                            Some(acc_effective),
+                                        )
                                     }));
                         let update_at_register = reduce_update_at_register::<S>(
                             update_navigates_here,
