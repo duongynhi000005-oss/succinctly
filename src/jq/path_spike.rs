@@ -1,5 +1,5 @@
-//! Phase 0 spike of #5223: a jq-mode interpreter that **carries** jq 1.7.1's
-//! path register instead of inferring it.
+//! A jq-mode interpreter that **carries** jq 1.7.1's path register instead of
+//! inferring it (#5223).
 //!
 //! The resolver in `eval.rs` reconstructs where jq's register would be from the
 //! shape of the syntax (`Frame`, `Snapshot`, `FoldRegister`, ...). jq itself
@@ -12,19 +12,22 @@
 //! - `Reg` is the register. Every output of `Interp::eval` carries its
 //!   own, so a generator resumed for its next output continues from the
 //!   register it had, which is what jq's fork-point restore amounts to.
-//! - [`SVal`] is a value with `jv` identity: arrays, objects, strings and
-//!   literal numbers are allocated and compare by pointer, `null`/`true`/
-//!   `false` by kind, and computed numbers by their `f64` bits ([`identical`]).
+//! - Values are [`OwnedValue`]s with jq's identity (`jv_identical`): arrays,
+//!   objects, strings and number literals compare by storage, `null`/`true`/
+//!   `false` by kind, and computed numbers by their `f64` bits. Every string
+//!   and number literal the interpreter holds has storage of its own: the
+//!   input document is promoted on entry, a constant once per site, and a C
+//!   builtin's result as it is answered (`fresh`), as jq allocates every `jv`.
 //! - Each `Expr` arm follows the bytecode `compile.c` emits for it, cited at
 //!   the arm. The jq-defined builtins run their `builtin.jq` bodies
 //!   ([`PRELUDE`]); the C-coded ones are delegated to the existing evaluator
 //!   and answer a fresh value (the issue's "stubbed to fresh").
 //!
-//! It is a dev-only spike: reachable from `succinctly dev jq-path-spike`
-//! (hidden) and from tests, never from `succinctly jq`. A construct it does
-//! not implement raises [`Raise::Unsupported`], which nothing catches, so a
-//! row the spike cannot run is never mistaken for one it answers. See
-//! `docs/plan/jq-path-mode-interpreter-spike.md` for the go/no-go report.
+//! It is reachable from `succinctly dev jq-path-spike` (hidden) and from tests,
+//! never from `succinctly jq`. A construct it does not implement raises
+//! `Raise::Unsupported`, which nothing catches, so a row it cannot run is never
+//! mistaken for one it answers. See `docs/plan/jq-path-mode-interpreter-spike.md`
+//! for the Phase 0 go/no-go report.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -35,148 +38,110 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
+use indexmap::IndexMap;
+
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
     substitute_vars, EvalTag, JqSemantics, QueryResult,
 };
 use super::expr::{
-    Builtin, CompareOp, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
+    ArithOp, Builtin, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
     SliceBoundKey,
 };
 use super::parser::parse;
-use super::value::{NumberRepr, OwnedValue};
+use super::value::{
+    jq_bare_float_display, jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral,
+    SharableString,
+};
 use super::walk::any_subexpr;
 
-/// A value with `jv` identity (see the module docs and [`identical`]).
-#[derive(Clone, Debug)]
-pub enum SVal {
-    /// `null`.
-    Null,
-    /// `true`/`false`.
-    Bool(bool),
-    /// A number: its value (an `Int`, `Float` or `NumberLiteral`, for output),
-    /// and the allocation that makes it a *literal* (`Some`) or `None` for a
-    /// computed double.
-    Num(OwnedValue, Option<Rc<()>>),
-    /// A string.
-    Str(Rc<str>),
-    /// An array.
-    Arr(Rc<Vec<Self>>),
-    /// An object, in insertion order.
-    Obj(Rc<Vec<(Rc<str>, Self)>>),
+/// A string with storage of its own: a fresh `jv_string`.
+fn string(s: &str) -> OwnedValue {
+    let mut s = SharableString::from(s);
+    s.promote();
+    OwnedValue::String(s)
 }
 
-/// Where a converted [`OwnedValue`]'s numbers come from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NumOrigin {
-    /// Parsed from the input document: every number is a literal, as
-    /// `jv_parse` makes it.
-    Document,
-    /// A C builtin's result: a spelled number is a fresh literal, any other a
-    /// computed double.
-    Fresh,
+/// A number literal with storage of its own: a fresh `jv_number_with_literal`.
+fn literal(repr: NumberRepr, spelling: &str) -> OwnedValue {
+    let mut spelling = SharableLiteral::from(spelling);
+    spelling.promote();
+    OwnedValue::NumberLiteral(repr, spelling)
 }
 
-impl SVal {
-    fn computed(value: OwnedValue) -> Self {
-        Self::Num(value, None)
-    }
-
-    fn literal(value: OwnedValue) -> Self {
-        Self::Num(value, Some(Rc::new(())))
-    }
-
-    fn string(s: &str) -> Self {
-        Self::Str(Rc::from(s))
-    }
-
-    fn truthy(&self) -> bool {
-        !matches!(self, Self::Null | Self::Bool(false))
-    }
-
-    fn f64(&self) -> Option<f64> {
-        match self {
-            Self::Num(n, _) => n.as_f64(),
-            _ => None,
-        }
-    }
-
-    fn from_owned(value: &OwnedValue, origin: NumOrigin) -> Self {
-        match value {
-            OwnedValue::Null => Self::Null,
-            OwnedValue::Bool(b) => Self::Bool(*b),
-            OwnedValue::NumberLiteral(..) => Self::literal(value.clone()),
-            OwnedValue::Int(_) | OwnedValue::Float(_) => match origin {
-                NumOrigin::Document => Self::literal(value.clone()),
-                NumOrigin::Fresh => Self::computed(value.clone()),
-            },
-            OwnedValue::String(s) => Self::string(s.as_str()),
-            OwnedValue::Array(items) => Self::Arr(Rc::new(
-                items.iter().map(|v| Self::from_owned(v, origin)).collect(),
-            )),
-            OwnedValue::Object(map) => Self::Obj(Rc::new(
-                map.iter()
-                    .map(|(k, v)| (Rc::from(k.as_str()), Self::from_owned(v, origin)))
-                    .collect(),
-            )),
-        }
-    }
-
-    /// This value as an [`OwnedValue`], for output and for the delegated
-    /// evaluator.
-    pub fn to_owned_value(&self) -> OwnedValue {
-        match self {
-            Self::Null => OwnedValue::Null,
-            Self::Bool(b) => OwnedValue::Bool(*b),
-            Self::Num(n, _) => n.clone(),
-            Self::Str(s) => OwnedValue::string(&**s),
-            Self::Arr(items) => OwnedValue::Array(items.iter().map(Self::to_owned_value).collect()),
-            Self::Obj(map) => OwnedValue::Object(
-                map.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_owned_value()))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-/// jq 1.7.1's `jv_identical`.
+/// A C builtin's result as jq's fresh `jv`.
 ///
-/// The same `kind_flags`, then pointer identity for an allocated value
-/// (array, object, string, literal number) and payload bits for anything
-/// else. A literal and a computed number differ in `kind_flags`, so they are
-/// never identical.
-pub fn identical(a: &SVal, b: &SVal) -> bool {
-    match (a, b) {
-        (SVal::Null, SVal::Null) => true,
-        (SVal::Bool(x), SVal::Bool(y)) => x == y,
-        (SVal::Num(_, Some(x)), SVal::Num(_, Some(y))) => Rc::ptr_eq(x, y),
-        (SVal::Num(x, None), SVal::Num(y, None)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => x.to_bits() == y.to_bits(),
-            _ => false,
-        },
-        (SVal::Str(x), SVal::Str(y)) => Rc::ptr_eq(x, y),
-        (SVal::Arr(x), SVal::Arr(y)) => Rc::ptr_eq(x, y),
-        (SVal::Obj(x), SVal::Obj(y)) => Rc::ptr_eq(x, y),
-        _ => false,
+/// The existing evaluator may hand back a value sharing storage with what it
+/// was given (an `Rc` clone), where jq's builtin built a new `jv`: that would
+/// read as identical where jq's is not, so a result identical to one of
+/// `inputs` gets storage of its own at the top. Below the top, a container the
+/// result shares came from the interpreter's own values, as jq's builtins
+/// `jv_copy` their input's elements; everything else the builtin built gets
+/// storage ([`promote_built`]). The builtins that *do* return their input
+/// unchanged are not answered through here.
+fn fresh(value: OwnedValue, inputs: &[&OwnedValue]) -> OwnedValue {
+    let mut value = if inputs.iter().any(|i| jv_identical(&value, i)) {
+        unshare_top(value)
+    } else {
+        value
+    };
+    promote_built(&mut value);
+    value
+}
+
+/// `value` with new storage at the top, its contents shared.
+fn unshare_top(value: OwnedValue) -> OwnedValue {
+    match value {
+        OwnedValue::Array(items) => OwnedValue::Array(items.iter().cloned().collect()),
+        OwnedValue::Object(map) => OwnedValue::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<IndexMap<_, _>>()
+                .into(),
+        ),
+        OwnedValue::String(s) => string(&s),
+        OwnedValue::NumberLiteral(repr, spelling) => literal(repr, &spelling),
+        other => other,
     }
 }
 
-fn value_eq(a: &SVal, b: &SVal) -> bool {
-    apply_compare_op::<JqSemantics>(CompareOp::Eq, &a.to_owned_value(), &b.to_owned_value())
+/// Give storage to every string and number literal a builtin built, without
+/// descending into a container whose storage is shared: such a container is
+/// one of the interpreter's own values, whose scalars already have storage, and
+/// writing through it would copy it and lose its identity.
+fn promote_built(value: &mut OwnedValue) {
+    match value {
+        OwnedValue::String(s) => s.promote(),
+        OwnedValue::NumberLiteral(_, spelling) => spelling.promote(),
+        OwnedValue::Array(items) if !items.is_shared() => {
+            items.iter_mut().for_each(promote_built);
+        }
+        OwnedValue::Object(map) if !map.is_shared() => map.values_mut().for_each(promote_built),
+        _ => {}
+    }
+}
+
+fn truthy(value: &OwnedValue) -> bool {
+    !matches!(value, OwnedValue::Null | OwnedValue::Bool(false))
+}
+
+/// The address of an array's storage: stable for as long as a handle on it is
+/// alive, which the slice-view tables guarantee by holding one.
+fn storage_addr(items: &ArrayVec) -> usize {
+    core::ptr::addr_of!(**items) as usize
 }
 
 /// A persistent path prefix: a fork shares its parent for free.
 #[derive(Clone, Default)]
-struct PathList(Option<Rc<(Self, SVal)>>);
+struct PathList(Option<Rc<(Self, OwnedValue)>>);
 
 impl PathList {
-    fn push(&self, key: SVal) -> Self {
+    fn push(&self, key: OwnedValue) -> Self {
         Self(Some(Rc::new((self.clone(), key))))
     }
 
-    fn to_array(&self) -> SVal {
+    fn to_array(&self) -> OwnedValue {
         let mut keys = Vec::new();
         let mut at = self;
         while let Some(node) = &at.0 {
@@ -184,7 +149,7 @@ impl PathList {
             at = &node.0;
         }
         keys.reverse();
-        SVal::Arr(Rc::new(keys))
+        OwnedValue::Array(keys.into())
     }
 }
 
@@ -193,7 +158,7 @@ impl PathList {
 #[derive(Clone)]
 struct Reg {
     path: Option<PathList>,
-    node: SVal,
+    node: OwnedValue,
     nest: u32,
 }
 
@@ -201,7 +166,7 @@ impl Reg {
     fn top() -> Self {
         Self {
             path: None,
-            node: SVal::Null,
+            node: OwnedValue::Null,
             nest: 0,
         }
     }
@@ -211,12 +176,12 @@ impl Reg {
     }
 
     /// `path_intact`: true when not tracking, else `jv_identical`.
-    fn intact(&self, value: &SVal) -> bool {
-        !self.tracking() || identical(value, &self.node)
+    fn intact(&self, value: &OwnedValue) -> bool {
+        !self.tracking() || jv_identical(value, &self.node)
     }
 
     /// `path_append`: a no-op when not tracking.
-    fn append(mut self, key: SVal, value: SVal) -> Self {
+    fn append(mut self, key: OwnedValue, value: OwnedValue) -> Self {
         if self.tracking() {
             self.path = Some(self.path.as_ref().map(|p| p.push(key)).unwrap_or_default());
             self.node = value;
@@ -234,34 +199,66 @@ impl Reg {
 
 /// How an evaluation stopped.
 #[derive(Debug)]
-pub enum Raise {
-    /// A jq error carrying its payload (`error(v)`'s `v`, or a message).
-    Error(SVal),
+enum Raise {
+    /// A jq error. `catch` sees its payload.
+    Error(EvalError),
+    /// `break $label`: an error `{"__jq": n}` to `try`, which its own `label`
+    /// alone stops.
+    Break(u64),
     /// An error raised downstream of a `try` body, wrapped by `TRY_END` so the
     /// `try` re-raises it instead of handling it.
     Wrapped(Box<Self>),
     /// `halt`/`halt_error`: nothing catches it.
     Halt(i32),
-    /// A construct the spike does not implement: nothing catches it either.
+    /// A construct the interpreter does not implement: nothing catches it
+    /// either.
     Unsupported(String),
 }
 
+impl Raise {
+    /// Whether `try`, `?//` and `label` read this as a jq error.
+    fn is_error(&self) -> bool {
+        matches!(self, Self::Error(_) | Self::Break(_))
+    }
+}
+
 type R = Result<(), Raise>;
-type Sink<'s> = dyn FnMut(SVal, Reg) -> R + 's;
+type Sink<'s> = dyn FnMut(OwnedValue, Reg) -> R + 's;
+
+/// The label value `GENLABEL` makes: `{"__jq": n}`.
+fn label_value(n: u64) -> OwnedValue {
+    let mut map = IndexMap::new();
+    map.insert(String::from("__jq"), OwnedValue::Int(n as i64));
+    OwnedValue::Object(map.into())
+}
+
+/// What `catch` receives for a jq error: `error(v)`'s `v` itself, or the
+/// message of any other error as a fresh string.
+fn caught(raise: Raise) -> OwnedValue {
+    match raise {
+        Raise::Error(error) => {
+            let mut payload = error.payload();
+            promote_built(&mut payload);
+            payload
+        }
+        Raise::Break(n) => label_value(n),
+        other => unreachable!("only a jq error is caught: {other:?}"), // patchcov: coverage tolerate-line reason="unreachable: every caller checks Raise::is_error first"
+    }
+}
 
 fn raise_eval(error: EvalError) -> Raise {
     if !error.is_uncatchable() {
-        return Raise::Error(SVal::from_owned(&error.payload(), NumOrigin::Fresh));
+        return Raise::Error(error);
     }
-    unsupported(format!("uncatchable delegated error: {}", error.message)) // patchcov: coverage tolerate-line reason="defensive: the delegated builtins the spike reaches raise only catchable errors; a resource limit would land here"
+    unsupported(format!("uncatchable delegated error: {}", error.message)) // patchcov: coverage tolerate-line reason="defensive: the delegated builtins the interpreter reaches raise only catchable errors; a resource limit would land here"
 }
 
-/// An error the spike raises itself (jq's three path messages, an object
-/// key's type): a plain string error, catchable like any jq error. Only
+/// An error the interpreter raises itself (jq's three path messages, an object
+/// key's type): a plain message, catchable like any jq error. Only
 /// [`raise_eval`] reads `EvalError`'s own catchability, which describes the
 /// shipped resolver's refusals, not jq.
 fn raise_msg(error: EvalError) -> Raise {
-    Raise::Error(SVal::string(&error.message))
+    Raise::Error(EvalError::new(error.message))
 }
 
 fn unsupported(what: impl Into<String>) -> Raise {
@@ -276,7 +273,7 @@ struct Env<'e>(Option<Rc<Frame<'e>>>);
 enum Frame<'e> {
     Var {
         name: &'e str,
-        value: SVal,
+        value: OwnedValue,
         parent: Env<'e>,
     },
     /// A `def`: its body runs in the environment *this frame* closes, so it
@@ -297,7 +294,7 @@ enum Frame<'e> {
     },
     Label {
         name: &'e str,
-        value: SVal,
+        id: u64,
         parent: Env<'e>,
     },
 }
@@ -329,7 +326,7 @@ impl<'e> Env<'e> {
         }
     }
 
-    fn lookup_var(&self, name: &str) -> Option<SVal> {
+    fn lookup_var(&self, name: &str) -> Option<OwnedValue> {
         let mut at = self;
         while let Some(frame) = &at.0 {
             if let Frame::Var { name: n, value, .. } = &**frame {
@@ -342,12 +339,12 @@ impl<'e> Env<'e> {
         None
     }
 
-    fn lookup_label(&self, name: &str) -> Option<SVal> {
+    fn lookup_label(&self, name: &str) -> Option<u64> {
         let mut at = self;
         while let Some(frame) = &at.0 {
-            if let Frame::Label { name: n, value, .. } = &**frame {
+            if let Frame::Label { name: n, id, .. } = &**frame {
                 if *n == name {
-                    return Some(value.clone());
+                    return Some(*id);
                 }
             }
             at = Self::parent(frame);
@@ -385,16 +382,9 @@ impl<'e> Env<'e> {
         }
         None
     }
-}
 
-const T_VAR: &str = "__sp_t";
-const K_VAR: &str = "__sp_k";
-const A_VAR: &str = "__sp_a";
-const B_VAR: &str = "__sp_b";
-
-impl<'e> Env<'e> {
     /// Bind a variable whose name the program (or prelude) owns.
-    fn var_ref(&self, name: &'e str, value: SVal) -> Self {
+    fn var_ref(&self, name: &'e str, value: OwnedValue) -> Self {
         Env::push(Frame::Var {
             name,
             value,
@@ -403,7 +393,9 @@ impl<'e> Env<'e> {
     }
 }
 
-/// The jq-defined builtins the spike runs from source.
+const T_VAR: &str = "__sp_t";
+
+/// The jq-defined builtins the interpreter runs from source.
 ///
 /// This is jq 1.7.1's `src/builtin.jq`, verbatim but for three mechanical
 /// changes. Every name
@@ -550,15 +542,13 @@ def _sp_debug(msg): (msg | debug | empty), .;
 .
 "#;
 
-/// The parsed [`PRELUDE`], plus the few one-off expressions the spike needs a
-/// stable `&Expr` for.
+/// The parsed [`PRELUDE`], plus the few one-off expressions the interpreter
+/// needs a stable `&Expr` for.
 pub struct Prelude {
     defs: Expr,
     /// `$__sp_t`: a compound assignment's right-hand value, re-read as the
     /// `$sp_t` argument of `_sp_upd_*`.
     t_var: Expr,
-    /// `.[$__sp_k]`: `jv_get` for the key/container pairs the spike delegates.
-    get_k: Expr,
     /// `.[]`: the delegated `Cannot iterate over ...` error.
     iterate: Expr,
 }
@@ -571,7 +561,6 @@ impl Prelude {
         Self {
             defs: parse_ok(PRELUDE),
             t_var: parse_ok("$__sp_t"),
-            get_k: parse_ok(".[$__sp_k]"),
             iterate: parse_ok(".[]"),
         }
     }
@@ -583,16 +572,13 @@ impl Default for Prelude {
     }
 }
 
-/// An array's elements, shared.
-type Items = Rc<Vec<SVal>>;
-
 /// The interpreter: one per program run.
 pub struct Interp<'e> {
     prelude: &'e Prelude,
     prelude_env: Env<'e>,
     /// One `jv` per constant site, as `LOADK` hands out (keyed by the `Expr`'s
-    /// address, which is stable: the spike never rewrites the program).
-    consts: RefCell<BTreeMap<usize, SVal>>,
+    /// address, which is stable: the interpreter never rewrites the program).
+    consts: RefCell<BTreeMap<usize, OwnedValue>>,
     next_label: Cell<u64>,
     /// Every builtin the run answered through the fresh stub although jq's
     /// own version can hand back its input or navigates it ([`stub_risk`]).
@@ -602,8 +588,8 @@ pub struct Interp<'e> {
     /// slices of one array are one value; each view maps back to its root
     /// and offset, so a slice of a slice lands on the same key. Both hold
     /// the root, so a compared address is never reused.
-    slices: RefCell<BTreeMap<(usize, usize, usize), Items>>,
-    slice_roots: RefCell<BTreeMap<usize, (Items, usize)>>,
+    slices: RefCell<BTreeMap<(usize, usize, usize), ArrayVec>>,
+    slice_roots: RefCell<BTreeMap<usize, (ArrayVec, usize)>>,
 }
 
 /// How a run ended.
@@ -611,11 +597,11 @@ pub struct Interp<'e> {
 pub enum Outcome {
     /// Every output was produced.
     Done,
-    /// An uncaught error, with its payload.
-    Error(OwnedValue),
+    /// An uncaught error.
+    Error(EvalError),
     /// `halt`/`halt_error` with this exit code.
     Halt(i32),
-    /// A construct the spike does not implement.
+    /// A construct the interpreter does not implement.
     Unsupported(String),
 }
 
@@ -645,7 +631,7 @@ pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
     }
     let prelude = Prelude::new();
     let interp = Interp::new(&prelude);
-    Ok(interp.run(&program, input))
+    Ok(interp.run(&program, input.clone()))
 }
 
 impl<'e> Interp<'e> {
@@ -680,12 +666,13 @@ impl<'e> Interp<'e> {
         }
     }
 
-    /// Run `program` on `input`.
-    pub fn run(&self, program: &'e Expr, input: &OwnedValue) -> Run {
+    /// Run `program` on `input`, a document: its strings and numbers are
+    /// promoted first, so each node has one identity, as `jv_parse` gives it.
+    pub fn run(&self, program: &'e Expr, mut input: OwnedValue) -> Run {
+        input.promote_identities();
         let mut outputs = Vec::new();
-        let input = SVal::from_owned(input, NumOrigin::Document);
         let result = self.eval(program, &Env::default(), input, Reg::top(), &mut |v, _| {
-            outputs.push(v.to_owned_value());
+            outputs.push(v);
             Ok(())
         });
         let outcome = match result {
@@ -701,14 +688,22 @@ impl<'e> Interp<'e> {
 
     fn outcome(raise: Raise) -> Outcome {
         match raise {
-            Raise::Error(payload) => Outcome::Error(payload.to_owned_value()),
+            Raise::Error(error) => Outcome::Error(error),
+            Raise::Break(n) => Outcome::Error(EvalError::from_value(label_value(n))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects a break with no enclosing label with resolve_all_jq, and a label stops its own break"
             Raise::Wrapped(inner) => Self::outcome(*inner), // patchcov: coverage tolerate-line reason="unreachable: a wrapped error is unwrapped by the try or label that wrapped it before it can reach the top"
             Raise::Halt(code) => Outcome::Halt(code),
             Raise::Unsupported(what) => Outcome::Unsupported(what),
         }
     }
 
-    fn eval(&self, expr: &'e Expr, env: &Env<'e>, input: SVal, reg: Reg, sink: &mut Sink<'_>) -> R {
+    fn eval(
+        &self,
+        expr: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
         match expr {
             Expr::Identity => sink(input, reg),
             Expr::Paren(inner) => self.eval(inner, env, input, reg, sink),
@@ -729,7 +724,7 @@ impl<'e> Interp<'e> {
                             NumberRepr::Int(i) => OwnedValue::Int(*i),
                             NumberRepr::Float(f) => OwnedValue::Float(*f),
                         };
-                        sink(SVal::computed(value), reg)
+                        sink(value, reg)
                     }
                     _ => Err(unsupported("a literal that is not a constant")), // patchcov: coverage tolerate-line reason="unreachable: constant_value answers every literal but a negative number, which the arm above computes"
                 },
@@ -740,7 +735,7 @@ impl<'e> Interp<'e> {
                     .ok_or_else(|| unsupported("a location that is not a constant"))?;
                 sink(value, reg)
             }
-            Expr::Field(name) => self.index(input, reg, SVal::string(name), false, sink),
+            Expr::Field(name) => self.index(input, reg, string(name), false, sink),
             Expr::Index { idx, key } => {
                 let key = index_key(*idx, key.as_ref());
                 self.index(input, reg, key, false, sink)
@@ -769,7 +764,7 @@ impl<'e> Interp<'e> {
                 }
                 let entries: Vec<(&'e ObjectKey, &'e Expr)> =
                     entries.iter().map(|e| (&e.key, &e.value)).collect();
-                self.object(&entries, Vec::new(), env, &input, &reg, sink)
+                self.object(&entries, IndexMap::new(), env, &input, &reg, sink)
             }
             Expr::RecursiveDescent => self.call_prelude("_sp_recurse", &[], env, input, reg, sink),
             Expr::Arithmetic {
@@ -780,8 +775,11 @@ impl<'e> Interp<'e> {
                 }
                 let op = *op;
                 self.binop(left, right, env, &input, &reg, sink, &mut |l, r| {
-                    arith_combine::<JqSemantics>(op, l.to_owned_value(), r.to_owned_value())
-                        .map(|v| SVal::from_owned(&v, NumOrigin::Fresh))
+                    if let Some(kept) = binop_keeps(op, l, r) {
+                        return Ok(kept.clone());
+                    }
+                    arith_combine::<JqSemantics>(op, l.clone(), r.clone())
+                        .map(|v| fresh(v, &[l, r]))
                 })
             }
             Expr::Compare { op, left, right } => {
@@ -790,24 +788,19 @@ impl<'e> Interp<'e> {
                 }
                 let op = *op;
                 self.binop(left, right, env, &input, &reg, sink, &mut |l, r| {
-                    Ok(SVal::Bool(apply_compare_op::<JqSemantics>(
-                        op,
-                        &l.to_owned_value(),
-                        &r.to_owned_value(),
-                    )))
+                    Ok(OwnedValue::Bool(apply_compare_op::<JqSemantics>(op, l, r)))
                 })
             }
             // `'-' Exp` is `Exp | _negate`: the operand is tracked, not a
             // subexp, and the result is computed.
             Expr::Negate(inner) => self.eval(inner, env, input, reg, &mut |v, r| {
-                let negated =
-                    arith_negate::<JqSemantics>(v.to_owned_value()).map_err(raise_eval)?;
-                sink(SVal::from_owned(&negated, NumOrigin::Fresh), r)
+                let negated = arith_negate::<JqSemantics>(v.clone()).map_err(raise_eval)?;
+                sink(fresh(negated, &[&v]), r)
             }),
             Expr::And(a, b) => self.and_or(a, b, true, env, input, reg, sink),
             Expr::Or(a, b) => self.and_or(a, b, false, env, input, reg, sink),
             // Bytecoded `not`: a branch on the input, no call.
-            Expr::Not => sink(SVal::Bool(!input.truthy()), reg),
+            Expr::Not => sink(OwnedValue::Bool(!truthy(&input)), reg),
             Expr::Alternative(a, b) => self.defined_or(a, b, env, input, reg, sink),
             // `gen_cond`: the condition is a subexp; each branch starts from
             // the register at entry.
@@ -816,18 +809,18 @@ impl<'e> Interp<'e> {
                 then_branch,
                 else_branch,
             } => self.eval(cond, env, input.clone(), reg.sub(), &mut |c, _| {
-                let branch = if c.truthy() { then_branch } else { else_branch };
+                let branch = if truthy(&c) { then_branch } else { else_branch };
                 self.eval(branch, env, input.clone(), reg.clone(), sink)
             }),
             Expr::Try { expr: body, catch } => {
                 self.try_catch(body, catch.as_deref(), env, input, reg, sink)
             }
             // C `error/1` on the input.
-            Expr::Error(None) => Err(Raise::Error(input)),
+            Expr::Error(None) => Err(Raise::Error(EvalError::from_value(input))),
             // `def error(msg): msg|error;`: `msg` is tracked.
-            Expr::Error(Some(msg)) => {
-                self.eval(msg, env, input, reg, &mut |v, _| Err(Raise::Error(v)))
-            }
+            Expr::Error(Some(msg)) => self.eval(msg, env, input, reg, &mut |v, _| {
+                Err(Raise::Error(EvalError::from_value(v)))
+            }),
             Expr::Builtin(builtin) => self.builtin(expr, builtin, env, input, reg, sink),
             Expr::StringInterpolation(_) => delegate(expr, env, input, reg, sink),
             Expr::Format(format) => {
@@ -908,7 +901,7 @@ impl<'e> Interp<'e> {
             },
             Expr::Label { name, body } => self.label(name, body, env, input, reg, sink),
             Expr::Break(name) => match env.lookup_label(name) {
-                Some(label) => Err(Raise::Error(label)),
+                Some(id) => Err(Raise::Break(id)),
                 None => Err(unsupported(format!("$*label-{name} is not defined"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects a break with no enclosing label with resolve_all_jq before evaluating"
             },
             Expr::FuncDef {
@@ -967,7 +960,7 @@ impl<'e> Interp<'e> {
         &self,
         stages: &'e [Expr],
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -982,7 +975,7 @@ impl<'e> Interp<'e> {
 
     /// `LOADK`: one value per constant site. `None` when `expr` is not
     /// something jq compiles to a single constant.
-    fn constant(&self, expr: &'e Expr) -> Option<SVal> {
+    fn constant(&self, expr: &'e Expr) -> Option<OwnedValue> {
         let key = expr as *const Expr as usize;
         if let Some(value) = self.consts.borrow().get(&key) {
             return Some(value.clone());
@@ -996,11 +989,17 @@ impl<'e> Interp<'e> {
     /// (a failure raises even under `INDEX_OPT`), then `jv_get`, then
     /// `path_append` with the key as given. 1.7.1 does not renormalize a
     /// negative index (`[1,2,3] | path(.[-1])` is `[-1]`; 1.8 changed that).
-    fn index(&self, container: SVal, reg: Reg, key: SVal, opt: bool, sink: &mut Sink<'_>) -> R {
+    fn index(
+        &self,
+        container: OwnedValue,
+        reg: Reg,
+        key: OwnedValue,
+        opt: bool,
+        sink: &mut Sink<'_>,
+    ) -> R {
         if !reg.intact(&container) {
             return Err(raise_msg(EvalError::invalid_path_expression_near_access(
-                &key.to_owned_value(),
-                &container.to_owned_value(),
+                &key, &container,
             )));
         }
         match self.jv_get(&container, &key) {
@@ -1008,26 +1007,25 @@ impl<'e> Interp<'e> {
                 let reg = reg.append(key, value.clone());
                 sink(value, reg)
             }
-            // `INDEX_OPT` drops the get's own error, never an escape the spike
-            // raises past every handler.
+            // `INDEX_OPT` drops the get's own error, never an escape the
+            // interpreter raises past every handler.
             Err(Raise::Error(_)) if opt => Ok(()),
             Err(e) => Err(e),
         }
     }
 
     /// `jv_get`, natively for the shapes whose result keeps its identity, and
-    /// through the existing evaluator for the rest (slices, array-of-indices
-    /// keys, and every error), whose results are fresh.
-    fn jv_get(&self, container: &SVal, key: &SVal) -> Result<SVal, Raise> {
+    /// through the existing evaluator for the rest (array-of-indices keys, and
+    /// every error), whose results are fresh.
+    fn jv_get(&self, container: &OwnedValue, key: &OwnedValue) -> Result<OwnedValue, Raise> {
         match (container, key) {
-            (SVal::Obj(map), SVal::Str(k)) => Ok(map
-                .iter()
-                .find(|(name, _)| **name == **k)
-                .map_or(SVal::Null, |(_, v)| v.clone())),
-            (SVal::Arr(items), SVal::Num(..)) => {
-                let d = key.f64().unwrap_or(f64::NAN);
+            (OwnedValue::Object(map), OwnedValue::String(k)) => {
+                Ok(map.get(k.as_str()).cloned().unwrap_or(OwnedValue::Null))
+            }
+            (OwnedValue::Array(items), k) if k.is_number() => {
+                let d = k.as_f64().unwrap_or(f64::NAN);
                 if d.is_nan() {
-                    return Ok(SVal::Null);
+                    return Ok(OwnedValue::Null);
                 }
                 let mut idx = i64::from(d.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32);
                 if idx < 0 {
@@ -1037,32 +1035,39 @@ impl<'e> Interp<'e> {
                     .ok()
                     .and_then(|i| items.get(i))
                     .cloned()
-                    .unwrap_or(SVal::Null))
+                    .unwrap_or(OwnedValue::Null))
             }
-            (SVal::Null, SVal::Str(_) | SVal::Num(..) | SVal::Obj(_)) => Ok(SVal::Null),
+            (OwnedValue::Null, OwnedValue::String(_) | OwnedValue::Object(_)) => {
+                Ok(OwnedValue::Null)
+            }
+            (OwnedValue::Null, k) if k.is_number() => Ok(OwnedValue::Null),
             // `jv_string_slice`: by codepoint, and always a fresh string.
-            (SVal::Str(text), SVal::Obj(bounds))
+            (OwnedValue::String(text), OwnedValue::Object(bounds))
                 if slice_bounds(text.chars().count(), bounds).is_some() =>
             {
                 let (start, end) = slice_bounds(text.chars().count(), bounds).unwrap_or_default();
                 let slice: String = text.chars().skip(start).take(end - start).collect();
-                Ok(SVal::string(&slice))
+                Ok(string(&slice))
             }
-            (SVal::Arr(items), SVal::Obj(bounds))
+            (OwnedValue::Array(items), OwnedValue::Object(bounds))
                 if slice_bounds(items.len(), bounds).is_some() =>
             {
                 let (start, end) = slice_bounds(items.len(), bounds).unwrap_or_default();
                 Ok(self.array_slice(items, start, end))
             }
             _ => {
-                let expr = substitute_vars(&self.prelude.get_k, [(K_VAR, &key.to_owned_value())]);
-                let (outputs, control) = delegate_eval(&expr, &container.to_owned_value());
+                let expr = Expr::IndexExpr {
+                    target: Box::new(Expr::Identity),
+                    key: Box::new(Expr::tracked_value(key.clone())),
+                };
+                let (outputs, control) = delegate_eval(&expr, container);
                 if let Some(control) = control {
                     return Err(control_raise(control));
                 }
                 outputs
-                    .first()
-                    .map(|v| SVal::from_owned(v, NumOrigin::Fresh))
+                    .into_iter()
+                    .next()
+                    .map(|v| fresh(v, &[container, key]))
                     .ok_or_else(|| unsupported("jv_get answered nothing")) // patchcov: coverage tolerate-line reason="defensive: the delegated `.[$k]` answers exactly one value or an error"
             }
         }
@@ -1070,59 +1075,57 @@ impl<'e> Interp<'e> {
 
     /// `jvp_array_slice`: an empty slice is a fresh `[]`; the whole root is the
     /// root itself; any other range is the one view of that range.
-    fn array_slice(&self, items: &Rc<Vec<SVal>>, start: usize, end: usize) -> SVal {
+    fn array_slice(&self, items: &ArrayVec, start: usize, end: usize) -> OwnedValue {
         if start == end {
-            return SVal::Arr(Rc::new(Vec::new()));
+            return OwnedValue::Array(ArrayVec::new());
         }
         let (root, offset) = self
             .slice_roots
             .borrow()
-            .get(&(Rc::as_ptr(items) as usize))
+            .get(&storage_addr(items))
             .cloned()
             .unwrap_or_else(|| (items.clone(), 0));
         let (offset, size) = (offset + start, end - start);
         if offset == 0 && size == root.len() {
-            return SVal::Arr(root);
+            return OwnedValue::Array(root);
         }
-        let key = (Rc::as_ptr(&root) as usize, offset, size);
+        let key = (storage_addr(&root), offset, size);
         if let Some(view) = self.slices.borrow().get(&key) {
-            return SVal::Arr(view.clone());
+            return OwnedValue::Array(view.clone());
         }
-        let view = Rc::new(root[offset..offset + size].to_vec());
+        let view: ArrayVec = root[offset..offset + size].to_vec().into();
         self.slices.borrow_mut().insert(key, view.clone());
         self.slice_roots
             .borrow_mut()
-            .insert(Rc::as_ptr(&view) as usize, (root, offset));
-        SVal::Arr(view)
+            .insert(storage_addr(&view), (root, offset));
+        OwnedValue::Array(view)
     }
 
     /// `EACH`/`EACH_OPT`: `path_intact` on the container (raising either
     /// way), then one output per element with the register appended.
-    fn each(&self, container: SVal, reg: Reg, opt: bool, sink: &mut Sink<'_>) -> R {
+    fn each(&self, container: OwnedValue, reg: Reg, opt: bool, sink: &mut Sink<'_>) -> R {
         if !reg.intact(&container) {
             return Err(raise_msg(EvalError::invalid_path_expression_near_iterate(
-                &container.to_owned_value(),
+                &container,
             )));
         }
         match &container {
-            SVal::Arr(items) => {
+            OwnedValue::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
-                    let key = SVal::computed(OwnedValue::Int(i as i64));
+                    let key = OwnedValue::Int(i as i64);
                     sink(item.clone(), reg.clone().append(key, item.clone()))?;
                 }
                 Ok(())
             }
-            SVal::Obj(map) => {
-                for (k, item) in map.iter() {
-                    let key = SVal::Str(k.clone());
-                    sink(item.clone(), reg.clone().append(key, item.clone()))?;
+            OwnedValue::Object(map) => {
+                for (k, item) in &**map {
+                    sink(item.clone(), reg.clone().append(string(k), item.clone()))?;
                 }
                 Ok(())
             }
             _ if opt => Ok(()),
             _ => {
-                let (_, control) =
-                    delegate_eval(&self.prelude.iterate, &container.to_owned_value());
+                let (_, control) = delegate_eval(&self.prelude.iterate, &container);
                 Err(control.map_or_else(|| unsupported("iterate answered"), control_raise))
             }
         }
@@ -1136,7 +1139,7 @@ impl<'e> Interp<'e> {
         target: &'e Expr,
         key: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         opt: bool,
         sink: &mut Sink<'_>,
@@ -1157,7 +1160,7 @@ impl<'e> Interp<'e> {
         start: &'e Option<Box<Expr>>,
         end: &'e Option<Box<Expr>>,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         opt: bool,
         sink: &mut Sink<'_>,
@@ -1176,12 +1179,12 @@ impl<'e> Interp<'e> {
         &self,
         bound: Option<&'e Expr>,
         env: &Env<'e>,
-        input: &SVal,
+        input: &OwnedValue,
         reg: &Reg,
-        k: &mut dyn FnMut(SVal) -> R,
+        k: &mut dyn FnMut(OwnedValue) -> R,
     ) -> R {
         match bound {
-            None => k(SVal::Null),
+            None => k(OwnedValue::Null),
             Some(e) => self.eval(e, env, input.clone(), reg.sub(), &mut |v, _| k(v)),
         }
     }
@@ -1193,12 +1196,12 @@ impl<'e> Interp<'e> {
         &self,
         inner: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
         match inner {
-            Expr::Field(name) => self.index(input, reg, SVal::string(name), true, sink),
+            Expr::Field(name) => self.index(input, reg, string(name), true, sink),
             Expr::Index { idx, key } => {
                 let key = index_key(*idx, key.as_ref());
                 self.index(input, reg, key, true, sink)
@@ -1231,7 +1234,7 @@ impl<'e> Interp<'e> {
         node: &'e Expr,
         inner: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1243,7 +1246,7 @@ impl<'e> Interp<'e> {
             items.push(v);
             Ok(())
         })?;
-        sink(SVal::Arr(Rc::new(items)), reg)
+        sink(OwnedValue::Array(items.into()), reg)
     }
 
     /// `gen_dictpair` per entry: key then value, both subexps, earlier
@@ -1251,32 +1254,27 @@ impl<'e> Interp<'e> {
     fn object(
         &self,
         entries: &[(&'e ObjectKey, &'e Expr)],
-        built: Vec<(Rc<str>, SVal)>,
+        built: IndexMap<String, OwnedValue>,
         env: &Env<'e>,
-        input: &SVal,
+        input: &OwnedValue,
         reg: &Reg,
         sink: &mut Sink<'_>,
     ) -> R {
         let Some(((key, value), rest)) = entries.split_first() else {
-            return sink(SVal::Obj(Rc::new(built)), reg.clone());
+            return sink(OwnedValue::Object(built.into()), reg.clone());
         };
-        let mut with_key = |k: SVal| -> R {
-            let SVal::Str(name) = k else {
-                return Err(raise_msg(EvalError::cannot_use_as_object_key(
-                    &k.to_owned_value(),
-                )));
+        let mut with_key = |k: OwnedValue| -> R {
+            let OwnedValue::String(name) = &k else {
+                return Err(raise_msg(EvalError::cannot_use_as_object_key(&k)));
             };
             self.eval(value, env, input.clone(), reg.sub(), &mut |v, _| {
                 let mut next = built.clone();
-                match next.iter_mut().find(|(n, _)| **n == *name) {
-                    Some(slot) => slot.1 = v,
-                    None => next.push((name.clone(), v)),
-                }
+                next.insert(name.as_str().to_string(), v);
                 self.object(rest, next, env, input, reg, sink)
             })
         };
         match key {
-            ObjectKey::Literal(s) => with_key(SVal::string(s)),
+            ObjectKey::Literal(s) => with_key(string(s)),
             ObjectKey::Expr(k) => {
                 self.eval(k, env, input.clone(), reg.sub(), &mut |kv, _| with_key(kv))
             }
@@ -1293,10 +1291,10 @@ impl<'e> Interp<'e> {
         left: &'e Expr,
         right: &'e Expr,
         env: &Env<'e>,
-        input: &SVal,
+        input: &OwnedValue,
         reg: &Reg,
         sink: &mut Sink<'_>,
-        op: &mut dyn FnMut(&SVal, &SVal) -> Result<SVal, EvalError>,
+        op: &mut dyn FnMut(&OwnedValue, &OwnedValue) -> Result<OwnedValue, EvalError>,
     ) -> R {
         self.eval(right, env, input.clone(), reg.sub(), &mut |r, _| {
             self.eval(left, env, input.clone(), reg.sub(), &mut |l, _| {
@@ -1316,16 +1314,16 @@ impl<'e> Interp<'e> {
         b: &'e Expr,
         is_and: bool,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
         self.eval(a, env, input.clone(), reg, &mut |av, ar| {
-            if av.truthy() != is_and {
-                return sink(SVal::Bool(!is_and), ar);
+            if truthy(&av) != is_and {
+                return sink(OwnedValue::Bool(!is_and), ar);
             }
             self.eval(b, env, input.clone(), ar, &mut |bv, br| {
-                sink(SVal::Bool(bv.truthy()), br)
+                sink(OwnedValue::Bool(truthy(&bv)), br)
             })
         })
     }
@@ -1338,13 +1336,13 @@ impl<'e> Interp<'e> {
         a: &'e Expr,
         b: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
         let mut found = false;
         self.eval(a, env, input.clone(), reg.clone(), &mut |v, r| {
-            if v.truthy() {
+            if truthy(&v) {
                 found = true;
                 sink(v, r)
             } else {
@@ -1366,7 +1364,7 @@ impl<'e> Interp<'e> {
         body: &'e Expr,
         catch: Option<&'e Expr>,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1376,9 +1374,9 @@ impl<'e> Interp<'e> {
         match result {
             Ok(()) => Ok(()),
             Err(Raise::Wrapped(inner)) => Err(*inner),
-            Err(Raise::Error(payload)) => match catch {
+            Err(raise) if raise.is_error() => match catch {
                 None => Ok(()),
-                Some(handler) => self.eval(handler, env, payload, reg, sink),
+                Some(handler) => self.eval(handler, env, caught(raise), reg, sink),
             },
             Err(other) => Err(other),
         }
@@ -1391,19 +1389,15 @@ impl<'e> Interp<'e> {
         name: &'e str,
         body: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
-        let n = self.next_label.get();
-        self.next_label.set(n + 1);
-        let label = SVal::Obj(Rc::new(vec![(
-            Rc::from("__jq"),
-            SVal::computed(OwnedValue::Int(n as i64)),
-        )]));
+        let id = self.next_label.get();
+        self.next_label.set(id + 1);
         let env = Env::push(Frame::Label {
             name,
-            value: label.clone(),
+            id,
             parent: env.clone(),
         });
         let result = self.eval(body, &env, input, reg, &mut |v, r| {
@@ -1412,7 +1406,9 @@ impl<'e> Interp<'e> {
         match result {
             Ok(()) => Ok(()),
             Err(Raise::Wrapped(inner)) => Err(*inner),
-            Err(Raise::Error(payload)) if value_eq(&payload, &label) => Ok(()),
+            Err(Raise::Break(n)) if n == id => Ok(()),
+            // `error({"__jq": n})` raised by hand is this label's break too.
+            Err(Raise::Error(e)) if is_label_payload(&e, id) => Ok(()),
             Err(other) => Err(other),
         }
     }
@@ -1425,7 +1421,7 @@ impl<'e> Interp<'e> {
     fn destructure(
         &self,
         patterns: &'e [Pattern],
-        value: SVal,
+        value: OwnedValue,
         env: &Env<'e>,
         reg: Reg,
         k: &mut dyn FnMut(Env<'e>, Reg) -> R,
@@ -1439,13 +1435,13 @@ impl<'e> Interp<'e> {
         }
         let mut base = env.clone();
         for name in &names {
-            base = base.var_ref(name, SVal::Null);
+            base = base.var_ref(name, OwnedValue::Null);
         }
         let (last, alternatives) = patterns.split_last().expect("at least one pattern");
         for p in alternatives {
             match self.match_pattern(p, value.clone(), base.clone(), reg.clone(), k) {
                 Ok(()) => return Ok(()),
-                Err(Raise::Error(_) | Raise::Wrapped(_)) => continue,
+                Err(raise) if raise.is_error() || matches!(raise, Raise::Wrapped(_)) => continue,
                 Err(other) => return Err(other),
             }
         }
@@ -1459,7 +1455,7 @@ impl<'e> Interp<'e> {
     fn match_pattern(
         &self,
         pattern: &'e Pattern,
-        value: SVal,
+        value: OwnedValue,
         env: Env<'e>,
         reg: Reg,
         k: &mut dyn FnMut(Env<'e>, Reg) -> R,
@@ -1475,7 +1471,7 @@ impl<'e> Interp<'e> {
         &self,
         elems: &'e [Pattern],
         remaining: usize,
-        value: SVal,
+        value: OwnedValue,
         env: Env<'e>,
         reg: Reg,
         k: &mut dyn FnMut(Env<'e>, Reg) -> R,
@@ -1483,7 +1479,7 @@ impl<'e> Interp<'e> {
         let Some(i) = remaining.checked_sub(1) else {
             return k(env, reg);
         };
-        let key = SVal::computed(OwnedValue::Int(i as i64));
+        let key = OwnedValue::Int(i as i64);
         self.index(value.clone(), reg, key, false, &mut |element, r| {
             self.match_pattern(&elems[i], element, env.clone(), r, &mut |env, r| {
                 self.match_array(elems, i, value.clone(), env, r, k)
@@ -1494,7 +1490,7 @@ impl<'e> Interp<'e> {
     fn match_object(
         &self,
         entries: &'e [super::expr::PatternEntry],
-        value: SVal,
+        value: OwnedValue,
         env: Env<'e>,
         reg: Reg,
         k: &mut dyn FnMut(Env<'e>, Reg) -> R,
@@ -1502,7 +1498,7 @@ impl<'e> Interp<'e> {
         let Some((entry, rest)) = entries.split_first() else {
             return k(env, reg);
         };
-        let mut with_key = |key: SVal| -> R {
+        let mut with_key = |key: OwnedValue| -> R {
             self.index(value.clone(), reg.clone(), key, false, &mut |field, r| {
                 let env = match &entry.bind {
                     Some(name) => env.var_ref(name, field.clone()),
@@ -1514,7 +1510,7 @@ impl<'e> Interp<'e> {
             })
         };
         match &entry.key {
-            ObjectKey::Literal(s) => with_key(SVal::string(s)),
+            ObjectKey::Literal(s) => with_key(string(s)),
             ObjectKey::Expr(e) => {
                 self.eval(e, &env, value.clone(), reg.sub(), &mut |kv, _| with_key(kv))
             }
@@ -1537,7 +1533,7 @@ impl<'e> Interp<'e> {
         init: &'e Expr,
         update: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1551,7 +1547,7 @@ impl<'e> Interp<'e> {
                 reg_init.clone(),
                 &mut |s, reg_s| {
                     self.destructure(patterns, s, env, reg_s, &mut |env_p, reg_p| {
-                        let current = state.replace(SVal::Null);
+                        let current = state.replace(OwnedValue::Null);
                         self.eval(update, &env_p, current, reg_p, &mut |u, _| {
                             *state.borrow_mut() = u;
                             Ok(())
@@ -1574,7 +1570,7 @@ impl<'e> Interp<'e> {
         update: &'e Expr,
         extract: Option<&'e Expr>,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1583,7 +1579,7 @@ impl<'e> Interp<'e> {
             let state = RefCell::new(initial);
             self.eval(source, env, fold_input.take(), reg_init, &mut |s, reg_s| {
                 self.destructure(patterns, s, env, reg_s, &mut |env_p, reg_p| {
-                    let current = state.replace(SVal::Null);
+                    let current = state.replace(OwnedValue::Null);
                     self.eval(update, &env_p, current, reg_p, &mut |u, reg_u| {
                         *state.borrow_mut() = u.clone();
                         match extract {
@@ -1604,14 +1600,14 @@ impl<'e> Interp<'e> {
         from: &'e Expr,
         to: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
         self.eval(from, env, input.clone(), reg, &mut |start, reg_s| {
             self.eval(to, env, input.clone(), reg_s, &mut |end, reg_e| {
-                let (Some(mut cur), Some(max)) = (start.f64(), end.f64()) else {
-                    return Err(Raise::Error(SVal::string("Range bounds must be numeric")));
+                let (Some(mut cur), Some(max)) = (number_f64(&start), number_f64(&end)) else {
+                    return Err(Raise::Error(EvalError::new("Range bounds must be numeric")));
                 };
                 let mut first = Some(start.clone());
                 // `RANGE` stops only on `>=`, which a NaN bound never is.
@@ -1619,9 +1615,7 @@ impl<'e> Interp<'e> {
                     if cur >= max {
                         return Ok(());
                     }
-                    let value = first
-                        .take()
-                        .unwrap_or_else(|| SVal::computed(number_owned(cur)));
+                    let value = first.take().unwrap_or_else(|| number_owned(cur));
                     sink(value, reg_e.clone())?;
                     cur += 1.0;
                 }
@@ -1636,7 +1630,7 @@ impl<'e> Interp<'e> {
         &self,
         f: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1647,11 +1641,9 @@ impl<'e> Interp<'e> {
         };
         self.eval(f, env, input, inner, &mut |v, r| {
             if !r.intact(&v) {
-                return Err(raise_msg(EvalError::invalid_path_expression(
-                    &v.to_owned_value(),
-                )));
+                return Err(raise_msg(EvalError::invalid_path_expression(&v)));
             }
-            let path = r.path.as_ref().map_or(SVal::Null, PathList::to_array);
+            let path = r.path.as_ref().map_or(OwnedValue::Null, PathList::to_array);
             sink(path, reg.clone())
         })
     }
@@ -1660,21 +1652,28 @@ impl<'e> Interp<'e> {
     /// input identical to the register's node the path is extended and the
     /// register moves to the result (`_jq_path_append`); otherwise the value
     /// is returned and the register is untouched.
-    fn getpath(&self, p: &'e Expr, env: &Env<'e>, input: SVal, reg: Reg, sink: &mut Sink<'_>) -> R {
+    fn getpath(
+        &self,
+        p: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
         self.eval(p, env, input.clone(), reg.sub(), &mut |path, _| {
-            let SVal::Arr(keys) = &path else {
+            let OwnedValue::Array(keys) = &path else {
                 return Err(raise_msg(EvalError::path_must_be_array()));
             };
             let mut value = input.clone();
-            for key in keys.iter() {
+            for key in &**keys {
                 value = self.jv_get(&value, key)?;
             }
-            if !reg.tracking() || !identical(&input, &reg.node) {
+            if !reg.tracking() || !jv_identical(&input, &reg.node) {
                 return sink(value, reg.clone());
             }
             let mut moved = reg.clone();
             let mut list = moved.path.take().unwrap_or_default();
-            for key in keys.iter() {
+            for key in &**keys {
                 list = list.push(key.clone());
             }
             moved.path = Some(list);
@@ -1688,7 +1687,7 @@ impl<'e> Interp<'e> {
         node: &'e Expr,
         builtin: &'e Builtin,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1708,15 +1707,15 @@ impl<'e> Interp<'e> {
         }
     }
 
-    /// A C builtin: its arguments are subexps the spike evaluates itself
+    /// A C builtin: its arguments are subexps the interpreter evaluates itself
     /// (so a closure parameter in one resolves here), then the call is
-    /// delegated with the argument values substituted, and answers fresh.
+    /// delegated with the argument values in place, and answers fresh.
     fn c_builtin(
         &self,
         node: &'e Expr,
         builtin: &'e Builtin,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1724,28 +1723,22 @@ impl<'e> Interp<'e> {
             self.note_stub(&variant_name(node));
         }
         if let Some(arg) = builtin.value_arg() {
-            let call = builtin
-                .with_value_arg(Expr::Var(A_VAR.to_string()))
-                .expect("value_arg implies with_value_arg");
-            let call = Expr::Builtin(call);
             return self.eval(arg, env, input.clone(), reg.sub(), &mut |a, _| {
-                let expr = substitute_vars(&call, [(A_VAR, &a.to_owned_value())]);
-                emit_delegated(&expr, &input, &reg, sink)
+                let call = builtin
+                    .with_value_arg(Expr::tracked_value(a.clone()))
+                    .expect("value_arg implies with_value_arg");
+                emit_delegated(&Expr::Builtin(call), &input, &[&a], &reg, sink)
             });
         }
         if let Builtin::SetPath(p, v) = builtin {
             // Two C arguments: the last is the outer loop.
-            let call = Expr::Builtin(Builtin::SetPath(
-                Box::new(Expr::Var(A_VAR.to_string())),
-                Box::new(Expr::Var(B_VAR.to_string())),
-            ));
             return self.eval(v, env, input.clone(), reg.sub(), &mut |bv, _| {
                 self.eval(p, env, input.clone(), reg.sub(), &mut |av, _| {
-                    let expr = substitute_vars(
-                        &call,
-                        [(A_VAR, &av.to_owned_value()), (B_VAR, &bv.to_owned_value())],
-                    );
-                    emit_delegated(&expr, &input, &reg, sink)
+                    let call = Expr::Builtin(Builtin::SetPath(
+                        Box::new(Expr::tracked_value(av.clone())),
+                        Box::new(Expr::tracked_value(bv.clone())),
+                    ));
+                    emit_delegated(&call, &input, &[&av, &bv], &reg, sink)
                 })
             });
         }
@@ -1768,7 +1761,7 @@ impl<'e> Interp<'e> {
         name: &str,
         args: &'e [Expr],
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1790,9 +1783,9 @@ impl<'e> Interp<'e> {
             Hook::MinBy => sink(min_max_by(&input, &a, true)?, reg.clone()),
             Hook::MaxBy => sink(min_max_by(&input, &a, false)?, reg.clone()),
             Hook::StrIndices => {
-                let call = Expr::Builtin(Builtin::Indices(Box::new(Expr::Var(A_VAR.to_string()))));
-                let expr = substitute_vars(&call, [(A_VAR, &a.to_owned_value())]);
-                emit_delegated(&expr, &input, &reg, sink)
+                let call =
+                    Expr::Builtin(Builtin::Indices(Box::new(Expr::tracked_value(a.clone()))));
+                emit_delegated(&call, &input, &[&a], &reg, sink)
             }
         })
     }
@@ -1802,7 +1795,7 @@ impl<'e> Interp<'e> {
         name: &str,
         args: &[&'e Expr],
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1821,7 +1814,7 @@ impl<'e> Interp<'e> {
         callee: Callee<'e>,
         args: &[&'e Expr],
         caller: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1834,7 +1827,7 @@ impl<'e> Interp<'e> {
         &self,
         callee: Callee<'e>,
         args: &[(&'e Expr, Env<'e>)],
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1860,7 +1853,7 @@ impl<'e> Interp<'e> {
         params: &'e [Param],
         body: &'e Expr,
         env: Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1889,7 +1882,7 @@ impl<'e> Interp<'e> {
         path: &'e Expr,
         value: &'e Expr,
         env: &Env<'e>,
-        input: SVal,
+        input: OwnedValue,
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
@@ -1907,20 +1900,45 @@ impl<'e> Interp<'e> {
     }
 }
 
+/// Whether `error` is `error({"__jq": id})`: the error a `break $label` is.
+fn is_label_payload(error: &EvalError, id: u64) -> bool {
+    error.clone().payload() == label_value(id)
+}
+
+/// The operand `binop_plus`/`binop_multiply` hand back unchanged, keeping its
+/// identity: `null + b` is `b`, `a + null` is `a`, and an empty right-hand
+/// array or object (`a + []`, `a + {}`, `a * {}`) leaves `a` itself. Every
+/// other result is a fresh `jv`.
+fn binop_keeps<'v>(op: ArithOp, l: &'v OwnedValue, r: &'v OwnedValue) -> Option<&'v OwnedValue> {
+    match (op, l, r) {
+        (ArithOp::Add, OwnedValue::Null, _) => Some(r),
+        (ArithOp::Add, _, OwnedValue::Null) => Some(l),
+        (ArithOp::Add, OwnedValue::Array(_), OwnedValue::Array(items)) if items.is_empty() => {
+            Some(l)
+        }
+        (ArithOp::Add | ArithOp::Mul(_), OwnedValue::Object(_), OwnedValue::Object(map))
+            if map.is_empty() =>
+        {
+            Some(l)
+        }
+        _ => None,
+    }
+}
+
 /// The fold's input as `DUPN` leaves it: `gen_reduce`/`gen_foreach` start
 /// each loop with `DUPN`, which *moves* the input out of a stack slot that
 /// `INIT`'s fork point shares, so every `INIT` output after the first runs
 /// `SOURCE` on `null` (`{"a":1} | [reduce .a as $i ((1,2); [$i,.])]` is
 /// `[[1,1],[null,2]]` in jq 1.7.1, which value mode already reproduces).
-struct FoldInput(RefCell<Option<SVal>>);
+struct FoldInput(RefCell<Option<OwnedValue>>);
 
 impl FoldInput {
-    fn new(input: SVal) -> Self {
+    fn new(input: OwnedValue) -> Self {
         Self(RefCell::new(Some(input)))
     }
 
-    fn take(&self) -> SVal {
-        self.0.borrow_mut().take().unwrap_or(SVal::Null)
+    fn take(&self) -> OwnedValue {
+        self.0.borrow_mut().take().unwrap_or(OwnedValue::Null)
     }
 }
 
@@ -1935,21 +1953,20 @@ enum Hook {
 }
 
 /// `type_error2`: `"<kind> (<dump>) and <kind> (<dump>) <msg>"`.
-fn type_error2(a: &SVal, b: &SVal, msg: &str) -> Raise {
-    let (a, b) = (a.to_owned_value(), b.to_owned_value());
-    Raise::Error(SVal::string(&format!(
+fn type_error2(a: &OwnedValue, b: &OwnedValue, msg: &str) -> Raise {
+    Raise::Error(EvalError::new(format!(
         "{} ({}) and {} ({}) {msg}",
         a.type_name(),
-        dump_truncated_with(EvalTag::Jq, &a),
+        dump_truncated_with(EvalTag::Jq, a),
         b.type_name(),
-        dump_truncated_with(EvalTag::Jq, &b)
+        dump_truncated_with(EvalTag::Jq, b)
     )))
 }
 
 /// `_sort_by_impl`/`_group_by_impl`: a stable sort of the input's elements by
 /// `keys` (`jv_sort`/`jv_group`), grouping runs of equal keys when `group`.
-fn sort_by_keys(input: &SVal, keys: &SVal, group: bool) -> Result<SVal, Raise> {
-    let (SVal::Arr(items), SVal::Arr(ks)) = (input, keys) else {
+fn sort_by_keys(input: &OwnedValue, keys: &OwnedValue, group: bool) -> Result<OwnedValue, Raise> {
+    let (OwnedValue::Array(items), OwnedValue::Array(ks)) = (input, keys) else {
         return Err(type_error2(
             input,
             keys,
@@ -1963,21 +1980,20 @@ fn sort_by_keys(input: &SVal, keys: &SVal, group: bool) -> Result<SVal, Raise> {
             "cannot be sorted, as they are not both arrays",
         ));
     }
-    let owned: Vec<OwnedValue> = ks.iter().map(SVal::to_owned_value).collect();
     let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by(|&a, &b| compare_values::<JqSemantics>(&owned[a], &owned[b]));
+    order.sort_by(|&a, &b| compare_values::<JqSemantics>(&ks[a], &ks[b]));
     if !group {
-        return Ok(SVal::Arr(Rc::new(
+        return Ok(OwnedValue::Array(
             order.iter().map(|&i| items[i].clone()).collect(),
-        )));
+        ));
     }
-    let mut groups: Vec<SVal> = Vec::new();
-    let mut current: Vec<SVal> = Vec::new();
+    let mut groups: Vec<OwnedValue> = Vec::new();
+    let mut current: Vec<OwnedValue> = Vec::new();
     let mut key: Option<usize> = None;
     for &i in &order {
         if let Some(k) = key {
-            if compare_values::<JqSemantics>(&owned[k], &owned[i]) != core::cmp::Ordering::Equal {
-                groups.push(SVal::Arr(Rc::new(core::mem::take(&mut current))));
+            if compare_values::<JqSemantics>(&ks[k], &ks[i]) != core::cmp::Ordering::Equal {
+                groups.push(OwnedValue::Array(core::mem::take(&mut current).into()));
                 key = Some(i);
             }
         } else {
@@ -1986,28 +2002,27 @@ fn sort_by_keys(input: &SVal, keys: &SVal, group: bool) -> Result<SVal, Raise> {
         current.push(items[i].clone());
     }
     if key.is_some() {
-        groups.push(SVal::Arr(Rc::new(current)));
+        groups.push(OwnedValue::Array(current.into()));
     }
-    Ok(SVal::Arr(Rc::new(groups)))
+    Ok(OwnedValue::Array(groups.into()))
 }
 
 /// `minmax_by`: the first element with the least key, or the last with the
 /// greatest; `null` for an empty array.
-fn min_max_by(values: &SVal, keys: &SVal, is_min: bool) -> Result<SVal, Raise> {
-    let (SVal::Arr(items), SVal::Arr(ks)) = (values, keys) else {
+fn min_max_by(values: &OwnedValue, keys: &OwnedValue, is_min: bool) -> Result<OwnedValue, Raise> {
+    let (OwnedValue::Array(items), OwnedValue::Array(ks)) = (values, keys) else {
         return Err(type_error2(values, keys, "cannot be iterated over"));
     };
     if items.len() != ks.len() {
         return Err(type_error2(values, keys, "have wrong length"));
     }
     let Some(first) = items.first() else {
-        return Ok(SVal::Null);
+        return Ok(OwnedValue::Null);
     };
-    let owned: Vec<OwnedValue> = ks.iter().map(SVal::to_owned_value).collect();
     let (mut best, mut best_key) = (first, 0);
     for i in 1..items.len() {
         let less =
-            compare_values::<JqSemantics>(&owned[i], &owned[best_key]) == core::cmp::Ordering::Less;
+            compare_values::<JqSemantics>(&ks[i], &ks[best_key]) == core::cmp::Ordering::Less;
         if less == is_min {
             best = &items[i];
             best_key = i;
@@ -2130,13 +2145,13 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
     Some(call)
 }
 
-/// Builtins the spike refuses outright: input-reading ones, succinctly
+/// Builtins the interpreter refuses outright: input-reading ones, succinctly
 /// extensions with no jq 1.7.1 model, and yq-only ones that reach path mode.
 fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     use Builtin as B;
     Some(match builtin {
         B::Input | B::Inputs | B::InputLineNumber | B::InputFilename => {
-            "input-reading builtins (the spike has no input queue)"
+            "input-reading builtins (the interpreter has no input queue)"
         }
         B::HaltError | B::HaltErrorCode(_) => "halt_error (its message is not carried)",
         B::LeafPaths => "leaf_paths (a succinctly extension)",
@@ -2154,11 +2169,11 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
 /// `{"start": s, "end": e}` key selects (`null` bounds default; the start
 /// rounds down and the end up). `None` when a bound is not a number, which
 /// `jv_get` reports as an error.
-fn slice_bounds(len: usize, bounds: &[(Rc<str>, SVal)]) -> Option<(usize, usize)> {
+fn slice_bounds(len: usize, bounds: &IndexMap<String, OwnedValue>) -> Option<(usize, usize)> {
     let bound = |name: &str, default: f64| -> Option<f64> {
-        match bounds.iter().find(|(k, _)| &**k == name).map(|(_, v)| v) {
-            None | Some(SVal::Null) => Some(default),
-            Some(v @ SVal::Num(..)) => v.f64(),
+        match bounds.get(name) {
+            None | Some(OwnedValue::Null) => Some(default),
+            Some(v) if v.is_number() => number_f64(v),
             Some(_) => None,
         }
     };
@@ -2189,75 +2204,82 @@ fn slice_bounds(len: usize, bounds: &[(Rc<str>, SVal)]) -> Option<(usize, usize)
     Some((start, end.max(start)))
 }
 
+/// A number's double, `None` for anything else.
+fn number_f64(value: &OwnedValue) -> Option<f64> {
+    if value.is_number() {
+        value.as_f64()
+    } else {
+        None
+    }
+}
+
 /// `-1` is `_negate` applied to the literal `1` at run time (`'-' Exp`), so a
 /// negative spelling is computed, never a constant.
-fn literal_value(lit: &Literal) -> Option<SVal> {
+fn literal_value(lit: &Literal) -> Option<OwnedValue> {
     Some(match lit {
-        Literal::Null => SVal::Null,
-        Literal::Bool(b) => SVal::Bool(*b),
+        Literal::Null => OwnedValue::Null,
+        Literal::Bool(b) => OwnedValue::Bool(*b),
         Literal::NumberLiteral(_, spelling) if spelling.starts_with('-') => return None,
-        Literal::NumberLiteral(repr, spelling) => {
-            SVal::literal(OwnedValue::NumberLiteral(*repr, spelling.as_str().into()))
-        }
-        Literal::Int(i) => SVal::literal(OwnedValue::Int(*i)),
-        Literal::Float(f) => SVal::literal(OwnedValue::Float(*f)),
-        Literal::String(s) => SVal::string(s),
+        Literal::NumberLiteral(repr, spelling) => literal(*repr, spelling),
+        Literal::Int(i) => literal(NumberRepr::Int(*i), &i.to_string()),
+        Literal::Float(f) => literal(NumberRepr::Float(*f), &jq_bare_float_display(*f)),
+        Literal::String(s) => string(s),
     })
 }
 
 /// What jq compiles to one constant (`LOADK`): a literal, and arrays and
 /// objects of constants that `gen_const_array`/`gen_const_object` fold, and a
 /// binary operator over two constants (`constant_fold`).
-fn constant_value(expr: &Expr) -> Option<SVal> {
+fn constant_value(expr: &Expr) -> Option<OwnedValue> {
     match expr {
         Expr::Literal(lit) => literal_value(lit),
         Expr::Paren(inner) => constant_value(inner),
-        Expr::Loc { line, file } => Some(SVal::Obj(Rc::new(vec![
-            (
-                Rc::from("file"),
-                SVal::string(file.as_deref().unwrap_or("<top-level>")),
-            ),
-            (
-                Rc::from("line"),
-                SVal::literal(OwnedValue::Int(*line as i64)),
-            ),
-        ]))),
+        Expr::Loc { line, file } => {
+            let mut map = IndexMap::new();
+            map.insert(
+                String::from("file"),
+                string(file.as_deref().unwrap_or("<top-level>")),
+            );
+            map.insert(
+                String::from("line"),
+                literal(NumberRepr::Int(*line as i64), &line.to_string()),
+            );
+            Some(OwnedValue::Object(map.into()))
+        }
         Expr::Array(inner) => {
             let elements: Vec<&Expr> = match &**inner {
                 Expr::Comma(items) => items.iter().collect(),
                 single => vec![single],
             };
-            let values: Option<Vec<SVal>> = elements.into_iter().map(constant_value).collect();
-            Some(SVal::Arr(Rc::new(values?)))
+            let values: Option<Vec<OwnedValue>> =
+                elements.into_iter().map(constant_value).collect();
+            Some(OwnedValue::Array(values?.into()))
         }
         Expr::Object(entries) => {
-            let mut built: Vec<(Rc<str>, SVal)> = Vec::new();
+            let mut built: IndexMap<String, OwnedValue> = IndexMap::new();
             for entry in entries {
                 let ObjectKey::Literal(key) = &entry.key else {
                     return None;
                 };
-                let value = constant_value(&entry.value)?;
-                match built.iter_mut().find(|(k, _)| **k == **key) {
-                    Some(slot) => slot.1 = value,
-                    None => built.push((Rc::from(key.as_str()), value)),
-                }
+                built.insert(key.clone(), constant_value(&entry.value)?);
             }
-            Some(SVal::Obj(Rc::new(built)))
+            Some(OwnedValue::Object(built.into()))
         }
         Expr::Arithmetic {
             op, left, right, ..
         } => {
             let (l, r) = (constant_value(left)?, constant_value(right)?);
-            arith_combine::<JqSemantics>(*op, l.to_owned_value(), r.to_owned_value())
+            if let Some(kept) = binop_keeps(*op, &l, &r) {
+                return Some(kept.clone());
+            }
+            arith_combine::<JqSemantics>(*op, l.clone(), r.clone())
                 .ok()
-                .map(|v| SVal::from_owned(&v, NumOrigin::Fresh))
+                .map(|v| fresh(v, &[&l, &r]))
         }
         Expr::Compare { op, left, right } => {
             let (l, r) = (constant_value(left)?, constant_value(right)?);
-            Some(SVal::Bool(apply_compare_op::<JqSemantics>(
-                *op,
-                &l.to_owned_value(),
-                &r.to_owned_value(),
+            Some(OwnedValue::Bool(apply_compare_op::<JqSemantics>(
+                *op, &l, &r,
             )))
         }
         _ => None,
@@ -2287,19 +2309,16 @@ fn pattern_vars<'e>(pattern: &'e Pattern, out: &mut Vec<&'e str>) {
 
 /// `.[n]`'s key: a program literal, `_negate` of one for a negative index,
 /// or the number it was spelled as (`.[1.0]` records `1.0`).
-fn index_key(idx: i64, spelled: Option<&NumberKey>) -> SVal {
+fn index_key(idx: i64, spelled: Option<&NumberKey>) -> OwnedValue {
     spelled.map_or_else(|| literal_int(idx), number_key)
 }
 
 /// A spelled number key: a source literal keeps its spelling and is
 /// allocated; one the parser computed (a negated literal) is a double.
-fn number_key(key: &NumberKey) -> SVal {
+fn number_key(key: &NumberKey) -> OwnedValue {
     match key {
-        NumberKey::Float(f) => SVal::computed(OwnedValue::Float(*f)),
-        NumberKey::Literal(f, spelling) => SVal::literal(OwnedValue::NumberLiteral(
-            NumberRepr::Float(*f),
-            (**spelling).into(),
-        )),
+        NumberKey::Float(f) => OwnedValue::Float(*f),
+        NumberKey::Literal(f, spelling) => literal(NumberRepr::Float(*f), spelling),
     }
 }
 
@@ -2313,35 +2332,35 @@ fn static_slice_key(
     end: Option<i64>,
     start_key: Option<&SliceBoundKey>,
     end_key: Option<&SliceBoundKey>,
-) -> SVal {
+) -> OwnedValue {
     if let Some(SliceBoundKey::Verbatim(descriptor)) = start_key {
-        return SVal::from_owned(descriptor, NumOrigin::Fresh);
+        return fresh((**descriptor).clone(), &[]);
     }
     let bound = |n: Option<i64>, key: Option<&SliceBoundKey>| match key {
         Some(SliceBoundKey::Number(k)) => Some(number_key(k)),
         Some(SliceBoundKey::Raw(value) | SliceBoundKey::Verbatim(value)) => {
-            Some(SVal::from_owned(value, NumOrigin::Fresh))
+            Some(fresh((**value).clone(), &[]))
         }
         None => n.map(literal_int),
     };
     slice_key(bound(start, start_key), bound(end, end_key))
 }
 
-fn literal_int(n: i64) -> SVal {
+fn literal_int(n: i64) -> OwnedValue {
     if n < 0 {
-        SVal::computed(OwnedValue::Int(n))
+        OwnedValue::Int(n)
     } else {
-        SVal::literal(OwnedValue::Int(n))
+        literal(NumberRepr::Int(n), &n.to_string())
     }
 }
 
 /// `gen_slice_index`'s key, `{"start": s, "end": e}` (an absent bound is
 /// `null`), fresh per evaluation.
-fn slice_key(start: Option<SVal>, end: Option<SVal>) -> SVal {
-    SVal::Obj(Rc::new(vec![
-        (Rc::from("start"), start.unwrap_or(SVal::Null)),
-        (Rc::from("end"), end.unwrap_or(SVal::Null)),
-    ]))
+fn slice_key(start: Option<OwnedValue>, end: Option<OwnedValue>) -> OwnedValue {
+    let mut map = IndexMap::new();
+    map.insert(String::from("start"), start.unwrap_or(OwnedValue::Null));
+    map.insert(String::from("end"), end.unwrap_or(OwnedValue::Null));
+    OwnedValue::Object(map.into())
 }
 
 fn number_owned(value: f64) -> OwnedValue {
@@ -2354,8 +2373,14 @@ fn number_owned(value: f64) -> OwnedValue {
 
 /// Run `expr` through the existing evaluator with the variables it reads
 /// substituted. Declines (unsupported) when it calls a function the
-/// spike's environment holds, or breaks to a spike label.
-fn delegate<'e>(expr: &'e Expr, env: &Env<'e>, input: SVal, reg: Reg, sink: &mut Sink<'_>) -> R {
+/// interpreter's environment holds, or breaks to an interpreter label.
+fn delegate<'e>(
+    expr: &'e Expr,
+    env: &Env<'e>,
+    input: OwnedValue,
+    reg: Reg,
+    sink: &mut Sink<'_>,
+) -> R {
     let mut names: Vec<String> = Vec::new();
     let mut blocked: Option<String> = None;
     any_subexpr(expr, &mut |e| {
@@ -2376,18 +2401,29 @@ fn delegate<'e>(expr: &'e Expr, env: &Env<'e>, input: SVal, reg: Reg, sink: &mut
     }
     let bound: Vec<(&str, OwnedValue)> = names
         .iter()
-        .filter_map(|n| env.lookup_var(n).map(|v| (n.as_str(), v.to_owned_value())))
+        .filter_map(|n| env.lookup_var(n).map(|v| (n.as_str(), v)))
         .collect();
     let expr = substitute_vars(expr, bound.iter().map(|(n, v)| (*n, v)));
-    emit_delegated(&expr, &input, &reg, sink)
+    let values: Vec<&OwnedValue> = bound.iter().map(|(_, v)| v).collect();
+    emit_delegated(&expr, &input, &values, &reg, sink)
 }
 
 /// Emit what the existing evaluator answers for `expr` on `input`, each
-/// output fresh and at `reg`.
-fn emit_delegated(expr: &Expr, input: &SVal, reg: &Reg, sink: &mut Sink<'_>) -> R {
-    let (outputs, control) = delegate_eval(expr, &input.to_owned_value());
+/// output fresh (against `input` and the argument values `args`) and at
+/// `reg`.
+fn emit_delegated(
+    expr: &Expr,
+    input: &OwnedValue,
+    args: &[&OwnedValue],
+    reg: &Reg,
+    sink: &mut Sink<'_>,
+) -> R {
+    let (outputs, control) = delegate_eval(expr, input);
+    let mut inputs = Vec::with_capacity(args.len() + 1);
+    inputs.push(input);
+    inputs.extend_from_slice(args);
     for v in outputs {
-        sink(SVal::from_owned(&v, NumOrigin::Fresh), reg.clone())?;
+        sink(fresh(v, &inputs), reg.clone())?;
     }
     match control {
         Some(control) => Err(control_raise(control)),
@@ -2441,7 +2477,7 @@ fn control_raise(control: Control) -> Raise {
 fn variant_name(expr: &Expr) -> String {
     let debug = match expr {
         Expr::Builtin(builtin) => format!("{builtin:?}"),
-        other => format!("{other:?}"), // patchcov: coverage tolerate-line reason="defensive: only reached for an Expr variant the spike does not implement"
+        other => format!("{other:?}"), // patchcov: coverage tolerate-line reason="defensive: only reached for an Expr variant the interpreter does not implement"
     };
     debug
         .split(|c: char| !c.is_alphanumeric())
@@ -2449,6 +2485,9 @@ fn variant_name(expr: &Expr) -> String {
         .unwrap_or("?")
         .to_string()
 }
+
+#[cfg(test)]
+mod reference;
 
 #[cfg(test)]
 mod tests;

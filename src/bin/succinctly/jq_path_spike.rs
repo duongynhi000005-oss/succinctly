@@ -122,8 +122,8 @@ fn report(filter: &str, input: &OwnedValue, raw: bool) -> i32 {
     }
     match run.outcome {
         Outcome::Done => 0,
-        Outcome::Error(payload) => {
-            match &payload {
+        Outcome::Error(error) => {
+            match &error.payload() {
                 OwnedValue::String(s) => eprintln!("jq: error (at <unknown>): {}", s.as_str()),
                 other => eprintln!(
                     "jq: error (at <unknown>) (not a string): {}",

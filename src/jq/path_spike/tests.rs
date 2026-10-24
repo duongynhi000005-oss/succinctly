@@ -22,8 +22,10 @@ fn spike(doc: &str, filter: &str) -> Answer {
     let run = run(filter, &input).expect("parses");
     let error = match run.outcome {
         Outcome::Done => None,
-        Outcome::Error(OwnedValue::String(s)) => Some(s.as_str().to_string()),
-        Outcome::Error(other) => Some(other.to_json_jq_preserve()),
+        Outcome::Error(error) => Some(match error.payload() {
+            OwnedValue::String(s) => s.as_str().to_string(),
+            other => other.to_json_jq_preserve(),
+        }),
         other => panic!("{filter}: {other:?}"),
     };
     Answer {
@@ -877,22 +879,28 @@ fn try_labels_and_delegated_builtins_match_jq_5223() {
 #[test]
 fn identity_is_jv_identical_on_every_kind_5223() {
     on_big_stack(|| {
+        // The SVal reference and `jv_identical` on promoted `OwnedValue`s give
+        // every kind the same answer.
+        use super::reference::{identical, SVal};
         let two = SVal::computed(OwnedValue::Int(2));
         assert!(identical(&two, &SVal::computed(OwnedValue::Float(2.0))));
+        assert!(jv_identical(&OwnedValue::Int(2), &OwnedValue::Float(2.0)));
         assert!(!identical(&two, &SVal::computed(OwnedValue::Float(-0.0))));
-        let doc = SVal::from_owned(&OwnedValue::Int(2), NumOrigin::Document);
-        assert!(identical(&doc, &doc.clone()));
-        assert!(!identical(&doc, &two));
-        assert!(!identical(
-            &doc,
-            &SVal::from_owned(&OwnedValue::Int(2), NumOrigin::Document)
-        ));
-        let text = SVal::string("s");
-        assert!(identical(&text, &text.clone()));
-        assert!(!identical(&text, &SVal::string("s")));
+        assert!(!jv_identical(&OwnedValue::Int(2), &OwnedValue::Float(-0.0)));
+        let doc = literal(NumberRepr::Int(2), "2");
+        assert!(jv_identical(&doc, &doc.clone()));
+        assert!(!jv_identical(&doc, &OwnedValue::Int(2)));
+        assert!(!jv_identical(&doc, &literal(NumberRepr::Int(2), "2")));
+        let text = string("s");
+        assert!(jv_identical(&text, &text.clone()));
+        assert!(!jv_identical(&text, &string("s")));
         assert!(identical(&SVal::Null, &SVal::Null));
-        assert!(!identical(&SVal::Bool(true), &SVal::Bool(false)));
-        assert!(!identical(&SVal::Null, &SVal::Bool(false)));
+        assert!(jv_identical(&OwnedValue::Null, &OwnedValue::Null));
+        assert!(!jv_identical(
+            &OwnedValue::Bool(true),
+            &OwnedValue::Bool(false)
+        ));
+        assert!(!jv_identical(&OwnedValue::Null, &OwnedValue::Bool(false)));
         let _ = Prelude::default();
     });
 }
@@ -960,5 +968,171 @@ fn spelled_keys_and_string_slices_match_jq_5223() {
             // value route answers "" here (a separate bug).
             (r#""abcd""#, ".[1:nan]", ok(&[r#""bcd""#])),
         ]);
+    });
+}
+
+/// One run, as the differential test compares it: each output compactly, then
+/// how the run ended.
+type Summary = (Vec<String>, String);
+
+fn summary(outputs: &[OwnedValue], ending: String) -> Summary {
+    (
+        outputs
+            .iter()
+            .map(OwnedValue::to_json_jq_preserve)
+            .collect(),
+        ending,
+    )
+}
+
+fn owned_summary(prelude: &Prelude, program: &Expr, doc: &OwnedValue) -> Summary {
+    let run = Interp::new(prelude).run(program, doc.clone());
+    let ending = match run.outcome {
+        Outcome::Done => String::from("done"),
+        Outcome::Error(e) => format!("error {}", e.payload().to_json_jq_preserve()),
+        Outcome::Halt(code) => format!("halt {code}"),
+        Outcome::Unsupported(what) => format!("unsupported {what}"),
+    };
+    summary(&run.outputs, ending)
+}
+
+fn reference_summary(
+    prelude: &super::reference::Prelude,
+    program: &Expr,
+    doc: &OwnedValue,
+) -> Summary {
+    use super::reference::{Interp as RefInterp, Outcome as RefOutcome};
+    let run = RefInterp::new(prelude).run(program, doc);
+    let ending = match run.outcome {
+        RefOutcome::Done => String::from("done"),
+        RefOutcome::Error(payload) => format!("error {}", payload.to_json_jq_preserve()),
+        RefOutcome::Halt(code) => format!("halt {code}"),
+        RefOutcome::Unsupported(what) => format!("unsupported {what}"),
+    };
+    summary(&run.outputs, ending)
+}
+
+fn parse_doc(doc: &str) -> OwnedValue {
+    let index = JsonIndex::build(doc.as_bytes());
+    to_owned::<JqSemantics, _>(&index.root(doc.as_bytes()).value()).expect("doc")
+}
+
+/// The differential corpus: every issue repro, and a grid of two-stage path
+/// programs over the construct forms the spike's tests pin, on a handful of
+/// documents. The builtins whose identity the Phase 0 stub got wrong
+/// (`. + null` and the other operands `binop_plus` hands back) are pinned
+/// against jq by the C-builtin table's own tests instead.
+fn differential_corpus() -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for line in include_str!("../../../scripts/jq-path-spike-rows/repros.jsonl").lines() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("a JSON row");
+        let args = row["args"].as_array().expect("args");
+        let filter = args.last().and_then(|a| a.as_str()).expect("a filter");
+        let stdin = row["stdin"].as_str().expect("stdin").trim().to_string();
+        rows.push((stdin, filter.to_string()));
+    }
+    let stages = [
+        ".",
+        ".a",
+        ".b",
+        ".[]",
+        ".[]?",
+        ".a?",
+        ".[0]",
+        ".[1:]",
+        "..",
+        "(.a, .b)",
+        ". as $x | $x",
+        ". as $x | .a | $x",
+        ".a as $x | .b | $x",
+        ". as [$p] | $p",
+        ". as {a: $p} ?// [$p] | $p",
+        "select(.)",
+        "select(type == \"object\")",
+        "if . then .a else .b end",
+        "try .a catch .",
+        "try error(.) catch .",
+        ".a // .b",
+        "(.a | empty) // .",
+        "first(.[])",
+        "last(.[])",
+        "limit(1; .[])",
+        "label $l | .[] | ., break $l",
+        "reduce .[] as $x (.; .)",
+        "reduce .a as $x (.; .b)",
+        "foreach .[] as $x (.; .; .)",
+        "foreach (1,2) as $x (.; .a; .)",
+        "getpath([\"a\"])",
+        "getpath([\"a\",\"b\"])",
+        "[.a][0]",
+        "{k: .}.k",
+        "1",
+        "\"x\"",
+        "null",
+        ". - 1",
+        "tostring",
+        "ltrimstr(\"x\")",
+        "recurse",
+        "to_entries",
+        "map(.)",
+        "paths",
+        "def f: .a; f",
+        "def f(g): g | g; f(.[]?)",
+        ".a |= 1",
+        "del(.a)",
+    ];
+    let docs = [
+        r#"{"a":{"b":1},"b":[1,"x",null]}"#,
+        r#"[1,[2],{"a":"x"}]"#,
+        r#"{"a":"x","b":"x"}"#,
+        r#"{"a":1,"b":1}"#,
+        r#""s""#,
+    ];
+    for doc in docs {
+        for s1 in stages {
+            for s2 in stages {
+                rows.push((doc.to_string(), format!("path({s1} | {s2})")));
+            }
+            rows.push((doc.to_string(), format!("[{s1}]")));
+            rows.push((doc.to_string(), format!("del({s1})")));
+            rows.push((doc.to_string(), format!("({s1}) |= 7")));
+        }
+    }
+    rows
+}
+
+/// The `OwnedValue` interpreter answers exactly what the Phase 0 `SVal`
+/// reference answers, on every row of [`differential_corpus`].
+#[test]
+fn owned_interpreter_matches_the_sval_reference_5223() {
+    on_big_stack(|| {
+        let prelude = Prelude::new();
+        let reference = super::reference::Prelude::new();
+        let mut differ = Vec::new();
+        let mut compared = 0;
+        for (doc, filter) in differential_corpus() {
+            let Ok(program) = parse(&filter) else {
+                continue;
+            };
+            if !crate::jq::resolve::resolve_all_jq(&mut program.clone()).is_empty() {
+                continue;
+            }
+            let input = parse_doc(&doc);
+            let owned = owned_summary(&prelude, &program, &input);
+            let expected = reference_summary(&reference, &program, &input);
+            compared += 1;
+            if owned != expected {
+                differ.push(format!(
+                    "{doc} | {filter}\n  owned: {owned:?}\n  ref:   {expected:?}"
+                ));
+            }
+        }
+        assert!(compared > 10_000, "{compared}");
+        assert!(
+            differ.is_empty(),
+            "{} rows differ:\n{}",
+            differ.len(),
+            differ.join("\n")
+        );
     });
 }
