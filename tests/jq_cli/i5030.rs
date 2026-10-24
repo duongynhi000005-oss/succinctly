@@ -796,3 +796,98 @@ fn test_fold_source_null_x_in_another_fold_body_is_not_the_register_5030() -> Re
         ),
     ])
 }
+
+/// #5030 (review): the same source behind an UPDATE or EXTRACT that emits nothing, which `foreach` never judges (jq
+/// answers `[]`/the document), an array `$x`, a `$x` bound below the root, and a `foreach (1,2)` outer. The source's
+/// trailing `.` is the document, not the register the walk moved, and is no yield to path-check: reading it so raised
+/// where jq answers. The last rows are the ones whose message named the document where jq names `$x`'s node. Rows captured
+/// from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_x_that_is_the_register_in_another_fold_body_trailing_dot_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; empty; .); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; select(false); .); .))",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(.a as $x | foreach 1 as $i (.; foreach ($x | . as {b:$q} | .) as $y (.a; empty; .); .)) |= 9",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; empty); .))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x as {b:$q} | .) as $y (.a; empty; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; .; foreach ($x as {b:$q} | .) as $y (.a; empty; .)))",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1,2],"b":0}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as [$q] | $q) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression with result [1,2]",
+            5,
+        ),
+        (
+            r#"{"a":[1,2],"b":0}"#,
+            r"del(.a as $x | foreach 1 as $i (.; foreach ($x as [$q] | .) as $y (.a; empty; .); .))",
+            "{\"a\":[1,2],\"b\":0}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[1,2],"b":0}"#,
+            r"(.a as $x | foreach 1 as $i (.; foreach ($x as [$q] | $q) as $y (.a; .[0]?; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1,2]",
+            5,
+        ),
+        (
+            r#"{"a":{"c":{"b":5}},"b":2}"#,
+            r"path(.a.c as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a.c; $y; .); .))",
+            "[\"a\",\"c\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"c":{"b":5}},"b":2}"#,
+            r"del(.a.c as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a.c; .b?; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":5}",
+            5,
+        ),
+    ])
+}
