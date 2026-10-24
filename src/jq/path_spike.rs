@@ -591,6 +591,13 @@ pub struct Interp<'e> {
     /// Every builtin the run answered through the fresh stub although jq's
     /// own version can hand back its input or navigates it ([`stub_risk`]).
     stubbed: RefCell<Vec<String>>,
+    /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
+    /// into the root allocation. Keyed by `(root, offset, size)`, so equal
+    /// slices of one array are one value; each view maps back to its root
+    /// and offset, so a slice of a slice lands on the same key. Both hold
+    /// the root, so a compared address is never reused.
+    slices: RefCell<BTreeMap<(usize, usize, usize), Rc<Vec<SVal>>>>,
+    slice_roots: RefCell<BTreeMap<usize, (Rc<Vec<SVal>>, usize)>>,
 }
 
 /// How a run ended.
@@ -654,6 +661,8 @@ impl<'e> Interp<'e> {
             consts: RefCell::new(BTreeMap::new()),
             next_label: Cell::new(0),
             stubbed: RefCell::new(Vec::new()),
+            slices: RefCell::new(BTreeMap::new()),
+            slice_roots: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -1018,6 +1027,12 @@ impl<'e> Interp<'e> {
                     .unwrap_or(SVal::Null))
             }
             (SVal::Null, SVal::Str(_) | SVal::Num(..) | SVal::Obj(_)) => Ok(SVal::Null),
+            (SVal::Arr(items), SVal::Obj(bounds))
+                if slice_bounds(items.len(), bounds).is_some() =>
+            {
+                let (start, end) = slice_bounds(items.len(), bounds).unwrap_or_default();
+                Ok(self.array_slice(items, start, end))
+            }
             _ => {
                 let expr = substitute_vars(&self.prelude.get_k, [(K_VAR, &key.to_owned_value())]);
                 let (outputs, control) = delegate_eval(&expr, &container.to_owned_value());
@@ -1030,6 +1045,34 @@ impl<'e> Interp<'e> {
                     .ok_or_else(|| unsupported("jv_get answered nothing"))
             }
         }
+    }
+
+    /// `jvp_array_slice`: an empty slice is a fresh `[]`; the whole root is the
+    /// root itself; any other range is the one view of that range.
+    fn array_slice(&self, items: &Rc<Vec<SVal>>, start: usize, end: usize) -> SVal {
+        if start == end {
+            return SVal::Arr(Rc::new(Vec::new()));
+        }
+        let (root, offset) = self
+            .slice_roots
+            .borrow()
+            .get(&(Rc::as_ptr(items) as usize))
+            .cloned()
+            .unwrap_or_else(|| (items.clone(), 0));
+        let (offset, size) = (offset + start, end - start);
+        if offset == 0 && size == root.len() {
+            return SVal::Arr(root);
+        }
+        let key = (Rc::as_ptr(&root) as usize, offset, size);
+        if let Some(view) = self.slices.borrow().get(&key) {
+            return SVal::Arr(view.clone());
+        }
+        let view = Rc::new(root[offset..offset + size].to_vec());
+        self.slices.borrow_mut().insert(key, view.clone());
+        self.slice_roots
+            .borrow_mut()
+            .insert(Rc::as_ptr(&view) as usize, (root, offset));
+        SVal::Arr(view)
     }
 
     /// `EACH`/`EACH_OPT`: `path_intact` on the container (raising either
@@ -2080,6 +2123,45 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+/// `parse_slice` for an array of `len` elements: the `[start, end)` range a
+/// `{"start": s, "end": e}` key selects (`null` bounds default; the start
+/// rounds down and the end up). `None` when a bound is not a number, which
+/// `jv_get` reports as an error.
+fn slice_bounds(len: usize, bounds: &[(Rc<str>, SVal)]) -> Option<(usize, usize)> {
+    let bound = |name: &str, default: f64| -> Option<f64> {
+        match bounds.iter().find(|(k, _)| &**k == name).map(|(_, v)| v) {
+            None | Some(SVal::Null) => Some(default),
+            Some(v @ SVal::Num(..)) => v.f64(),
+            Some(_) => None,
+        }
+    };
+    let n = len as f64;
+    let (mut dstart, mut dend) = (bound("start", 0.0)?, bound("end", n)?);
+    if dstart.is_nan() {
+        dstart = 0.0;
+    }
+    if dstart < 0.0 {
+        dstart += n;
+    }
+    let start = dstart.clamp(0.0, n) as usize;
+    if dend.is_nan() {
+        dend = n;
+    }
+    if dend < 0.0 {
+        dend += n;
+    }
+    let mut end = if dend < 0.0 {
+        start
+    } else {
+        dend.min(f64::from(i32::MAX)) as usize
+    };
+    end = end.min(len);
+    if end < len && (end as f64) < dend {
+        end += 1;
+    }
+    Some((start, end.max(start)))
 }
 
 /// `-1` is `_negate` applied to the literal `1` at run time (`'-' Exp`), so a

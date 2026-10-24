@@ -209,6 +209,38 @@ fn a_constant_is_one_value_per_site_5223() {
     });
 }
 
+/// `jvp_array_slice` returns a view into the same allocation: the whole
+/// range is the array itself, and equal ranges of one array (a slice of a
+/// slice included) are one value.
+#[test]
+fn an_array_slice_is_a_view_with_jqs_identity_5223() {
+    on_big_stack(|| {
+        check(&[
+            ("[1,2]", "path(reduce (.[0:2]) as $k (.; $k))", ok(&["[]"])),
+            (
+                "[1,2]",
+                "path(foreach (.[0:2]) as $k (.; .[0]))",
+                ok(&[r#"[{"start":0,"end":2},0]"#]),
+            ),
+            (
+                "[1,2,3]",
+                "path(.[0:2] as $a | .[0:2] | $a)",
+                ok(&[r#"[{"start":0,"end":2}]"#]),
+            ),
+            (
+                "[1,2,3]",
+                "path(.[1:3] | .[0:1] as $a | . as $b | $b[0:1] | $a)",
+                ok(&[r#"[{"start":1,"end":3},{"start":0,"end":1}]"#]),
+            ),
+            (
+                "[1,2,3]",
+                "[.[1:], .[-2:], .[:-1], .[1.5:2.5], .[5:], .[null:2]]",
+                ok(&["[[2,3],[2,3],[1,2],[2,3],[],[1,2]]"]),
+            ),
+        ]);
+    });
+}
+
 /// `jv_identical` by kind and payload: `null`/`true`/`false` of the same kind
 /// always are; a computed number never equals a literal.
 #[test]
