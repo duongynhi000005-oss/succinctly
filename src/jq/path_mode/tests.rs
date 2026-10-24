@@ -1554,6 +1554,75 @@ fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
     });
 }
 
+/// Every routed library entry answers a dynamic path program as jq 1.7.1
+/// does, through the interpreter: the collecting cursor entry, `eval_using` on
+/// a document value and eval.rs's owned entry. A document that cannot be
+/// materialized whole (a lone surrogate) stays on the shipped route, which
+/// reads only what the program does (#4412).
+#[test]
+fn the_routed_library_entries_run_the_interpreter_5223() {
+    fn json(values: &[OwnedValue]) -> Vec<String> {
+        values.iter().map(OwnedValue::to_json_jq_preserve).collect()
+    }
+    on_big_stack(|| {
+        // The shipped resolver refuses this row (`Invalid path expression with
+        // result {"b":1,...}`), so an answer shows the interpreter ran.
+        let doc = br#"{"a":{"b":1,"c":{"b":3}},"b":2}"#;
+        let expr = parse("[path(. as $x | .a | $x | .a as $q | $q)]").expect("parses");
+        let want = [r#"[["a"]]"#];
+        let index = JsonIndex::build(doc);
+        let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(doc))
+            .collect_owned::<JqSemantics>()
+            .expect("materializes");
+        assert_eq!(json(&collected), want, "eval_with_cursor");
+        let using =
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(doc).value())
+                .collect_owned::<JqSemantics>()
+                .expect("materializes");
+        assert_eq!(json(&using), want, "eval_using");
+        let owned = to_owned::<JqSemantics, _>(&index.root(doc).value()).expect("doc");
+        let result = crate::jq::eval::eval_owned_with_file_index::<Vec<u64>, JqSemantics>(
+            &expr,
+            &owned,
+            &[],
+        );
+        assert_eq!(
+            json(&result.collect_owned::<JqSemantics>()),
+            want,
+            "eval_owned_with_file_index"
+        );
+
+        let lone = br#"{"a":"\ud800","d":5}"#;
+        let index = JsonIndex::build(lone);
+        let expr = parse("path(try .d)").expect("parses");
+        let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone))
+            .collect_owned::<JqSemantics>()
+            .expect("materializes");
+        assert_eq!(json(&collected), [r#"["d"]"#]);
+    });
+}
+
+/// `error({"__jq": n})` raised by hand is the break of the label numbered `n`
+/// (jq numbers them from 0 per run, as `GENLABEL` does): the label stops, as
+/// for `break $f`. A payload naming no live label is an ordinary error.
+#[test]
+fn a_hand_raised_label_payload_breaks_its_label_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "{}",
+                r#"[path(label $f | .a, error({"__jq": 0}), .b)]"#,
+                ok(&[r#"[["a"]]"#]),
+            ),
+            (
+                "{}",
+                r#"[path(label $f | .a, error({"__jq": 1}), .b)]"#,
+                err(&[], r#"{"__jq":1}"#),
+            ),
+        ]);
+    });
+}
+
 /// A program that skipped `resolve_all_jq` (a library caller parsing it
 /// itself) raises the shipped evaluator's errors for an unbound variable or a
 /// `break` with no enclosing label, rather than an internal error.
