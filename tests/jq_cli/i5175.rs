@@ -147,3 +147,181 @@ fn test_5175_left_operand_that_fans_out_is_not_read_with_a_bind_in_the_right_ope
     );
     Ok(())
 }
+
+/// #5175: a comma around the binds of the right operand, whose items each run from the register the `//` was entered with. Before, the operand kept the resolver's refusal, a `try` around the `//` swallowed it, and
+/// `path`/`del`/`|=` answered where jq raises at the emission of the left operand's truthy output. Every row captured from
+/// `/usr/bin/jq` 1.7.1, both routes, for a `reduce`, a two-argument and a three-argument `foreach`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_right_operand_with_a_comma() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), 3))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), 3)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), 3)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), (.a as $q | 1)))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), (.a as $q | 1))); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // ((.a as $q | $q), (.a as $q | 1))))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+    ])
+}
+
+/// #5175: an `if` around the binds of the right operand (its condition cannot move the register). Before, the operand kept the resolver's refusal, a `try` around the `//` swallowed it, and
+/// `path`/`del`/`|=` answered where jq raises at the emission of the left operand's truthy output. Every row captured from
+/// `/usr/bin/jq` 1.7.1, both routes, for a `reduce`, a two-argument and a three-argument `foreach`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_right_operand_with_an_if() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // (if true then (.a as $q | $q) else 1 end))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // (if true then (.a as $q | $q) else 1 end)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // (if true then (.a as $q | $q) else 1 end)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // (if $i then ($x as {a:$a} | .) else (.a as $q | 1) end))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // (if $i then ($x as {a:$a} | .) else (.a as $q | 1) end)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // (if $i then ($x as {a:$a} | .) else (.a as $q | 1) end)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+    ])
+}
+
+/// #5175: a bind in the right operand whose source is a comma of sources or `.[]`, so its body runs once per source output. Before, the operand kept the resolver's refusal, a `try` around the `//` swallowed it, and
+/// `path`/`del`/`|=` answered where jq raises at the emission of the left operand's truthy output. Every row captured from
+/// `/usr/bin/jq` 1.7.1, both routes, for a `reduce`, a two-argument and a three-argument `foreach`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_right_operand_with_a_generator_source() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // (.[] as $q | $q))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // (.[] as $q | $q)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // (.[] as $q | $q)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try ((($x as {a:$a} | 5)) // ((.a, .) as $q | 1))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try ((($x as {a:$a} | 5)) // ((.a, .) as $q | 1)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try ((($x as {a:$a} | 5)) // ((.a, .) as $q | 1)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+    ])
+}
+
+/// #5175: a right operand whose bind bodies fan out, or that nests two generator sources, is not read: the resolver
+/// delivers only the first output of a generator body when the state is not the register (#5193), so reading it would
+/// answer a truncated sequence. Both rows raise in jq (the left operand's truthy `5`, then `3`), and still raise here, with
+/// the resolver's own wording of the step.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_right_operand_that_fans_out_through_a_body_or_nested_sources_stays_unread(
+) -> Result<()> {
+    for program in [
+        r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // ((1,2) as $q | (3,4) as $r | $r))))",
+        r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // (.a as $q | range(2)), 3)))",
+    ] {
+        let (stdout, code) = run_jq_stdin(program, r#"{"a":{"b":1}}"#, &["-c"])?;
+        assert_eq!(
+            (stdout.as_str(), code),
+            ("", 5),
+            "{program} answered where jq raises"
+        );
+    }
+    Ok(())
+}
