@@ -484,29 +484,18 @@ fn test_5113_caught_bind_foreach_update_keeps_the_steps_where_the_marker_is_the_
     ])
 }
 
-/// #5113: not read, pinned as they stand (a fix flips them). jq answers `[]` to the first (a pipe-spelled `$x | . as P`
-/// source, which was not measured) and `[["a","a"]]` to the second, whose `null` marker is `jv_identical` to the `null`
-/// register of the first step and so passes it: reading the second step as empty there let the first step's own
-/// placement through, as `["a"]` (a grid of 40,000 rows turned five refusals into wrong answers, `del` among them).
-/// Both refuse as `main` does.
+/// #5113: not read, pinned as it stands (a fix flips it): a `null` marker is `jv_identical` to the `null` register of the first step
+/// and so passes it, and jq answers `[["a","a"]]`: reading the second step as empty there let the first step's own placement
+/// through, as `["a"]` (a grid of 40,000 rows turned five refusals into wrong answers, `del` among them). It refuses as `main` does.
+/// The pipe-spelled `$x | . as P` source, pinned here before #5206, is read now (`tests/jq_cli/i5206.rs`).
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5113_caught_bind_foreach_update_leaves_a_null_marker_and_a_piped_destructure_refused(
-) -> Result<()> {
-    assert_path_rows_both_routes_3749(&[
-        (
-            r#"{"a":null}"#,
-            r". as $x | [path(foreach (.a) as $i (.; foreach (try ($x | . as {a:$a} | .)) as $y (.; .; .); $i))]",
-            "",
-            "Invalid path expression with result null",
-            5,
-        ),
-        (
-            r#"{"a":null}"#,
-            r".a as $x | [path(foreach ((.a,.)) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; .; .) | .); $i))]",
-            "",
-            "Invalid path expression with result {\"a\":null}",
-            5,
-        ),
-    ])
+fn test_5113_caught_bind_foreach_update_leaves_a_null_marker_refused() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":null}"#,
+        r".a as $x | [path(foreach ((.a,.)) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; .; .) | .); $i))]",
+        "",
+        "Invalid path expression with result {\"a\":null}",
+        5,
+    )])
 }

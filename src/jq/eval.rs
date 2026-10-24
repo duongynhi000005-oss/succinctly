@@ -37983,6 +37983,16 @@ fn may_emit_null_or_bool(e: &Expr) -> bool {
 /// (the error message stands in as its element, with the register back at the `try`'s entry), so that an
 /// emission says nothing of where the register is.
 fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>> {
+    bare_bind_source_key_within(e, refuse_handler, false)
+}
+
+/// `caught` is whether a `try`/`?` is around `e` (#5206): the `$x | . as P | .` spelling is read only there, where a foreign
+/// `$x` leaves the source empty; with no `try` the raise leaves the loop, which only the bare spelling is read for (#5182).
+fn bare_bind_source_key_within(
+    e: &Expr,
+    refuse_handler: bool,
+    caught: bool,
+) -> Option<PatternKey<'_>> {
     /// One bare variable in an object or array pattern: a second entry lands on the `null` an absent
     /// key or index reads as, which the resolver's walk places differently from jq's (a caught raise
     /// answered `[]` or `"C"` where jq answers a path, 11 of 40,000 random rows).
@@ -38009,9 +38019,9 @@ fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>
             .map_or(true, |handler| {
                 !refuse_handler && matches!(unwrap_paren(handler), Expr::Identity)
             })
-            .then(|| bare_bind_source_key(expr, refuse_handler))
+            .then(|| bare_bind_source_key_within(expr, refuse_handler, true))
             .flatten(),
-        Expr::Optional(inner) => bare_bind_source_key(inner, refuse_handler),
+        Expr::Optional(inner) => bare_bind_source_key_within(inner, refuse_handler, true),
         Expr::AsPattern {
             expr,
             patterns,
@@ -38025,6 +38035,36 @@ fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>
             .flatten(),
             _ => None,
         },
+        // #5206: `$x | . as P | .`, the destructure of the marker's value spelled through `.`
+        // ([`caught_marker_destructure`]'s pipe spelling): the same bind, so the same key, behind a `try`/`?`.
+        Expr::Pipe(stages) if caught => {
+            let mut rest = flatten_pipe_stages(stages)
+                .into_iter()
+                .filter(|stage| !is_identity_stage(stage))
+                .map(unwrap_paren);
+            match (rest.next(), rest.next(), rest.next()) {
+                (
+                    Some(Expr::TrackedVar(marker)),
+                    Some(Expr::AsPattern {
+                        expr,
+                        patterns,
+                        body,
+                    }),
+                    None,
+                ) if is_identity_pipe(expr)
+                    && matches!(unwrap_paren(body), Expr::Identity)
+                    // A `null` or boolean marker is `jv_identical` to a register of its kind, so the step of a `null`
+                    // element passes it and is placed by a model that is wrong there (#5205): not read, as for the bare spelling.
+                    && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_)) =>
+                {
+                    match patterns.as_slice() {
+                        [pattern] => flat(pattern),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -56524,10 +56564,13 @@ fn caught_marker_destructure(source: &Expr) -> Option<(&Expr, &Rc<Tracked>, &[Pa
 /// marker, which is `jv_identical` to a register of its kind and so passes the step of a `null` element: emptying the
 /// other steps lets that step's placement through, where a refusal had hidden it (five of 40,000 grid rows turned from
 /// a refusal into a wrong answer). Nor is a `?//` chain (`routes_destructuring` reads one pattern), whose retry is not
-/// modelled, or the `$x | . as P` spelling, which was not measured.
+/// modelled. The `$x | . as P` spelling is read as the bare destructure is (#5206).
 fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -> bool {
     caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
-        matches!(bind, Expr::AsPattern { .. })
+        // The pipe spelling only as far as `bare_bind_source_key` reads it (#5206): the verdict empties a step whose
+        // passing sibling steps that key places, and a source it declines (a body other than `.`, a stage after it, a
+        // `// empty` outside) is empty on one and refused on the other, which a `?` over the path turns into a lost path.
+        (matches!(bind, Expr::AsPattern { .. }) || bare_bind_source_key(source, false).is_some())
             && routes_destructuring(patterns)
             && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
             && marker.value != *register
