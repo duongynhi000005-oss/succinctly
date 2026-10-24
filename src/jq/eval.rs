@@ -39027,7 +39027,7 @@ fn bind_free(e: &Expr) -> bool {
 /// and `// $i` over a source that navigates a wrong accept under a `try` (#5167). An operand with a bind is read when it is a bare chain of binds ([`right_operand_bind_chain`], #5175) or a comma or
 /// `if` of such chains, or a bind over a comma or `.[]` ([`right_operand_with_binds`]):
 /// jq runs it from the register the `//` was entered with, as it runs the chain; one with a `def` or a call, a `?//` chain
-/// or a computed source keeps the resolver's refusal, and so the wrong accept under a `try`. The same test serves [`binds_only_in_tail`] and
+/// or a computed source (anything but `.`, `$x`, a variable or a navigation of `.` or `$x`) keeps the resolver's refusal, and so the wrong accept under a `try`. The same test serves [`binds_only_in_tail`] and
 /// [`is_single_output_bind`], which read the same `//` for a three-argument `foreach`, so the three cannot disagree.
 ///
 /// `read_alternations`: whether a `?//` chain is read (a two-argument `foreach`'s). A `reduce`'s is not: its final
@@ -39134,12 +39134,20 @@ fn is_field_navigation(e: &Expr) -> bool {
 }
 
 /// Whether `source`, the source of a bind in the right operand of a `//`, is `.`, an outer `$x`, a variable or a
-/// navigation of `.`: it yields one output (or raises) and moves no register (#5175).
+/// navigation of `.` or of an outer `$x` (`$x.a.b`): it yields one output (or raises) and moves no register (#5175). Only
+/// the outer marker may head a navigation: a navigated loop variable (`$i.a`) can be the register's node and stays
+/// refused, as the bare `$i` does.
 fn is_single_bind_source(source: &Expr) -> bool {
-    matches!(
-        unwrap_paren(source),
-        Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
-    ) || is_field_navigation(source)
+    match unwrap_paren(source) {
+        Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_) => true,
+        Expr::Pipe(stages) => match stages.split_first() {
+            Some((head, rest)) if matches!(unwrap_paren(head), Expr::TrackedVar(_)) => {
+                rest.iter().all(is_field_navigation)
+            }
+            _ => is_field_navigation(source),
+        },
+        _ => is_field_navigation(source),
+    }
 }
 
 /// Whether `source` is a comma of [`is_single_bind_source`] sources or `.[]`: the bind's body runs once per output of it,
@@ -39155,7 +39163,7 @@ fn is_generator_bind_source(source: &Expr) -> bool {
 /// Whether the right operand of a `//` is a chain of binds that each run once and end in a bind-free body (#5175): paren
 /// and pipe spine only (a comma, `if`, `try` or fold around a bind is [`right_operand_with_binds`]'s, or the resolver's
 /// to refuse, and `//` swallowed that refusal under a `try`), one pattern with literal keys, and a source that is `.`, an
-/// outer `$x` or a navigation of `.` ([`is_single_bind_source`]). jq runs a bind's source inside a subexpression that
+/// outer `$x` or a navigation of `.` or `$x` ([`is_single_bind_source`]). jq runs a bind's source inside a subexpression that
 /// tracks no path, so such a source moves no register; a call or a computed source may move it and keeps the refusal.
 /// With `generator_sources`, a comma of those sources or `.[]` too ([`is_generator_bind_source`]), the body running once
 /// per output: only [`right_operand_with_binds`] asks for that, behind its fan-out guards.

@@ -327,3 +327,58 @@ fn test_5175_right_operand_that_fans_out_through_a_body_or_nested_sources_stays_
     }
     Ok(())
 }
+
+/// #5175: a bind in the right operand whose source navigates an outer `$x` (`$x.a`, `$x.a.b`). jq runs a bind's source in a
+/// subexpression that tracks no path, so it moves no register, as `.a` and a bare `$x` do. Before, the source kept the
+/// resolver's refusal, a `try` around the `//` swallowed it, and `path`/`del`/`|=` answered (or wrote) where jq raises at the
+/// emission of the left operand's truthy `5`. Every row captured from `/usr/bin/jq` 1.7.1, both routes, for a `reduce`, a
+/// two-argument and a three-argument `foreach`; the last row is a falsy left operand, where the right operand runs and jq
+/// answers.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5175_right_operand_with_a_bind_source_that_navigates_an_outer_marker() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // ($x.a as $q | $q))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // ($x.a.b as $q | $q))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // ($x.a.b as {c:$c} | $c))))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | foreach (.a,.) as $i (false; try (($x as {a:$a} | 5) // ($x.a as $q | $q)); .))",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r"null",
+            r"(. as $x | reduce (1,2) as $i (null; try (($x as {a:$a} | 5) // ($x.a as $q | $q)))) |= 9",
+            "",
+            "Invalid path expression with result 5",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | reduce (1,2) as $i (.; (($x as {a:$a} | false) // ($x.a as $q | .))))",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}

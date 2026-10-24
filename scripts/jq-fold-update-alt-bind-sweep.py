@@ -112,6 +112,13 @@ WRAPPERS = [
     "try (({S}) // (.[] as $q | .))",
     "try (({S}) // (.[] as $q | $q))",
     "try (({S}) // ((.a, .) as $q | 1))",
+    # #5175: a bind whose source navigates an outer `$x` (a source runs in a subexpression that tracks no path)
+    "try (({S}) // ($x.a as $q | $q))",
+    "try (({S}) // ($x.a.b as {c:$c} | .))",
+    "try (({S}) // ($x.a as $q | $x.a as $r | 1))",
+    "try (({S}) // (($x.a, .) as $q | 1))",
+    # a navigated loop variable can be the register's node and stays refused (a known residual, listed not failed)
+    "try (({S}) // ($i.a as $q | $q))",
     # controls: no `//`, so a change to the `//` code must not move them
     "{S}",
     "try ({S})",
