@@ -65850,7 +65850,10 @@ fn resolve_reduce<'a, S: EvalSemantics>(
                                 acc_input,
                                 update_at_register,
                                 &acc_snapshot,
-                                keep,
+                                // #5198: `reduce` runs its UPDATE to exhaustion and keeps the last output, so a
+                                // generator in it (`range(3)`) is asked for all of them, not the first `path()`
+                                // asks of a leaf (`resolve_foreach`'s UPDATE, #5193).
+                                Keep::AtMost(usize::MAX),
                             ) {
                             Ok(branches) => {
                                 // Only the last output of a multi-output UPDATE
