@@ -8,7 +8,8 @@ use anyhow::Result;
 
 use crate::assert_path_rows_both_routes_3749;
 
-/// #5209: The issue's rows, and the writes over them. Rows captured from jq 1.7.1, both routes.
+/// #5209: The issue's rows, the writes over them, a deeper and an array pattern, and the same landing on a `false`/`true`
+/// child or state. Rows captured from jq 1.7.1, both routes.
 #[test]
 fn test_foreach_update_try_handler_nested_pattern_landing_on_a_null_child_5209() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -79,6 +80,27 @@ fn test_foreach_update_try_handler_nested_pattern_landing_on_a_null_child_5209()
             r#"{"a":{"a":{"a":null}}}"#,
             r#"[path(. as $x | foreach (.,.a.a,.) as $i (null; try (foreach (try ($x as {a:{c:{d:$b}}} | .)) as $y (.; 1; $y)) catch "c"; .))?]"#,
             "[[\"a\",\"c\",\"d\"],[\"a\",\"c\",\"d\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"c":false}}"#,
+            r#"try path(. as $x | foreach (.,.a) as $i (true; not | try (foreach (try ($x as {a:{c:$b}} | .)) as $y (.; .; $y)) catch "c"; .)) catch 5"#,
+            "[\"a\",\"c\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":true}}"#,
+            r#"[path(. as $x | foreach (.,.a) as $i (null; try (foreach (try ($x as {c:{d:$b}} | .)) as $y (.; 1; $y)) catch "c"; .))?]"#,
+            "[[\"c\",\"d\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":false}}"#,
+            r"(. as $x | foreach (.[0]?,.) as $i (0; not | try (foreach (try ($x as {a:{a:$b}} | $b)) as $y (null; .a; $i)) catch $x; .)) = 9",
+            "9\n",
             "",
             0,
         ),

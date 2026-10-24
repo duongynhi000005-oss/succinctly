@@ -42911,9 +42911,9 @@ fn head_value<'a, S: EvalSemantics>(
 /// step left is `jv_identical` to it by kind, which the path resolver models for a pattern walk off the
 /// register ([`PathPatternMode::step`]'s exception); any other node the walk lands on needs a trackable
 /// seed the state does not have, and a boolean the state is not refuses the emission where jq only
-/// meets that at the end of the path. Only bare `$name` entries of a pattern with literal keys are read, and a one-entry
-/// pattern may nest one-entry patterns that do not raise (#5209, [`nested_landing`]): `{a:{c:$b}}` on `{"a":{"a":null}}` lands
-/// on the `null` an absent `c` is, as the flat `{c:$b}` does.
+/// meets that at the end of the path. Only bare `$name` entries of a pattern with literal keys are read, and a
+/// one-entry pattern may nest one-entry patterns that do not raise (#5209, [`nested_landing`]): `{a:{c:$b}}` on
+/// `{"a":{"a":null}}` lands on the `null` an absent `c` is, as the flat `{c:$b}` does.
 fn source_destructures_to_null_or_bool(source: &Expr, state: &OwnedValue) -> bool {
     source_destructures_onto(
         source,

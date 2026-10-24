@@ -164717,7 +164717,7 @@ fn test_caught_foreign_marker_destructure_in_a_foreach_update_patterns_4800() ->
 /// A pattern with entries of two kinds is read since #5012 (its second step raises on the register,
 /// `tests/jq_cli/i5012.rs`), and a nested one-entry pattern (`{a:[$b]}`, jq's `["a",0]`) since #5209.
 #[test]
-fn test_caught_foreign_marker_destructure_in_a_foreach_update_unread_patterns_stay_refused_4800(
+fn test_caught_foreign_marker_destructure_in_a_foreach_update_computed_key_stays_refused_nested_pattern_read_4800(
 ) -> Result<()> {
     let refused = "Invalid path expression with result null";
     assert_path_rows_both_routes_3749(&[
