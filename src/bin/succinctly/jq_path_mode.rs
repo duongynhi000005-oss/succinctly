@@ -82,8 +82,10 @@ pub fn run(args: JqPathModeArgs) -> i32 {
     worker.join().unwrap_or_else(|_| {
         // A panic is an interpreter bug: count the row as unsupported, never as a
         // verdict on the register model.
+        // patchcov: coverage tolerate reason="defensive: reached only if the interpreter panics, which no test provokes"
         eprintln!("path-mode: unsupported: the interpreter panicked");
         UNSUPPORTED_EXIT
+        // patchcov: coverage end
     })
 }
 

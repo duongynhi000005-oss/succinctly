@@ -301,7 +301,7 @@ mod tests {
                     Ok(run.outputs[0].to_json_jq_preserve())
                 }
                 crate::jq::path_mode::Outcome::Error(e) => Err(e.message),
-                other => panic!("{filter}: {other:?}"),
+                other => panic!("{filter}: {other:?}"), // patchcov: coverage tolerate-line reason="test assertion: fires only when a row halts or is unsupported"
             };
             let want = want.map(String::from).map_err(String::from);
             assert_eq!(got, want, "{input} | {filter}");

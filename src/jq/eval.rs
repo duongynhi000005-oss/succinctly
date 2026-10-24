@@ -92960,11 +92960,10 @@ pub(crate) fn delpaths_jq_prepare(paths: OwnedValue) -> Result<ArrayVec, EvalErr
     if let Some(bad) = paths.iter().find(|p| !matches!(p, OwnedValue::Array(_))) {
         return Err(EvalError::path_must_be_array_not(bad.type_name()));
     }
-    paths.retain(|path| match path {
-        OwnedValue::Array(components) => !components
-            .iter()
-            .any(|key| matches!(key, OwnedValue::Float(f) if f.is_nan())),
-        _ => false,
+    // Every path is an array by now (checked above).
+    paths.retain(|path| {
+        !matches!(path, OwnedValue::Array(components)
+            if components.iter().any(|key| matches!(key, OwnedValue::Float(f) if f.is_nan())))
     });
     paths.sort_by(compare_values::<JqSemantics>);
     Ok(paths)
@@ -92977,12 +92976,10 @@ pub(crate) fn delpaths_jq_apply(
     value: OwnedValue,
     paths: &ArrayVec,
 ) -> Result<OwnedValue, EvalError> {
+    // `delpaths_jq_prepare` left only arrays.
     let paths: Vec<&[OwnedValue]> = paths
         .iter()
-        .filter_map(|path| match path {
-            OwnedValue::Array(components) => Some(components.as_slice()),
-            _ => None,
-        })
+        .filter_map(|path| path.as_array().map(Vec::as_slice))
         .collect();
     match paths.first() {
         None => Ok(value),

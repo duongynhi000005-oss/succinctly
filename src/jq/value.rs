@@ -5429,20 +5429,11 @@ pub(crate) fn jv_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
     match (a, b) {
         (OwnedValue::Null, OwnedValue::Null) => true,
         (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x == y,
+        // A computed number is its double: compared by bits.
         (OwnedValue::Int(_) | OwnedValue::Float(_), OwnedValue::Int(_) | OwnedValue::Float(_)) => {
-            computed_bits(a) == computed_bits(b)
+            a.as_f64().map(f64::to_bits) == b.as_f64().map(f64::to_bits)
         }
         _ => a.shares_storage_with(b),
-    }
-}
-
-/// The double a computed number holds, as bits: [`jv_identical`]'s payload
-/// comparison for `Int`/`Float`.
-fn computed_bits(value: &OwnedValue) -> Option<u64> {
-    match value {
-        OwnedValue::Int(i) => Some((*i as f64).to_bits()),
-        OwnedValue::Float(f) => Some(f.to_bits()),
-        _ => None,
     }
 }
 

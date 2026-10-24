@@ -18,8 +18,8 @@ use core::cell::{Cell, RefCell};
 
 use crate::jq::error::{dump_truncated_with, Control, EvalError};
 use crate::jq::eval::{
-    apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_unrouted,
-    substitute_vars, EvalTag, JqSemantics, QueryResult,
+    apply_compare_op, arith_combine, arith_negate, compare_values, substitute_vars, EvalTag,
+    JqSemantics,
 };
 use crate::jq::expr::{
     Builtin, CompareOp, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
@@ -28,6 +28,8 @@ use crate::jq::expr::{
 use crate::jq::parser::parse;
 use crate::jq::value::{NumberRepr, OwnedValue};
 use crate::jq::walk::any_subexpr;
+
+use super::delegate_eval;
 
 /// A value with `jv` identity (see the module docs and [`identical`]).
 #[derive(Clone, Debug)]
@@ -611,22 +613,6 @@ pub struct Run {
     /// own version can hand back its input or navigates it: a divergence on
     /// such a run may be the stub's, not a construct rule's.
     pub stubbed: Vec<String>,
-}
-
-/// Parse `filter` and run it on `input` (a parsed input document). `Err` is
-/// a compile error: the filter does not parse, or jq would reject it.
-pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
-    let program = parse(filter).map_err(|e| format!("{e:?}"))?;
-    // jq's compile-time checks (an unbound `$x`, an undefined function), which
-    // the interpreter alone would only meet if evaluation reached them. The
-    // resolver rewrites what it checks, so it runs on a copy.
-    let diagnostics = crate::jq::resolve::resolve_all_jq(&mut program.clone());
-    if !diagnostics.is_empty() {
-        return Err(format!("{diagnostics:?}"));
-    }
-    let prelude = Prelude::new();
-    let interp = Interp::new(&prelude);
-    Ok(interp.run(&program, input))
 }
 
 impl<'e> Interp<'e> {
@@ -2373,41 +2359,6 @@ fn emit_delegated(expr: &Expr, input: &SVal, reg: &Reg, sink: &mut Sink<'_>) -> 
     match control {
         Some(control) => Err(control_raise(control)),
         None => Ok(()),
-    }
-}
-
-/// Run `expr` on `input` through the existing evaluator: its outputs, and
-/// the escape that ended it.
-fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Control>) {
-    let result = eval_owned_unrouted::<Vec<u64>, JqSemantics>(expr, input, &[]);
-    match result {
-        QueryResult::One(v) => match crate::jq::eval_generic::to_owned::<JqSemantics, _>(&v) {
-            Ok(o) => (vec![o], None),
-            Err(e) => (vec![], Some(Control::Error(e))),
-        },
-        QueryResult::OneCursor(c) => {
-            match crate::jq::eval_generic::to_owned::<JqSemantics, _>(&c.value()) {
-                Ok(o) => (vec![o], None),
-                Err(e) => (vec![], Some(Control::Error(e))),
-            }
-        }
-        QueryResult::Many(vs) => {
-            let mut out = Vec::new();
-            for v in &vs {
-                match crate::jq::eval_generic::to_owned::<JqSemantics, _>(v) {
-                    Ok(o) => out.push(o),
-                    Err(e) => return (out, Some(Control::Error(e))),
-                }
-            }
-            (out, None)
-        }
-        QueryResult::None => (vec![], None),
-        QueryResult::Error(e) => (vec![], Some(Control::Error(e))),
-        QueryResult::Owned(v) => (vec![v], None),
-        QueryResult::ManyOwned(vs) => (vs, None),
-        QueryResult::Break(label) => (vec![], Some(Control::Break(label))),
-        QueryResult::Halt(code) => (vec![], Some(Control::Halt(code))),
-        QueryResult::Partial(vs, control) => (vs, Some(control)),
     }
 }
 

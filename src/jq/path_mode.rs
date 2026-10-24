@@ -401,7 +401,7 @@ impl<'e> Env<'e> {
             }
             at = Self::parent(frame);
         }
-        None
+        None // patchcov: coverage tolerate-line reason="unreachable: only the prelude's _modify takes a variable, and it binds the one it takes"
     }
 
     fn lookup_label(&self, name: &str) -> Option<u64> {
@@ -893,16 +893,15 @@ pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
 pub(crate) fn takes_program(program: &Expr) -> bool {
     // The interpreter reads storage identity, which the `unshared-containers`
     // A/B holdout (#2999) does not have: that build keeps the shipped routing.
-    if cfg!(feature = "unshared-containers") {
-        return false;
+    !cfg!(feature = "unshared-containers") && {
+        // One walk of the program: the entries ask once per document.
+        let mut dynamic = false;
+        let declined = any_subexpr(program, &mut |e| {
+            dynamic |= is_dynamic_path_target(e);
+            !runs(e) || matches!(e, Expr::Builtin(b) if super::walk::is_cursor_metadata_builtin(b))
+        });
+        dynamic && !declined
     }
-    // One walk of the program: the entries ask once per document.
-    let mut dynamic = false;
-    let declined = any_subexpr(program, &mut |e| {
-        dynamic |= is_dynamic_path_target(e);
-        !runs(e) || matches!(e, Expr::Builtin(b) if super::walk::is_cursor_metadata_builtin(b))
-    });
-    dynamic && !declined
 }
 
 /// Whether `expr` is a path construct whose target is not static.
@@ -1029,9 +1028,11 @@ pub(crate) fn run_program(
                 Outcome::Done => None, // patchcov: coverage tolerate-line reason="unreachable: an error outcome is never Done"
                 Outcome::Error(e) => Some(Control::Error(e)),
                 Outcome::Halt(code) => Some(Control::Halt(code)),
+                // patchcov: coverage tolerate reason="unreachable: takes_program declines every program holding a construct the interpreter does not run"
                 Outcome::Unsupported(what) => Some(Control::Error(EvalError::new(format!(
                     "internal error: the path-mode interpreter cannot run {what}"
                 )))),
+                // patchcov: coverage end
             },
         }
     })
@@ -1108,7 +1109,7 @@ impl<'e> Interp<'e> {
             Raise::Halt(code) => Outcome::Halt(code),
             Raise::Fatal(error) => Outcome::Error(error),
             Raise::Unsupported(what) => Outcome::Unsupported(what),
-            Raise::Stop => Outcome::Done,
+            Raise::Stop => Outcome::Done, // patchcov: coverage tolerate-line reason="unreachable: only run_program's sink stops a run, and run_program reads the stop before asking for an outcome"
         }
     }
 
@@ -2272,7 +2273,7 @@ impl<'e> Interp<'e> {
             E::As { expr, body, .. } => self.single(expr, env) && self.single(body, env),
             E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
                 Some(Callee::Arg { frame, .. }) => self.arg_is_single(&frame),
-                _ => false,
+                _ => false, // patchcov: coverage tolerate-line reason="unreachable: single() runs only after pure() accepted the same expression, and pure() rejects a def call"
             },
             E::Builtin(builtin) => {
                 pure_builtin(builtin)
@@ -2808,8 +2809,9 @@ impl<'e> Interp<'e> {
         let kids: Vec<&'e Expr> = args.iter().collect();
         self.c_args(&kids, env, &input, &reg, &mut |values| {
             let [re, mode, test] = values else {
+                // patchcov: coverage tolerate reason="unreachable: the prelude calls the hook with three arguments only"
                 return Err(unsupported(format!("_match_impl/{}", values.len())));
-                // patchcov: coverage tolerate-line reason="unreachable: the prelude calls the hook with three arguments only"
+                // patchcov: coverage end
             };
             let (re_arg, mode_arg) = (
                 Box::new(Expr::tracked_value(re.clone())),
@@ -3099,7 +3101,7 @@ impl<'e> Interp<'e> {
                 }
                 None => false,
             },
-            Expr::DefCall { .. } | Expr::Shared(_) | Expr::NamespacedCall { .. } => true,
+            Expr::DefCall { .. } | Expr::Shared(_) | Expr::NamespacedCall { .. } => true, // patchcov: coverage tolerate-line reason="unreachable: runs() declines these, so takes_program never hands the interpreter one"
             _ => false,
         })
     }
@@ -3540,7 +3542,7 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     Some(match builtin {
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
-        B::AnyC(..) | B::AllC(..) => "a yq builtin",
+        B::AnyC(..) | B::AllC(..) => "a yq builtin", // patchcov: coverage tolerate-line reason="unreachable in jq mode: only the yq parser builds any_c/all_c"
         // These read the shipped evaluator's path context (`needs_path_context`),
         // which a delegated builtin call does not carry.
         B::Key | B::FileIndex | B::Filename => "a path-context builtin",
@@ -3721,12 +3723,12 @@ fn static_slice_key(
     end_key: Option<&SliceBoundKey>,
 ) -> OwnedValue {
     if let Some(SliceBoundKey::Verbatim(descriptor)) = start_key {
-        return fresh((**descriptor).clone(), &[]);
+        return fresh((**descriptor).clone(), &[]); // patchcov: coverage tolerate-line reason="unreachable: only the shipped evaluator's runtime slice rewrite builds a Verbatim key, and the interpreter sees parsed programs"
     }
     let bound = |n: Option<i64>, key: Option<&SliceBoundKey>| match key {
         Some(SliceBoundKey::Number(k)) => Some(number_key(k)),
         Some(SliceBoundKey::Raw(value) | SliceBoundKey::Verbatim(value)) => {
-            Some(fresh((**value).clone(), &[]))
+            Some(fresh((**value).clone(), &[])) // patchcov: coverage tolerate-line reason="unreachable: Raw and Verbatim keys come only from the shipped evaluator's runtime slice rewrite"
         }
         None => n.map(literal_int),
     };
@@ -3806,10 +3808,12 @@ fn emit_c_builtin(
     inputs.push(input);
     inputs.extend(args);
     for v in outputs {
-        let value = match keep {
-            Some(Kept::Input) => input.clone(),
-            Some(Kept::Arg(i)) => args[i].clone(),
-            None => fresh(v, &inputs),
+        // Only `debug`/`stderr` reach the call with a kept answer, and both keep
+        // their input.
+        let value = if keep.is_some() {
+            input.clone()
+        } else {
+            fresh(v, &inputs)
         };
         sink(value, reg.clone())?;
     }
