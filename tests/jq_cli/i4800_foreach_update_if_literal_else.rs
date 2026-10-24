@@ -562,7 +562,8 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
 /// two, the `.a` EXTRACT row's refusal became a truncated `[["a","a"]]`, because the second step runs the fold arm on
 /// the stored literal and refuses where a `?` swallows it. The same holds for a `?//` retry that runs UPDATE again on
 /// the stored literal (the last row; the base answers `[]` there too). The last step of an earlier INIT fork is read
-/// since #5113 (`tests/jq_cli/i5113.rs`): the next fork stores INIT's own output.
+/// since #5113 (`tests/jq_cli/i5113.rs`): the next fork stores INIT's own output. So is a `try ... catch` that is a comma
+/// item beside a literal sibling (the second row, now jq's `[["a"],["a"]]`).
 #[test]
 fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -576,7 +577,7 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
         (
             r#"{"a":null}"#,
             r"[path(. as $x | foreach .a as $i (.; (try (if .a then (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) else null end) catch 1, 7); $i))?]",
-            "[]\n",
+            "[[\"a\"],[\"a\"]]\n",
             "",
             0,
         ),

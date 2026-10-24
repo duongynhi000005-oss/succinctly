@@ -499,3 +499,220 @@ fn test_5113_caught_bind_foreach_update_leaves_a_null_marker_refused() -> Result
         5,
     )])
 }
+
+// A comma UPDATE stores its last emission, so the literal an `if` item emits is not the state the next step enters with
+// when a literal sibling follows it (`(if .a then 1 else FE end, 7)` stores `7`). The literal arm is read on a step
+// that is not the fork's last when the lookahead, started from the sibling's literal, finds every later step stores a
+// literal too or raises with no handler (which ends the `foreach`). A step the lookahead cannot place keeps the
+// whole-`if` resolve.
+
+/// #5113: a literal sibling after the `if` (`null` and `true` `then` literals, an `elif` chain, 2-3 element sources,
+/// the `path`, `|=` and `del` contexts), and a source of ten elements whose second step raises (it ends the `foreach`,
+/// past the eight-step cap). Captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_then_read_beside_a_literal_sibling_after_the_if() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then true else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 elif . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else 2 end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i)) |= 9",
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))",
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: the literal sibling ahead of the `if`: the `if` is the comma's last item, so the literal it emits is the
+/// stored state, and the lookahead steps through the comma (`7` then the `if` item read as its literal arm).
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_then_read_beside_a_literal_sibling_before_the_if() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (7, if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end); $i))?]",
+            "[[\"a\"],[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.) as $i (.; (7, if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end); $i))?]",
+            "[[\"a\"],[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.,.a,.) as $i (.; (7, if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end); $i))?]",
+            "[[],[],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.,.) as $i (.; (7, if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end); $i))",
+            "[\"a\"]\n[\"a\"]\n[]\n",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (7, if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end); $i))",
+            "",
+            "Cannot index number with string \"a\"",
+            5,
+        ),
+    ])
+}
+
+/// #5113: a handler `try` around the `if`, beside a literal sibling: the handler literal is the arm a later step takes
+/// when its condition raises on the stored `7`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_handler_literal_read_beside_a_literal_sibling() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
+            "[[\"a\"],[\"a\"],[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
+            "[[\"a\"],[\"a\"],[],[],[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))",
+            "[\"a\"]\n[\"a\"]\n[]\n[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: what the reading leaves as it was, pinned as it stands (jq answers each; a fix flips them). A sibling that is
+/// not a literal (`.b?`) stores a computed state; a `null` sibling makes the next step's `.a` falsy, so it takes the
+/// computed `else`; the handler row runs ten steps that all store `7`, past the eight-step cap; a `?//` pattern retries
+/// UPDATE on the stored literal; and a trailing `$i` stores each step's own element, which a lookahead started from the
+/// `then` literal cannot see (it printed a truncated answer before the lookahead ran on the unbound UPDATE). jq answers
+/// `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`, a list of twenty paths, `[["a","a"],["a","a"]]` and
+/// `[[],[],["b"],["b"],["a"]]`.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_place_the_step(
+) -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, .b?); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, null); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7, .b?); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as {a:$i} ?// $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.,.b,.a) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, $i); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
