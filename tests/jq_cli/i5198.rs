@@ -56,5 +56,47 @@ fn test_5198_reduce_update_generator_yields_its_last_output() -> Result<()> {
             "",
             0,
         ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (0; range(3)))",
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"path(reduce (1,2) as $i (.; (., 7)))",
+            "",
+            "Invalid path expression with result 7",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r#"try path(reduce .a as $i (null; (range(3), error("x")))) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"first(path(reduce .a as $i (5; range(3))))",
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"isempty(path(reduce .a as $i (5; range(3))))",
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":1}"#,
+            r"[path(reduce (1,2) as $i (.; (.a?, .)))]",
+            "[[]]\n",
+            "",
+            0,
+        ),
     ])
 }
