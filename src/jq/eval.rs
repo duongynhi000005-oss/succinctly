@@ -61835,12 +61835,16 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // unproven. Walked only for a `bound` that shares the register's storage.
     // #5030: ...and so does a head navigating `.` where `.` is a `$x` marker's value a pipe stage handed on
     // (`$x | .a as {b:$q} | $q`, read as `($x | .a) as {b:$q}`): the mark says it is that frozen node.
+    // Read once (#5180): it walks the head, and the `identical` chain asks it for every `bound`.
+    let marker_navigation_head_cell: core::cell::OnceCell<bool> = core::cell::OnceCell::new();
     let marker_navigation_head = || {
-        S::TAG == EvalTag::Jq
-            && patterns.len() == 1
-            && (snapshot.is_marked()
-                || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
-            && head_spine_navigates(head)
+        *marker_navigation_head_cell.get_or_init(|| {
+            S::TAG == EvalTag::Jq
+                && patterns.len() == 1
+                && (snapshot.is_marked()
+                    || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
+                && head_spine_navigates(head)
+        })
     };
     // #4831: the outputs of `head` without the stages that hand their input on unchanged, in the order
     // `sources` has them (the stripped stages neither add nor drop one), read at most once and only for a
@@ -61944,7 +61948,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                         walked_outputs()
                             .as_ref()
                             .and_then(|outputs| outputs.get(position))
-                            .is_some_and(|out| out == bound && out.shares_storage_with(reg))
+                            .is_some_and(|out| out.shares_storage_with(reg) && out == bound)
                     })
             }
         };
@@ -73750,14 +73754,7 @@ fn marker_navigation_outputs(head: &Expr, start: Option<&OwnedValue>) -> Option<
     for stage in stages {
         // `select(true)` and `first(.)` hand their input on, and a postfix `?` on a lookup is the lookup for an output.
         let stage = match stage {
-            Expr::Builtin(Builtin::Select(cond))
-                if matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true))) =>
-            {
-                &Expr::Identity
-            }
-            Expr::FirstExpr(inner) if matches!(unwrap_paren(inner), Expr::Identity) => {
-                &Expr::Identity
-            }
+            other if is_neutral_pass_through(other) => &Expr::Identity,
             Expr::Optional(inner) if matches!(unwrap_paren(inner), Expr::Field(_)) => {
                 unwrap_paren(inner)
             }
@@ -73794,22 +73791,26 @@ fn marker_navigation_outputs(head: &Expr, start: Option<&OwnedValue>) -> Option<
     Some(nodes)
 }
 
+/// Whether `stage` hands its input on unchanged: `.`, `select(true)` or `first(.)` ([`strip_neutral_stages`] and
+/// [`marker_navigation_outputs`] skip exactly these).
+fn is_neutral_pass_through(stage: &Expr) -> bool {
+    match unwrap_paren(stage) {
+        Expr::Identity => true,
+        Expr::Builtin(Builtin::Select(cond)) => {
+            matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
+        }
+        Expr::FirstExpr(inner) => matches!(unwrap_paren(inner), Expr::Identity),
+        _ => false,
+    }
+}
+
 /// `head` with the stages that hand their input on unchanged removed (#4831): `.`, `select(true)`,
 /// `first(.)`, and a postfix `?` on a field lookup (which, for an output, is the lookup). `None`
 /// when `head` has none, so nothing differs from it. Read by [`resolve_as_pattern`] to find the node a
 /// navigation of a `$x` marker yields, whose storage the register may share although the by-value
 /// evaluation of the stages after it bridges through a copy.
 fn strip_neutral_stages(head: &Expr) -> Option<Expr> {
-    fn neutral(stage: &Expr) -> bool {
-        match unwrap_paren(stage) {
-            Expr::Identity => true,
-            Expr::Builtin(Builtin::Select(cond)) => {
-                matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
-            }
-            Expr::FirstExpr(inner) => matches!(unwrap_paren(inner), Expr::Identity),
-            _ => false,
-        }
-    }
+    let neutral = is_neutral_pass_through;
     fn flatten<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
         match unwrap_paren(e) {
             Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),

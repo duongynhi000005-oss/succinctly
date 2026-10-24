@@ -109,3 +109,57 @@ fn test_5180_a_head_reaching_another_node_is_still_refused() -> Result<()> {
         ),
     ])
 }
+
+/// #5180: the stages the walk reads through (`select(true)`, `first(.)`, a postfix `?` on a lookup), a `null` along the
+/// way, an array and an object `[]` whose register is the first element, and sibling values that compare equal where only
+/// one is the register. Every row captured from `/usr/bin/jq` 1.7.1.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5180_stages_the_walk_reads_through_and_the_register_among_equal_siblings() -> Result<()> {
+    let doc = r#"{"a":[{"b":1},{"b":2}],"c":{"d":{"b":5}}}"#;
+    let deleted = "{\"a\":[{\"b\":1},{\"b\":2}],\"c\":{\"d\":{}}}\n";
+    assert_path_rows_both_routes_3749(&[
+        (
+            doc,
+            r"del(. as $x | .c.d | try (($x | .c? | .d) as {b:$q} | $q))",
+            deleted,
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(. as $x | .c.d | try (($x | .c | select(true) | .d) as {b:$q} | $q))",
+            deleted,
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"del(. as $x | .c.d | try (($x | .c | first(.) | .d) as {b:$q} | $q))",
+            deleted,
+            "",
+            0,
+        ),
+        (
+            doc,
+            r"path(. as $x | .z | $x.z.c as [$q] | $q)",
+            "[\"z\",0]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":[{"b":1},{"b":2}]}"#,
+            r"del(. as $x | .a[0] | try ($x.a[] as {b:$q} | $q))",
+            "{\"a\":[{},{\"b\":2}]}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"x":{"b":1},"y":{"b":1}}}"#,
+            r"del(. as $x | .a.x | try ($x.a[] as {b:$q} | $q))",
+            "{\"a\":{\"x\":{},\"y\":{\"b\":1}}}\n",
+            "",
+            0,
+        ),
+    ])
+}
