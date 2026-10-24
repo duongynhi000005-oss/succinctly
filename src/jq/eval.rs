@@ -43566,7 +43566,7 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
                 // #5156: ...and a value that is no node of the register (`// .`, `// $x`, `// {b:1}`): the step falls back
                 // to the state or a variable the same way, at the register the `//` entered with.
                 Expr::Literal(_) | Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) => {
-                    emptied.has_fallback = true
+                    emptied.has_fallback = true;
                 }
                 other if is_value_head(other) => emptied.has_fallback = true,
                 _ => return None,

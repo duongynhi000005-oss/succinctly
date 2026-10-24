@@ -89,7 +89,7 @@ fn test_5156_foreach_update_alternative_with_a_value_alternate_of_a_caught_forei
             0,
         ),
         (
-            r#"[null]"#,
+            r"[null]",
             r"try path(. as $x | foreach (.[]?) as $i (.; ((foreach (try ($x as {c:$a} | .)) as $y (0; .; .))|.) // (.,.); $i)) catch 5",
             "[0]\n[0]\n",
             "",
