@@ -626,9 +626,17 @@ pub struct Run {
     pub stubbed: Vec<String>,
 }
 
-/// Parse `filter` and run it on `input` (a parsed input document).
+/// Parse `filter` and run it on `input` (a parsed input document). `Err` is
+/// a compile error: the filter does not parse, or jq would reject it.
 pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
     let program = parse(filter).map_err(|e| format!("{e:?}"))?;
+    // jq's compile-time checks (an unbound `$x`, an undefined function), which
+    // the interpreter alone would only meet if evaluation reached them. The
+    // resolver rewrites what it checks, so it runs on a copy.
+    let diagnostics = super::resolve::resolve_all_jq(&mut program.clone());
+    if !diagnostics.is_empty() {
+        return Err(format!("{diagnostics:?}"));
+    }
     let prelude = Prelude::new();
     let interp = Interp::new(&prelude);
     Ok(interp.run(&program, input))

@@ -462,6 +462,19 @@ fn an_unimplemented_construct_is_unsupported_not_an_error_5223() {
     });
 }
 
+/// jq rejects an unbound variable at compile time, before the input is read;
+/// the spike reports it the same way rather than when evaluation reaches it.
+#[test]
+fn an_unbound_variable_is_a_compile_error_5223() {
+    on_big_stack(|| {
+        assert!(run(
+            "reduce .a? as $i (.; try ($x as $q | $a))",
+            &OwnedValue::Null
+        )
+        .is_err());
+    });
+}
+
 /// Every jq-defined builtin [`prelude_call`] maps resolves to a definition of
 /// the right arity in [`PRELUDE`].
 #[test]
