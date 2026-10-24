@@ -66,6 +66,11 @@ pub(crate) fn kept(builtin: &Builtin, input: &OwnedValue, args: &[OwnedValue]) -
     match (builtin, args) {
         (Builtin::ToString, []) if matches!(input, OwnedValue::String(_)) => Some(Kept::Input),
         (Builtin::ToNumber, []) if input.is_number() => Some(Kept::Input),
+        (Builtin::FormatNamed(_), [OwnedValue::String(name)])
+            if name.as_str() == "text" && matches!(input, OwnedValue::String(_)) =>
+        {
+            Some(Kept::Input)
+        }
         (Builtin::Debug | Builtin::Stderr, []) => Some(Kept::Input),
         (Builtin::Ltrimstr(_), [prefix]) => trim_keeps(input, prefix, |s, a| s.starts_with(a)),
         (Builtin::Rtrimstr(_), [suffix]) => trim_keeps(input, suffix, |s, a| s.ends_with(a)),
@@ -139,26 +144,29 @@ pub(crate) fn delpaths_keeps(input: &OwnedValue, paths: &OwnedValue) -> bool {
             (OwnedValue::Object(map), OwnedValue::String(k)) => {
                 matches!(map.get(k.as_str()), None | Some(OwnedValue::Null))
             }
-            (OwnedValue::Array(items), k) if k.is_number() => {
-                // `jv_get` on an array: an integer index, counted from the end
-                // when negative, and `null` out of range.
-                let d = k.as_f64().unwrap_or(f64::NAN);
-                if d.is_nan() {
-                    return true;
-                }
-                let mut idx = i64::from(d.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32);
-                if idx < 0 {
-                    idx += items.len() as i64;
-                }
-                matches!(
-                    usize::try_from(idx).ok().and_then(|i| items.get(i)),
-                    None | Some(OwnedValue::Null)
-                )
-            }
+            (OwnedValue::Array(items), k) if k.is_number() => matches!(
+                array_index(items.len(), k).and_then(|i| items.get(i)),
+                None | Some(OwnedValue::Null)
+            ),
             _ => false,
         },
         _ => false,
     })
+}
+
+/// `jv_get`'s element for number key `key` of an array of `len` elements: the
+/// double truncated to an `int` (clamped), counted from the end when negative.
+/// `None` -- jq's `null` -- for NaN and out of range.
+pub(crate) fn array_index(len: usize, key: &OwnedValue) -> Option<usize> {
+    let d = key.as_f64().unwrap_or(f64::NAN);
+    if d.is_nan() {
+        return None;
+    }
+    let mut idx = i64::from(d.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32);
+    if idx < 0 {
+        idx += len as i64;
+    }
+    usize::try_from(idx).ok().filter(|&i| i < len)
 }
 
 #[cfg(test)]
@@ -185,6 +193,16 @@ mod tests {
             (r#"{"a":"x"}"#, "path(.a | tostring)", Ok(r#"["a"]"#)),
             (r#"{"a":1}"#, "path(.a | tonumber)", Ok(r#"["a"]"#)),
             (r#"{"a":"x"}"#, "path(.a | @text)", Ok(r#"["a"]"#)),
+            (
+                r#"{"a":"x"}"#,
+                r#"path(.a | format("text"))"#,
+                Ok(r#"["a"]"#),
+            ),
+            (
+                r#"{"a":"x"}"#,
+                r#"path(.a | format("json"))"#,
+                Err(r#"Invalid path expression with result "\"x\"""#),
+            ),
             (
                 r#"{"a":"x"}"#,
                 r#"path(.a | ltrimstr("z"))"#,
@@ -274,7 +292,7 @@ mod tests {
 
     fn check_rows(rows: &[(&str, &str, Result<&str, &str>)]) {
         for (input, filter, want) in rows {
-            let run = run(filter, &doc(input)).expect(filter);
+            let run = run(filter, doc(input)).expect(filter);
             let got = match run.outcome {
                 crate::jq::path_spike::Outcome::Done => {
                     assert_eq!(run.outputs.len(), 1, "{filter}");

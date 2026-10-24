@@ -75,7 +75,7 @@ pub fn run(args: JqPathSpikeArgs) -> i32 {
 /// (exit 5, as jq's parse error does) after the values before it ran.
 fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool) -> i32 {
     let Some(bytes) = bytes else {
-        return report(filter, &OwnedValue::Null, raw);
+        return report(filter, OwnedValue::Null, raw);
     };
     let (spans, malformed) = crate::jq_runner::split_json_values_strict(bytes);
     let mut status = 0;
@@ -87,7 +87,7 @@ fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool) -> i32 {
                 return 5;
             }
         };
-        status = report(filter, &input, raw);
+        status = report(filter, input, raw);
         if status != 0 && status != 5 {
             return status;
         }
@@ -99,7 +99,7 @@ fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool) -> i32 {
     status
 }
 
-fn report(filter: &str, input: &OwnedValue, raw: bool) -> i32 {
+fn report(filter: &str, input: OwnedValue, raw: bool) -> i32 {
     let run = match path_spike::run(filter, input) {
         Ok(run) => run,
         Err(e) => {

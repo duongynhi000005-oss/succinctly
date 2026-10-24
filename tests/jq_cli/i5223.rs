@@ -4,6 +4,10 @@
 //! (`scripts/jq-path-spike-3way.py`): jq's input handling and exit codes, and the
 //! `path-spike: unsupported`/`path-spike: stubbed` lines it classifies rows by. Expected
 //! stdout and exit codes are jq 1.7.1's for the same argv.
+//!
+//! The interpreter reads storage identity, which the `unshared-containers` holdout does not
+//! have, so these pin the shipped shape only.
+#![cfg(not(feature = "unshared-containers"))]
 
 use std::process::Command;
 

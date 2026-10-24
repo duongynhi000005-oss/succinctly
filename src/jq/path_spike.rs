@@ -42,7 +42,7 @@ use core::cell::{Cell, RefCell};
 
 use indexmap::IndexMap;
 
-use super::c_builtin_identity::{binop_keeps, format_keeps_input, kept, Kept};
+use super::c_builtin_identity::{array_index, binop_keeps, format_keeps_input, kept, Kept};
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
@@ -51,8 +51,7 @@ use super::eval::{
 use super::expr::{Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey};
 use super::parser::parse;
 use super::value::{
-    jq_bare_float_display, jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral,
-    SharableString,
+    jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral, SharableString,
 };
 use super::walk::any_subexpr;
 
@@ -618,9 +617,13 @@ pub struct Run {
     pub stubbed: Vec<String>,
 }
 
-/// Parse `filter` and run it on `input` (a parsed input document). `Err` is
-/// a compile error: the filter does not parse, or jq would reject it.
-pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
+/// Parse `filter` and run it on `input`, a parsed input document. `Err` is a
+/// compile error: the filter does not parse, or jq would reject it.
+///
+/// The document's numbers are literals, as a JSON document's materialize
+/// (`NumberLiteral`), and it is moved in, so that promoting its scalars copies
+/// nothing.
+pub fn run(filter: &str, input: OwnedValue) -> Result<Run, String> {
     let program = parse(filter).map_err(|e| format!("{e:?}"))?;
     // jq's compile-time checks (an unbound `$x`, an undefined function), which
     // the interpreter alone would only meet if evaluation reached them. The
@@ -631,7 +634,7 @@ pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
     }
     let prelude = Prelude::new();
     let interp = Interp::new(&prelude);
-    Ok(interp.run(&program, input.clone()))
+    Ok(interp.run(&program, input))
 }
 
 impl<'e> Interp<'e> {
@@ -717,14 +720,15 @@ impl<'e> Interp<'e> {
             }
             Expr::Literal(lit) => match self.constant(expr) {
                 Some(value) => sink(value, reg),
-                // A negative spelling is `_negate` of a literal: computed.
+                // A negative number is `_negate` of a literal: computed. The
+                // parser folds some negations itself (`-01`, `-1.5`, a
+                // negative past 2^53) into a spelling-less `Int`/`Float`.
                 None => match lit {
-                    Literal::NumberLiteral(repr, _) => {
-                        let value = match repr {
-                            NumberRepr::Int(i) => OwnedValue::Int(*i),
-                            NumberRepr::Float(f) => OwnedValue::Float(*f),
-                        };
-                        sink(value, reg)
+                    Literal::NumberLiteral(NumberRepr::Int(i), _) | Literal::Int(i) => {
+                        sink(OwnedValue::Int(*i), reg)
+                    }
+                    Literal::NumberLiteral(NumberRepr::Float(f), _) | Literal::Float(f) => {
+                        sink(OwnedValue::Float(*f), reg)
                     }
                     _ => Err(unsupported("a literal that is not a constant")), // patchcov: coverage tolerate-line reason="unreachable: constant_value answers every literal but a negative number, which the arm above computes"
                 },
@@ -1019,19 +1023,7 @@ impl<'e> Interp<'e> {
                 Ok(map.get(k.as_str()).cloned().unwrap_or(OwnedValue::Null))
             }
             (OwnedValue::Array(items), k) if k.is_number() => {
-                let d = k.as_f64().unwrap_or(f64::NAN);
-                if d.is_nan() {
-                    return Ok(OwnedValue::Null);
-                }
-                let mut idx = i64::from(d.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32);
-                if idx < 0 {
-                    idx += items.len() as i64;
-                }
-                Ok(usize::try_from(idx)
-                    .ok()
-                    .and_then(|i| items.get(i))
-                    .cloned()
-                    .unwrap_or(OwnedValue::Null))
+                Ok(array_index(items.len(), k).map_or(OwnedValue::Null, |i| items[i].clone()))
             }
             (OwnedValue::Null, OwnedValue::String(_) | OwnedValue::Object(_)) => {
                 Ok(OwnedValue::Null)
@@ -1075,6 +1067,17 @@ impl<'e> Interp<'e> {
         if start == end {
             return OwnedValue::Array(ArrayVec::new());
         }
+        // The holdout stores an array's elements inline, so there is no
+        // storage address to key a view by, and no identity to keep anyway.
+        #[cfg(feature = "unshared-containers")]
+        return OwnedValue::Array(items[start..end].to_vec().into());
+        #[cfg(not(feature = "unshared-containers"))]
+        self.array_view(items, start, end)
+    }
+
+    /// [`Self::array_slice`]'s non-empty range, as a view of its root.
+    #[cfg(not(feature = "unshared-containers"))]
+    fn array_view(&self, items: &ArrayVec, start: usize, end: usize) -> OwnedValue {
         let (root, offset) = self
             .slice_roots
             .borrow()
@@ -1738,6 +1741,14 @@ impl<'e> Interp<'e> {
                 emit_c_builtin(&Expr::Builtin(call), builtin, &input, &[a], &reg, sink)
             });
         }
+        if let Builtin::FormatNamed(name) = builtin {
+            return self.eval(name, env, input.clone(), reg.sub(), &mut |n, _| {
+                let call = Expr::Builtin(Builtin::FormatNamed(Box::new(Expr::tracked_value(
+                    n.clone(),
+                ))));
+                emit_c_builtin(&call, builtin, &input, &[n], &reg, sink)
+            });
+        }
         if let Builtin::SetPath(p, v) = builtin {
             // Two C arguments: the last is the outer loop.
             return self.eval(v, env, input.clone(), reg.sub(), &mut |bv, _| {
@@ -1916,7 +1927,14 @@ impl<'e> Interp<'e> {
 
 /// Whether `error` is `error({"__jq": id})`: the error a `break $label` is.
 fn is_label_payload(error: &EvalError, id: u64) -> bool {
-    error.clone().payload() == label_value(id)
+    let super::error::EvalErrorPayload::Value(OwnedValue::Object(map)) = &error.value else {
+        return false;
+    };
+    map.len() == 1
+        && map
+            .get("__jq")
+            .and_then(OwnedValue::as_f64)
+            .is_some_and(|n| n == id as f64)
 }
 
 /// The fold's input as `DUPN` leaves it: `gen_reduce`/`gen_foreach` start
@@ -2196,15 +2214,16 @@ fn number_f64(value: &OwnedValue) -> Option<f64> {
 }
 
 /// `-1` is `_negate` applied to the literal `1` at run time (`'-' Exp`), so a
-/// negative spelling is computed, never a constant.
+/// negative number is computed, never a constant.
 fn literal_value(lit: &Literal) -> Option<OwnedValue> {
     Some(match lit {
         Literal::Null => OwnedValue::Null,
         Literal::Bool(b) => OwnedValue::Bool(*b),
         Literal::NumberLiteral(_, spelling) if spelling.starts_with('-') => return None,
         Literal::NumberLiteral(repr, spelling) => literal(*repr, spelling),
-        Literal::Int(i) => literal(NumberRepr::Int(*i), &i.to_string()),
-        Literal::Float(f) => literal(NumberRepr::Float(*f), &jq_bare_float_display(*f)),
+        // No spelling: a negation the parser folded (`-01`), which jq
+        // computes with `_negate`.
+        Literal::Int(_) | Literal::Float(_) => return None,
         Literal::String(s) => string(s),
     })
 }
@@ -2403,8 +2422,19 @@ fn emit_c_builtin(
     reg: &Reg,
     sink: &mut Sink<'_>,
 ) -> R {
-    let (outputs, control) = delegate_eval(expr, input);
     let keep = kept(builtin, input, args);
+    // A kept answer is known without the call, and only `debug`/`stderr`
+    // have a side effect to run it for.
+    if let Some(k) = keep {
+        if !matches!(builtin, Builtin::Debug | Builtin::Stderr) {
+            let value = match k {
+                Kept::Input => input.clone(),
+                Kept::Arg(i) => args[i].clone(),
+            };
+            return sink(value, reg.clone());
+        }
+    }
+    let (outputs, control) = delegate_eval(expr, input);
     let mut inputs: Vec<&OwnedValue> = Vec::with_capacity(args.len() + 1);
     inputs.push(input);
     inputs.extend(args);
@@ -2500,8 +2530,11 @@ fn variant_name(expr: &Expr) -> String {
         .to_string()
 }
 
-#[cfg(test)]
+// The interpreter reads storage identity, which the `unshared-containers`
+// holdout does not have (every clone copies), so its tests pin the shipped
+// shape only.
+#[cfg(all(test, not(feature = "unshared-containers")))]
 mod reference;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "unshared-containers")))]
 mod tests;

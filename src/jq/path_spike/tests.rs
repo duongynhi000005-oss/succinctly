@@ -19,7 +19,7 @@ struct Answer {
 fn spike(doc: &str, filter: &str) -> Answer {
     let index = JsonIndex::build(doc.as_bytes());
     let input = to_owned::<JqSemantics, _>(&index.root(doc.as_bytes()).value()).expect("doc");
-    let run = run(filter, &input).expect("parses");
+    let run = run(filter, input).expect("parses");
     let error = match run.outcome {
         Outcome::Done => None,
         Outcome::Error(error) => Some(match error.payload() {
@@ -452,7 +452,7 @@ fn writes_and_jq_defined_builtins_run_from_the_prelude_5223() {
 #[test]
 fn an_unimplemented_construct_is_unsupported_not_an_error_5223() {
     on_big_stack(|| {
-        let run = run("try input catch 1", &OwnedValue::Null).expect("parses");
+        let run = run("try input catch 1", OwnedValue::Null).expect("parses");
         assert!(
             matches!(run.outcome, Outcome::Unsupported(_)),
             "{:?}",
@@ -468,7 +468,7 @@ fn an_unbound_variable_is_a_compile_error_5223() {
     on_big_stack(|| {
         assert!(run(
             "reduce .a? as $i (.; try ($x as $q | $a))",
-            &OwnedValue::Null
+            OwnedValue::Null
         )
         .is_err());
     });
@@ -914,7 +914,7 @@ fn a_declined_row_is_unsupported_5223() {
             "input_line_number",
             "input_filename",
         ] {
-            let run = run(filter, &OwnedValue::Null).expect(filter);
+            let run = run(filter, OwnedValue::Null).expect(filter);
             assert!(
                 matches!(run.outcome, Outcome::Unsupported(_)),
                 "{filter}: {:?}",
@@ -930,11 +930,11 @@ fn a_declined_row_is_unsupported_5223() {
 fn a_run_names_the_stubbed_builtins_it_touched_5223() {
     on_big_stack(|| {
         let run = run(
-            r#"ltrimstr("z"), @text, tostring, [scan("x")], length"#,
-            &OwnedValue::string("x"),
+            r#"ltrimstr("z"), @text, tostring, ([[1]] | transpose), length"#,
+            OwnedValue::string("x"),
         )
         .expect("parses");
-        assert_eq!(run.stubbed, ["Scan"]);
+        assert_eq!(run.stubbed, ["Transpose"]);
         assert!(matches!(run.outcome, Outcome::Done));
     });
 }
@@ -1140,5 +1140,20 @@ fn owned_interpreter_matches_the_sval_reference_5223() {
             differ.len(),
             differ.join("\n")
         );
+    });
+}
+
+/// A negative number is `_negate` of a literal, so it is computed and compares
+/// by value, including the spellings the parser folds itself (`-01`, `-00`,
+/// `-01.5`): each row is `[0]` in jq 1.7.1.
+#[test]
+fn a_negative_number_is_computed_however_spelled_5223() {
+    on_big_stack(|| {
+        check(&[
+            ("null", "[-01] | path(.[0] | -01)", ok(&["[0]"])),
+            ("null", "[-1.5e0] | path(.[0] | -01.5)", ok(&["[0]"])),
+            ("null", "[-1] | path(.[0] | -1)", ok(&["[0]"])),
+            ("null", "[-00] | path(.[0] | -00)", ok(&["[0]"])),
+        ]);
     });
 }
