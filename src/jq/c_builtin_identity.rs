@@ -172,6 +172,7 @@ pub(crate) fn array_index(len: usize, key: &OwnedValue) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "unshared-containers"))]
     use crate::jq::path_spike::run;
 
     fn doc(text: &str) -> OwnedValue {
@@ -290,6 +291,7 @@ mod tests {
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
     }
 
+    #[cfg(not(feature = "unshared-containers"))]
     fn check_rows(rows: &[(&str, &str, Result<&str, &str>)]) {
         for (input, filter, want) in rows {
             let run = run(filter, doc(input)).expect(filter);

@@ -127,6 +127,7 @@ fn truthy(value: &OwnedValue) -> bool {
 
 /// The address of an array's storage: stable for as long as a handle on it is
 /// alive, which the slice-view tables guarantee by holding one.
+#[cfg(not(feature = "unshared-containers"))]
 fn storage_addr(items: &ArrayVec) -> usize {
     core::ptr::addr_of!(**items) as usize
 }
@@ -586,8 +587,11 @@ pub struct Interp<'e> {
     /// into the root allocation. Keyed by `(root, offset, size)`, so equal
     /// slices of one array are one value; each view maps back to its root
     /// and offset, so a slice of a slice lands on the same key. Both hold
-    /// the root, so a compared address is never reused.
+    /// the root, so a compared address is never reused. Unused under the
+    /// `unshared-containers` holdout, which has no storage to view.
+    #[cfg_attr(feature = "unshared-containers", allow(dead_code))]
     slices: RefCell<BTreeMap<(usize, usize, usize), ArrayVec>>,
+    #[cfg_attr(feature = "unshared-containers", allow(dead_code))]
     slice_roots: RefCell<BTreeMap<usize, (ArrayVec, usize)>>,
 }
 
@@ -1063,6 +1067,7 @@ impl<'e> Interp<'e> {
 
     /// `jvp_array_slice`: an empty slice is a fresh `[]`; the whole root is the
     /// root itself; any other range is the one view of that range.
+    #[cfg_attr(feature = "unshared-containers", allow(clippy::unused_self))]
     fn array_slice(&self, items: &ArrayVec, start: usize, end: usize) -> OwnedValue {
         if start == end {
             return OwnedValue::Array(ArrayVec::new());
