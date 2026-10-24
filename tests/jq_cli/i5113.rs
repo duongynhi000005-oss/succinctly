@@ -240,18 +240,96 @@ fn test_5113_literal_then_read_when_every_later_step_stores_a_literal() -> Resul
     ])
 }
 
-/// #5113: the lookahead stops at eight steps, so a source of ten elements keeps the whole-`if` resolve on its first
-/// step, pinned as it stands (a fix flips it). jq answers `[["a"],[],[],[],[],[],[],[],[],[]]`.
+/// #5113: a source longer than the lookahead's eight-step cap is read through its cycle: the stored literals repeat
+/// (`null`, then `1`, then `1` again), so a step that enters with a state an earlier one entered with repeats the steps
+/// between, which were already read. A source of ten elements keeps the literal arm on its first step, with a handler
+/// (`catch 1`) and beside a literal comma sibling. Captured from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5113_literal_then_lookahead_stops_at_eight_steps() -> Result<()> {
-    assert_path_rows_both_routes_3749(&[(
-        r#"{"a":{"a":null}}"#,
-        r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
-        "[]\n",
-        "",
-        0,
-    )])
+fn test_5113_literal_then_lookahead_reads_a_source_past_eight_steps_through_its_cycle() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; try (if .a then 1 else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[[\"a\"],[],[],[],[],[],[],[],[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
+            "[[\"a\"],[\"a\"],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.a,.a,.a,.a,.a,.a,.a,.a,.a) as $i (.; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.,.a,.,.a,.,.a,.,.a,.,.a) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[],[]]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5113: a source whose bound no static shape says (`.[]`, `range(n)`) may have any number of steps left, so the
+/// literal arm is read when every step that could follow stores a literal too, or raises (the cycle of stored states
+/// is read as the bounded source's is). Captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5113_literal_then_lookahead_reads_an_unbounded_source() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i (.; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"path(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i)) |= 9",
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null},"b":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[[\"a\"],[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            "[1]",
+            r"[path(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
 }
 
 /// #5113 review: the lookahead reads a step's handler literal only where the real last step does. On a fork that is not
@@ -662,11 +740,10 @@ fn test_5113_handler_literal_read_beside_a_literal_sibling() -> Result<()> {
 
 /// #5113: what the reading leaves as it was, pinned as it stands (jq answers each; a fix flips them). A sibling that is
 /// not a literal (`.b?`) stores a computed state; a `null` sibling makes the next step's `.a` falsy, so it takes the
-/// computed `else`; the handler row runs ten steps that all store `7`, past the eight-step cap; a `?//` pattern retries
-/// UPDATE on the stored literal; and a trailing `$i` stores each step's own element, which a lookahead started from the
-/// `then` literal cannot see (it printed a truncated answer before the lookahead ran on the unbound UPDATE). jq answers
-/// `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`, a list of twenty paths, `[["a","a"],["a","a"]]` and
-/// `[[],[],["b"],["b"],["a"]]`.
+/// computed `else`; a `?//` pattern retries UPDATE on the stored literal; and a trailing `$i` stores each step's own
+/// element, which a lookahead started from the `then` literal cannot see (it printed a truncated answer before the
+/// lookahead ran on the unbound UPDATE). jq answers `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`,
+/// `[["a","a"],["a","a"]]` and `[[],[],["b"],["b"],["a"]]`.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_place_the_step(
@@ -689,13 +766,6 @@ fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_pla
         (
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach (.a,.) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7, .b?); $i))?]",
-            "[]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":{"a":null}}"#,
-            r"[path(. as $x | foreach (.a,.,.,.,.,.,.,.,.,.) as $i (.; (try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1, 7); $i))?]",
             "[]\n",
             "",
             0,
