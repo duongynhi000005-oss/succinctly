@@ -43050,6 +43050,58 @@ fn source_destructure_raises(item: &Expr, register: &OwnedValue) -> bool {
     }
 }
 
+/// Whether every `try` handler that can emit in `update` hands its value on without navigating (#5208): `catch $i`, `catch .`,
+/// a literal. jq runs a handler with its register where the `try` entered it, and a handler that navigates (`catch ($i |
+/// .a?)`) moves it, which the steps after the one that ran it place wrongly, so a `?` around the target swallows the error
+/// that placement raises and a write lands on a prefix of the paths jq writes.
+fn update_handlers_stay_put(update: &Expr) -> bool {
+    let mut stay = true;
+    any_subexpr(update, &mut |e| {
+        if let Expr::Try {
+            catch: Some(handler),
+            ..
+        } = e
+        {
+            if !emits_nothing(handler) && !cannot_move_register(handler) {
+                stay = false;
+            }
+        }
+        false
+    });
+    stay
+}
+
+/// Whether `item`, a fold source, destructures a `$x` that is the register node and the pattern's steps pass on it
+/// (#5208), the non-raising sibling of [`source_destructure_raises`]: a bare destructure, or one behind a handler-less
+/// `try`/`?`. `$x` is `register`'s own node only where the resolver can say so: a marker frozen from `.` itself
+/// ([`Origin::Snapshot`], [`Origin::SnapshotAt`]) is certified by value equality, which no other node of the register's
+/// tree can have; any other marker of an equal value may be a copy, whose step fails in jq.
+fn source_destructure_passes_on_register(item: &Expr, register: &OwnedValue) -> bool {
+    match unwrap_paren(item) {
+        Expr::AsPattern { expr, patterns, .. } => match (unwrap_paren(expr), patterns.as_slice()) {
+            (Expr::TrackedVar(marker), [pattern]) => {
+                !matches!(pattern, Pattern::Var(_))
+                    && pattern_is_plain(pattern)
+                    && matches!(marker.origin, Origin::Snapshot | Origin::SnapshotAt { .. })
+                    && marker.value == *register
+                    && !pattern_raises_on_register(pattern, &marker.value)
+                    // A landing on an absent key or a `null` child is the nested-pattern residual (#5209).
+                    && matches!(
+                        nested_landing(pattern, Some(&marker.value)),
+                        NestedLanding::Node(_)
+                    )
+            }
+            _ => false,
+        },
+        Expr::Optional(inner)
+        | Expr::Try {
+            expr: inner,
+            catch: None,
+        } => source_destructure_passes_on_register(inner, register),
+        _ => false,
+    }
+}
+
 /// Whether destructuring `value` with `pattern` (one with no computed key, [`pattern_is_plain`]) raises in jq when
 /// `value` is jq's register (#5012), so whether or not it is: an object pattern on a value that is neither an object
 /// nor `null`, an array pattern on one that is neither an array nor `null` (`Cannot index ...`), a pattern of two or
@@ -60601,7 +60653,10 @@ fn drive_fold_source_with<S: EvalSemantics>(
             // A `null` or boolean state is the register by kind only, which says nothing of the node `$x` is.
             !is_null_or_bool(&register)
                 && register == *ambient.value
-                && source_destructure_raises(source, &register)
+                && (source_destructure_raises(source, &register)
+                    || (S::TAG == EvalTag::Jq
+                        && fold_body::foreach_handlers_stay_here()
+                        && source_destructure_passes_on_register(source, &register)))
         });
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
         && !certain_fresh
@@ -67686,6 +67741,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 .then(|| fold_body::register_folds(register_fold_items(item)));
                             let _state_handed_on =
                                 update_tail_unchecked.then(fold_body::state_handed_on);
+                            // #5208: ...and whether every handler that emits there hands its value on without moving jq's register.
+                            let _handlers_stay = (S::TAG == EvalTag::Jq
+                                && update_handlers_stay_put(item))
+                            .then(fold_body::foreach_handlers_stay);
                             let _foreach_body = if input_cannot_move && !inherits_moved_loop {
                                 if flags.get().update_stays_if_stated {
                                     fold_body::foreach_body_stating()
@@ -77277,6 +77336,8 @@ mod fold_body {
         /// The body depth whose UPDATE hands the accumulator on untouched behind destructures of a
         /// foreign `$x` (#4901), 0 for none.
         static HANDED_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth whose `foreach` step has handlers that leave jq's register where it was (#5208), 0 for none.
+        static HANDLERS_STAY_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known NOT to be jq's register (#4550), 0 for none.
         static OFF_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth whose enclosing `reduce` source moved jq's register (#4484), 0 for none.
@@ -77596,6 +77657,30 @@ mod fold_body {
     /// Whether the body being resolved is the one [`state_handed_on`] marked.
     pub(crate) fn state_handed_on_here() -> bool {
         depth() > 0 && HANDED_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`foreach_handlers_stay`] mark.
+    pub(crate) struct HandlersStayGuard(u32);
+
+    /// Marks the UPDATE about to be entered (one level deeper than now) as one whose `try` handlers that emit hand on a
+    /// value without navigating (`catch $i`, `catch .`, a literal), so jq's register is where the `try` entered with it
+    /// when they run (#5208). A handler that navigates (`catch ($i | .a?)`) moves it, in ways the later steps of the
+    /// `foreach` do not read yet.
+    pub(crate) fn foreach_handlers_stay() -> HandlersStayGuard {
+        let previous = HANDLERS_STAY_DEPTH.with(Cell::get);
+        HANDLERS_STAY_DEPTH.with(|a| a.set(depth() + 1));
+        HandlersStayGuard(previous)
+    }
+
+    impl Drop for HandlersStayGuard {
+        fn drop(&mut self) {
+            HANDLERS_STAY_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`foreach_handlers_stay`] marked.
+    pub(crate) fn foreach_handlers_stay_here() -> bool {
+        depth() > 0 && HANDLERS_STAY_DEPTH.with(Cell::get) == depth()
     }
 
     /// Restores the previous [`acc_off_register`] mark.
@@ -78011,6 +78096,16 @@ mod fold_body {
     }
 
     pub(crate) fn state_handed_on_here() -> bool {
+        false
+    }
+
+    pub(crate) struct HandlersStayGuard;
+
+    pub(crate) fn foreach_handlers_stay() -> HandlersStayGuard {
+        HandlersStayGuard
+    }
+
+    pub(crate) fn foreach_handlers_stay_here() -> bool {
         false
     }
 
