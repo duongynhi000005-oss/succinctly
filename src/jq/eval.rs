@@ -56566,8 +56566,12 @@ fn caught_marker_destructure(source: &Expr) -> Option<(&Expr, &Rc<Tracked>, &[Pa
 /// a refusal into a wrong answer). Nor is a `?//` chain (`routes_destructuring` reads one pattern), whose retry is not
 /// modelled. The `$x | . as P` spelling is read as the bare destructure is (#5206).
 fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -> bool {
-    caught_marker_destructure(source).is_some_and(|(_, marker, patterns)| {
-        routes_destructuring(patterns)
+    caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
+        // The pipe spelling only as far as `bare_bind_source_key` reads it (#5206): the verdict empties a step whose
+        // passing sibling steps that key places, and a source it declines (a body other than `.`, a stage after it, a
+        // `// empty` outside) is empty on one and refused on the other, which a `?` over the path turns into a lost path.
+        (matches!(bind, Expr::AsPattern { .. }) || bare_bind_source_key(source, false).is_some())
+            && routes_destructuring(patterns)
             && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
             && marker.value != *register
             && !holds_nan(register)
