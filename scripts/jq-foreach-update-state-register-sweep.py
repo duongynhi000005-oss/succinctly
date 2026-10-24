@@ -59,7 +59,7 @@ BINDS = [". as $x", ". as $x", ".a as $x", ".b as $x", "(.a // .) as $x"]
 OUTERS = ["(.,.)", "(.,.,.a)", "(.,.a)", "(.a,.)", "(.,.a,.)", ".", ".a", "(.,.,.)", "(.a,.a)", "(.,1,.)"]
 INITS = ["0", "null", "[]", ".", "false", "1"]
 # what the handler of the `try` around the nested fold hands on as the next state
-HANDLERS = ["$i", "$i", "$x", ".", "null", "0", "$i | .a?"]
+HANDLERS = ["$i", "$i", "$x", ".", "null", "0", "$i | .a?", "($i, $i)", "($i, 0)", "($x, $i)"]
 # the nested fold's source: a destructure of `$x`, behind no wrapper, a `try` or a `?`
 PATTERNS = [
     "$x as {a:$q} | .",

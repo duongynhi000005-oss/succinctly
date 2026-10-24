@@ -123,11 +123,12 @@ fn test_5208_a_rebuilt_state_is_not_the_node_x_is() -> Result<()> {
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5208_a_navigating_handler_keeps_its_refusal() -> Result<()> {
-    let (stdout, _stderr, code) = run_jq_stdin_streams(
+    let (stdout, stderr, code) = run_jq_stdin_streams(
         r"((. as $x | foreach (.,.,.a) as $i (.; try (foreach ($x as {a:$q} | .) as $y (0; .a?; $y)) catch ($i | .a?); .))?) |= 9",
         r#"{"a":{"a":null},"c":1}"#,
         &["-c"],
     )?;
     assert_eq!((stdout.as_str(), code), ("", 5));
+    assert!(stderr.contains("Invalid path expression"), "{stderr}");
     Ok(())
 }

@@ -43050,8 +43050,8 @@ fn source_destructure_raises(item: &Expr, register: &OwnedValue) -> bool {
     }
 }
 
-/// Whether every `try` handler that can emit in `update` hands its value on without navigating (#5208): `catch $i`, `catch .`,
-/// a literal. jq runs a handler with its register where the `try` entered it, and a handler that navigates (`catch ($i |
+/// Whether every `try` handler that can emit in `update` is one that cannot move jq's register (#5208,
+/// [`cannot_move_register`]): `catch $i`, `catch .`, a literal. jq runs a handler with its register where the `try` entered it, and a handler that navigates (`catch ($i |
 /// .a?)`) moves it, which the steps after the one that ran it place wrongly, so a `?` around the target swallows the error
 /// that placement raises and a write lands on a prefix of the paths jq writes.
 fn update_handlers_stay_put(update: &Expr) -> bool {
@@ -60654,8 +60654,7 @@ fn drive_fold_source_with<S: EvalSemantics>(
             !is_null_or_bool(&register)
                 && register == *ambient.value
                 && (source_destructure_raises(source, &register)
-                    || (S::TAG == EvalTag::Jq
-                        && fold_body::foreach_handlers_stay_here()
+                    || (fold_body::foreach_handlers_stay_here()
                         && source_destructure_passes_on_register(source, &register)))
         });
     if (destructures_unplaced_register || marker_destructures_unplaced_register)
@@ -67742,7 +67741,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             let _state_handed_on =
                                 update_tail_unchecked.then(fold_body::state_handed_on);
                             // #5208: ...and whether every handler that emits there hands its value on without moving jq's register.
-                            let _handlers_stay = (S::TAG == EvalTag::Jq
+                            // Only where the register above is named: that is the one reader, and the walk is per step.
+                            let _handlers_stay = (_register.is_some()
                                 && update_handlers_stay_put(item))
                             .then(fold_body::foreach_handlers_stay);
                             let _foreach_body = if input_cannot_move && !inherits_moved_loop {
