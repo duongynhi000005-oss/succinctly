@@ -8,9 +8,9 @@ this is that grid. `jq-fold-body-register-grid-sweep.py` has no `if` UPDATE, so 
 
 Grid: UPDATE (`if C then A else B end`, `C` in `.a`, `.`, `.b`, a literal in one arm (`1`, `null`, `true`,
 `false`) and the fold FE in the other, both orders, plus `elif` chains) x FE (a `try`-caught `$x` destructure, a
-`?//` chain) x wrapper (none, `try .. catch`, comma siblings, `?`, `| .`, `label`) x loop source x EXTRACT x INIT (one,
+`?//` chain) x wrapper (none, `try .. catch`, comma siblings, `?`, `| .`, `label`) x loop source (short, ten items long, unbounded) x EXTRACT x INIT (one,
 two and three values, and two behind a pipe, which succinctly's static bound cannot count) x the loop's pattern (`$i`,
-`?//` chains) x write context x document. The full product is about 4.3 million rows: `--n` (40,000 by default) samples
+`?//` chains) x write context x document. The full product is about 7.9 million rows: `--n` (40,000 by default) samples
 it deterministically (`--seed`), decoding each sampled index into its row, and `--only` narrows it to one axis value
 (`--only null-then`, `--only alt-obj`) to sample that slice densely.
 
@@ -85,7 +85,21 @@ WRAPPERS = [
     ("label", "label $l | {U}"),
     ("comma-empty", "({U}, empty)"),
 ]
-SOURCES = [".a", "(.a,.)", "(.,.a)", ".", "(.a,.a)", "(.a,.b)"]
+# #5113: ...and sources whose steps the lookahead cannot count one by one: one longer than its cap (ten items) and the
+# unbounded `.[]`, `.[]?` and `range(3)`, whose bound no static shape says.
+SOURCES = [
+    ".a",
+    "(.a,.)",
+    "(.,.a)",
+    ".",
+    "(.a,.a)",
+    "(.a,.b)",
+    "(.,.a,.,.a,.,.a,.,.a,.,.a)",
+    "(.a,.a,.a,.a,.a,.a,.a,.a,.a,.a)",
+    ".[]",
+    ".[]?",
+    "range(3)",
+]
 EXTRACTS = [".a", "$i", "."]
 INITS = [("init1", "."), ("initN", "(., .a)"), ("init3", "(., null, .a)"), ("initU", "(.,.) | .")]
 # #5132: the loop's own pattern, a `?//` chain included: a retry runs UPDATE again on the state a step stored, and a
@@ -111,7 +125,7 @@ DOCS = [
 
 
 def build_axes(control):
-    """The grid's axes, in `itertools.product` order: a row is one pick from each (#5132: the product is about 3
+    """The grid's axes, in `itertools.product` order: a row is one pick from each (#5132: the product is about 7.9
     million rows, so rows are decoded from an index rather than all built)."""
     updates = []
     for (cond_name, cond), (an, then, els) in itertools.product(CONDS, CONTROL_ARMS if control else ARMS):

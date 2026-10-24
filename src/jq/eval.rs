@@ -52002,9 +52002,10 @@ struct ForkTail<'u> {
     fork_last: bool,
     /// The step is the `foreach`'s last, of its last fork.
     foreach_last: bool,
-    /// UPDATE, how many steps follow this one in the fork (when the source's bound says and there are any), and
-    /// whether the fork's last of them is the `foreach`'s last step (the fork is INIT's last).
-    ahead: Option<(&'u Expr, usize, bool)>,
+    /// UPDATE, how many steps follow this one in the fork (when the source's bound says and there are any; `None`
+    /// when it cannot, so any number), and whether the fork's last of them is the `foreach`'s last step (the fork is
+    /// INIT's last).
+    ahead: Option<(&'u Expr, Option<usize>, bool)>,
     /// What the step stores as the state the next one enters with (#5113).
     stored: Stored<'u>,
 }
@@ -52053,25 +52054,60 @@ impl ForkTail<'_> {
 /// step is the `foreach`'s only when `ends_foreach`: on an earlier INIT fork's it reads no handler literal. UPDATE is the
 /// `if` itself, behind a handler, `?` or a no-op stage, or a comma of literals and such `if`s ([`step_stored_literal`]):
 /// a comma stores its last emission. A step that raises ends the `foreach`, so it may be reached past the step cap.
+///
+/// `after` is `None` when the source's bound cannot say how many steps follow (`.[]`, `range(n)`): then it is any
+/// number, none included, so every step is read as the last would be. The state is one of the literals UPDATE names, so
+/// the steps cycle: a step that stores a state an earlier one entered with repeats the steps between, which were
+/// already read, and a source longer than [`FORK_LOOKAHEAD_STEPS`] is read through its cycle rather than step by step.
 fn later_steps_store_literals<S: EvalSemantics>(
     update: &Expr,
     mut state: OwnedValue,
-    after: usize,
+    after: Option<usize>,
     ends_foreach: bool,
 ) -> bool {
-    for step in 1..=after.min(FORK_LOOKAHEAD_STEPS) {
+    // The state each step so far entered with.
+    let mut entered: Vec<OwnedValue> = Vec::new();
+    for step in 1..=FORK_LOOKAHEAD_STEPS {
+        let final_step = after == Some(step);
         let tail = ForkTail {
-            foreach_last: step < after || ends_foreach,
+            foreach_last: !final_step || ends_foreach,
             ..ForkTail::LAST
         };
-        match step_stored_literal::<S>(update, &state, tail) {
-            StepStored::Literal(next) => state = next,
+        let next = match step_stored_literal::<S>(update, &state, tail) {
+            StepStored::Literal(next) => next,
             StepStored::Raises => return true,
             StepStored::Unknown => return false,
+        };
+        if final_step {
+            return true;
         }
+        entered.push(state);
+        // The same literal, spelling included (`1` and `1.0` are equal numbers a condition can tell apart).
+        let next_text = next.to_json_jq_preserve();
+        let Some(from) = entered
+            .iter()
+            .position(|seen| seen.to_json_jq_preserve() == next_text)
+        else {
+            state = next;
+            continue;
+        };
+        // `next` enters step `step + 1` as `entered[from]` entered step `from + 1`: the steps from there repeat with
+        // period `step - from`.
+        let Some(after) = after else {
+            return true;
+        };
+        let period = step - from;
+        let at = from + (after - 1 - from) % period;
+        let tail = ForkTail {
+            foreach_last: ends_foreach,
+            ..ForkTail::LAST
+        };
+        return !matches!(
+            step_stored_literal::<S>(update, &entered[at], tail),
+            StepStored::Unknown
+        );
     }
-    // Past the cap only a step that raised could have ended the `foreach` early.
-    after <= FORK_LOOKAHEAD_STEPS
+    false
 }
 
 /// What a later step of [`later_steps_store_literals`] leaves behind.
@@ -66925,10 +66961,9 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     // Nor where UPDATE holds a `?//` chain of its own: answering an earlier fork reaches the later ones, and a later fork
     // whose fold source is such a chain was answered as empty where jq emits (2 of 30,000 differential rows turned a
     // refusal into a truncated answer).
-    let fork_source_bound =
-        (S::TAG == EvalTag::Jq && patterns.len() == 1 && !has_pattern_alternatives(update))
-            .then(|| source_output_bound(input))
-            .flatten();
+    let fork_lookahead =
+        S::TAG == EvalTag::Jq && patterns.len() == 1 && !has_pattern_alternatives(update);
+    let fork_source_bound = fork_lookahead.then(|| source_output_bound(input)).flatten();
     // #2979: see `resolve_reduce`'s identical hoist.
     let alternative_names = (patterns.len() > 1).then(|| pattern_alternatives_var_names(patterns));
     let alternatives = alternative_names.as_deref();
@@ -67671,19 +67706,23 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                         let fork_tail = ForkTail {
                             fork_last: fork_last_step,
                             foreach_last: last_step,
-                            ahead: fork_source_bound
-                                .and_then(|bound| bound.checked_sub(steps))
-                                .filter(|after| *after > 0)
-                                .map(|after| {
-                                    (
-                                        // The unbound UPDATE: `$i` is this step's value in `bound_update`, and each
-                                        // later step has its own, so a literal it names is no literal there.
-                                        update,
-                                        after,
-                                        run_bounds
-                                            .is_some_and(|(forks, _)| forks == fork_index + 1),
-                                    )
-                                }),
+                            ahead: match fork_source_bound {
+                                Some(bound) => bound
+                                    .checked_sub(steps)
+                                    .filter(|after| *after > 0)
+                                    .map(Some),
+                                // A source whose bound cannot be said may have any number of steps left.
+                                None => fork_lookahead.then_some(None),
+                            }
+                            .map(|after| {
+                                (
+                                    // The unbound UPDATE: `$i` is this step's value in `bound_update`, and each
+                                    // later step has its own, so a literal it names is no literal there.
+                                    update,
+                                    after,
+                                    run_bounds.is_some_and(|(forks, _)| forks == fork_index + 1),
+                                )
+                            }),
                             stored: step_stored::<S>(update, &entry_state),
                         };
                         // #5110: ...and `(LIT | FE) // R`, whose operands are the items, the right one run only when the left
