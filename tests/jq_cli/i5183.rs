@@ -152,3 +152,62 @@ fn test_5183_nested_foreach_bind_shapes_that_keep_their_answer() -> Result<()> {
         ),
     ])
 }
+
+/// #5183: the loop variable shadowing the `$x` it destructures, an outer EXTRACT that navigates, a `del` over two steps, and the
+/// pipe tails and heads on which the widening stays off (`FE | 7`, `FE | null`, `.a | FE`) answer as jq does, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5183_nested_foreach_bind_boundaries() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (1) as $i (null; foreach ($x as {a:$a} | .) as $x (.; $x; $x); null))]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (1) as $i (null; foreach ($x as {a:$a} | .) as $y (.; $y; $y); .a?))]",
+            "[[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#". as $x | try del(foreach (1,2) as $i (.; foreach ($x as {a:$a} | .) as $y (.; $y; 5); $i|.)) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.b) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; $y) | 7; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null}"#,
+            r". as $x | [path(foreach (.b) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; 5) | null; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5199: a bare caught-bind `foreach` piped into a stage that computes a value is read as the bind passing even where `$x` is
+/// not the step's register. jq's answer is `[]` (the pattern's step raises, the `try` empties the source); this pins what
+/// is answered until #5199 checks the marker on that route.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_5183_value_tail_after_the_bind_is_read_as_passing_until_5199() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[(
+        r#"{"a":null}"#,
+        r". as $x | [path(foreach (.b) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .) | 7; $i))]",
+        "[[\"b\",\"a\"]]\n",
+        "",
+        0,
+    )])
+}
