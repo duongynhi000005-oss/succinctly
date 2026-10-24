@@ -59,7 +59,7 @@ def mk():
     prog='%s | foreach %s as $i (%s; %s; %s)'%(random.choice(xbind),random.choice(outer_src),random.choice(outer_init),upd,random.choice(outer_ext))
     f=random.choice(ctx).replace('{}',prog)
     return random.choice(docs), f
-rows=list({mk() for _ in range(N)})
+rows=list(dict.fromkeys(mk() for _ in range(N)))
 def run(cmd, inp, f):
     try:
         p=subprocess.run(cmd+['-c',f],input=inp.encode(),capture_output=True,timeout=20)
