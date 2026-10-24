@@ -556,3 +556,409 @@ fn every_prelude_call_resolves_5223() {
         }
     });
 }
+
+/// `sort_by`/`group_by`/`unique`/`min_by`/`max_by` run their `builtin.jq` bodies over
+/// native `_sort_by_impl`-style helpers, errors included.
+#[test]
+fn the_sort_group_and_min_max_helpers_keep_jqs_answers_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r"[3,1,2]",
+                r"sort_by(-.), group_by(. > 1), unique, unique_by(. % 2), min_by(.), max_by(.)",
+                ok(&[r"[3,2,1]", r"[[1],[3,2]]", r"[1,2,3]", r"[2,3]", r"1", r"3"]),
+            ),
+            (
+                r"[[1],[1]]",
+                r"[min_by(.), max_by(.)] | map(. == [1])",
+                ok(&[r"[true,true]"]),
+            ),
+            (
+                r"[]",
+                r"min_by(.), max_by(.), sort_by(.), group_by(.)",
+                ok(&[r"null", r"null", r"[]", r"[]"]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"try sort_by(.) catch .",
+                ok(&[
+                    r#""object ({\"a\":1}) and array ([[1]]) cannot be sorted, as they are not both arrays""#,
+                ]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"try group_by(.) catch .",
+                ok(&[
+                    r#""object ({\"a\":1}) and array ([[1]]) cannot be sorted, as they are not both arrays""#,
+                ]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"try min_by(.) catch .",
+                ok(&[r#""object ({\"a\":1}) and array ([[1]]) cannot be iterated over""#]),
+            ),
+            (
+                r"[3,1,2]",
+                r"path(min_by(.))",
+                err(&[], r"Invalid path expression with result 1"),
+            ),
+        ]);
+    });
+}
+
+/// `indices`/`index`/`rindex` and `debug(msg)` run their `builtin.jq` bodies, so
+/// `index` navigates its fresh `indices` result (jq raises on it in path mode).
+#[test]
+fn the_index_family_runs_its_builtin_jq_body_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#""xyxy""#,
+                r#"indices("x"), index("y"), rindex("x"), indices("")"#,
+                ok(&[r"[0,2]", r"1", r"2", r"[]"]),
+            ),
+            (
+                r"[1,2,1,2]",
+                r"indices(1), indices([1,2]), index(2), rindex(2)",
+                ok(&[r"[0,2]", r"[0,2]", r"1", r"3"]),
+            ),
+            (r#"{"a":1}"#, r#"try indices("a") catch ."#, ok(&[r"1"])),
+            (
+                r#""xyx""#,
+                r#"path(.[0:1] | index("x"))"#,
+                err(
+                    &[],
+                    r"Invalid path expression near attempt to access element 0 of [0]",
+                ),
+            ),
+            (
+                r"[1,2]",
+                r#"debug("m"), [debug(.)]"#,
+                ok(&[r"[1,2]", r"[[1,2]]"]),
+            ),
+        ]);
+    });
+}
+
+/// The update-assignment operators, negation, interpolation, the generator
+/// builtins, constants and object construction.
+#[test]
+fn operators_folds_and_generators_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#"{"a":5}"#,
+                r".a -= 1, .a *= 2, .a /= 2, .a %= 3, .b //= 7",
+                ok(&[
+                    r#"{"a":4}"#,
+                    r#"{"a":10}"#,
+                    r#"{"a":2.5}"#,
+                    r#"{"a":2}"#,
+                    r#"{"a":5,"b":7}"#,
+                ]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r"-(.a), (.a | not), ([.a, 1] | not)",
+                ok(&[r"-5", r"false", r"false"]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r"-1.5, [-1.5, 1+2, 1 < 2, {b:1, b:2}]",
+                ok(&[r"-1.5", r#"[-1.5,3,true,{"b":2}]"#]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r#""x\(.a)y\(.a + 1)", @base64 "\(.a)", @text"#,
+                ok(&[r#""x5y6""#, r#""NQ==""#, r#""{\"a\":5}""#]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r"first(range(3; 10)), last(range(3)), nth(1; range(5)), [limit(2; repeat(.a))]",
+                ok(&[r"3", r"2", r"1", r"[5,5]"]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r"[.a | until(. > 20; . * 2)], [.a | while(. < 20; . * 2)], [range(0; 10; 3)], [range(0.5; 2)]",
+                ok(&[r"[40]", r"[5,10]", r"[0,3,6,9]", r"[0.5,1.5]"]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r#"try ([range("a"; 2)]) catch ., [limit(3; range(0; nan))]"#,
+                ok(&[r#""Range bounds must be numeric""#, r"[0,1,2]"]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r#"$__loc__, {a: 1, a: 2}, [1 + 1, 2 < 1], {(.a | tostring): 1, ("5"): 2}"#,
+                ok(&[
+                    r#"{"file":"<top-level>","line":1}"#,
+                    r#"{"a":2}"#,
+                    r"[2,false]",
+                    r#"{"5":2}"#,
+                ]),
+            ),
+            (
+                r#"{"a":5}"#,
+                r"try {(.a): 1} catch .",
+                ok(&[r#""Cannot use number (5) as object key""#]),
+            ),
+        ]);
+    });
+}
+
+/// Every index, slice and iterate form, optional or not, including the shapes
+/// `jv_get` delegates and the errors they raise.
+#[test]
+fn index_slice_and_iterate_forms_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r"[1,2,3]",
+                r".[0]?, .[1:]?, (2 as $k | .[$k]?), (1 as $a | .[$a:]?), (1 as $b | .[:$b]), (1 as $b | .[:$b]?)",
+                ok(&[r"1", r"[2,3]", r"3", r"[2,3]", r"[1]", r"[1]"]),
+            ),
+            (
+                r"[1,2,3]",
+                r#".[nan], .[-1], .[10], (try .["a"] catch .), (try .[[1]] catch .), .[[2,3]]"#,
+                ok(&[
+                    r"null",
+                    r"3",
+                    r"null",
+                    r#""Cannot index array with string \"a\"""#,
+                    r"[0]",
+                    r"[1]",
+                ]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"(1 | .a?), (try (1 | .a) catch .), [.[]?], (try (1 | .[]) catch .), [1 | .[]?]",
+                ok(&[
+                    r#""Cannot index number with string \"a\"""#,
+                    r"[1]",
+                    r#""Cannot iterate over number (1)""#,
+                    r"[]",
+                ]),
+            ),
+            (
+                r#""abcd""#,
+                r#".[1:3], .[nan:2], .[1:nan], (try .["x":2] catch .), .[-2:]"#,
+                ok(&[
+                    r#""bc""#,
+                    r#""ab""#,
+                    r#""bcd""#,
+                    r#""Array/string slice indices must be integers""#,
+                    r#""cd""#,
+                ]),
+            ),
+            (
+                r"null",
+                r".a, .[0], .[1:2], path(.a.b[0])",
+                ok(&[r"null", r"null", r"null", r#"["a","b",0]"#]),
+            ),
+            (
+                r#"{"a":[1,2]}"#,
+                r#"getpath(["a",1]), (try getpath("a") catch .), [paths], path(getpath(["a"]) | .[0])"#,
+                ok(&[
+                    r"2",
+                    r#""Path must be specified as an array""#,
+                    r#"[["a"],["a",0],["a",1]]"#,
+                    r#"["a",0]"#,
+                ]),
+            ),
+        ]);
+    });
+}
+
+/// Object and array patterns, `$name: pattern` binds, computed keys and `?//`
+/// chains, in `as` and in a fold.
+#[test]
+fn destructuring_patterns_and_alternatives_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r". as {a:$x, $b} | [$x, $b]",
+                ok(&[r"[1,[2]]"]),
+            ),
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r". as {$a: $v} | [$a, $v]",
+                ok(&[r"[1,1]"]),
+            ),
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r#". as {("a","b"): $v} | $v"#,
+                ok(&[r"1", r"[2]"]),
+            ),
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r"[. as {a: [$x]} ?// {b: [$x]} | $x]",
+                ok(&[r"[2]"]),
+            ),
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r"[.[] as [$x] ?// $x | $x]",
+                ok(&[r"[1,2]"]),
+            ),
+            (
+                r#"{"a":1,"b":[2]}"#,
+                r"reduce .b[] as [$q] ?// $q (0; . + $q)",
+                ok(&[r"2"]),
+            ),
+        ]);
+    });
+}
+
+/// `try`, nested labels, a label's downstream error, and delegated C builtins
+/// (several outputs, an error, a variable in an argument).
+#[test]
+fn try_labels_and_delegated_builtins_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#"{"a":1}"#,
+                r#"try .a catch ., (try error({}) catch .), [.[] | try error("x") catch .]"#,
+                ok(&[r"1", r"{}", r#"["x"]"#]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r#"(label $f | 1, 2) | if . == 2 then error("e") else . end"#,
+                err(&[r"1"], r"e"),
+            ),
+            (
+                r#"{"a":1}"#,
+                r#"try ((label $f | 1) | error("x")) catch ."#,
+                ok(&[r#""x""#]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"label $f | label $g | 1, break $f",
+                ok(&[r"1"]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"[label $out | foreach (1,2,3) as $i (0; . + $i; ., if . > 2 then break $out else empty end)]",
+                ok(&[r"[1,3]"]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r#".a as $x | "\($x)" as $s | [$s, ($x | has(0)?)]"#,
+                ok(&[r#"["1"]"#]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r"(.a | keys)",
+                err(&[], r"number (1) has no keys"),
+            ),
+            (
+                r#"{"a":1}"#,
+                // `combinations` is delegated and answers several values (no
+                // regex builtin here: `cargo test --lib` builds without it).
+                r#""a,b" | ([[1,2],[3]] | [combinations]), ascii_downcase, ascii_upcase, ltrimstr("a"), tostring"#,
+                ok(&[
+                    r"[[1,3],[2,3]]",
+                    r#""a,b""#,
+                    r#""A,B""#,
+                    r#"",b""#,
+                    r#""a,b""#,
+                ]),
+            ),
+            (
+                r#"{"a":1}"#,
+                r#"path(1 | getpath(["a"])?), [path(..)]"#,
+                ok(&[r#"[[],["a"]]"#]),
+            ),
+        ]);
+    });
+}
+
+/// `jv_identical` on values built directly: computed numbers by their bits,
+/// a document's numbers as literals, containers and strings by allocation.
+#[test]
+fn identity_is_jv_identical_on_every_kind_5223() {
+    on_big_stack(|| {
+        let two = SVal::computed(OwnedValue::Int(2));
+        assert!(identical(&two, &SVal::computed(OwnedValue::Float(2.0))));
+        assert!(!identical(&two, &SVal::computed(OwnedValue::Float(-0.0))));
+        let doc = SVal::from_owned(&OwnedValue::Int(2), NumOrigin::Document);
+        assert!(identical(&doc, &doc.clone()));
+        assert!(!identical(&doc, &two));
+        assert!(!identical(
+            &doc,
+            &SVal::from_owned(&OwnedValue::Int(2), NumOrigin::Document)
+        ));
+        let text = SVal::string("s");
+        assert!(identical(&text, &text.clone()));
+        assert!(!identical(&text, &SVal::string("s")));
+        assert!(identical(&SVal::Null, &SVal::Null));
+        assert!(!identical(&SVal::Bool(true), &SVal::Bool(false)));
+        assert!(!identical(&SVal::Null, &SVal::Bool(false)));
+        let _ = Prelude::default();
+    });
+}
+
+/// What the spike declines rather than answers: a closure call inside a
+/// delegated builtin, `halt_error` (its message is not carried) and the
+/// builtins that read input state.
+#[test]
+fn a_declined_row_is_unsupported_5223() {
+    on_big_stack(|| {
+        for filter in [
+            r#"def f: 1; "\(f)""#,
+            "halt_error",
+            "input_line_number",
+            "input_filename",
+        ] {
+            let run = run(filter, &OwnedValue::Null).expect(filter);
+            assert!(
+                matches!(run.outcome, Outcome::Unsupported(_)),
+                "{filter}: {:?}",
+                run.outcome
+            );
+        }
+    });
+}
+
+/// A run names the stubbed builtins jq could have answered differently on
+/// identity, so the three-way harness can attribute a divergence to the stub.
+#[test]
+fn a_run_names_the_stubbed_builtins_it_touched_5223() {
+    on_big_stack(|| {
+        let run = run(
+            r#"ltrimstr("z"), @text, tostring, ltrimstr("y"), length"#,
+            &OwnedValue::string("x"),
+        )
+        .expect("parses");
+        assert_eq!(run.stubbed, ["Ltrimstr", "Format(Text)", "ToString"]);
+        assert!(matches!(run.outcome, Outcome::Done));
+    });
+}
+
+/// A spelled index or slice bound is recorded as written (`.[1.0]` is
+/// `[1.0]`), and a string slice counts codepoints.
+#[test]
+fn spelled_keys_and_string_slices_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "[1,2,3]",
+                "path(.[1.0]), .[1.0], path(.[1.0:2.50]), path(.[1.0]?)",
+                ok(&["[1.0]", "2", r#"[{"start":1.0,"end":2.50}]"#, "[1.0]"]),
+            ),
+            (
+                "[1,2,3]",
+                "path(.[1.5:3]), .[1.5:3]",
+                ok(&[r#"[{"start":1.5,"end":3}]"#, "[2,3]"]),
+            ),
+            (
+                "null",
+                r#"path(.[1.5:"a"])"#,
+                ok(&[r#"[{"start":1.5,"end":"a"}]"#]),
+            ),
+            (r#""äöü""#, ".[1:]", ok(&[r#""öü""#])),
+            // jq 1.7.1 slices to the end on a NaN end bound; succinctly jq's own
+            // value route answers "" here (a separate bug).
+            (r#""abcd""#, ".[1:nan]", ok(&[r#""bcd""#])),
+        ]);
+    });
+}

@@ -117,3 +117,4 @@ mod i5205;
 mod i5206;
 mod i5208;
 mod i5209;
+mod i5223;
