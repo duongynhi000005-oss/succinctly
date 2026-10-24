@@ -28,6 +28,7 @@ import itertools
 import json
 import subprocess
 import sys
+import time
 
 OUTER = [
     ("fe-lit", "foreach (1,2) as $i (.; {I}; .)"),
@@ -356,6 +357,18 @@ def classify(oracle, got):
     return "DIFF"
 
 
+PROGRESS_EVERY = 2000
+
+
+def progress_line(done, total, elapsed):
+    """`  done/total (elapsed s, rate rows/s, ETA)`: the rate is the run's average so far."""
+    rate = done / elapsed if elapsed > 0 else 0.0
+    left = int(round((total - done) / rate)) if rate > 0 else 0
+    hours, rest = divmod(left, 3600)
+    eta = f"{hours}h{rest // 60:02d}m" if hours else f"{rest // 60}m{rest % 60:02d}s"
+    return f"  {done}/{total} ({elapsed:.0f}s, {rate:.0f} rows/s, ETA {eta})"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bin", required=True, help="succinctly build under test")
@@ -412,8 +425,17 @@ def main():
             classify(oracle, base) if base else None,
         )
 
+    # Progress goes to stderr, as `jq-path-register-sweep.py` does: the full grid is hours long, and a
+    # run that prints nothing until it ends cannot be judged (or killed) early (#5204).
+    results = []
+    started = time.time()
+    print(f"{len(rows)} rows, {args.jobs} jobs", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
-        results = [r for r in ex.map(work, rows) if r]
+        for i, r in enumerate(ex.map(work, rows), 1):
+            if r:
+                results.append(r)
+            if i % PROGRESS_EVERY == 0:
+                print(progress_line(i, len(rows), time.time() - started), file=sys.stderr)
 
     if args.dump:
         with open(args.dump, "w") as out:
