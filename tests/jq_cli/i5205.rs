@@ -113,10 +113,19 @@ fn test_foreach_update_caught_bind_of_a_null_or_boolean_marker_5205() -> Result<
             "",
             0,
         ),
+        // The pipe spelling `$x | . as P | .` of a `null` marker is not read (jq answers `[["a","a"]]`); it refuses as `main` does.
+        (
+            r#"{"a":null}"#,
+            r".a as $x | [path(foreach (.a,.) as $i (.; (foreach (try ($x | . as {a:$a} | .)) as $y (null; .; .)); $i))]",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
     ])
 }
 
-/// #5205: shapes the reading does not cover keep the refusal `main` raised: a nested `foreach` whose INIT navigates
+/// #5205: shapes the reading does not cover keep the refusal `main` raised: the pipe spelling of a `null` marker, and a
+/// nested `foreach` whose INIT navigates
 /// (`.a?`), where lifting the exclusion turned a raise into a write of `{"a":{"a":{"a":{"a":9}}}}` (8 of 12,000 rows
 /// of the first draft's grid).
 #[test]
