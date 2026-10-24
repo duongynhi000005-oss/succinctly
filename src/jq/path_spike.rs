@@ -21,7 +21,9 @@
 //! - Each `Expr` arm follows the bytecode `compile.c` emits for it, cited at
 //!   the arm. The jq-defined builtins run their `builtin.jq` bodies
 //!   ([`PRELUDE`]); the C-coded ones are delegated to the existing evaluator
-//!   and answer a fresh value (the issue's "stubbed to fresh").
+//!   and answer a fresh value, unless jq's own function hands back its input
+//!   or an argument (`c_builtin_identity`), when that value itself is the
+//!   answer.
 //!
 //! It is reachable from `succinctly dev jq-path-spike` (hidden) and from tests,
 //! never from `succinctly jq`. A construct it does not implement raises
@@ -40,15 +42,13 @@ use core::cell::{Cell, RefCell};
 
 use indexmap::IndexMap;
 
+use super::c_builtin_identity::{binop_keeps, format_keeps_input, kept, Kept};
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
     substitute_vars, EvalTag, JqSemantics, QueryResult,
 };
-use super::expr::{
-    ArithOp, Builtin, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
-    SliceBoundKey,
-};
+use super::expr::{Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey};
 use super::parser::parse;
 use super::value::{
     jq_bare_float_display, jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral,
@@ -823,13 +823,9 @@ impl<'e> Interp<'e> {
             }),
             Expr::Builtin(builtin) => self.builtin(expr, builtin, env, input, reg, sink),
             Expr::StringInterpolation(_) => delegate(expr, env, input, reg, sink),
-            Expr::Format(format) => {
-                // `@text` is `f_tostring`, which returns a string input itself.
-                if matches!(format, FormatType::Text) {
-                    self.note_stub("Format(Text)");
-                }
-                delegate(expr, env, input, reg, sink)
-            }
+            // `@text` is `f_tostring`, which returns a string input itself.
+            Expr::Format(format) if format_keeps_input(format, &input) => sink(input, reg),
+            Expr::Format(_) => delegate(expr, env, input, reg, sink),
             Expr::Env => delegate(expr, env, input, reg, sink),
             // `gen_destructure` with a plain `$var`: the source is a subexp,
             // and the body starts from the register at entry.
@@ -1695,6 +1691,16 @@ impl<'e> Interp<'e> {
             Builtin::Path(f) => self.path_mode(f, env, input, reg, sink),
             Builtin::GetPath(p) => self.getpath(p, env, input, reg, sink),
             Builtin::Empty => Ok(()),
+            // `f_min`/`f_max` (`minmax_by(x, x)`) and `f_sort` (`jv_sort(x, x)`)
+            // keep the input's elements; anything but an array is the shipped
+            // builtin's error.
+            Builtin::Min | Builtin::Max if matches!(input, OwnedValue::Array(_)) => {
+                let is_min = matches!(builtin, Builtin::Min);
+                sink(min_max_by(&input, &input, is_min)?, reg)
+            }
+            Builtin::Sort if matches!(input, OwnedValue::Array(_)) => {
+                sink(sort_by_keys(&input, &input, false)?, reg)
+            }
             _ => {
                 if let Some((name, args)) = prelude_call(builtin) {
                     return self.call_prelude(name, &args, env, input, reg, sink);
@@ -1709,7 +1715,9 @@ impl<'e> Interp<'e> {
 
     /// A C builtin: its arguments are subexps the interpreter evaluates itself
     /// (so a closure parameter in one resolves here), then the call is
-    /// delegated with the argument values in place, and answers fresh.
+    /// delegated with the argument values in place. It answers fresh, unless
+    /// the builtin is one that hands back its input or an argument
+    /// ([`kept`]), when that value itself is the answer.
     fn c_builtin(
         &self,
         node: &'e Expr,
@@ -1727,7 +1735,7 @@ impl<'e> Interp<'e> {
                 let call = builtin
                     .with_value_arg(Expr::tracked_value(a.clone()))
                     .expect("value_arg implies with_value_arg");
-                emit_delegated(&Expr::Builtin(call), &input, &[&a], &reg, sink)
+                emit_c_builtin(&Expr::Builtin(call), builtin, &input, &[a], &reg, sink)
             });
         }
         if let Builtin::SetPath(p, v) = builtin {
@@ -1738,9 +1746,15 @@ impl<'e> Interp<'e> {
                         Box::new(Expr::tracked_value(av.clone())),
                         Box::new(Expr::tracked_value(bv.clone())),
                     ));
-                    emit_delegated(&call, &input, &[&av, &bv], &reg, sink)
+                    emit_c_builtin(&call, builtin, &input, &[av, bv.clone()], &reg, sink)
                 })
             });
+        }
+        if matches!(
+            super::walk::builtin_kids(builtin),
+            super::walk::BuiltinKids::None
+        ) {
+            return emit_c_builtin(node, builtin, &input, &[], &reg, sink);
         }
         delegate(node, env, input, reg, sink)
     }
@@ -1905,26 +1919,6 @@ fn is_label_payload(error: &EvalError, id: u64) -> bool {
     error.clone().payload() == label_value(id)
 }
 
-/// The operand `binop_plus`/`binop_multiply` hand back unchanged, keeping its
-/// identity: `null + b` is `b`, `a + null` is `a`, and an empty right-hand
-/// array or object (`a + []`, `a + {}`, `a * {}`) leaves `a` itself. Every
-/// other result is a fresh `jv`.
-fn binop_keeps<'v>(op: ArithOp, l: &'v OwnedValue, r: &'v OwnedValue) -> Option<&'v OwnedValue> {
-    match (op, l, r) {
-        (ArithOp::Add, OwnedValue::Null, _) => Some(r),
-        (ArithOp::Add, _, OwnedValue::Null) => Some(l),
-        (ArithOp::Add, OwnedValue::Array(_), OwnedValue::Array(items)) if items.is_empty() => {
-            Some(l)
-        }
-        (ArithOp::Add | ArithOp::Mul(_), OwnedValue::Object(_), OwnedValue::Object(map))
-            if map.is_empty() =>
-        {
-            Some(l)
-        }
-        _ => None,
-    }
-}
-
 /// The fold's input as `DUPN` leaves it: `gen_reduce`/`gen_foreach` start
 /// each loop with `DUPN`, which *moves* the input out of a stack slot that
 /// `INIT`'s fork point shares, so every `INIT` output after the first runs
@@ -2031,26 +2025,14 @@ fn min_max_by(values: &OwnedValue, keys: &OwnedValue, is_min: bool) -> Result<Ow
     Ok(best.clone())
 }
 
-/// A builtin the fresh stub may answer differently from jq on identity: a C
-/// builtin jq lets hand back its input (`ltrimstr`/`rtrimstr` with no match,
-/// `tostring` of a string, `tonumber` of a number, `delpaths([])`,
-/// `setpath([]; v)`, `min`/`max` and `sort`, whose elements are the input's),
-/// or a jq-defined builtin the prelude does not run, whose body navigates its
-/// input.
+/// A jq-defined builtin the prelude does not run yet, whose `builtin.jq` body
+/// navigates its input: its answer through the shipped evaluator is fresh,
+/// where jq's body could keep the register.
 fn stub_risk(builtin: &Builtin) -> bool {
     use Builtin as B;
     matches!(
         builtin,
-        B::Ltrimstr(_)
-            | B::Rtrimstr(_)
-            | B::ToString
-            | B::ToNumber
-            | B::DelPaths(_)
-            | B::SetPath(..)
-            | B::Min
-            | B::Max
-            | B::Sort
-            | B::Match(_)
+        B::Match(_)
             | B::MatchFlags(..)
             | B::Capture(_)
             | B::CaptureFlags(..)
@@ -2406,6 +2388,38 @@ fn delegate<'e>(
     let expr = substitute_vars(expr, bound.iter().map(|(n, v)| (*n, v)));
     let values: Vec<&OwnedValue> = bound.iter().map(|(_, v)| v).collect();
     emit_delegated(&expr, &input, &values, &reg, sink)
+}
+
+/// Emit what the existing evaluator answers for C builtin `builtin` (called
+/// as `expr`, its arguments' values `args` in place) on `input`: the input or
+/// argument itself when the builtin hands it back unchanged ([`kept`]), a
+/// fresh value otherwise. The call runs either way, for its side effects
+/// (`debug`) and its errors.
+fn emit_c_builtin(
+    expr: &Expr,
+    builtin: &Builtin,
+    input: &OwnedValue,
+    args: &[OwnedValue],
+    reg: &Reg,
+    sink: &mut Sink<'_>,
+) -> R {
+    let (outputs, control) = delegate_eval(expr, input);
+    let keep = kept(builtin, input, args);
+    let mut inputs: Vec<&OwnedValue> = Vec::with_capacity(args.len() + 1);
+    inputs.push(input);
+    inputs.extend(args);
+    for v in outputs {
+        let value = match keep {
+            Some(Kept::Input) => input.clone(),
+            Some(Kept::Arg(i)) => args[i].clone(),
+            None => fresh(v, &inputs),
+        };
+        sink(value, reg.clone())?;
+    }
+    match control {
+        Some(control) => Err(control_raise(control)),
+        None => Ok(()),
+    }
 }
 
 /// Emit what the existing evaluator answers for `expr` on `input`, each

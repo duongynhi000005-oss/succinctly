@@ -84,8 +84,12 @@ fn the_spike_entry_marks_declined_and_stubbed_runs_5223() -> Result<()> {
     assert!(err.contains("path-spike: unsupported: "), "{err}");
     let (_, _, rc) = spike(&["-n", "$a"], None)?;
     assert_eq!(rc, 3);
+    let (out, err, rc) = spike(&["-c", r#"[scan("x")]"#], Some(r#""x""#))?;
+    assert_eq!((out.as_str(), rc), ("[\"x\"]\n", 0));
+    assert!(err.contains("path-spike: stubbed: Scan"), "{err}");
+    // A C builtin that hands back its input keeps the path, as in jq 1.7.1.
     let (out, err, rc) = spike(&["-c", r#"path(.a | ltrimstr("z"))"#], Some(r#"{"a":"x"}"#))?;
-    assert_eq!((out.as_str(), rc), ("", 5));
-    assert!(err.contains("path-spike: stubbed: Ltrimstr"), "{err}");
+    assert_eq!((out.as_str(), rc), ("[\"a\"]\n", 0));
+    assert!(!err.contains("stubbed"), "{err}");
     Ok(())
 }

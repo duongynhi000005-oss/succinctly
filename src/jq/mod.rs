@@ -71,6 +71,7 @@
 //! ```
 
 mod array_index;
+mod c_builtin_identity;
 mod collect_object;
 mod deferred_bind;
 pub mod document;

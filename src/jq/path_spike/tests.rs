@@ -159,17 +159,14 @@ fn the_issues_live_probes_match_jq_5223() {
 }
 
 /// `ltrimstr` with no match returns its input in jq (`f_ltrimstr`), so the
-/// path survives. The spike stubs every C builtin to a fresh result, as
-/// Phase 0 specifies; Phase 1's table of builtins that can return their input
-/// closes this row. Pinned so the gap is visible, not silent.
+/// path survives; the C-builtin table (`c_builtin_identity`) says so.
 #[test]
-fn a_c_builtin_that_returns_its_input_is_fresh_under_the_stub_5223() {
+fn a_c_builtin_that_returns_its_input_keeps_the_path_5223() {
     on_big_stack(|| {
         check(&[(
             r#"{"a":"x"}"#,
             r#"path(.a | ltrimstr("z"))"#,
-            // jq 1.7.1: ["a"]
-            err(&[], r#"Invalid path expression with result "x""#),
+            ok(&[r#"["a"]"#]),
         )]);
     });
 }
@@ -933,11 +930,11 @@ fn a_declined_row_is_unsupported_5223() {
 fn a_run_names_the_stubbed_builtins_it_touched_5223() {
     on_big_stack(|| {
         let run = run(
-            r#"ltrimstr("z"), @text, tostring, ltrimstr("y"), length"#,
+            r#"ltrimstr("z"), @text, tostring, [scan("x")], length"#,
             &OwnedValue::string("x"),
         )
         .expect("parses");
-        assert_eq!(run.stubbed, ["Ltrimstr", "Format(Text)", "ToString"]);
+        assert_eq!(run.stubbed, ["Scan"]);
         assert!(matches!(run.outcome, Outcome::Done));
     });
 }
@@ -996,20 +993,26 @@ fn owned_summary(prelude: &Prelude, program: &Expr, doc: &OwnedValue) -> Summary
     summary(&run.outputs, ending)
 }
 
+/// The reference's answer, or `None` when it answered a builtin through its
+/// fresh stub, which the C-builtin table now answers as jq does (its rows are
+/// pinned against jq in `c_builtin_identity`).
 fn reference_summary(
     prelude: &super::reference::Prelude,
     program: &Expr,
     doc: &OwnedValue,
-) -> Summary {
+) -> Option<Summary> {
     use super::reference::{Interp as RefInterp, Outcome as RefOutcome};
     let run = RefInterp::new(prelude).run(program, doc);
+    if !run.stubbed.is_empty() {
+        return None;
+    }
     let ending = match run.outcome {
         RefOutcome::Done => String::from("done"),
         RefOutcome::Error(payload) => format!("error {}", payload.to_json_jq_preserve()),
         RefOutcome::Halt(code) => format!("halt {code}"),
         RefOutcome::Unsupported(what) => format!("unsupported {what}"),
     };
-    summary(&run.outputs, ending)
+    Some(summary(&run.outputs, ending))
 }
 
 fn parse_doc(doc: &str) -> OwnedValue {
@@ -1102,7 +1105,8 @@ fn differential_corpus() -> Vec<(String, String)> {
 }
 
 /// The `OwnedValue` interpreter answers exactly what the Phase 0 `SVal`
-/// reference answers, on every row of [`differential_corpus`].
+/// reference answers, on every row of [`differential_corpus`] the reference
+/// answered without its fresh stub.
 #[test]
 fn owned_interpreter_matches_the_sval_reference_5223() {
     on_big_stack(|| {
@@ -1118,8 +1122,10 @@ fn owned_interpreter_matches_the_sval_reference_5223() {
                 continue;
             }
             let input = parse_doc(&doc);
+            let Some(expected) = reference_summary(&reference, &program, &input) else {
+                continue;
+            };
             let owned = owned_summary(&prelude, &program, &input);
-            let expected = reference_summary(&reference, &program, &input);
             compared += 1;
             if owned != expected {
                 differ.push(format!(
