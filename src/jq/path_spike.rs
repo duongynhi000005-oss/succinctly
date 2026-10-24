@@ -9,7 +9,7 @@
 //! (`jv_identical`) at three sites: the `INDEX`/`EACH` opcodes, `getpath`'s
 //! `_jq_path_append`, and `PATH_END`. This module is that model, written down:
 //!
-//! - [`Reg`] is the register. Every output of [`Interp::eval`] carries its
+//! - `Reg` is the register. Every output of `Interp::eval` carries its
 //!   own, so a generator resumed for its next output continues from the
 //!   register it had, which is what jq's fork-point restore amounts to.
 //! - [`SVal`] is a value with `jv` identity: arrays, objects, strings and
@@ -411,10 +411,10 @@ impl<'e> Env<'e> {
 /// is spelled `$v`.
 ///
 /// Bodies call one another through the `Builtin` variants they parse to,
-/// which [`prelude_call`] maps back here, plus a few direct `_sp_` calls. The
+/// which `prelude_call` maps back here, plus a few direct `_sp_` calls. The
 /// C functions those bodies call that succinctly has no builtin for
 /// (`_sort_by_impl`, `_strindices`, ...) are `_sp_hook_*` calls, answered by
-/// [`Interp::hook`].
+/// `Interp::hook`.
 pub const PRELUDE: &str = r#"
 def _sp_select(f): if f then . else empty end;
 def _sp_map(f): [.[] | f];
