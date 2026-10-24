@@ -539,6 +539,37 @@ fn every_prelude_call_resolves_5223() {
             "index(1)",
             "rindex(1)",
             "debug(.)",
+            "isfinite",
+            "halt_error",
+            "todate",
+            "fromdate",
+            "todateiso8601",
+            "fromdateiso8601",
+            r#"match("a")"#,
+            r#"match("a"; "g")"#,
+            r#"test("a")"#,
+            r#"test("a"; "g")"#,
+            r#"capture("a")"#,
+            r#"capture("a"; "g")"#,
+            r#"scan("a")"#,
+            r#"scan("a"; "g")"#,
+            r#"splits("a")"#,
+            r#"splits("a"; "g")"#,
+            r#"split("a"; "g")"#,
+            r#"sub("a"; "b")"#,
+            r#"sub("a"; "b"; "g")"#,
+            r#"gsub("a"; "b")"#,
+            r#"gsub("a"; "b"; "g")"#,
+            "combinations",
+            "combinations(2)",
+            "transpose",
+            "truncate_stream(.)",
+            "fromstream(.)",
+            "tostream",
+            "bsearch(1)",
+            "INDEX(.)",
+            "INDEX(.; .)",
+            "leaf_paths",
         ];
         for call in calls {
             let expr = parse(call).expect(call);
@@ -902,18 +933,12 @@ fn identity_is_jv_identical_on_every_kind_5223() {
     });
 }
 
-/// What the interpreter declines rather than answers: a closure call inside a
-/// delegated builtin, `halt_error` (its message is not carried) and the
-/// builtins that read input state.
+/// What the interpreter declines rather than answers: `halt_error` (its
+/// message is not carried) and the builtins that read input state.
 #[test]
 fn a_declined_row_is_unsupported_5223() {
     on_big_stack(|| {
-        for filter in [
-            r#"def f: 1; "\(f)""#,
-            "halt_error",
-            "input_line_number",
-            "input_filename",
-        ] {
+        for filter in ["halt_error", "input_line_number", "input_filename"] {
             let run = run(filter, OwnedValue::Null).expect(filter);
             assert!(
                 matches!(run.outcome, Outcome::Unsupported(_)),
@@ -924,18 +949,72 @@ fn a_declined_row_is_unsupported_5223() {
     });
 }
 
-/// A run names the stubbed builtins jq could have answered differently on
-/// identity, so the three-way harness can attribute a divergence to the stub.
+/// The jq-defined builtins Phase 0 stubbed run their `builtin.jq` bodies
+/// now: their values, and in path mode the register effect of the body
+/// (`transpose` and `tostream` build fresh arrays; `combinations` indexes its
+/// input). Every expected answer is jq 1.7.1's.
 #[test]
-fn a_run_names_the_stubbed_builtins_it_touched_5223() {
+fn the_rest_of_builtin_jq_runs_from_its_definitions_5223() {
     on_big_stack(|| {
-        let run = run(
-            r#"ltrimstr("z"), @text, tostring, ([[1]] | transpose), length"#,
-            OwnedValue::string("x"),
-        )
-        .expect("parses");
-        assert_eq!(run.stubbed, ["Transpose"]);
-        assert!(matches!(run.outcome, Outcome::Done));
+        check(&[
+            ("[[1,2],[3]]", "transpose", ok(&["[[1,3],[2,null]]"])),
+            (
+                "[1,[2]]",
+                "[tostream]",
+                ok(&["[[[0],1],[[1,0],2],[[1,0]],[[1]]]"]),
+            ),
+            (
+                "[[1,2],[3,4]]",
+                "[combinations]",
+                ok(&["[[1,3],[1,4],[2,3],[2,4]]"]),
+            ),
+            (
+                "[1,2]",
+                "[combinations(2)]",
+                ok(&["[[1,1],[1,2],[2,1],[2,2]]"]),
+            ),
+            (
+                "[1,2,3]",
+                "bsearch(2), bsearch(0), bsearch(4)",
+                ok(&["1", "-1", "-4"]),
+            ),
+            (
+                r#"[{"id":1},{"id":2}]"#,
+                "INDEX(.id)",
+                ok(&[r#"{"1":{"id":1},"2":{"id":2}}"#]),
+            ),
+            (
+                "null",
+                r#"INDEX(({"id":"a"},{"id":"b"}); .id)"#,
+                ok(&[r#"{"a":{"id":"a"},"b":{"id":"b"}}"#]),
+            ),
+            (
+                "null",
+                "[1|truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]])]",
+                ok(&["[[[0],2],[[0]]]"]),
+            ),
+            (
+                "null",
+                "fromstream(1|truncate_stream([[0],1],[[1,0],2],[[1,0]],[[1]]))",
+                ok(&["[2]"]),
+            ),
+            ("null", "1e1000 | isfinite", ok(&["false"])),
+            (
+                "[[1]]",
+                "path(transpose)",
+                err(&[], "Invalid path expression with result [[1]]"),
+            ),
+            (
+                "[1,2]",
+                "path(tostream)",
+                err(&[], "Invalid path expression with result [[0],1]"),
+            ),
+            (
+                r#""abc""#,
+                "path(combinations)",
+                err(&[], "Cannot index string with number"),
+            ),
+        ]);
     });
 }
 
@@ -1154,6 +1233,125 @@ fn a_negative_number_is_computed_however_spelled_5223() {
             ("null", "[-1.5e0] | path(.[0] | -01.5)", ok(&["[0]"])),
             ("null", "[-1] | path(.[0] | -1)", ok(&["[0]"])),
             ("null", "[-00] | path(.[0] | -00)", ok(&["[0]"])),
+        ]);
+    });
+}
+
+/// A C builtin's arguments and an interpolation's slots are subexps the
+/// interpreter evaluates itself, the last the outermost loop, so a closure
+/// call in one resolves (every expected answer is jq 1.7.1's).
+#[test]
+fn c_arguments_and_interpolation_slots_run_last_outermost_5223() {
+    on_big_stack(|| {
+        check(&[
+            ("null", r#"def f: 1; "\(f)""#, ok(&[r#""1""#])),
+            ("null", "def f: 2; pow(f; 3)", ok(&["8"])),
+            ("null", "[pow((1,2);(3,4))]", ok(&["[1,8,1,16]"])),
+            (
+                "null",
+                r#"["\(1,2)-\(3,4)"]"#,
+                ok(&[r#"["1-3","2-3","1-4","2-4"]"#]),
+            ),
+            (
+                "null",
+                r#"[@base64 "x\(1,2)y\(3,4)"]"#,
+                ok(&[r#"["xMQ==yMw==","xMg==yMw==","xMQ==yNA==","xMg==yNA=="]"#]),
+            ),
+        ]);
+    });
+}
+
+/// The regex family runs `builtin.jq`'s bodies over the `_match_impl` hook:
+/// `match/2` iterates the array of matches (so `path(match(..))` raises at
+/// `EACH`), and `sub`'s replacement is a closure over each match's captures,
+/// a generator included. Every expected answer is jq 1.7.1's.
+#[test]
+#[cfg(feature = "regex")]
+fn the_regex_family_runs_from_builtin_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#""a1b2""#,
+                r#"[match("[0-9]";"g") | .offset]"#,
+                ok(&["[1,3]"]),
+            ),
+            (
+                r#""abc""#,
+                r#"test("B"; "i"), test("x")"#,
+                ok(&["true", "false"]),
+            ),
+            (
+                r#""xyz-123""#,
+                r#"capture("(?<a>[a-z]+)-(?<n>[0-9]+)")"#,
+                ok(&[r#"{"a":"xyz","n":"123"}"#]),
+            ),
+            (r#""a1b22""#, r#"[scan("[0-9]+")]"#, ok(&[r#"["1","22"]"#])),
+            (
+                r#""a1b2c""#,
+                r#"[splits("[0-9]")]"#,
+                ok(&[r#"["a","b","c"]"#]),
+            ),
+            (
+                r#""a,b, c""#,
+                r#"split(", *"; null)"#,
+                ok(&[r#"["a","b","c"]"#]),
+            ),
+            (
+                r#""aaa""#,
+                r#"sub("a";"X"), gsub("a";"X")"#,
+                ok(&[r#""Xaa""#, r#""XXX""#]),
+            ),
+            (
+                r#""abc""#,
+                r#"sub("(?<x>b)"; "[\(.x)]")"#,
+                ok(&[r#""a[b]c""#]),
+            ),
+            (
+                r#""abab""#,
+                r#"gsub("(?<l>a)"; "\(.l|ascii_upcase)", "-")"#,
+                ok(&[r#""AbAb""#, r#""-b-b""#]),
+            ),
+            (
+                r#""ab""#,
+                r#"[match(["a","g"]) | .string]"#,
+                ok(&[r#"["a"]"#]),
+            ),
+            (
+                r#""a""#,
+                "match(1)",
+                err(&[], "number not a string or array"),
+            ),
+            (
+                r#"{"a":"x"}"#,
+                r#"path(.a | match("x"))"#,
+                err(
+                    &[],
+                    r#"Invalid path expression near attempt to iterate through [{"offset":0,"length":1,"s..."#,
+                ),
+            ),
+            (
+                r#""a""#,
+                r#"path(test("a"))"#,
+                err(&[], "Invalid path expression with result true"),
+            ),
+        ]);
+    });
+}
+
+/// `leaf_paths` (a succinctly extension) answers what the shipped evaluator
+/// answers: every childless node's path, the root's `[]` included.
+#[test]
+fn leaf_paths_matches_the_shipped_extension_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#"{"a":{"b":1,"c":null},"d":[],"e":[2,3]}"#,
+                "[leaf_paths]",
+                ok(&[r#"[["a","b"],["a","c"],["d"],["e",0],["e",1]]"#]),
+            ),
+            (r#""x""#, "[leaf_paths]", ok(&["[[]]"])),
+            ("[]", "[leaf_paths]", ok(&["[[]]"])),
+            ("[[[]]]", "[leaf_paths]", ok(&["[[0,0]]"])),
         ]);
     });
 }

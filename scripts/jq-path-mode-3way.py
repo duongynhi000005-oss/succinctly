@@ -12,18 +12,12 @@ Each row compares **stdout and exit code** with jq's, as the sweeps do:
 
   both          main and the interpreter match jq
   gain          only the interpreter matches jq
-  LOSS          only main matches jq, and the interpreter's run touched no stub:
-                the gate's failure class
-  LOSS-stub     only main matches jq, on a run that answered a builtin
-                through the fresh stub where jq's own version can hand back
-                its input or navigates it (`path-mode: stubbed: ...`)
+  LOSS          only main matches jq: the gate's failure class
   neither       neither matches jq
-  neither-stub  neither matches jq, on a stubbed run
   unsupported   the interpreter declined the row (exit 64, `path-mode: unsupported`)
   oracle-skip   jq timed out, so the row says nothing
 
-A `-stub` row is the issue's "unstubbed builtin" case, which does not fail the
-gate; a LOSS or a neither still needs tracing to a construct rule (which
+A LOSS or a neither still needs tracing to a construct rule (which
 falsifies the model) or to something else. `--out` writes every row that is
 not `both`, with all three answers, for that tracing. Exit status 1 on any
 LOSS.
@@ -98,8 +92,6 @@ def classify(row, opts):
     same = lambda r: r is not None and (r[0], r[1]) == (jq[0], jq[1])
     m, s = same(main), same(got)
     cls = "both" if m and s else "gain" if s else "LOSS" if m else "neither"
-    if cls in ("LOSS", "neither") and got is not None and "path-mode: stubbed:" in got[2]:
-        cls += "-stub"
     return cls, row, jq, main, got
 
 
@@ -144,7 +136,7 @@ def main():
     if out:
         out.close()
 
-    order = ["both", "gain", "LOSS", "LOSS-stub", "neither", "neither-stub", "unsupported", "oracle-skip"]
+    order = ["both", "gain", "LOSS", "neither", "unsupported", "oracle-skip"]
     print("| class | rows |")
     print("|---|---|")
     for cls in order:

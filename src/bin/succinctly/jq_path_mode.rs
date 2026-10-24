@@ -117,9 +117,6 @@ fn report(filter: &str, input: OwnedValue, raw: bool) -> i32 {
         let _ = writeln!(out, "{text}");
     }
     let _ = out.flush();
-    if !run.stubbed.is_empty() {
-        eprintln!("path-mode: stubbed: {}", run.stubbed.join(","));
-    }
     match run.outcome {
         Outcome::Done => 0,
         Outcome::Error(error) => {

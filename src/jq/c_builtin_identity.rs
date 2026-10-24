@@ -305,7 +305,6 @@ mod tests {
             };
             let want = want.map(String::from).map_err(String::from);
             assert_eq!(got, want, "{input} | {filter}");
-            assert!(run.stubbed.is_empty(), "{filter}: {:?}", run.stubbed);
         }
     }
 

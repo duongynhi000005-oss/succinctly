@@ -2,7 +2,7 @@
 //! path-mode interpreter (`src/jq/path_mode.rs`). Its own semantics are pinned by its unit
 //! tests; these pin the entry's contract with the three-way harness
 //! (`scripts/jq-path-mode-3way.py`): jq's input handling and exit codes, and the
-//! `path-mode: unsupported`/`path-mode: stubbed` lines it classifies rows by. Expected
+//! `path-mode: unsupported` line it classifies rows by. Expected
 //! stdout and exit codes are jq 1.7.1's for the same argv.
 //!
 //! The interpreter reads storage identity, which the `unshared-containers` holdout does not
@@ -79,10 +79,9 @@ fn the_dev_entry_takes_jqs_options_and_reports_its_errors_5223() -> Result<()> {
 }
 
 /// The lines the three-way harness classifies by: a declined construct exits 64 with
-/// `path-mode: unsupported`, a compile error exits 3 as jq does, and a run that answered a
-/// builtin through the fresh stub names it.
+/// `path-mode: unsupported`, and a compile error exits 3 as jq does.
 #[test]
-fn the_dev_entry_marks_declined_and_stubbed_runs_5223() -> Result<()> {
+fn the_dev_entry_marks_declined_runs_5223() -> Result<()> {
     let (_, err, rc) = dev_entry(&["-n", "input"], None)?;
     assert_eq!(rc, 64);
     assert!(err.contains("path-mode: unsupported: "), "{err}");
@@ -90,10 +89,10 @@ fn the_dev_entry_marks_declined_and_stubbed_runs_5223() -> Result<()> {
     assert_eq!(rc, 3);
     let (out, err, rc) = dev_entry(&["-c", r#"[scan("x")]"#], Some(r#""x""#))?;
     assert_eq!((out.as_str(), rc), ("[\"x\"]\n", 0));
-    assert!(err.contains("path-mode: stubbed: Scan"), "{err}");
+    assert!(err.is_empty(), "{err}");
     // A C builtin that hands back its input keeps the path, as in jq 1.7.1.
     let (out, err, rc) = dev_entry(&["-c", r#"path(.a | ltrimstr("z"))"#], Some(r#"{"a":"x"}"#))?;
     assert_eq!((out.as_str(), rc), ("[\"a\"]\n", 0));
-    assert!(!err.contains("stubbed"), "{err}");
+    assert!(err.is_empty(), "{err}");
     Ok(())
 }

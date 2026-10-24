@@ -46,14 +46,16 @@ use super::c_builtin_identity::{array_index, binop_keeps, format_keeps_input, ke
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    substitute_vars, EvalTag, JqSemantics, QueryResult,
+    owned_to_string, EvalTag, JqSemantics, QueryResult,
 };
-use super::expr::{Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey};
+use super::expr::{
+    Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey, StringPart,
+};
 use super::parser::parse;
 use super::value::{
     jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral, SharableString,
 };
-use super::walk::any_subexpr;
+use super::walk::{builtin_kids, map_builtin_subexprs, BuiltinKids};
 
 /// A string with storage of its own: a fresh `jv_string`.
 fn string(s: &str) -> OwnedValue {
@@ -403,13 +405,18 @@ const T_VAR: &str = "__sp_t";
 /// the `Builtin` it replaces. Closure parameters are renamed where
 /// succinctly's parser would read the jq name as a builtin (`exp`, `paths`).
 /// And `_modify`'s private `$$$$v` (`LOADVN`, which only avoids a refcount)
-/// is spelled `$v`.
+/// is spelled `$v`. `builtin.jq`'s comments are left out.
+///
+/// `leaf_paths` is a succinctly extension, not a jq builtin: its definition
+/// here is the path of every childless node (scalars, `null`, and empty
+/// arrays and objects), the root included when it is one, as the shipped
+/// evaluator answers it.
 ///
 /// Bodies call one another through the `Builtin` variants they parse to,
 /// which `prelude_call` maps back here, plus a few direct `_sp_` calls. The
 /// C functions those bodies call that succinctly has no builtin for
-/// (`_sort_by_impl`, `_strindices`, ...) are `_sp_hook_*` calls, answered by
-/// `Interp::hook`.
+/// (`_sort_by_impl`, `_strindices`, `_match_impl`, ...) are `_sp_hook_*`
+/// calls, answered by `Interp::hook`.
 pub const PRELUDE: &str = r#"
 def _sp_select(f): if f then . else empty end;
 def _sp_map(f): [.[] | f];
@@ -539,6 +546,110 @@ def _sp_indices($i): if type == "array" and ($i|type) == "array" then .[$i]
 def _sp_index($i):   indices($i) | .[0];
 def _sp_rindex($i):  indices($i) | .[-1:][0];
 def _sp_debug(msg): (msg | debug | empty), .;
+def _sp_isfinite: type == "number" and (isinfinite | not);
+def _sp_halt_error: halt_error(5);
+def _sp_fromdateiso8601: strptime("%Y-%m-%dT%H:%M:%SZ")|mktime;
+def _sp_todateiso8601: strftime("%Y-%m-%dT%H:%M:%SZ");
+def _sp_fromdate: fromdateiso8601;
+def _sp_todate: todateiso8601;
+def _sp_match(sp_re; mode): _sp_hook_match_impl(sp_re; mode; false)|.[];
+def _sp_match($val): ($val|type) as $vt | if $vt == "string" then match($val; null)
+   elif $vt == "array" and ($val | length) > 1 then match($val[0]; $val[1])
+   elif $vt == "array" and ($val | length) > 0 then match($val[0]; null)
+   else error( $vt + " not a string or array") end;
+def _sp_test(sp_re; mode): _sp_hook_match_impl(sp_re; mode; true);
+def _sp_test($val): ($val|type) as $vt | if $vt == "string" then test($val; null)
+   elif $vt == "array" and ($val | length) > 1 then test($val[0]; $val[1])
+   elif $vt == "array" and ($val | length) > 0 then test($val[0]; null)
+   else error( $vt + " not a string or array") end;
+def _sp_capture(sp_re; mods): match(sp_re; mods) | reduce ( .captures | .[] | select(.name != null) | { (.name) : .string } ) as $pair ({}; . + $pair);
+def _sp_capture($val): ($val|type) as $vt | if $vt == "string" then capture($val; null)
+   elif $vt == "array" and ($val | length) > 1 then capture($val[0]; $val[1])
+   elif $vt == "array" and ($val | length) > 0 then capture($val[0]; null)
+   else error( $vt + " not a string or array") end;
+def _sp_scan($re; $flags):
+  match($re; "g" + $flags)
+    | if (.captures|length > 0)
+      then [ .captures | .[] | .string ]
+      else .string
+      end;
+def _sp_scan($re): scan($re; null);
+def _sp__nwise($n):
+  def n: if length <= $n then . else .[0:$n] , (.[$n:] | n) end;
+  n;
+def _sp_splits($re; flags): . as $s
+  | [ match($re; "g" + flags) | (.offset, .offset + .length) ]
+  | [0] + . +[$s|length]
+  | _sp__nwise(2)
+  | $s[.[0]:.[1] ] ;
+def _sp_splits($re): splits($re; null);
+def _sp_split($re; flags): [ splits($re; flags) ];
+def _sp_sub($re; s; $flags):
+   . as $in
+   | (reduce match($re; $flags) as $edit
+        ({result: [], previous: 0};
+            $in[ .previous: ($edit | .offset) ] as $gap
+            | [reduce ( $edit | .captures | .[] | select(.name != null) | { (.name) : .string } ) as $pair
+                 ({}; . + $pair) | s ] as $inserts
+            | reduce range(0; $inserts|length) as $ix (.; .result[$ix] += $gap + $inserts[$ix])
+            | .previous = ($edit | .offset + .length ) )
+          | .result[] + $in[.previous:] )
+      // $in;
+def _sp_sub($re; s): sub($re; s; "");
+def _sp_gsub($re; s; flags): sub($re; s; flags + "g");
+def _sp_gsub($re; s): sub($re; s; "g");
+def _sp_combinations:
+    if length == 0 then [] else
+        .[0][] as $x
+          | (.[1:] | combinations) as $y
+          | [$x] + $y
+    end;
+def _sp_combinations(n):
+    . as $dot
+      | [range(n) | $dot]
+      | combinations;
+def _sp_transpose: [range(0; map(length)|max // 0) as $i | [.[][$i]]];
+def _sp_truncate_stream(stream):
+  . as $n | null | stream | . as $input | if (.[0]|length) > $n then setpath([0];$input[0][$n:]) else empty end;
+def _sp_fromstream(i): {x: null, e: false} as $init |
+  foreach i as $i ($init
+  ; if .e then $init else . end
+  | if $i|length == 2
+    then setpath(["e"]; $i[0]|length==0) | setpath(["x"]+$i[0]; $i[1])
+    else setpath(["e"]; $i[0]|length==1) end
+  ; if .e then .x else empty end);
+def _sp_tostream:
+  path(def r: (.[]?|r), .; r) as $p |
+  getpath($p) |
+  reduce path(.[]?) as $q ([$p, .]; [$p+$q]);
+def _sp_bsearch($target):
+  if length == 0 then -1
+  elif length == 1 then
+     if $target == .[0] then 0 elif $target < .[0] then -1 else -2 end
+  else . as $in
+    | [0, length-1, null]
+    | until( .[0] > .[1] ;
+             if .[2] != null then (.[1] = -1)
+             else
+               ( ( (.[1] + .[0]) / 2 ) | floor ) as $mid
+               | $in[$mid] as $monkey
+               | if $monkey == $target  then (.[2] = $mid)
+                 elif .[0] == .[1]     then (.[1] = -1)
+                 elif $monkey < $target then (.[0] = ($mid + 1))
+                 else (.[1] = ($mid - 1))
+                 end
+             end )
+    | if .[2] == null then
+         if $in[ .[0] ] < $target then (-2 -.[0])
+         else (-1 -.[0])
+         end
+      else .[2]
+      end
+  end;
+def _sp_INDEX(stream; idx_expr):
+  reduce stream as $row ({}; .[$row|idx_expr|tostring] = $row);
+def _sp_INDEX(idx_expr): INDEX(.[]; idx_expr);
+def _sp_leaf_paths: path(..|select(type != "object" and type != "array" or length == 0));
 .
 "#;
 
@@ -580,9 +691,6 @@ pub struct Interp<'e> {
     /// address, which is stable: the interpreter never rewrites the program).
     consts: RefCell<BTreeMap<usize, OwnedValue>>,
     next_label: Cell<u64>,
-    /// Every builtin the run answered through the fresh stub although jq's
-    /// own version can hand back its input or navigates it ([`stub_risk`]).
-    stubbed: RefCell<Vec<String>>,
     /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
     /// into the root allocation. Keyed by `(root, offset, size)`, so equal
     /// slices of one array are one value; each view maps back to its root
@@ -615,10 +723,6 @@ pub struct Run {
     pub outputs: Vec<OwnedValue>,
     /// How the run ended.
     pub outcome: Outcome,
-    /// The builtins the run answered through the fresh stub although jq's
-    /// own version can hand back its input or navigates it: a divergence on
-    /// such a run may be the stub's, not a construct rule's.
-    pub stubbed: Vec<String>,
 }
 
 /// Parse `filter` and run it on `input`, a parsed input document. `Err` is a
@@ -667,7 +771,6 @@ impl<'e> Interp<'e> {
             prelude_env: env,
             consts: RefCell::new(BTreeMap::new()),
             next_label: Cell::new(0),
-            stubbed: RefCell::new(Vec::new()),
             slices: RefCell::new(BTreeMap::new()),
             slice_roots: RefCell::new(BTreeMap::new()),
         }
@@ -686,11 +789,7 @@ impl<'e> Interp<'e> {
             Ok(()) => Outcome::Done,
             Err(raise) => Self::outcome(raise),
         };
-        Run {
-            outputs,
-            outcome,
-            stubbed: self.stubbed.take(),
-        }
+        Run { outputs, outcome }
     }
 
     fn outcome(raise: Raise) -> Outcome {
@@ -830,11 +929,10 @@ impl<'e> Interp<'e> {
                 Err(Raise::Error(EvalError::from_value(v)))
             }),
             Expr::Builtin(builtin) => self.builtin(expr, builtin, env, input, reg, sink),
-            Expr::StringInterpolation(_) => delegate(expr, env, input, reg, sink),
+            Expr::StringInterpolation(parts) => self.interpolate(parts, env, &input, &reg, sink),
             // `@text` is `f_tostring`, which returns a string input itself.
             Expr::Format(format) if format_keeps_input(format, &input) => sink(input, reg),
-            Expr::Format(_) => delegate(expr, env, input, reg, sink),
-            Expr::Env => delegate(expr, env, input, reg, sink),
+            Expr::Format(_) | Expr::Env => emit_delegated(expr, &input, &[], &reg, sink),
             // `gen_destructure` with a plain `$var`: the source is a subexp,
             // and the body starts from the register at entry.
             Expr::As {
@@ -1735,51 +1833,77 @@ impl<'e> Interp<'e> {
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
-        if stub_risk(builtin) {
-            self.note_stub(&variant_name(node));
-        }
-        if let Some(arg) = builtin.value_arg() {
-            return self.eval(arg, env, input.clone(), reg.sub(), &mut |a, _| {
-                let call = builtin
-                    .with_value_arg(Expr::tracked_value(a.clone()))
-                    .expect("value_arg implies with_value_arg");
-                emit_c_builtin(&Expr::Builtin(call), builtin, &input, &[a], &reg, sink)
-            });
-        }
-        if let Builtin::FormatNamed(name) = builtin {
-            return self.eval(name, env, input.clone(), reg.sub(), &mut |n, _| {
-                let call = Expr::Builtin(Builtin::FormatNamed(Box::new(Expr::tracked_value(
-                    n.clone(),
-                ))));
-                emit_c_builtin(&call, builtin, &input, &[n], &reg, sink)
-            });
-        }
-        if let Builtin::SetPath(p, v) = builtin {
-            // Two C arguments: the last is the outer loop.
-            return self.eval(v, env, input.clone(), reg.sub(), &mut |bv, _| {
-                self.eval(p, env, input.clone(), reg.sub(), &mut |av, _| {
-                    let call = Expr::Builtin(Builtin::SetPath(
-                        Box::new(Expr::tracked_value(av.clone())),
-                        Box::new(Expr::tracked_value(bv.clone())),
-                    ));
-                    emit_c_builtin(&call, builtin, &input, &[av, bv.clone()], &reg, sink)
-                })
-            });
-        }
-        if matches!(
-            super::walk::builtin_kids(builtin),
-            super::walk::BuiltinKids::None
-        ) {
+        let kids = builtin_args(builtin);
+        if kids.is_empty() {
             return emit_c_builtin(node, builtin, &input, &[], &reg, sink);
         }
-        delegate(node, env, input, reg, sink)
+        self.c_args(&kids, env, &input, &reg, &mut |values| {
+            let mut next = values.iter();
+            let call = map_builtin_subexprs(builtin, &mut |_| {
+                Expr::tracked_value(next.next().cloned().unwrap_or(OwnedValue::Null))
+            });
+            emit_c_builtin(&Expr::Builtin(call), builtin, &input, values, &reg, sink)
+        })
     }
 
-    fn note_stub(&self, name: &str) {
-        let mut stubbed = self.stubbed.borrow_mut();
-        if !stubbed.iter().any(|s| s == name) {
-            stubbed.push(name.to_string());
-        }
+    /// The arguments of a C function call (`expand_call_arglist`): each a
+    /// subexp on the call's input, the **last** the outermost loop
+    /// (`[pow((1,2);(3,4))]` is `[1,8,1,16]` in jq 1.7.1). `k` gets the
+    /// values in argument order.
+    fn c_args(
+        &self,
+        args: &[&'e Expr],
+        env: &Env<'e>,
+        input: &OwnedValue,
+        reg: &Reg,
+        k: &mut dyn FnMut(&[OwnedValue]) -> R,
+    ) -> R {
+        let Some((last, init)) = args.split_last() else {
+            return k(&[]);
+        };
+        self.eval(last, env, input.clone(), reg.sub(), &mut |v, _| {
+            self.c_args(init, env, input, reg, &mut |values| {
+                let mut all = values.to_vec();
+                all.push(v.clone());
+                k(&all)
+            })
+        })
+    }
+
+    /// String interpolation, `"a\(E)b"`: jq's parser builds it from
+    /// `format("text")` (or the prefix's format, which the parser already
+    /// put in each slot) and `_plus`, so each slot is a C argument, the last
+    /// slot the outermost loop, and the result is a fresh string.
+    fn interpolate(
+        &self,
+        parts: &'e [StringPart],
+        env: &Env<'e>,
+        input: &OwnedValue,
+        reg: &Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        let slots: Vec<&'e Expr> = parts
+            .iter()
+            .filter_map(|part| match part {
+                StringPart::Expr(e) => Some(&**e),
+                StringPart::Literal(_) => None,
+            })
+            .collect();
+        self.c_args(&slots, env, input, reg, &mut |values| {
+            let mut text = String::new();
+            let mut next = values.iter();
+            for part in parts {
+                match part {
+                    StringPart::Literal(s) => text.push_str(s),
+                    StringPart::Expr(_) => {
+                        if let Some(v) = next.next() {
+                            text.push_str(&owned_to_string::<JqSemantics>(v));
+                        }
+                    }
+                }
+            }
+            sink(string(&text), reg.clone())
+        })
     }
 
     /// The C functions the prelude's `builtin.jq` bodies call that succinctly
@@ -1796,6 +1920,9 @@ impl<'e> Interp<'e> {
         sink: &mut Sink<'_>,
     ) -> R {
         let undefined = || unsupported(format!("{name}/{} is not defined", args.len()));
+        if name == "_sp_hook_match_impl" {
+            return self.match_impl(args, env, input, reg, sink);
+        }
         let [arg] = args else {
             return Err(undefined());
         };
@@ -1817,6 +1944,38 @@ impl<'e> Interp<'e> {
                     Expr::Builtin(Builtin::Indices(Box::new(Expr::tracked_value(a.clone()))));
                 emit_delegated(&call, &input, &[&a], &reg, sink)
             }
+        })
+    }
+
+    /// `_match_impl(re; mode; test)`: a C function, so its three arguments
+    /// are subexps (the last outermost). `test` answers `test(re; mode)`'s
+    /// boolean; otherwise the array of every match, which `match/2` iterates.
+    fn match_impl(
+        &self,
+        args: &'e [Expr],
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        let kids: Vec<&'e Expr> = args.iter().collect();
+        self.c_args(&kids, env, &input, &reg, &mut |values| {
+            let [re, mode, test] = values else {
+                return Err(unsupported(format!("_match_impl/{}", values.len())));
+                // patchcov: coverage tolerate-line reason="unreachable: the prelude calls the hook with three arguments only"
+            };
+            let (re_arg, mode_arg) = (
+                Box::new(Expr::tracked_value(re.clone())),
+                Box::new(Expr::tracked_value(mode.clone())),
+            );
+            let call = if truthy(test) {
+                Expr::Builtin(Builtin::TestFlags(re_arg, mode_arg))
+            } else {
+                Expr::Array(Box::new(Expr::Builtin(Builtin::MatchFlags(
+                    re_arg, mode_arg,
+                ))))
+            };
+            emit_delegated(&call, &input, &[re, mode], &reg, sink)
         })
     }
 
@@ -2048,36 +2207,15 @@ fn min_max_by(values: &OwnedValue, keys: &OwnedValue, is_min: bool) -> Result<Ow
     Ok(best.clone())
 }
 
-/// A jq-defined builtin the prelude does not run yet, whose `builtin.jq` body
-/// navigates its input: its answer through the shipped evaluator is fresh,
-/// where jq's body could keep the register.
-fn stub_risk(builtin: &Builtin) -> bool {
-    use Builtin as B;
-    matches!(
-        builtin,
-        B::Match(_)
-            | B::MatchFlags(..)
-            | B::Capture(_)
-            | B::CaptureFlags(..)
-            | B::Scan(_)
-            | B::ScanFlags(..)
-            | B::Splits(_)
-            | B::SplitsFlags(..)
-            | B::SplitRegex(..)
-            | B::Sub(..)
-            | B::SubFlags(..)
-            | B::Gsub(..)
-            | B::GsubFlags(..)
-            | B::Transpose
-            | B::Combinations
-            | B::CombinationsN(_)
-            | B::ToStream
-            | B::FromStream(_)
-            | B::TruncateStream(_)
-            | B::BSearch(_)
-            | B::UpperIndex(_)
-            | B::UpperIndexStream(..)
-    )
+/// A builtin's sub-expressions, in argument order (`map_builtin_subexprs`
+/// visits them in the same order).
+fn builtin_args(builtin: &Builtin) -> Vec<&Expr> {
+    match builtin_kids(builtin) {
+        BuiltinKids::None => Vec::new(),
+        BuiltinKids::One(a) => vec![a],
+        BuiltinKids::Two(a, b) => vec![a, b],
+        BuiltinKids::Three(a, b, c) => vec![a, b, c],
+    }
 }
 
 /// The jq-defined builtins the prelude implements, as `(definition, args)`.
@@ -2145,6 +2283,37 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
         B::Index(i) => ("_sp_index", vec![i]),
         B::Rindex(i) => ("_sp_rindex", vec![i]),
         B::DebugMsg(m) => ("_sp_debug", vec![m]),
+        B::IsFinite => ("_sp_isfinite", vec![]),
+        B::HaltError => ("_sp_halt_error", vec![]),
+        B::Fromdateiso8601 => ("_sp_fromdateiso8601", vec![]),
+        B::Todateiso8601 => ("_sp_todateiso8601", vec![]),
+        B::Fromdate => ("_sp_fromdate", vec![]),
+        B::Todate => ("_sp_todate", vec![]),
+        B::Match(v) => ("_sp_match", vec![v]),
+        B::MatchFlags(re, mode) => ("_sp_match", vec![re, mode]),
+        B::Test(v) => ("_sp_test", vec![v]),
+        B::TestFlags(re, mode) => ("_sp_test", vec![re, mode]),
+        B::Capture(v) => ("_sp_capture", vec![v]),
+        B::CaptureFlags(re, mods) => ("_sp_capture", vec![re, mods]),
+        B::Scan(re) => ("_sp_scan", vec![re]),
+        B::ScanFlags(re, flags) => ("_sp_scan", vec![re, flags]),
+        B::Splits(re) => ("_sp_splits", vec![re]),
+        B::SplitsFlags(re, flags) => ("_sp_splits", vec![re, flags]),
+        B::SplitRegex(re, flags) => ("_sp_split", vec![re, flags]),
+        B::Sub(re, s) => ("_sp_sub", vec![re, s]),
+        B::SubFlags(re, s, flags) => ("_sp_sub", vec![re, s, flags]),
+        B::Gsub(re, s) => ("_sp_gsub", vec![re, s]),
+        B::GsubFlags(re, s, flags) => ("_sp_gsub", vec![re, s, flags]),
+        B::Combinations => ("_sp_combinations", vec![]),
+        B::CombinationsN(n) => ("_sp_combinations", vec![n]),
+        B::Transpose => ("_sp_transpose", vec![]),
+        B::TruncateStream(stream) => ("_sp_truncate_stream", vec![stream]),
+        B::FromStream(i) => ("_sp_fromstream", vec![i]),
+        B::ToStream => ("_sp_tostream", vec![]),
+        B::BSearch(target) => ("_sp_bsearch", vec![target]),
+        B::UpperIndex(idx) => ("_sp_INDEX", vec![idx]),
+        B::UpperIndexStream(stream, idx) => ("_sp_INDEX", vec![stream, idx]),
+        B::LeafPaths => ("_sp_leaf_paths", vec![]),
         _ => return None,
     };
     Some(call)
@@ -2158,8 +2327,7 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
         B::Input | B::Inputs | B::InputLineNumber | B::InputFilename => {
             "input-reading builtins (the interpreter has no input queue)"
         }
-        B::HaltError | B::HaltErrorCode(_) => "halt_error (its message is not carried)",
-        B::LeafPaths => "leaf_paths (a succinctly extension)",
+        B::HaltErrorCode(_) => "halt_error (its message is not carried)",
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
         B::IsValid(_) | B::Skip(..) | B::AnyC(..) | B::AllC(..) | B::RecurseDown => {
@@ -2375,43 +2543,6 @@ fn number_owned(value: f64) -> OwnedValue {
     } else {
         OwnedValue::Float(value)
     }
-}
-
-/// Run `expr` through the existing evaluator with the variables it reads
-/// substituted. Declines (unsupported) when it calls a function the
-/// interpreter's environment holds, or breaks to an interpreter label.
-fn delegate<'e>(
-    expr: &'e Expr,
-    env: &Env<'e>,
-    input: OwnedValue,
-    reg: Reg,
-    sink: &mut Sink<'_>,
-) -> R {
-    let mut names: Vec<String> = Vec::new();
-    let mut blocked: Option<String> = None;
-    any_subexpr(expr, &mut |e| {
-        match e {
-            Expr::Var(name) => names.push(name.clone()),
-            Expr::FuncCall { name, .. } => {
-                blocked = Some(format!("a closure call ({name}) inside a C builtin"));
-            }
-            Expr::Break(_) | Expr::Label { .. } => {
-                blocked = Some("a label inside a C builtin".to_string());
-            }
-            _ => {}
-        }
-        blocked.is_some()
-    });
-    if let Some(why) = blocked {
-        return Err(unsupported(why));
-    }
-    let bound: Vec<(&str, OwnedValue)> = names
-        .iter()
-        .filter_map(|n| env.lookup_var(n).map(|v| (n.as_str(), v)))
-        .collect();
-    let expr = substitute_vars(expr, bound.iter().map(|(n, v)| (*n, v)));
-    let values: Vec<&OwnedValue> = bound.iter().map(|(_, v)| v).collect();
-    emit_delegated(&expr, &input, &values, &reg, sink)
 }
 
 /// Emit what the existing evaluator answers for C builtin `builtin` (called
