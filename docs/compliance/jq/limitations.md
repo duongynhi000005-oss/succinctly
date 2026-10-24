@@ -519,7 +519,7 @@ non-array path argument.
 Since [#5223](https://github.com/rust-works/succinctly/issues/5223) ([ADR-0026](../../adrs/adr-0026.md)), a jq-mode program whose path target is more than navigation runs whole through the path-mode interpreter (`src/jq/path_mode.rs`), which carries jq 1.7.1's path register `(path, value)` with every output and checks it with `jv_identical` where jq does.
 A target counts as dynamic when an argument of `path`/`del`/`pick`, or the target of `=`, `|=`, `op=` or `//=`, binds, folds, branches, retries a `?//`, catches an error with a handler, or calls a function.
 Targets made only of navigation (`.a`, `.[i]`, `.[$k]`, `.[a:b]`, `.[]`, `..`, `recurse`, `recurse(.[]?)`), or of value filters over it (`try S`, `try S catch empty`, `first(S)`, `S // T`, `select(c)` for a condition with no `?//`, function call or input), stay on the streaming walkers, which answer them as jq does.
-A program that uses `key`, `file_index`, `filename` or a cursor-metadata builtin (`at_offset`, `input_line_number`, ...) stays on the shipped route too, and so does a document the interpreter cannot materialize whole (a lone surrogate, nesting past 256 levels): the shipped route decodes only what the program reads.
+A program that uses `key`, `file_index`, `filename` or a cursor-metadata builtin (`line`, `column`, `document_index`, `anchor`, `style`, the comment builtins, `at_offset`, `at_position`) stays on the shipped route too, and so does a document the interpreter cannot materialize whole (a lone surrogate, nesting past 256 levels): the shipped route decodes only what the program reads.
 yq mode is unchanged.
 
 So the sections below that describe the path resolver's inferred register (the `Path-mode ...` sections, the register refusals under [Where succinctly errors and jq does not](#where-succinctly-errors-and-jq-does-not), the "artefact guard" and every "refused where jq answers" row) describe the shipped route, which jq mode now reaches only for the programs just listed.
@@ -7338,7 +7338,8 @@ computed-key object patterns, and owned `path()` continuations. An empty or rais
 re-enters the sink; a clean retry no longer returns the previous computed-key or
 continuation error. `test_path_sink_retry_*_3808` checks stdout, attempt traces,
 errors and exit status on document and owned inputs, with `path`/`del`/`=`/`|=`
-read/write probes. Update assignments raise jq's `Paths must be specified as an array` through the path-mode interpreter (above); a retry's own raise or halt still takes precedence.
+read/write probes.
+Update assignments raise jq's `Paths must be specified as an array` through the path-mode interpreter (above); a retry's own raise or halt still takes precedence.
 
 That interleave has a price, and it is charged only where it buys something. The
 streaming route keeps two documents where the eager one keeps one, so on a 1.5 MB /
