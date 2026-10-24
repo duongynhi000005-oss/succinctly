@@ -1,0 +1,73 @@
+{"source": "#5223", "args": ["jq", "-c", "path(reduce (.a,.a) as $x (.; .a))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(reduce .a as $v (.; .))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(foreach (1,2) as $x (.; .a; .b))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(foreach .a as $v (.; .; .))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a as {b:$v} | .)"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path([{} | .a])"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(. as $x | [.a] | $x)"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(. as $x | try (.a | error) catch $x)"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(. as $x | (.a | empty) // $x)"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(. as $x | .a | (1 + (.b)) | $x)"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a | {c:2} | getpath([\"c\"]))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a | ltrimstr(\"z\"))"], "stdin": "{\"a\":\"x\"}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a | ltrimstr(\"x\"))"], "stdin": "{\"a\":\"x\"}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a | ascii_downcase)"], "stdin": "{\"a\":\"x\"}\n"}
+{"source": "#5223", "args": ["jq", "-c", "path(.a as $v | .b | select(. == $v) | $v)"], "stdin": "{\"a\":1,\"b\":1}\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))"], "stdin": "{\"a\":null}\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; not | foreach (try ($x as {a:$a} | .)) as $y (.; .; .); .))"], "stdin": "{\"a\":true}\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)); .))"], "stdin": "{\"a\":null}\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i))"], "stdin": "null\n"}
+{"source": "#4800", "args": ["jq", "-c", "(. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a}|.) as $y (.; .; .); $i)) |= 9"], "stdin": "null\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(foreach (1) as $i (.; . as {a:$q} | .; $i))"], "stdin": "{\"a\":1}\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach . as $i (.; 1 | ($x as {a:$q} | .); $i))"], "stdin": "null\n"}
+{"source": "#4800", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (1 | foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // 5; $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5013", "args": ["jq", "-c", "[path(. as $x | foreach (.a,.) as $i (.; try (foreach (try ($x as {a:$a} | .)) as $y (.a?; .; error(\"x\"))) catch (.); $i))?]"], "stdin": "{\"a\":null}\n"}
+{"source": "#5013", "args": ["jq", "-c", "(. as $x | foreach (.,.a) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.a?; empty; error($x))) catch null)?; $i)) = 9"], "stdin": "{\"a\":{\"a\":true}}\n"}
+{"source": "#5030", "args": ["jq", "-c", "del(. as $x | foreach (try reduce ($x as {b:$q} | .) as $w (0; .)) as $y (.a; .; .))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5030", "args": ["jq", "-c", "del(.a as $x | foreach ($x | . as {b:$q} | .) as $y (.a; .; .))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5030", "args": ["jq", "-c", "path(. as $x | foreach (try ($x | . as {b:$q} | .), 1) as $y (.a; .; .))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5030", "args": ["jq", "-c", "path(.a as $x | .nope | reduce ($x as {b:$b} | .) as $y (.; .))"], "stdin": "{\"a\":{\"b\":1},\"c\":{\"b\":2}}\n"}
+{"source": "#5030", "args": ["jq", "-c", "path(. as $x | foreach ($x as {b:$q} | .) as $y (.a|tostring; .; .))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5030", "args": ["jq", "-c", "path(.a.c as $x | foreach (try ($x | . as {b:$q} | .)) as $y (.a; .; $y))"], "stdin": "{\"a\":{\"a\":{\"b\":1}},\"b\":{\"b\":1}}\n"}
+{"source": "#5042", "args": ["jq", "-c", "path(. as $r | .a as $x | null | foreach ($x as {b:$q} | 1) as $y ($r | .a | tostring; .))"], "stdin": "{\"a\":{\"b\":{\"c\":3}},\"b\":{\"c\":4}}\n"}
+{"source": "#5042", "args": ["jq", "-c", "(.a as $x | . as $z | foreach (foreach (1,2) as $k (.; 1, ($x as {c:$q} | 1); .)) as $z (.a; .; .)) = 9"], "stdin": "{\"a\":true,\"b\":false}\n"}
+{"source": "#5042", "args": ["jq", "-c", "path(first(. as $x | null | foreach (foreach (1,2) as $k (.; .; $x as {b:{c:$q}} | .)) as $z (null; .; .)))"], "stdin": "{\"a\":{\"b\":{\"c\":3}},\"b\":{\"c\":4}}\n"}
+{"source": "#5044", "args": ["jq", "-c", "path(. as $x | reduce (.a,.b) as $i (.; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))"], "stdin": "{\"a\":1,\"b\":2}\n"}
+{"source": "#5044", "args": ["jq", "-c", "[path(. as $x | reduce (.a,.b) as $i (.; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))?]"], "stdin": "{\"a\":1,\"b\":2}\n"}
+{"source": "#5044", "args": ["jq", "-c", "path(. as $x | foreach (.a,.b) as $i (.; .; if . then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else .a end))"], "stdin": "{\"a\":1,\"b\":2}\n"}
+{"source": "#5044", "args": ["jq", "-c", "try del(. as $x | foreach (null,.a) as $i (.; if .a then .b else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end; .a)) catch \"C\""], "stdin": "{\"a\":1}\n"}
+{"source": "#5101", "args": ["jq", "-c", "try path(. as $x | foreach (.a?,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; 7; .)), 7) | $x) catch \"C\""], "stdin": "null\n"}
+{"source": "#5113", "args": ["jq", "-c", "[path(. as $x | foreach .a as $i ((.,.); try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5113", "args": ["jq", "-c", "[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5113", "args": ["jq", "-c", "[path(. as $x | foreach (.a,.) as $i (.; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))?]"], "stdin": "{\"b\":true}\n"}
+{"source": "#5113", "args": ["jq", "-c", "[path(. as $x | foreach .a as {a:$k} ?// $k (.; (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); if $k == null then error(\"x\") else $k end))?]"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5156", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5156", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // $x; $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5156", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // (5,6); $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5156", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // error(\"z\"); $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5156", "args": ["jq", "-c", "path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .a; $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5175", "args": ["jq", "-c", "path(. as $x | reduce (.a,.) as $i (.; (($x as {a:$a} ?// $a | $a) // 5)?))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5175", "args": ["jq", "-c", "path(. as $x | foreach (1,2) as $i (false; try (($x as {a:$a} | 5) // .a as $q | 1)))"], "stdin": "{\"a\":{\"b\":1}}\n"}
+{"source": "#5175", "args": ["jq", "-c", "path(. as $x | reduce (1,2) as $i (.; try (($x as {a:$a} | .) // $x)))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5175", "args": ["jq", "-c", "path(. as $x | reduce (.a,.) as $i (null; (($x as {a:$a} ?// $a | .a) // 5)?))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x.a as $q | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x | .a as $q | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x.a as {b:$q} ?// $q | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x | .a as {b:$q} ?// $q | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x | first(.a) as {b:$q} | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x | (.a | limit(1; .)) as {b:$q} | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | foreach 1 as $i ($x; .a as {b:$q} | $q))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | first($x.a) as {b:$q} | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5181", "args": ["jq", "-c", "path(. as $x | .a | $x | .b as {b:$q} ?// $q | $q)"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5194", "args": ["jq", "-c", "path(. as $x | foreach (1,2) as $i (.; ($x as {a:$a} ?// $a | .a) // false; .))"], "stdin": "{\"a\":1}\n"}
+{"source": "#5203", "args": ["jq", "-c", "del(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .); .))"], "stdin": "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n"}
+{"source": "#5203", "args": ["jq", "-c", "path(.n as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.m; .; .); .))"], "stdin": "{\"n\":null,\"m\":null}\n"}
+{"source": "#5203", "args": ["jq", "-c", "path(.b as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.b; .; .); .))"], "stdin": "{\"a\":{\"c\":null},\"b\":{\"b\":4}}\n"}
+{"source": "#5205", "args": ["jq", "-c", ".a as $x | [path(foreach ((.a,.)) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; .; .) | .); $i))]"], "stdin": "{\"a\":null}\n"}
+{"source": "#5205", "args": ["jq", "-c", ".a as $x | del(foreach ((.a,.)) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (null; .; .) | .); $i))"], "stdin": "{\"a\":null}\n"}
+{"source": "#5207", "args": ["jq", "-c", ". as $x | (foreach ((.a,.)) as $i (null; try (foreach (try ($x as {a:$a} | 1)) as $y (.; .; .a)) catch 1; empty)) |= 9"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5207", "args": ["jq", "-c", ". as $x | (foreach ((.a,.)) as $i (false; try (foreach (try ($x as {a:$a} | 1)) as $y (.; .; .a)) catch 1; empty)) |= 9"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5207", "args": ["jq", "-c", "[path(. as $x | (foreach ((.a,.)) as $i (null; try (foreach (try ($x as {a:$a} | 1)) as $y (.; .; .a)) catch 1; empty)))?]"], "stdin": "{\"a\":{\"a\":null}}\n"}
+{"source": "#5213", "args": ["jq", "-c", "[path(. as $x | foreach (.,.,.a) as $i (.; try (foreach ($x | .) as $y (0; .a?; $y)) catch ($i | .a?); .))?]"], "stdin": "{\"a\":{\"a\":null},\"c\":1}\n"}
+{"source": "#5213", "args": ["jq", "-c", "((. as $x | foreach (.,.,.a) as $i (.; try (foreach ($x | .) as $y (0; .a?; $y)) catch ($i | .a?); .))?) |= 9"], "stdin": "{\"a\":{\"a\":null},\"c\":1}\n"}
+{"source": "#5213", "args": ["jq", "-c", "path(. as $x | foreach (.,.) as $i (.; try (foreach ($x | .) as $y (0; .a?; $y)) catch ($i | .a?); .))"], "stdin": "{\"a\":{\"a\":null}}\n"}
