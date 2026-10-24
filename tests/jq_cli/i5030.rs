@@ -679,3 +679,120 @@ fn test_fold_source_x_that_is_the_register_in_another_fold_body_keeps_its_answer
         ),
     ])
 }
+
+/// #5030: a nested `foreach` in another fold's UPDATE or EXTRACT whose INIT moved jq's register onto the node a
+/// container `$x` is bound to (`.a as $x | foreach 1 as $i (.; FE; .)` with `FE`'s INIT `.a`), and whose source
+/// destructures that `$x`. The pattern's step passes, as it does outside a body, and moves the register onto `$x`'s
+/// child, so the UPDATE's `.c?` raises where the state is not that child. The source was read by value, so the register
+/// stayed on `.a`: `del` deleted `.a.c` and `path` answered `["a","c"]`. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_x_that_is_the_register_in_another_fold_body_walks_it_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; $y; .); .))",
+            "[\"a\",\"b\"]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .; .c); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach (1,2) as $i (.; foreach ($x | . as {b:$q} | .) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression with result {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; .; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.a as $x | foreach 1 as $i (.; .; foreach ($x as {b:$q} | $q) as $y (.a; .c?; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach (first($x as {b:$q} | .)) as $y (.a; .b; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":{"b":1}},"b":{"b":1}}"#,
+            r#"try path(.b as $x | foreach 1 as $i (.; .; foreach (first($x as {b:$q} | .)) as $y (.b; .c?; .))) catch "C""#,
+            "\"C\"\n",
+            "",
+            0,
+        ),
+    ])
+}
+
+/// #5030: a `null` `$x` is `jv_identical` to a `null` register by kind, not by node, so it is not read as the register
+/// here: these rows answered as jq does before and still do. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_null_x_in_another_fold_body_is_not_the_register_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":null}"#,
+            r"del(.a? as $x | foreach 1 as $i (.; .; foreach ((1, ($x as {b:$q} | .))) as $y (.a?; .; .b)))",
+            "{\"a\":null,\"b\":null}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":null}"#,
+            r"del(.b as $x | foreach 1 as $i (.; foreach (($x as {b:$q} | .)?) as $y (.a.c; .; null); .))",
+            "{\"a\":null,\"b\":null}\n",
+            "",
+            0,
+        ),
+    ])
+}
