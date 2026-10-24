@@ -12,6 +12,9 @@ use anyhow::Result;
 /// a node of its own (`.a`, `7`), a state-dependent count (`limit(.; .)`) and a raising one (`1/0`), where jq
 /// answers the outputs it reached before it raised and only the refusal's kind is pinned here. Every other
 /// row captured from jq 1.7.1.
+///
+/// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
+/// refused here now hold jq 1.7.1's answers.
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -340,36 +343,36 @@ fn test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800() -> Result<
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(0.5; .a); null))",
-            "",
-            "Invalid path expression with result",
+            "[\"a\"]\n[\"a\"]\n",
+            r#"Invalid path expression near attempt to access element "a" of null"#,
             5,
         ),
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1; 7); null))",
-            "",
-            "Invalid path expression with result",
+            "[\"a\"]\n",
+            "Invalid path expression with result null",
             5,
         ),
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(.; .); null))",
-            "",
-            "Invalid path expression with result",
+            "[\"a\"]\n",
+            r#"object ({"a":null}) and number (1) cannot be subtracted"#,
             5,
         ),
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1/0; .); null))",
-            "",
-            "Invalid path expression with result",
+            "[\"a\"]\n",
+            "number (1) and number (0) cannot be divided because the divisor is zero",
             5,
         ),
         (
             r#"{"a":null}"#,
             r"path(foreach (1,2) as $i (.; (. as {a:$q} | .), limit(1; .a); null))",
-            "",
-            "Invalid path expression with result",
+            "[\"a\"]\n[\"a\"]\n",
+            r#"Invalid path expression near attempt to access element "a" of null"#,
             5,
         ),
     ])

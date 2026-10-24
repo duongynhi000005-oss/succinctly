@@ -117,9 +117,9 @@ fn test_foreach_update_caught_bind_of_a_null_or_boolean_marker_5205() -> Result<
         (
             r#"{"a":null}"#,
             r".a as $x | [path(foreach (.a,.) as $i (.; (foreach (try ($x | . as {a:$a} | .)) as $y (null; .; .)); $i))]",
+            "[[\"a\",\"a\"]]\n",
             "",
-            "Invalid path expression with result {\"a\":null}",
-            5,
+            0,
         ),
     ])
 }

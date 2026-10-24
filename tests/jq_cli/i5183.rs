@@ -214,9 +214,9 @@ fn test_5183_value_tail_after_the_bind_is_read_as_passing_until_5199() -> Result
         (
             r#"{"a":null}"#,
             r". as $x | [path(foreach (.b) as $i (.; foreach ($x as {a:$a} | .) as $y (.; .; .) | 7; $i))]",
-            "[[\"b\",\"a\"]]\n",
             "",
-            0,
+            r#"Invalid path expression near attempt to access element "a" of {"a":null}"#,
+            5,
         ),
     ])
 }

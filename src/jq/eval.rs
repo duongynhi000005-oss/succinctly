@@ -13320,8 +13320,10 @@ fn binary_fanout_each_with<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     //         this     exit 3, the halt wins        <- inner keeps `pending`
     //
     // Left and right therefore answer differently, deliberately rather than
-    // by accident; both rows are pinned in
-    // `test_short_circuit_side_effect_leaks_820_932_987`. Preserving the
+    // by accident (the pair spelled in `path(...)` runs through the path-mode
+    // interpreter since #5223, which answers jq's path error in both, so
+    // `test_short_circuit_side_effect_leaks_820_932_987` no longer reaches
+    // this arm). Preserving the
     // outer `pending` instead would move the first row back to exit 3, away
     // from jq.
     //
@@ -31134,6 +31136,22 @@ pub fn eval_full<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     eval_single::<W, S>(expr, cursor.value(), false)
 }
 
+/// Run `expr` through the path-mode interpreter on `input` (#5223): every
+/// output collected, and the escape that ended the run kept after them.
+fn path_mode_query<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    input: OwnedValue,
+) -> QueryResult<'a, W> {
+    let mut outputs = Vec::new();
+    match super::path_mode::run_program(expr, input, &mut |v| {
+        outputs.push(v);
+        true
+    }) {
+        None => owned_vec_to_result(outputs),
+        Some(control) => partial(outputs, control),
+    }
+}
+
 /// The generic evaluator's result in this evaluator's shape (spine 2416,
 /// phase 3). Lazy variants are materialized first; a cursor stays a cursor
 /// where [`QueryResult`] can hold one, and a batch of cursors becomes their
@@ -31243,6 +31261,11 @@ pub fn eval_owned_with_file_index<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     input: &OwnedValue,
     file_origin: &[usize],
 ) -> QueryResult<'a, W> {
+    // #5223: a jq program with a path target the shipped walkers cannot take
+    // natively runs whole through the path-mode interpreter.
+    if S::TAG == EvalTag::Jq && super::path_mode::takes_program(expr) {
+        return path_mode_query(expr, input.clone());
+    }
     if !needs_path_context(expr) {
         return eval_owned_input::<W, S>(expr, input, false, Reentry::REBUILT);
     }
@@ -92689,8 +92712,7 @@ fn delpaths_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         };
         return match to_owned::<S, _>(value).and_then(|v| delpaths_jq_apply(v, &paths)) {
             Ok(v) => QueryResult::Owned(v),
-            Err(e) if optional && !e.is_uncatchable_at_value_position() => QueryResult::None,
-            Err(e) => e.into(),
+            Err(e) => suppress_or_raise(e, optional),
         };
     }
     let OwnedValue::Array(mut paths) = paths_owned else {

@@ -95,6 +95,9 @@ fn test_5208_nested_foreach_destructure_that_passes_on_a_state_that_is_the_regis
 
 /// #5208: the shapes that must keep their refusal. A handler that hands on a rebuilt copy of the root (`tojson|fromjson`,
 /// `[$i][0]`) is not `$x`'s node, so jq's step fails `path_intact` and the resolver must not read it as passing.
+///
+/// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
+/// refused here now hold jq 1.7.1's answers.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5208_a_rebuilt_state_is_not_the_node_x_is() -> Result<()> {
@@ -116,19 +119,20 @@ fn test_5208_a_rebuilt_state_is_not_the_node_x_is() -> Result<()> {
     ])
 }
 
-/// #5208: a handler that navigates (`catch ($i | .a?)`) keeps the earlier refusal. Its step is followed by one the resolver
-/// places wrongly (#5213), and reading the destructure turned this loud refusal into a write of `{"a":9,"c":1}` where jq
-/// raises (`Cannot index number with string "a"`). The refusal's message is the resolver's own, so only the exit code and the
-/// empty stdout are jq's here.
+/// #5208: a handler that navigates (`catch ($i | .a?)`) kept the earlier refusal: its step is followed by one the resolver
+/// placed wrongly (#5213). The path-mode interpreter (#5223) raises jq's own error (`Cannot index number with string "a"`).
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5208_a_navigating_handler_keeps_its_refusal() -> Result<()> {
+fn test_5208_a_navigating_handler_raises_as_jq_does() -> Result<()> {
     let (stdout, stderr, code) = run_jq_stdin_streams(
         r"((. as $x | foreach (.,.,.a) as $i (.; try (foreach ($x as {a:$q} | .) as $y (0; .a?; $y)) catch ($i | .a?); .))?) |= 9",
         r#"{"a":{"a":null},"c":1}"#,
         &["-c"],
     )?;
     assert_eq!((stdout.as_str(), code), ("", 5));
-    assert!(stderr.contains("Invalid path expression"), "{stderr}");
+    assert!(
+        stderr.contains(r#"Cannot index number with string "a""#),
+        "{stderr}"
+    );
     Ok(())
 }

@@ -478,6 +478,31 @@ fn an_unbound_variable_is_a_compile_error_5223() {
     });
 }
 
+/// The prelude parsed one definition at a time is the chain [`PRELUDE`] spells,
+/// each definition's own `FuncDef` with the rest of the chain cut off; and it
+/// parses on a 2 MiB thread, which the whole chain does not in a debug build.
+#[test]
+fn the_prelude_parses_one_definition_at_a_time_5223() {
+    on_big_stack(|| {
+        let prelude = Prelude::new();
+        let mut chain = parse(PRELUDE).expect("the prelude parses");
+        let mut defs = Vec::new();
+        while let Expr::FuncDef { then, .. } = &mut chain {
+            let rest = core::mem::replace(&mut **then, Expr::Identity);
+            defs.push(mark_loadvn(&chain));
+            chain = rest;
+        }
+        assert_eq!(chain, Expr::Identity);
+        assert_eq!(prelude.defs, defs);
+    });
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| drop(Prelude::new()))
+        .expect("spawn")
+        .join()
+        .expect("the prelude parses on a 2 MiB thread");
+}
+
 /// Every jq-defined builtin [`prelude_call`] maps resolves to a definition of
 /// the right arity in [`PRELUDE`].
 #[test]

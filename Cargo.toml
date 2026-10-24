@@ -98,13 +98,6 @@ unshared-containers = []
 # `--features cli,share-stats` binary. See `jq::share_stats`.
 share-stats = ["std"]
 
-# #5223 Phase 2: run every jq program the path-mode interpreter would take
-# through both evaluators, and report each disagreement -- to the file named by
-# `PATH_SHADOW_LOG` as a JSON line, or as a `path-shadow: disagree` line on
-# stderr. Additive: the shipped answer is still the one printed. A
-# development tool for the switch, never for a timing or shipped build.
-path-shadow = ["std"]
-
 # Use pure scalar (byte-by-byte) for YAML parsing. Disables all SIMD/broadword.
 # Useful for benchmarking baseline scalar performance.
 scalar-yaml = []

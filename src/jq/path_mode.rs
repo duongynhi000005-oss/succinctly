@@ -142,6 +142,21 @@ fn storage_addr(items: &ArrayVec) -> usize {
 #[derive(Clone, Default)]
 struct PathList(Option<Rc<(Self, OwnedValue)>>);
 
+/// Unlinks the list a node at a time: the default drop recurses once per
+/// component, and a path as long as a `recurse` walk is deep (10,000 nodes
+/// under the cap) would overflow a 2 MiB thread.
+impl Drop for PathList {
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(node) = next {
+            match Rc::try_unwrap(node) {
+                Ok((mut parent, _key)) => next = parent.0.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 impl PathList {
     fn push(&self, key: OwnedValue) -> Self {
         Self(Some(Rc::new((self.clone(), key))))
@@ -225,7 +240,6 @@ enum Raise {
     Unsupported(String),
     /// The consumer of the program's outputs wants no more: unwinds the run
     /// past every handler.
-    #[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
     Stop,
 }
 
@@ -233,6 +247,15 @@ impl Raise {
     /// Whether `try`, `?//` and `label` read this as a jq error.
     fn is_error(&self) -> bool {
         matches!(self, Self::Error(_) | Self::Break(_))
+    }
+
+    /// Whether `?//` retries on this: an error, also one a `try` or `label`
+    /// wrapped on its way out. A halt or a stop is not one, wrapped or not.
+    fn retries_alternative(&self) -> bool {
+        match self {
+            Self::Wrapped(inner) => inner.retries_alternative(),
+            other => other.is_error(),
+        }
     }
 }
 
@@ -721,6 +744,7 @@ def _sp_skip($n; f):
   elif $n == 0 then f
   else error("skip doesn't support negative count") end;
 def _sp_isvalid(f): try (reduce f as $x (false; true)) catch false;
+def _sp_inputs: try repeat(input) catch if . == "break" then empty else error end;
 def _sp_recurse_down: recurse;
 .
 "#;
@@ -728,7 +752,11 @@ def _sp_recurse_down: recurse;
 /// The parsed [`PRELUDE`], plus the few one-off expressions the interpreter
 /// needs a stable `&Expr` for.
 pub struct Prelude {
-    defs: Expr,
+    /// One `FuncDef` per definition, in [`PRELUDE`]'s order, each parsed on
+    /// its own: parsed as one chain the definitions nest about 150 deep, and
+    /// the recursive-descent parser then needs more native stack than a 2 MiB
+    /// debug thread has (a library caller's or a `cargo test` thread's).
+    defs: Vec<Expr>,
     /// `$__sp_t`: a compound assignment's right-hand value, re-read as the
     /// `$sp_t` argument of `_sp_upd_*`.
     t_var: Expr,
@@ -742,11 +770,27 @@ impl Prelude {
     pub fn new() -> Self {
         let parse_ok = |src: &str| parse(src).unwrap_or_else(|e| panic!("prelude: {e:?}"));
         Self {
-            defs: mark_loadvn(&parse_ok(PRELUDE)),
+            defs: prelude_definitions()
+                .map(|def| mark_loadvn(&parse_ok(&format!("{def} ."))))
+                .collect(),
             t_var: parse_ok("$__sp_t"),
             iterate: parse_ok(".[]"),
         }
     }
+}
+
+/// [`PRELUDE`]'s definitions, one source text each (`def name: body;`):
+/// every one starts a line with `def `, and the text ends with the chain's `.`.
+fn prelude_definitions() -> impl Iterator<Item = String> {
+    let text = PRELUDE
+        .trim()
+        .strip_suffix('.')
+        .expect("the prelude ends with `.`");
+    text.split("\ndef ").map(|def| {
+        let def = def.trim();
+        let def = def.strip_prefix("def ").unwrap_or(def);
+        format!("def {def}")
+    })
 }
 
 impl Default for Prelude {
@@ -845,7 +889,6 @@ pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
 /// target asks where jq's register is, which this interpreter answers by
 /// carrying it. A program that reads cursor metadata (`line`, `at_offset`,
 /// ...) stays on the shipped route, which holds the cursor.
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 pub(crate) fn takes_program(program: &Expr) -> bool {
     if super::walk::uses_cursor_metadata_builtins(program) {
         return false;
@@ -858,16 +901,7 @@ pub(crate) fn takes_program(program: &Expr) -> bool {
     dynamic && !declined
 }
 
-/// Whether the shadow build compares `program` (`path-shadow`): one the
-/// interpreter takes that reads no input, since the second run would read
-/// other values from the shared queue.
-#[cfg(feature = "path-shadow")]
-pub(crate) fn shadows(program: &Expr) -> bool {
-    takes_program(program) && !super::walk::uses_input_builtins(program)
-}
-
 /// Whether `expr` is a path construct whose target is not static.
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 fn is_dynamic_path_target(expr: &Expr) -> bool {
     match expr {
         Expr::Builtin(Builtin::Path(target) | Builtin::Del(target) | Builtin::Pick(target)) => {
@@ -882,7 +916,6 @@ fn is_dynamic_path_target(expr: &Expr) -> bool {
 }
 
 /// A target the shipped walkers resolve natively: navigation only.
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 fn is_static_target(expr: &Expr) -> bool {
     match expr {
         Expr::Identity
@@ -892,17 +925,72 @@ fn is_static_target(expr: &Expr) -> bool {
         | Expr::Iterate
         | Expr::RecursiveDescent
         | Expr::Builtin(Builtin::Recurse) => true,
+        // `recurse(.[]?)` is `..`, which the shipped walker takes 384 levels
+        // deep (#3850) where a materialized document stops at 256.
+        Expr::Builtin(Builtin::RecurseF(f)) => {
+            matches!(&**f, Expr::Optional(inner) if matches!(**inner, Expr::Iterate))
+        }
+        // A key that is a variable reads no register: jq's identity check at
+        // `INDEX` is on the target, which is static here (#4001's walker).
+        Expr::IndexExpr { target, key } => {
+            matches!(**key, Expr::Var(_)) && is_static_target(target)
+        }
         Expr::Paren(inner) | Expr::Optional(inner) => is_static_target(inner),
         Expr::Pipe(stages) => stages.iter().all(is_static_target),
         Expr::Comma(items) => items.iter().all(is_static_target),
+        // Value-level filters over navigation: none moves the register off the
+        // navigated value, so the walkers answer them as jq does, streaming.
+        // `try S` and `try S catch empty` are `S?`; `first(S)` is its first
+        // path; `S // T` takes the truthy paths of `S`, else `T`'s; and
+        // `select(c)` keeps `.` for a condition that cannot reach back into
+        // the paths (no `?//` to retry, no function to hide one, no input).
+        Expr::Try { expr, catch } => {
+            is_static_target(expr)
+                && catch
+                    .as_deref()
+                    .map_or(true, |c| matches!(c, Expr::Builtin(Builtin::Empty)))
+        }
+        Expr::FirstExpr(inner) | Expr::Builtin(Builtin::FirstStream(inner)) => {
+            is_static_target(inner)
+        }
+        Expr::Alternative(left, right) => is_static_target(left) && is_static_target(right),
+        Expr::Builtin(Builtin::Select(cond)) => is_value_only_condition(cond),
         _ => false,
     }
+}
+
+/// A `select` condition that only computes a value: no `?//` an error after
+/// the `select` could retry into, no function call (whose body could hold
+/// one), no input builtin, and no path construct of its own.
+fn is_value_only_condition(cond: &Expr) -> bool {
+    !any_subexpr(cond, &mut |e| match e {
+        Expr::AsPattern { patterns, .. }
+        | Expr::Reduce { patterns, .. }
+        | Expr::Foreach { patterns, .. } => patterns.len() > 1,
+        Expr::FuncCall { .. }
+        | Expr::FuncDef { .. }
+        | Expr::NamespacedCall { .. }
+        | Expr::DefCall { .. }
+        | Expr::Shared(_)
+        | Expr::Label { .. }
+        | Expr::Break(_) => true,
+        Expr::Builtin(
+            Builtin::Input
+            | Builtin::Inputs
+            | Builtin::Path(_)
+            | Builtin::Del(_)
+            | Builtin::Pick(_)
+            | Builtin::Paths
+            | Builtin::PathsFilter(_)
+            | Builtin::GetPath(_),
+        ) => true,
+        other => is_dynamic_path_target(other),
+    })
 }
 
 /// Whether the interpreter runs this node: not a product of the shipped
 /// evaluator's own run (`DefCall`, `Shared`, `DeferredVar`), not yq syntax,
 /// and not a builtin it declines ([`unsupported_builtin`]).
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 fn runs(expr: &Expr) -> bool {
     match expr {
         Expr::DefCall { .. }
@@ -923,7 +1011,6 @@ fn runs(expr: &Expr) -> bool {
 /// Run `program` on `input` (a document, materialized for this run), handing
 /// each output to `on_value` until it answers `false`. The escape that ended
 /// the run, if any, is the shipped evaluator's `Control`.
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 pub(crate) fn run_program(
     program: &Expr,
     input: OwnedValue,
@@ -956,7 +1043,6 @@ pub(crate) fn run_program(
 
 /// Run `f` with this thread's parsed [`PRELUDE`]: parsed once per thread
 /// under `std`, so a stream of inputs does not reparse it per document.
-#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
 fn with_prelude<R>(f: impl FnOnce(&Prelude) -> R) -> R {
     #[cfg(feature = "std")]
     {
@@ -972,119 +1058,22 @@ fn with_prelude<R>(f: impl FnOnce(&Prelude) -> R) -> R {
     }
 }
 
-/// `path-shadow`'s comparison of the two evaluators (#5223 Phase 2).
-#[cfg(feature = "path-shadow")]
-pub mod shadow {
-    use alloc::string::String;
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
-
-    use super::super::error::Control;
-    use super::super::expr::Expr;
-    use super::super::value::OwnedValue;
-    use indexmap::IndexMap;
-
-    std::thread_local! {
-        static FILTER: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
-    /// Record the program's source text, for the disagreement log; the CLI
-    /// calls it once it has read the filter.
-    pub fn set_filter(text: &str) {
-        FILTER.with(|f| *f.borrow_mut() = Some(String::from(text)));
-    }
-
-    fn ending(control: Option<&Control>) -> String {
-        match control {
-            None => String::from("done"),
-            Some(Control::Error(e)) => alloc::format!("error {}", e.message),
-            Some(Control::Break(label)) => alloc::format!("break {label}"),
-            Some(Control::Halt(code)) => alloc::format!("halt {code}"),
-        }
-    }
-
-    /// Run the interpreter on `input` and report it if it answers other than
-    /// the shipped evaluator did (`shipped`, ended by `control`). The
-    /// interpreter's own stderr writes are muted: the shipped run made them.
-    pub(crate) fn compare(
-        program: &Expr,
-        input: &OwnedValue,
-        shipped: &[OwnedValue],
-        control: Option<&Control>,
-    ) {
-        let mut interp: Vec<OwnedValue> = Vec::new();
-        // Far past the shipped count the answer already disagrees: stop
-        // there, so a program the shipped route refused early cannot run
-        // without end. The margin keeps the interpreter's own ending (an
-        // error after a few more outputs) in the log.
-        let cap = shipped.len() + 1000;
-        let end = super::super::eval::with_stderr_muted(|| {
-            super::run_program(program, input.clone(), &mut |v| {
-                interp.push(v);
-                interp.len() < cap
-            })
-        });
-        let render = |values: &[OwnedValue]| -> Vec<OwnedValue> {
-            values
-                .iter()
-                .map(|v| OwnedValue::string(v.to_json_jq_preserve()))
-                .collect()
-        };
-        let (want, got) = (render(shipped), render(&interp));
-        let (want_end, got_end) = (ending(control), ending(end.as_ref()));
-        if want == got && want_end == got_end {
-            return;
-        }
-        let filter = FILTER
-            .with(|f| f.borrow().clone())
-            .unwrap_or_else(|| alloc::format!("{program:?}"));
-        let mut row = IndexMap::new();
-        row.insert(String::from("filter"), OwnedValue::string(filter));
-        row.insert(
-            String::from("input"),
-            OwnedValue::string(input.to_json_jq_preserve()),
-        );
-        row.insert(String::from("shipped"), OwnedValue::Array(want.into()));
-        row.insert(String::from("shipped_end"), OwnedValue::string(want_end));
-        row.insert(String::from("interp"), OwnedValue::Array(got.into()));
-        row.insert(String::from("interp_end"), OwnedValue::string(got_end));
-        let line = OwnedValue::Object(row.into()).to_json_jq_preserve();
-        match std::env::var_os("PATH_SHADOW_LOG") {
-            Some(path) => {
-                use std::io::Write;
-                if let Ok(mut log) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    let _ = log.write_all(alloc::format!("{line}\n").as_bytes());
-                }
-            }
-            None => std::eprintln!("path-shadow: disagree {line}"),
-        }
-    }
-}
-
 impl<'e> Interp<'e> {
     /// An interpreter over `prelude`'s definitions.
     pub fn new(prelude: &'e Prelude) -> Self {
         let mut env = Env::default();
-        let mut at = &prelude.defs;
-        while let Expr::FuncDef {
-            name,
-            params,
-            body,
-            then,
-            ..
-        } = at
-        {
-            env = Env::push(Frame::Def {
-                name,
-                params,
-                body,
-                parent: env.clone(),
-            });
-            at = then;
+        for def in &prelude.defs {
+            if let Expr::FuncDef {
+                name, params, body, ..
+            } = def
+            {
+                env = Env::push(Frame::Def {
+                    name,
+                    params,
+                    body,
+                    parent: env.clone(),
+                });
+            }
         }
         Self {
             prelude,
@@ -1918,7 +1907,7 @@ impl<'e> Interp<'e> {
         for p in alternatives {
             match self.match_pattern(p, value.clone(), base.clone(), reg.clone(), k) {
                 Ok(()) => return Ok(()),
-                Err(raise) if raise.is_error() || matches!(raise, Raise::Wrapped(_)) => continue,
+                Err(raise) if raise.retries_alternative() => continue,
                 Err(other) => return Err(other),
             }
         }
@@ -3526,6 +3515,9 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
         B::LeafPaths => ("_sp_leaf_paths", vec![]),
         B::Skip(n, f) => ("_sp_skip", vec![n, f]),
         B::IsValid(f) => ("_sp_isvalid", vec![f]),
+        // One `input` per demand, as jq's own definition: delegated whole, the
+        // shipped evaluator would drain the queue.
+        B::Inputs => ("_sp_inputs", vec![]),
         B::RecurseDown => ("_sp_recurse_down", vec![]),
         _ => return None,
     };
@@ -3544,6 +3536,9 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
         B::AnyC(..) | B::AllC(..) => "a yq builtin",
+        // These read the shipped evaluator's path context (`needs_path_context`),
+        // which a delegated builtin call does not carry.
+        B::Key | B::FileIndex | B::Filename => "a path-context builtin",
         _ => return None,
     })
 }

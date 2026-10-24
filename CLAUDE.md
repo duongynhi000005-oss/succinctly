@@ -498,7 +498,6 @@ for the full list.
 | `select-stats`        | Adds a counter to five hot `select` scan loops (#40 measurement; never for timing runs)                                   |
 | `unshared-containers` | Non-additive: the #3000 layout (boxed map, inline array `Vec`) instead of `Rc` containers (#2999 A/B holdout; never ship) |
 | `share-stats`         | Record every copy-on-write that copied, with its call site (#2999 clone audit)                                            |
-| `path-shadow`         | Run each jq program the path-mode interpreter takes through both evaluators; log disagreements (#5223, `PATH_SHADOW_LOG`) |
 
 ### `--all-features` is not a superset build (#3006)
 

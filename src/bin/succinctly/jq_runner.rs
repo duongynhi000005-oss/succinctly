@@ -3927,9 +3927,6 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
         }
         Err(BuildContextError::Other(e)) => return Err(e),
     };
-    // #5223 Phase 2: the disagreement log names the filter as written.
-    #[cfg(feature = "path-shadow")]
-    succinctly::jq::path_mode::shadow::set_filter(&filter_str);
 
     // The main filter is parsed *twice* (#2395 -- see the re-parse below), and
     // the second result is the one that runs, so a drift between the two in
