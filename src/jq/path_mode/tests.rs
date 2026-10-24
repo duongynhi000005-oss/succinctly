@@ -574,6 +574,9 @@ fn every_prelude_call_resolves_5223() {
             "INDEX(.)",
             "INDEX(.; .)",
             "leaf_paths",
+            "skip(1; .)",
+            "isvalid(.)",
+            "recurse_down",
         ];
         for call in calls {
             let expr = parse(call).expect(call);
@@ -1465,17 +1468,36 @@ fn a_recursion_too_deep_is_refused_not_overflowed_5223() {
 /// `until`, `while`, `range/3` and `recurse` run jq's tail-recursive bodies
 /// on a heap work list when their arguments are pure, in jq's order, so a
 /// long loop costs no native stack per iteration; an impure argument keeps
-/// the `builtin.jq` body. Every expected answer is jq 1.7.1's.
+/// the `builtin.jq` body. The shipped evaluator's caps stay, each a
+/// documented divergence from jq's unbounded loop: 100,000 `until`/`while`
+/// states and `range` values, 10,000 nodes for a `recurse(f)` that is not a
+/// tree descent, and `repeat`'s round limits. Every expected answer under a
+/// cap is jq 1.7.1's; the capped rows are the shipped evaluator's.
 #[test]
 fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
     on_big_stack(|| {
         check(&[
-            ("0", "until(. >= 100000; . + 1)", ok(&["100000"])),
+            ("0", "until(. >= 99999; . + 1)", ok(&["99999"])),
+            (
+                "0",
+                "until(. >= 100000; . + 1)",
+                err(&[], "until: maximum iterations exceeded"),
+            ),
             ("0", "[range(0; 100000; 1)] | length", ok(&["100000"])),
             (
                 "0",
+                "[range(100001)] | length",
+                err(&[], "range: maximum iterations exceeded"),
+            ),
+            (
+                "0",
+                "[recurse(if . < 9999 then . + 1 else empty end)] | length",
+                ok(&["10000"]),
+            ),
+            (
+                "0",
                 "[recurse(if . < 50000 then . + 1 else empty end)] | length",
-                ok(&["50001"]),
+                err(&[], "recurse: maximum nodes exceeded"),
             ),
             (
                 "1",
@@ -1494,6 +1516,13 @@ fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
             ),
             ("0", "[limit(3; repeat(1))]", ok(&["[1,1,1]"])),
             ("1", "[limit(5; repeat(. * 2))]", ok(&["[2,2,2,2,2]"])),
+            ("0", "[limit(3; repeat(empty))]", ok(&["[]"])),
+            ("[1,2]", "[path(repeat(.))] | length", ok(&["1000"])),
+            (
+                "[1,2]",
+                "[path(limit(20000; repeat(.[])))] | length",
+                ok(&["2000"]),
+            ),
             ("0", "[until(. > 2; . + 1, error(\"x\"))]", err(&[], "x")),
             ("0", "[until(. > 2; (. + 1 | debug))] | length", ok(&["1"])),
         ]);
@@ -1530,4 +1559,137 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
     ] {
         assert!(!takes(filter), "{filter}");
     }
+}
+
+/// `skip`, `isvalid` and `recurse_down` (succinctly extensions) answer what
+/// the shipped evaluator answers, in path mode too.
+#[test]
+fn the_extension_builtins_match_the_shipped_evaluator_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "null",
+                "[skip(2; 1,2,3,4)], [skip(0; 1,2)], [skip(5; 1,2)]",
+                ok(&["[3,4]", "[1,2]", "[]"]),
+            ),
+            (
+                "null",
+                "try [skip(-1; 1,2)] catch .",
+                ok(&[r#""skip doesn't support negative count""#]),
+            ),
+            (
+                "null",
+                "isvalid(1), isvalid(empty), isvalid(error), isvalid(1, error)",
+                ok(&["true", "false", "false", "false"]),
+            ),
+            ("[1,[2]]", "[recurse_down]", ok(&["[[1,[2]],1,[2],2]"])),
+            (
+                r#"{"a":[1,2,3]}"#,
+                "[path(skip(1; .a[]))]",
+                ok(&[r#"[["a",1],["a",2]]"#]),
+            ),
+        ]);
+    });
+}
+
+/// `|=`, `=`, the update-assignments and `//=` write in place outside path
+/// mode, with `_modify`'s meaning: the update's first output is written, an
+/// update with none deletes the path (all deletions at the end), and a `?//`
+/// in the update (which can catch the fold's `break`) runs jq's own body,
+/// quirk included. Every expected answer is jq 1.7.1's.
+#[test]
+fn updates_and_assignments_follow_modify_and_assign_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                r#"{"a":[1,2]}"#,
+                ".a[] |= . * 10",
+                ok(&[r#"{"a":[10,20]}"#]),
+            ),
+            (
+                r#"{"a":[1,{"b":2}],"c":"x"}"#,
+                "(.. | numbers) |= . + 1",
+                ok(&[r#"{"a":[2,{"b":3}],"c":"x"}"#]),
+            ),
+            (r#"{"a":1,"b":2}"#, ".a |= empty", ok(&[r#"{"b":2}"#])),
+            (
+                r#"{"a":1,"b":2,"c":3}"#,
+                "(.a, .b) |= empty",
+                ok(&[r#"{"c":3}"#]),
+            ),
+            ("[1,2,3]", ".[] |= select(. > 1)", ok(&["[2,3]"])),
+            (r#"{"a":1}"#, ".a |= (1,2)", ok(&[r#"{"a":1}"#])),
+            (
+                r#"{"a":[1]}"#,
+                ".a |= (. as [$x] ?// $x | $x)",
+                err(&[], "Paths must be specified as an array"),
+            ),
+            (r#"{"a":0}"#, "[.a = (1,2)]", ok(&[r#"[{"a":1},{"a":2}]"#])),
+            (
+                r#"{"a":1}"#,
+                ".a += 1, .a //= 3, (.b //= 3)",
+                ok(&[r#"{"a":2}"#, r#"{"a":1}"#, r#"{"a":1,"b":3}"#]),
+            ),
+            (
+                r#"{"a":1}"#,
+                ".a.b |= 1",
+                err(&[], r#"Cannot index number with string "b""#),
+            ),
+            (
+                r#"{"a":1}"#,
+                "try (.a.b = 1) catch .",
+                ok(&[r#""Cannot index number with string \"b\"""#]),
+            ),
+            (
+                r#"{"a":{"b":1}}"#,
+                "(.a | select(.b) | .b) |= . + 1",
+                ok(&[r#"{"a":{"b":2}}"#]),
+            ),
+            ("null", "(.a[2] |= 5)", ok(&[r#"{"a":[null,null,5]}"#])),
+            ("[1,2,3]", "(.[] | select(. == 2)) |= empty", ok(&["[1,3]"])),
+            (
+                r#"{"a":[1,2,3]}"#,
+                "del(.a[] | select(. >= 2))",
+                ok(&[r#"{"a":[1]}"#]),
+            ),
+        ]);
+    });
+}
+
+/// Rows the shadow run found the interpreter wrong on, fixed from jq's
+/// source: a slice descriptor missing a bound is not a slice (`jv_object_get`
+/// answers *invalid*), `range/1`'s argument is a `$x` binding (a subexp), and
+/// a slice 65,536 or more elements into its root is a copy, not a view (`jv`'s
+/// 16-bit `offset`). Every expected answer is jq 1.7.1's.
+#[test]
+fn shadow_findings_match_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "[1,2,3]",
+                r#"path(.[{"start":1}])"#,
+                err(&[], "Array/string slice indices must be integers"),
+            ),
+            (
+                r#"{"a":{"b":1}}"#,
+                "path(reduce range([1] as [$a]|$a) as $k (.; .))",
+                ok(&["[]"]),
+            ),
+            (
+                "null",
+                r#"{"a":[range(70003)]} | try path(.a[70000:] as $x | .a[70000:][0:] | $x) catch "c""#,
+                ok(&[r#""c""#]),
+            ),
+            (
+                "null",
+                "[range(70003)] | .[60000:] | [path(.[5535:] as $x | .[5535:] | $x)]",
+                ok(&[r#"[[{"start":5535,"end":null}]]"#]),
+            ),
+            (
+                "null",
+                r#"[range(70003)] | .[60000:] | try path(.[5536:] as $x | .[5536:] | $x) catch "c""#,
+                ok(&[r#""c""#]),
+            ),
+        ]);
+    });
 }

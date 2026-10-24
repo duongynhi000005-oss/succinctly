@@ -68838,7 +68838,7 @@ fn eval_recurse_cond<S: EvalSemantics>(
 /// It used to end the walk as though it had finished, which answered a finite
 /// walk over a larger document silently short and left a write through it
 /// silently partial.
-const RECURSE_MAX_ITEMS: usize = 10000;
+pub(crate) const RECURSE_MAX_ITEMS: usize = 10000;
 
 /// Whether `recurse(f)` / `recurse(f; cond)` is bare `recurse` (#3703).
 ///
@@ -68900,7 +68900,7 @@ pub(crate) fn is_gated_structural_descent(f: &Expr, cond: Option<&Expr>) -> bool
 /// `null` again, forever, and `.a.b` is as likely to land on the same node as
 /// to leave it. A pipe through anything else (`.[]? | .`, a slice, a comma, a
 /// call) is a computed `f` whose outputs need not be tree nodes at all.
-fn is_tree_descending_f(f: &Expr) -> bool {
+pub(crate) fn is_tree_descending_f(f: &Expr) -> bool {
     fn step(e: &Expr) -> &Expr {
         let mut e = e;
         while let Expr::Paren(inner) | Expr::Optional(inner) = e {
@@ -81976,7 +81976,7 @@ fn eval_range<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// instead, the one guard in the file that chose that failure mode. See
 /// [`docs/compliance/jq/limitations.md`](../../docs/compliance/jq/limitations.md)
 /// for the recorded divergence (real jq has no such cap at all).
-const MAX_RANGE: usize = 100000;
+pub(crate) const MAX_RANGE: usize = 100000;
 
 /// The error [`each_range`]'s `emit` raises once a caller that actually
 /// wanted every value (its sink kept answering [`Demand::Continue`]) hits a
@@ -84508,7 +84508,7 @@ pub(crate) fn yq_integer_component_text(component: &OwnedValue) -> Option<String
 /// indexed, so `1 | setpath(["a"]; 1)` is an error rather than `{"a":1}`
 /// (#359), and so does a container indexed with the wrong kind of key —
 /// `{} | setpath([0]; 1)`, `[] | setpath(["a"]; 1)`.
-fn set_value_at_path<S: EvalSemantics>(
+pub(crate) fn set_value_at_path<S: EvalSemantics>(
     value: OwnedValue,
     path: &[OwnedValue],
     new_val: OwnedValue,
@@ -92897,6 +92897,43 @@ fn delpaths_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // `is_invalid_path_expression()` is never actually raised here.
         Err(e) if optional && !e.is_uncatchable_at_value_position() => QueryResult::None,
         Err(e) => e.into(),
+    }
+}
+
+/// jq mode's `delpaths(paths)` on an owned value, for the path-mode interpreter
+/// (#5223): [`delpaths_one`]'s jq rules over an `OwnedValue` the caller owns,
+/// so a uniquely owned document is written in place. Every entry must be an
+/// array; a path holding a NaN names nothing and is dropped; the list is
+/// sorted in jq's value order and applied as one batch; an empty path deletes
+/// everything.
+pub(crate) fn delpaths_jq_owned(
+    value: OwnedValue,
+    paths: OwnedValue,
+) -> Result<OwnedValue, EvalError> {
+    let OwnedValue::Array(mut paths) = paths else {
+        return Err(EvalError::paths_must_be_array());
+    };
+    if let Some(bad) = paths.iter().find(|p| !matches!(p, OwnedValue::Array(_))) {
+        return Err(EvalError::path_must_be_array_not(bad.type_name()));
+    }
+    paths.retain(|path| match path {
+        OwnedValue::Array(components) => !components
+            .iter()
+            .any(|key| matches!(key, OwnedValue::Float(f) if f.is_nan())),
+        _ => false,
+    });
+    paths.sort_by(compare_values::<JqSemantics>);
+    let paths: Vec<&[OwnedValue]> = paths
+        .iter()
+        .filter_map(|path| match path {
+            OwnedValue::Array(components) => Some(components.as_slice()),
+            _ => None,
+        })
+        .collect();
+    match paths.first() {
+        None => Ok(value),
+        Some([]) => Ok(OwnedValue::Null),
+        Some(_) => delete_paths_sorted::<JqSemantics>(value, &paths, 0),
     }
 }
 

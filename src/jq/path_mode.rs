@@ -46,10 +46,13 @@ use super::c_builtin_identity::{array_index, binop_keeps, format_keeps_input, ke
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    native_stack_exhausted, owned_to_string, EvalTag, JqSemantics, QueryResult, MAX_EVAL_FRAMES,
+    is_tree_descending_f, native_stack_exhausted, owned_to_string, range_max_exceeded_error,
+    EvalTag, JqSemantics, QueryResult, MAX_EMPTY_REPEAT_ROUNDS, MAX_EVAL_FRAMES, MAX_RANGE,
+    RECURSE_MAX_ITEMS, REPEAT_WIDTH_BUDGET, WHILE_UNTIL_MAX_STEPS,
 };
 use super::expr::{
-    Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey, StringPart,
+    ArithOp, Builtin, CompareOp, Expr, Literal, MergeFlags, NumberKey, ObjectKey, Param, Pattern,
+    SliceBoundKey, StringPart,
 };
 use super::parser::parse;
 use super::resolve::ModuleRun;
@@ -235,6 +238,9 @@ impl Raise {
 
 type R = Result<(), Raise>;
 type Sink<'s> = dyn FnMut(OwnedValue, Reg) -> R + 's;
+/// An update for [`Interp::modify_native`]: the value at a path in, each
+/// output handed to the emitter.
+type Update<'u, 'e> = dyn FnMut(&Interp<'e>, OwnedValue, &mut dyn FnMut(OwnedValue) -> R) -> R + 'u;
 
 /// The label value `GENLABEL` makes: `{"__jq": n}`.
 fn label_value(n: u64) -> OwnedValue {
@@ -285,7 +291,8 @@ struct Env<'e>(Option<Rc<Frame<'e>>>);
 enum Frame<'e> {
     Var {
         name: &'e str,
-        value: OwnedValue,
+        /// A cell, for `LOADVN` ([`Env::take_var`]), which empties it.
+        value: RefCell<OwnedValue>,
         parent: Env<'e>,
     },
     /// A `def`: its body runs in the environment *this frame* closes, so it
@@ -348,7 +355,23 @@ impl<'e> Env<'e> {
         while let Some(frame) = &at.0 {
             if let Frame::Var { name: n, value, .. } = &**frame {
                 if *n == name {
-                    return Some(value.clone());
+                    return Some(value.borrow().clone());
+                }
+            }
+            at = Self::parent(frame);
+        }
+        None
+    }
+
+    /// `LOADVN`: the variable's value, leaving `null` in its place, so a later
+    /// read of the same binding -- after a backtrack re-runs the code that
+    /// read it -- finds `null` (jq's `$$$$v`, which only `_modify` uses).
+    fn take_var(&self, name: &str) -> Option<OwnedValue> {
+        let mut at = self;
+        while let Some(frame) = &at.0 {
+            if let Frame::Var { name: n, value, .. } = &**frame {
+                if *n == name {
+                    return Some(value.replace(OwnedValue::Null));
                 }
             }
             at = Self::parent(frame);
@@ -406,13 +429,17 @@ impl<'e> Env<'e> {
     fn var_ref(&self, name: &'e str, value: OwnedValue) -> Self {
         Env::push(Frame::Var {
             name,
-            value,
+            value: RefCell::new(value),
             parent: self.clone(),
         })
     }
 }
 
 const T_VAR: &str = "__sp_t";
+
+/// The prefix of a prelude variable read as `LOADVN`: `$__lvn_v` is jq's
+/// `$$$$v` ([`Env::take_var`]).
+const LOADVN: &str = "__lvn_";
 
 /// The jq-defined builtins the interpreter runs from source.
 ///
@@ -421,13 +448,16 @@ const T_VAR: &str = "__sp_t";
 /// carries an `_sp_` prefix, so the parser cannot fold a definition back into
 /// the `Builtin` it replaces. Closure parameters are renamed where
 /// succinctly's parser would read the jq name as a builtin (`exp`, `paths`).
-/// And `_modify`'s private `$$$$v` (`LOADVN`, which only avoids a refcount)
-/// is spelled `$v`. `builtin.jq`'s comments are left out.
+/// And `_modify`'s `$$$$v`/`$$$$dot` (`LOADVN`, which loads the variable and
+/// nulls it, so a backtrack that re-reads it finds `null`) are spelled
+/// `$__lvn_v`/`$__lvn_dot`. `builtin.jq`'s comments are left out.
 ///
-/// `leaf_paths` is a succinctly extension, not a jq builtin: its definition
-/// here is the path of every childless node (scalars, `null`, and empty
-/// arrays and objects), the root included when it is one, as the shipped
-/// evaluator answers it.
+/// `leaf_paths`, `skip`, `isvalid` and `recurse_down` are succinctly
+/// extensions, not jq 1.7.1 builtins, defined here as the shipped evaluator
+/// answers them: `leaf_paths` is the path of every childless node (scalars,
+/// `null`, and empty arrays and objects), the root included when it is one;
+/// `skip` is jq 1.8's definition; `isvalid(f)` is whether `f` yields at least
+/// one output and no error; `recurse_down` is `recurse`.
 ///
 /// Bodies call one another through the `Builtin` variants they parse to,
 /// which `prelude_call` maps back here, plus a few direct `_sp_` calls. The
@@ -450,14 +480,14 @@ def _sp_modify(sp_paths; sp_update):
       | label $out
       | ($dot[0] | getpath($p)) as $v
       | (
-          (   $v
+          (   $__lvn_v
             | sp_update
             | (., break $out) as $v
-            | $dot
+            | $__lvn_dot
             | setpath([0] + $p; $v)
           ),
           (
-              $dot
+              $__lvn_dot
             | setpath([1, (.[1] | length)]; $p)
           )
         )
@@ -667,6 +697,12 @@ def _sp_INDEX(stream; idx_expr):
   reduce stream as $row ({}; .[$row|idx_expr|tostring] = $row);
 def _sp_INDEX(idx_expr): INDEX(.[]; idx_expr);
 def _sp_leaf_paths: path(..|select(type != "object" and type != "array" or length == 0));
+def _sp_skip($n; f):
+  if $n > 0 then foreach f as $item ($n; . - 1; if . < 0 then $item else empty end)
+  elif $n == 0 then f
+  else error("skip doesn't support negative count") end;
+def _sp_isvalid(f): try (reduce f as $x (false; true)) catch false;
+def _sp_recurse_down: recurse;
 .
 "#;
 
@@ -1222,6 +1258,13 @@ impl<'e> Interp<'e> {
                 });
                 sink(value, reg)
             }
+            // The prelude's spelling of `LOADVN` (`$$$$v`).
+            Expr::Var(name) if name.starts_with(LOADVN) => {
+                match env.take_var(&name[LOADVN.len()..]) {
+                    Some(value) => sink(value, reg),
+                    None => Err(unsupported(format!("${name} is not bound"))), // patchcov: coverage tolerate-line reason="unreachable: the prelude reads only variables it binds"
+                }
+            }
             Expr::Var(name) => match env.lookup_var(name) {
                 Some(value) => sink(value, reg),
                 None => Err(unsupported(format!("${name} is not bound"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects an unbound variable with resolve_all_jq before evaluating"
@@ -1266,14 +1309,22 @@ impl<'e> Interp<'e> {
             // `def _repeat: exp, _repeat;` in jq 1.7.1: every pass runs `exp` on
             // the same input from the entry register (`FORK`), so a loop is the
             // body exactly. A consumer ends it by raising (`limit`'s `break`).
-            Expr::Repeat(g) => loop {
-                self.eval(g, env, input.clone(), reg.clone(), sink)?;
-            },
+            Expr::Repeat(g) => self.repeat(g, env, input, reg, sink),
+            // `def range($x): range(0;$x);`: the parser spells range/1 as a
+            // spelling-less `0` start, and its argument is a `$x` binding, a
+            // subexp, where range/2's bounds are closures, tracked.
+            Expr::Range {
+                from,
+                to: Some(to),
+                step: None,
+            } if matches!(**from, Expr::Literal(Literal::Int(0))) => {
+                self.eval(to, env, input.clone(), reg.sub(), &mut |end, _| {
+                    range_values(OwnedValue::Int(0), &end, &reg, sink)
+                })
+            }
             Expr::Range { from, to, step } => match (to, step) {
                 (Some(to), None) => self.range(from, to, env, input, reg, sink),
-                (Some(to), Some(step)) => {
-                    self.call_prelude("_sp_range", &[from, to, step], env, input, reg, sink)
-                }
+                (Some(to), Some(step)) => self.range_by(from, to, step, env, input, reg, sink),
                 (None, _) => Err(unsupported("range without an upper bound")),
             },
             Expr::Label { name, body } => self.label(name, body, env, input, reg, sink),
@@ -1310,8 +1361,18 @@ impl<'e> Interp<'e> {
                     None => self.hook(name, args, env, input, reg, sink),
                 },
             },
+            Expr::Assign { path, value } if !reg.tracking() => {
+                self.assign_native(path, value, env, input, reg, sink)
+            }
             Expr::Assign { path, value } => {
                 self.call_prelude("_sp_assign", &[path, value], env, input, reg, sink)
+            }
+            Expr::Update { path, filter } if !reg.tracking() && !Self::may_retry(filter, env) => {
+                let mut update =
+                    |this: &Self, v: OwnedValue, emit: &mut dyn FnMut(OwnedValue) -> R| {
+                        this.eval(filter, env, v, Reg::top(), &mut |u, _| emit(u))
+                    };
+                self.modify_native(path, env, input, reg, &mut update, sink)
             }
             Expr::Update { path, filter } => {
                 self.call_prelude("_sp_modify", &[path, filter], env, input, reg, sink)
@@ -1439,7 +1500,8 @@ impl<'e> Interp<'e> {
     }
 
     /// `jvp_array_slice`: an empty slice is a fresh `[]`; the whole root is the
-    /// root itself; any other range is the one view of that range.
+    /// root itself; any other range is the one view of that range, unless it
+    /// starts 65,536 or more elements into the root, where jq copies it.
     #[cfg_attr(feature = "unshared-containers", allow(clippy::unused_self))]
     fn array_slice(&self, items: &ArrayVec, start: usize, end: usize) -> OwnedValue {
         if start == end {
@@ -1465,6 +1527,11 @@ impl<'e> Interp<'e> {
         let (offset, size) = (offset + start, end - start);
         if offset == 0 && size == root.len() {
             return OwnedValue::Array(root);
+        }
+        // A `jv`'s `offset` is 16 bits: past it `jvp_array_slice` copies the
+        // range into a new array of the same elements, which is fresh.
+        if offset >= 1 << 16 {
+            return OwnedValue::Array(root[offset..offset + size].to_vec().into());
         }
         let key = (storage_addr(&root), offset, size);
         if let Some(view) = self.slices.borrow().get(&key) {
@@ -1983,19 +2050,61 @@ impl<'e> Interp<'e> {
     ) -> R {
         self.eval(from, env, input.clone(), reg, &mut |start, reg_s| {
             self.eval(to, env, input.clone(), reg_s, &mut |end, reg_e| {
-                let (Some(mut cur), Some(max)) = (number_f64(&start), number_f64(&end)) else {
-                    return Err(Raise::Error(EvalError::new("Range bounds must be numeric")));
-                };
-                let mut first = Some(start.clone());
-                // `RANGE` stops only on `>=`, which a NaN bound never is.
-                loop {
-                    if cur >= max {
+                range_values(start.clone(), &end, &reg_e, sink)
+            })
+        })
+    }
+
+    /// `range($init; $upto; $by)`:
+    ///
+    /// ```text
+    /// def range($init; $upto; $by):
+    ///     if $by > 0 then $init|while(. < $upto; . + $by)
+    ///   elif $by < 0 then $init|while(. > $upto; . + $by)
+    ///   else empty end;
+    /// ```
+    ///
+    /// The three `$` parameters are subexps (earlier outermost). The loop
+    /// emits `$init` itself first, then each `. + $by`, all at the entry
+    /// register (a variable and a binary operator move nothing), and stops
+    /// past `MAX_RANGE` values with the shipped `range` cap.
+    #[allow(clippy::too_many_arguments)]
+    fn range_by(
+        &self,
+        init: &'e Expr,
+        upto: &'e Expr,
+        by: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        self.eval(init, env, input.clone(), reg.sub(), &mut |start, _| {
+            self.eval(upto, env, input.clone(), reg.sub(), &mut |end, _| {
+                self.eval(by, env, input.clone(), reg.sub(), &mut |step, _| {
+                    let zero = OwnedValue::Int(0);
+                    let cmp = |op: CompareOp, a: &OwnedValue, b: &OwnedValue| {
+                        apply_compare_op::<JqSemantics>(op, a, b)
+                    };
+                    let below = if cmp(CompareOp::Gt, &step, &zero) {
+                        CompareOp::Lt
+                    } else if cmp(CompareOp::Lt, &step, &zero) {
+                        CompareOp::Gt
+                    } else {
                         return Ok(());
+                    };
+                    let mut current = start.clone();
+                    let mut emitted = 0;
+                    while cmp(below, &current, &end) {
+                        emitted += 1;
+                        if emitted > MAX_RANGE {
+                            return Err(Raise::Fatal(range_max_exceeded_error()));
+                        }
+                        sink(current.clone(), reg.clone())?;
+                        current = compound_step("_sp_upd_add", &current, &step)?;
                     }
-                    let value = first.take().unwrap_or_else(|| number_owned(cur));
-                    sink(value, reg_e.clone())?;
-                    cur += 1.0;
-                }
+                    Ok(())
+                })
             })
         })
     }
@@ -2153,12 +2262,22 @@ impl<'e> Interp<'e> {
             let name = if is_while { "_sp_while" } else { "_sp_until" };
             return self.call_prelude(name, &[cond, step], env, input, reg, sink);
         }
+        // The shipped evaluator's step budget (`WHILE_UNTIL_MAX_STEPS`, a
+        // documented divergence from jq's unbounded loop): one state per test.
+        let mut budget = WHILE_UNTIL_MAX_STEPS;
         let mut work = vec![Work::Test(input, reg)];
         while let Some(item) = work.pop() {
             match item {
                 Work::Emit(v, r) => sink(v, r)?,
                 Work::Raise(raise) => return Err(raise),
                 Work::Test(v, r) => {
+                    if budget == 0 {
+                        let which = if is_while { "while" } else { "until" };
+                        return Err(Raise::Fatal(EvalError::resource_limit(format!(
+                            "{which}: maximum iterations exceeded"
+                        ))));
+                    }
+                    budget -= 1;
                     let conds = self.collect_outputs(cond, env, v.clone(), r.sub());
                     if let Err(raise) = conds.end {
                         work.push(Work::Raise(raise));
@@ -2216,12 +2335,27 @@ impl<'e> Interp<'e> {
             let args: Vec<&'e Expr> = f.into_iter().chain(cond).collect();
             return self.call_prelude("_sp_recurse", &args, env, input, reg, sink);
         }
+        // The shipped evaluator's node cap (`RECURSE_MAX_ITEMS`, a documented
+        // divergence: jq's `recurse(.a)` on `null` never ends): an `f` that
+        // descends a tree is uncapped until a `cond` forks a child.
+        let mut cap = match f {
+            None => None,
+            Some(f) if is_tree_descending_f(f) => None,
+            Some(_) => Some(RECURSE_MAX_ITEMS),
+        };
+        let mut visited = 0usize;
         let mut work = vec![Work::Test(input, reg)];
         while let Some(item) = work.pop() {
             match item {
                 Work::Raise(raise) => return Err(raise),
                 Work::Emit(v, r) | Work::Step(v, r) => work.push(Work::Test(v, r)), // patchcov: coverage tolerate-line reason="unreachable: recurse pushes only Test and Raise items"
                 Work::Test(v, r) => {
+                    if cap.is_some_and(|cap| visited >= cap) {
+                        return Err(Raise::Fatal(EvalError::resource_limit(
+                            "recurse: maximum nodes exceeded",
+                        )));
+                    }
+                    visited += 1;
                     sink(v.clone(), r.clone())?;
                     let children = match f {
                         Some(f) => self.collect_outputs(f, env, v, r),
@@ -2246,10 +2380,15 @@ impl<'e> Interp<'e> {
                         // `select(cond)`: `cond` a subexp on the child, the
                         // child once per truthy output.
                         let tests = self.collect_outputs(cond, env, child.clone(), rc.sub());
+                        let mut verdicts = 0;
                         for (t, _) in tests.values {
                             if truthy(&t) {
+                                verdicts += 1;
                                 kept.push((child.clone(), rc.clone()));
                             }
+                        }
+                        if verdicts > 1 && cap.is_none() {
+                            cap = Some(RECURSE_MAX_ITEMS);
                         }
                         // An error in `cond` ends the walk once the children
                         // kept before it are done; `f`'s own later outputs and
@@ -2266,6 +2405,51 @@ impl<'e> Interp<'e> {
             }
         }
         Ok(())
+    }
+
+    /// `repeat(exp)` (`def _repeat: exp, _repeat;` in jq 1.7.1): `exp` on the
+    /// same input, from the entry register, round after round, which a loop
+    /// is exactly. jq hangs where no round can end it; the shipped
+    /// evaluator's backstops, each a documented divergence, are kept: a run
+    /// of `MAX_EMPTY_REPEAT_ROUNDS` empty rounds ends the stream, and in path
+    /// mode so do 1,000 rounds, with more than `REPEAT_WIDTH_BUDGET` outputs
+    /// raising the uncatchable `repeat: maximum iterations exceeded`.
+    fn repeat(
+        &self,
+        g: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        const PATH_MODE_ROUNDS: usize = 1000;
+        let tracking = reg.tracking();
+        let (mut rounds, mut empty_rounds, mut outputs) = (0usize, 0usize, 0usize);
+        loop {
+            if tracking && rounds == PATH_MODE_ROUNDS {
+                return Ok(());
+            }
+            rounds += 1;
+            let mut produced = false;
+            self.eval(g, env, input.clone(), reg.clone(), &mut |v, r| {
+                produced = true;
+                outputs += 1;
+                if tracking && outputs > REPEAT_WIDTH_BUDGET {
+                    return Err(Raise::Fatal(EvalError::resource_limit(
+                        "repeat: maximum iterations exceeded",
+                    )));
+                }
+                sink(v, r)
+            })?;
+            if produced {
+                empty_rounds = 0;
+            } else {
+                empty_rounds += 1;
+                if empty_rounds == MAX_EMPTY_REPEAT_ROUNDS {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// `PATH_BEGIN … PATH_END`: a fresh register on the input; each output
@@ -2643,6 +2827,162 @@ impl<'e> Interp<'e> {
         })
     }
 
+    /// `_modify(paths; update)` (`|=`, the arithmetic update-assignments and
+    /// `//=`) outside path mode, with jq 1.7.1's body's meaning:
+    ///
+    /// ```text
+    /// def _modify(paths; update):
+    ///     reduce path(paths) as $p ([., []];
+    ///         . as $dot | null | label $out | ($dot[0] | getpath($p)) as $v
+    ///         | (($v | update | (., break $out) as $v | $dot | setpath([0] + $p; $v)),
+    ///            ($dot | setpath([1, (.[1] | length)]; $p))))
+    ///     | . as $dot | $dot[0] | delpaths($dot[1]);
+    /// ```
+    ///
+    /// For each path of `paths` (computed on the input, lazily), the value
+    /// there in the state so far goes through `update`. Its first output is
+    /// written there, and a `break` to the fold's own label ends the update
+    /// (jq's `(., break $out)`); an update with no output queues the path for
+    /// deletion, all of them deleted together at the end. The state moves
+    /// from write to write, so a uniquely owned document is written in place
+    /// rather than copied per path. The caller has checked that `update`
+    /// cannot catch that `break` ([`Self::may_retry`]): one that can (a
+    /// `?//` retries past it) restores the pre-path state in jq's body,
+    /// which only that body reproduces.
+    fn modify_native(
+        &self,
+        paths: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        update: &mut Update<'_, 'e>,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        let state = RefCell::new(input.clone());
+        let mut deletions: Vec<OwnedValue> = Vec::new();
+        self.path_mode(paths, env, input, reg.clone(), &mut |path, _| {
+            let OwnedValue::Array(keys) = &path else {
+                return Err(unsupported("a path that is not an array")); // patchcov: coverage tolerate-line reason="unreachable: path() emits arrays only"
+            };
+            let current = self.getpath_value(&state.borrow(), keys)?;
+            let label = self.next_label.get();
+            self.next_label.set(label + 1);
+            let mut wrote = false;
+            let result = update(self, current, &mut |u| {
+                let before = state.replace(OwnedValue::Null);
+                let after = super::eval::set_value_at_path::<JqSemantics>(before, keys, u)
+                    .map_err(raise_eval)?;
+                *state.borrow_mut() = after;
+                wrote = true;
+                Err(Raise::Break(label))
+            });
+            match result {
+                Err(Raise::Break(id)) if id == label => Ok(()),
+                Ok(()) => {
+                    // No `?//` can have caught the `break`, so no output was
+                    // written: the path is deleted.
+                    debug_assert!(!wrote, "a write without its break");
+                    deletions.push(path.clone());
+                    Ok(())
+                }
+                Err(other) => Err(other),
+            }
+        })?;
+        let state = state.into_inner();
+        let result = if deletions.is_empty() {
+            state
+        } else {
+            super::eval::delpaths_jq_owned(state, OwnedValue::Array(deletions.into()))
+                .map_err(raise_eval)?
+        };
+        sink(result, reg)
+    }
+
+    /// `_assign(paths; $value)` (`=`) outside path mode: `def _assign(paths;
+    /// $value): reduce path(paths) as $p (.; setpath($p; $value));` -- the
+    /// value a `$` parameter (a subexp, its outputs the outer loop), and the
+    /// state moved from write to write.
+    fn assign_native(
+        &self,
+        paths: &'e Expr,
+        value: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        self.eval(value, env, input.clone(), reg.sub(), &mut |v, _| {
+            let state = RefCell::new(input.clone());
+            self.path_mode(paths, env, input.clone(), reg.clone(), &mut |path, _| {
+                let OwnedValue::Array(keys) = &path else {
+                    return Err(unsupported("a path that is not an array")); // patchcov: coverage tolerate-line reason="unreachable: path() emits arrays only"
+                };
+                let before = state.replace(OwnedValue::Null);
+                let after = super::eval::set_value_at_path::<JqSemantics>(before, keys, v.clone())
+                    .map_err(raise_eval)?;
+                *state.borrow_mut() = after;
+                Ok(())
+            })?;
+            sink(state.into_inner(), reg.clone())
+        })
+    }
+
+    /// `getpath(p)`'s value on `root` (`jv_getpath`): each key in turn,
+    /// as `.[k]` reads it.
+    fn getpath_value(&self, root: &OwnedValue, keys: &ArrayVec) -> Result<OwnedValue, Raise> {
+        let mut value = root.clone();
+        for key in &**keys {
+            value = self.jv_get(&value, key)?;
+        }
+        Ok(value)
+    }
+
+    /// Whether evaluating `expr` in `env` can catch an error raised *after*
+    /// one of its outputs -- only a `?//` (`DESTRUCTURE_ALT`) can, here or in
+    /// a `def` or closure argument it reaches. Conservative: a call it cannot
+    /// see into counts as one that can.
+    fn may_retry(expr: &'e Expr, env: &Env<'e>) -> bool {
+        let mut seen: Vec<usize> = Vec::new();
+        Self::may_retry_in(expr, env, &mut seen)
+    }
+
+    fn may_retry_in(expr: &'e Expr, env: &Env<'e>, seen: &mut Vec<usize>) -> bool {
+        any_subexpr(expr, &mut |e| match e {
+            Expr::AsPattern { patterns, .. }
+            | Expr::Reduce { patterns, .. }
+            | Expr::Foreach { patterns, .. }
+                if patterns.len() > 1 =>
+            {
+                true
+            }
+            Expr::FuncCall { name, args, .. } => match env.lookup_func(name, args.len()) {
+                Some(Callee::Def {
+                    body, env: def_env, ..
+                }) => {
+                    let key = body as *const Expr as usize;
+                    if seen.contains(&key) {
+                        return false;
+                    }
+                    seen.push(key);
+                    Self::may_retry_in(body, &def_env, seen)
+                }
+                Some(Callee::Arg {
+                    body, env: arg_env, ..
+                }) => {
+                    let key = body as *const Expr as usize;
+                    if seen.contains(&key) {
+                        return false;
+                    }
+                    seen.push(key);
+                    Self::may_retry_in(body, &arg_env, seen)
+                }
+                None => false,
+            },
+            Expr::DefCall { .. } | Expr::Shared(_) | Expr::NamespacedCall { .. } => true,
+            _ => false,
+        })
+    }
+
     /// `gen_update`/`gen_definedor_assign`: `DUP; VALUE; STOREV tmp;
     /// _modify(path; . op $tmp)`. `VALUE` is tracked (not a subexp), so its
     /// register effect carries into the `_modify` call.
@@ -2658,6 +2998,14 @@ impl<'e> Interp<'e> {
         sink: &mut Sink<'_>,
     ) -> R {
         self.eval(value, env, input.clone(), reg, &mut |t, reg_t| {
+            if !reg_t.tracking() {
+                // `. op $t` and `. // $t` are single-valued and catch nothing.
+                let mut update =
+                    |_: &Self, v: OwnedValue, emit: &mut dyn FnMut(OwnedValue) -> R| {
+                        emit(compound_step(name, &v, &t)?)
+                    };
+                return self.modify_native(path, env, input.clone(), reg_t, &mut update, sink);
+            }
             // `path` closes over the caller's environment; the re-read
             // `$__sp_t` over one that binds the value just computed.
             let env_t = env.var_ref(T_VAR, t);
@@ -2669,6 +3017,51 @@ impl<'e> Interp<'e> {
             self.call_with(callee, &args, input.clone(), reg_t, sink)
         })
     }
+}
+
+/// `RANGE`: the start value itself first, then computed successors, each
+/// at `reg`, while below `end`. Past `MAX_RANGE` values it raises the
+/// shipped evaluator's uncatchable cap (a documented divergence: jq's
+/// `range` is bounded only by memory).
+fn range_values(start: OwnedValue, end: &OwnedValue, reg: &Reg, sink: &mut Sink<'_>) -> R {
+    let (Some(mut cur), Some(max)) = (number_f64(&start), number_f64(end)) else {
+        return Err(Raise::Error(EvalError::new("Range bounds must be numeric")));
+    };
+    let mut first = Some(start);
+    let mut emitted = 0;
+    // `RANGE` stops only on `>=`, which a NaN bound never is.
+    loop {
+        if cur >= max {
+            return Ok(());
+        }
+        emitted += 1;
+        if emitted > MAX_RANGE {
+            return Err(Raise::Fatal(range_max_exceeded_error()));
+        }
+        let value = first.take().unwrap_or_else(|| number_owned(cur));
+        sink(value, reg.clone())?;
+        cur += 1.0;
+    }
+}
+
+/// One step of an arithmetic update-assignment or `//=`, named by its prelude
+/// definition: `. op $t` (`binop_plus`'s operand rule included), or
+/// `. // $t`.
+fn compound_step(name: &str, v: &OwnedValue, t: &OwnedValue) -> Result<OwnedValue, Raise> {
+    let op = match name {
+        "_sp_upd_alt" => return Ok(if truthy(v) { v.clone() } else { t.clone() }),
+        "_sp_upd_add" => ArithOp::Add,
+        "_sp_upd_sub" => ArithOp::Sub,
+        "_sp_upd_mul" => ArithOp::Mul(MergeFlags::default()),
+        "_sp_upd_div" => ArithOp::Div,
+        _ => ArithOp::Mod,
+    };
+    if let Some(kept) = binop_keeps(op, v, t) {
+        return Ok(kept.clone());
+    }
+    arith_combine::<JqSemantics>(op, v.clone(), t.clone())
+        .map(|r| fresh(r, &[v, t]))
+        .map_err(raise_eval)
 }
 
 /// What [`Interp::collect_outputs`] gathered: every output with its register,
@@ -3004,6 +3397,9 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
         B::UpperIndex(idx) => ("_sp_INDEX", vec![idx]),
         B::UpperIndexStream(stream, idx) => ("_sp_INDEX", vec![stream, idx]),
         B::LeafPaths => ("_sp_leaf_paths", vec![]),
+        B::Skip(n, f) => ("_sp_skip", vec![n, f]),
+        B::IsValid(f) => ("_sp_isvalid", vec![f]),
+        B::RecurseDown => ("_sp_recurse_down", vec![]),
         _ => return None,
     };
     Some(call)
@@ -3020,9 +3416,7 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     Some(match builtin {
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
-        B::IsValid(_) | B::Skip(..) | B::AnyC(..) | B::AllC(..) | B::RecurseDown => {
-            "a builtin jq 1.7.1 does not define"
-        }
+        B::AnyC(..) | B::AllC(..) => "a yq builtin",
         _ => return None,
     })
 }
@@ -3030,14 +3424,16 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
 /// `parse_slice` for an array of `len` elements (or a string of `len`
 /// codepoints): the `[start, end)` range a
 /// `{"start": s, "end": e}` key selects (`null` bounds default; the start
-/// rounds down and the end up). `None` when a bound is not a number, which
-/// `jv_get` reports as an error.
+/// rounds down and the end up). `None` when a bound is missing or not a
+/// number, which `jv_get` reports as an error.
 fn slice_bounds(len: usize, bounds: &IndexMap<String, OwnedValue>) -> Option<(usize, usize)> {
+    // `jv_object_get` answers *invalid* for a missing key, which is not a
+    // number: only an explicit `null` takes the default.
     let bound = |name: &str, default: f64| -> Option<f64> {
         match bounds.get(name) {
-            None | Some(OwnedValue::Null) => Some(default),
+            Some(OwnedValue::Null) => Some(default),
             Some(v) if v.is_number() => number_f64(v),
-            Some(_) => None,
+            None | Some(_) => None,
         }
     };
     let n = len as f64;
@@ -3259,6 +3655,22 @@ fn emit_c_builtin(
             };
             return sink(value, reg.clone());
         }
+    }
+    // `setpath`/`delpaths` write the input natively, so a uniquely owned
+    // value is written in place (no copy through the shipped evaluator).
+    match (builtin, args) {
+        (Builtin::SetPath(..), [OwnedValue::Array(keys), v]) => {
+            let written =
+                super::eval::set_value_at_path::<JqSemantics>(input.clone(), keys, v.clone())
+                    .map_err(raise_eval)?;
+            return sink(written, reg.clone());
+        }
+        (Builtin::DelPaths(_), [paths]) => {
+            let deleted =
+                super::eval::delpaths_jq_owned(input.clone(), paths.clone()).map_err(raise_eval)?;
+            return sink(deleted, reg.clone());
+        }
+        _ => {}
     }
     let (outputs, control) = delegate_eval(expr, input);
     let mut inputs: Vec<&OwnedValue> = Vec::with_capacity(args.len() + 1);
