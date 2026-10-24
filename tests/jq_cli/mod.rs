@@ -108,3 +108,4 @@ mod i5182;
 mod i5185;
 mod i5193;
 mod i5198;
+mod i5199;
