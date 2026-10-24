@@ -39134,12 +39134,20 @@ fn is_field_navigation(e: &Expr) -> bool {
 }
 
 /// Whether `source`, the source of a bind in the right operand of a `//`, is `.`, an outer `$x`, a variable or a
-/// navigation of `.`: it yields one output (or raises) and moves no register (#5175).
+/// navigation of `.`, `$x` or a variable (`$x.a.b`): it yields one output (or raises) and moves no register (#5175).
 fn is_single_bind_source(source: &Expr) -> bool {
-    matches!(
-        unwrap_paren(source),
-        Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
-    ) || is_field_navigation(source)
+    match unwrap_paren(source) {
+        Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_) => true,
+        Expr::Pipe(stages) => match stages.split_first() {
+            Some((head, rest))
+                if matches!(unwrap_paren(head), Expr::TrackedVar(_) | Expr::Var(_)) =>
+            {
+                rest.iter().all(is_field_navigation)
+            }
+            _ => is_field_navigation(source),
+        },
+        _ => is_field_navigation(source),
+    }
 }
 
 /// Whether `source` is a comma of [`is_single_bind_source`] sources or `.[]`: the bind's body runs once per output of it,
