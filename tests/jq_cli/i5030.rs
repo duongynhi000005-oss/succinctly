@@ -555,3 +555,127 @@ fn test_marker_stage_navigated_into_a_destructure_on_the_register_5030() -> Resu
         ),
     ])
 }
+
+/// #5030: a fold whose INIT moves jq's register (`.a`), inside another fold's body whose `.` is the register, reads its
+/// source from the register INIT left: a foreign `$x` destructure there raises at its first step, as jq's does, where it
+/// was read by value (`del` deleted `.a`, `|= 9` wrote, `path` answered). A `try` around the destructure catches the
+/// raise and empties the source. The same on an INIT of two outputs (`(.a, .a)`). Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_foreign_x_destructure_in_another_fold_body_5030() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; .; foreach ($x as {b:$q} | .) as $y (.a; .; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; reduce ($x as {b:$q} | .) as $y (.a; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; foreach (try ($x | . as {b:$q} | .)) as $y (.a; .; .); .))",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | reduce 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .)))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach (1,2) as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.a; .; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(. as $x | foreach 1 as $i (.; foreach (($x as {b:$q} | .)?) as $y (.a; .; .); .))]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(. as $x | foreach 1 as $i (.; .; foreach (($x as {b:$q} | .)?) as $y (.a; .; .))) |= 9",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.nope as $x | foreach 1 as $i (.; foreach ($x | . as {b:$q} | .) as $y (.a; .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y ((.a, .a); .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y ((.a, .a); .; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+    ])
+}
+
+/// #5030: the converse, left as it was: where INIT leaves the register on the node `$x` is, the destructure passes as
+/// jq's does, and the fold's own emission is then judged. Rows captured from jq 1.7.1, both routes.
+#[test]
+fn test_fold_source_x_that_is_the_register_in_another_fold_body_keeps_its_answer_5030() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | .) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; foreach ($x as {b:$q} | $q) as $y (.; .; .); .))",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1,\"c\":{\"b\":3}},\"...",
+            5,
+        ),
+    ])
+}
