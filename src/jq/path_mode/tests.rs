@@ -1219,6 +1219,11 @@ fn differential_corpus() -> Vec<(String, String)> {
             rows.push((doc.to_string(), format!("del({s1})")));
             rows.push((doc.to_string(), format!("({s1}) |= 7")));
         }
+        // Each arithmetic update-assignment, which the prelude spells as its
+        // own `_sp_upd_*` call.
+        for op in ["+", "-", "*", "/", "%"] {
+            rows.push((doc.to_string(), format!("(.a, .b) {op}= 2")));
+        }
     }
     rows
 }
@@ -1592,13 +1597,143 @@ fn the_routed_library_entries_run_the_interpreter_5223() {
             "eval_owned_with_file_index"
         );
 
+        // A document the interpreter cannot materialize whole (a lone surrogate)
+        // falls back to the shipped route, which reads only what the program does
+        // and answers (#4412); without the fallback both entries raise the decode
+        // error.
         let lone = br#"{"a":"\ud800","d":5}"#;
         let index = JsonIndex::build(lone);
-        let expr = parse("path(try .d)").expect("parses");
+        let expr = parse("[.d | path(if . then . else empty end)]").expect("parses");
+        assert!(takes_program(&expr));
         let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone))
             .collect_owned::<JqSemantics>()
             .expect("materializes");
-        assert_eq!(json(&collected), [r#"["d"]"#]);
+        assert_eq!(json(&collected), ["[[]]"], "eval_with_cursor");
+        let using =
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(lone).value())
+                .collect_owned::<JqSemantics>()
+                .expect("materializes");
+        assert_eq!(json(&using), ["[[]]"], "eval_using");
+
+        // A taken program that raises ends the owned entry's run with the error,
+        // after what it emitted.
+        let doc = br#"{"a":1}"#;
+        let index = JsonIndex::build(doc);
+        let owned = to_owned::<JqSemantics, _>(&index.root(doc).value()).expect("doc");
+        let expr = parse("path(.a | if . then ., error(\"boom\") else empty end)").expect("parses");
+        match crate::jq::eval::eval_owned_with_file_index::<Vec<u64>, JqSemantics>(
+            &expr,
+            &owned,
+            &[],
+        ) {
+            crate::jq::eval::QueryResult::Partial(outputs, Control::Error(e)) => {
+                assert_eq!(json(&outputs), [r#"["a"]"#]);
+                assert_eq!(e.message, "boom");
+            }
+            other => panic!("expected a partial result, got {other:?}"),
+        }
+    });
+}
+
+/// The interpreter's internals a CLI run does not reach: `unshare_top` gives
+/// a result identical to a builtin's input storage of its own (a container at
+/// the top only, a string or a literal whole); `raise_eval` keeps a resource
+/// limit uncatchable; and a consumer that stops ends `run_program` cleanly
+/// after the outputs it took.
+#[test]
+fn the_interpreter_internals_a_cli_run_does_not_reach_5223() {
+    on_big_stack(|| {
+        let inner = OwnedValue::from(alloc::vec![OwnedValue::Int(1)]);
+        let array = OwnedValue::from(alloc::vec![inner.clone()]);
+        let unshared = unshare_top(array.clone());
+        assert!(!jv_identical(&unshared, &array));
+        assert_eq!(unshared, array);
+        let OwnedValue::Array(items) = &unshared else {
+            panic!("an array")
+        };
+        assert!(jv_identical(&items[0], &inner), "the contents stay shared");
+        let mut map = IndexMap::new();
+        map.insert(String::from("k"), inner.clone());
+        let object = OwnedValue::Object(map.into());
+        let unshared = unshare_top(object.clone());
+        assert!(!jv_identical(&unshared, &object));
+        assert_eq!(unshared, object);
+        for scalar in [string("s"), literal(NumberRepr::Int(5), "5")] {
+            let unshared = unshare_top(scalar.clone());
+            assert!(!jv_identical(&unshared, &scalar));
+            assert_eq!(unshared, scalar);
+        }
+        assert!(matches!(
+            raise_eval(EvalError::resource_limit("cap")),
+            Raise::Fatal(_)
+        ));
+
+        let program = parse(".[]").expect("parses");
+        let input = OwnedValue::from(alloc::vec![OwnedValue::Int(1), OwnedValue::Int(2)]);
+        let mut taken = Vec::new();
+        let control = run_program(&program, input, &mut |v| {
+            taken.push(v);
+            false
+        });
+        assert!(control.is_none());
+        assert_eq!(taken, [OwnedValue::Int(1)]);
+    });
+}
+
+/// Rows that reach the interpreter's less common arms, each jq 1.7.1's answer
+/// but the first, which is the shipped `range` cap the interpreter keeps
+/// (`MAX_RANGE`, a recorded divergence).
+#[test]
+fn less_common_interpreter_arms_answer_as_jq_does_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "null",
+                "[range(0; 200000; 1)] | length",
+                err(&[], "range: maximum iterations exceeded"),
+            ),
+            // A zero-arity def as a C builtin's argument.
+            ("null", r#"def f: "a"; "ab" | ltrimstr(f)"#, ok(&[r#""b""#])),
+            // An `until` condition that raises.
+            (
+                "null",
+                r#"try (0 | until(error("c"); . + 1)) catch ."#,
+                ok(&[r#""c""#]),
+            ),
+            // A `recurse` condition that forks.
+            (
+                "[[1],[2]]",
+                "[recurse(.[]?; (true, true))] | length",
+                ok(&["13"]),
+            ),
+            // A constant sum that hands back its left operand is that constant.
+            (
+                "null",
+                "[path(([1] + []) as $c | $c | .[0])]",
+                err(
+                    &[],
+                    "Invalid path expression near attempt to access element 0 of [1]",
+                ),
+            ),
+            // An object slice key, and a `null` bound.
+            (
+                "[1,2,3]",
+                r#"[path(.[{"start":1,"end":null}])]"#,
+                ok(&[r#"[[{"start":1,"end":null}]]"#]),
+            ),
+            (
+                "[1,2,3]",
+                "[path(.[null:2])]",
+                ok(&[r#"[[{"start":null,"end":2}]]"#]),
+            ),
+            // A def, and a closure parameter, named twice in a write's paths.
+            ("{\"a\":1}", "def f: .a; (f, f) |= 1", ok(&[r#"{"a":1}"#])),
+            (
+                "{\"a\":1}",
+                "def h(g): (g, g) |= 1; h(.a)",
+                ok(&[r#"{"a":1}"#]),
+            ),
+        ]);
     });
 }
 
