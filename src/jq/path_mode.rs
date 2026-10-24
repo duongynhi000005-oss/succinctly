@@ -45,10 +45,10 @@ use indexmap::IndexMap;
 use super::c_builtin_identity::{array_index, binop_keeps, format_keeps_input, kept, Kept};
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
-    apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    is_tree_descending_f, native_stack_exhausted, owned_to_string, range_max_exceeded_error,
-    EvalTag, JqSemantics, QueryResult, MAX_EMPTY_REPEAT_ROUNDS, MAX_EVAL_FRAMES, MAX_RANGE,
-    RECURSE_MAX_ITEMS, REPEAT_WIDTH_BUDGET, WHILE_UNTIL_MAX_STEPS,
+    apply_compare_op, arith_combine, arith_negate, compare_values, is_tree_descending_f,
+    native_stack_exhausted, owned_to_string, range_max_exceeded_error, EvalTag, JqSemantics,
+    QueryResult, MAX_EMPTY_REPEAT_ROUNDS, MAX_EVAL_FRAMES, MAX_RANGE, RECURSE_MAX_ITEMS,
+    REPEAT_WIDTH_BUDGET, WHILE_UNTIL_MAX_STEPS,
 };
 use super::expr::{
     ArithOp, Builtin, CompareOp, Expr, Literal, MergeFlags, NumberKey, ObjectKey, Param, Pattern,
@@ -890,13 +890,11 @@ pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
 /// carrying it. A program that reads cursor metadata (`line`, `at_offset`,
 /// ...) stays on the shipped route, which holds the cursor.
 pub(crate) fn takes_program(program: &Expr) -> bool {
-    if super::walk::uses_cursor_metadata_builtins(program) {
-        return false;
-    }
+    // One walk of the program: the entries ask once per document.
     let mut dynamic = false;
     let declined = any_subexpr(program, &mut |e| {
         dynamic |= is_dynamic_path_target(e);
-        !runs(e)
+        !runs(e) || matches!(e, Expr::Builtin(b) if super::walk::is_cursor_metadata_builtin(b))
     });
     dynamic && !declined
 }
@@ -961,7 +959,8 @@ fn is_static_target(expr: &Expr) -> bool {
 
 /// A `select` condition that only computes a value: no `?//` an error after
 /// the `select` could retry into, no function call (whose body could hold
-/// one), no input builtin, and no path construct of its own.
+/// one) or label, no input builtin, and no dynamic path target of its own,
+/// which would need the register the shipped evaluator does not carry.
 fn is_value_only_condition(cond: &Expr) -> bool {
     !any_subexpr(cond, &mut |e| match e {
         Expr::AsPattern { patterns, .. }
@@ -973,17 +972,8 @@ fn is_value_only_condition(cond: &Expr) -> bool {
         | Expr::DefCall { .. }
         | Expr::Shared(_)
         | Expr::Label { .. }
-        | Expr::Break(_) => true,
-        Expr::Builtin(
-            Builtin::Input
-            | Builtin::Inputs
-            | Builtin::Path(_)
-            | Builtin::Del(_)
-            | Builtin::Pick(_)
-            | Builtin::Paths
-            | Builtin::PathsFilter(_)
-            | Builtin::GetPath(_),
-        ) => true,
+        | Expr::Break(_)
+        | Expr::Builtin(Builtin::Input | Builtin::Inputs) => true,
         other => is_dynamic_path_target(other),
     })
 }
@@ -1044,13 +1034,15 @@ pub(crate) fn run_program(
 /// Run `f` with this thread's parsed [`PRELUDE`]: parsed once per thread
 /// under `std`, so a stream of inputs does not reparse it per document.
 fn with_prelude<R>(f: impl FnOnce(&Prelude) -> R) -> R {
+    // Parsed once per thread and freed with it. `with` hands out a shared
+    // borrow, so a delegated builtin that re-enters the interpreter on the same
+    // thread borrows the same prelude.
     #[cfg(feature = "std")]
     {
         std::thread_local! {
-            static PRELUDE_PARSED: &'static Prelude = Box::leak(Box::new(Prelude::new()));
+            static PRELUDE_PARSED: Prelude = Prelude::new();
         }
-        let prelude: &'static Prelude = PRELUDE_PARSED.with(|p| *p);
-        f(prelude)
+        PRELUDE_PARSED.with(|prelude| f(prelude))
     }
     #[cfg(not(feature = "std"))]
     {
@@ -1285,7 +1277,11 @@ impl<'e> Interp<'e> {
             }
             Expr::Var(name) => match env.lookup_var(name) {
                 Some(value) => sink(value, reg),
-                None => Err(unsupported(format!("${name} is not bound"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects an unbound variable with resolve_all_jq before evaluating"
+                // `compile()` rejects this up front; a library caller that skips
+                // `resolve_all_jq` gets the shipped evaluator's error.
+                None => Err(Raise::Error(EvalError::new(format!(
+                    "undefined variable: ${name}"
+                )))),
             },
             Expr::Reduce {
                 input: source,
@@ -1348,7 +1344,10 @@ impl<'e> Interp<'e> {
             Expr::Label { name, body } => self.label(name, body, env, input, reg, sink),
             Expr::Break(name) => match env.lookup_label(name) {
                 Some(id) => Err(Raise::Break(id)),
-                None => Err(unsupported(format!("$*label-{name} is not defined"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects a break with no enclosing label with resolve_all_jq before evaluating"
+                // jq's compile error, for a library caller that skips `resolve_all_jq`.
+                None => Err(Raise::Error(EvalError::new(format!(
+                    "$*label-{name} is not defined"
+                )))),
             },
             Expr::FuncDef {
                 name,
@@ -3840,7 +3839,9 @@ fn emit_delegated(
 /// Run `expr` on `input` through the existing evaluator: its outputs, and
 /// the escape that ended it.
 fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Control>) {
-    let result = eval_owned_with_file_index::<Vec<u64>, JqSemantics>(expr, input, &[]);
+    // Unrouted: a delegated call is one builtin over values, never a program
+    // the interpreter would take.
+    let result = super::eval::eval_owned_unrouted::<Vec<u64>, JqSemantics>(expr, input, &[]);
     match result {
         QueryResult::One(v) => match super::eval_generic::to_owned::<JqSemantics, _>(&v) {
             Ok(o) => (vec![o], None),

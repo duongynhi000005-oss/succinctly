@@ -1554,20 +1554,46 @@ fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
     });
 }
 
+/// A program that skipped `resolve_all_jq` (a library caller parsing it
+/// itself) raises the shipped evaluator's errors for an unbound variable or a
+/// `break` with no enclosing label, rather than an internal error.
+#[test]
+fn an_unresolved_program_raises_the_shipped_errors_5223() {
+    on_big_stack(|| {
+        for (filter, message) in [
+            ("path(if $x then .a else .b end)", "undefined variable: $x"),
+            ("path(.a | (break $out))", "$*label-out is not defined"),
+        ] {
+            let program = parse(filter).expect(filter);
+            let control = run_program(&program, OwnedValue::Null, &mut |_| true);
+            match control {
+                Some(Control::Error(e)) => assert_eq!(e.message, message, "{filter}"),
+                other => panic!("{filter}: {other:?}"),
+            }
+        }
+    });
+}
+
 /// `takes_program` routes a program to the interpreter exactly when it holds
-/// a path target that is not plain navigation, and nothing the interpreter
-/// declines.
+/// a path target that is neither navigation nor a value filter over it, and
+/// nothing the interpreter declines.
 #[test]
 fn takes_program_routes_dynamic_path_targets_only_5223() {
     let takes = |filter: &str| takes_program(&parse(filter).expect(filter));
     for filter in [
-        "del(.users[] | select(.score < 100))",
+        "del(.users[] | .score as $y | select($y < 100))",
         "path(.a as $x | $x)",
         "(.. | numbers) |= . + 1",
-        "[paths(type == \"number\") ] as $p | .a | path(first(.[]))",
+        "[paths(type == \"number\") ] as $p | .a | path(first(.[] | if . then .a else .b end))",
         "def f: .a; f |= 1",
-        "pick(first(.[]))",
+        "pick(first(.[] | . as $x | $x))",
         ".a //= (path(if . then .b else .c end) | length)",
+        // A condition that can retry, call a function or nest a dynamic path.
+        "path(.a | select(. as [$q] ?// $z | $z))",
+        "def ok: true; del(.[] | select(ok))",
+        "del(.[] | select(path(if . then .a else .b end) == [\"a\"]))",
+        // A handler that does more than drop the error.
+        "path(try .a catch .b)",
     ] {
         assert!(takes(filter), "{filter}");
     }
@@ -1581,6 +1607,13 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
         "[paths]",
         "to_entries",
         "path(.a | select(.)) | line",
+        // Value filters over navigation.
+        "del(.users[] | select(.score < 100))",
+        "pick(first(.[]))",
+        "path(try .a catch empty)",
+        "path(.a // .b)",
+        "[path(.[$k])]",
+        "path(recurse(.[]?))",
     ] {
         assert!(!takes(filter), "{filter}");
     }

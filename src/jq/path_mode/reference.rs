@@ -18,7 +18,7 @@ use core::cell::{Cell, RefCell};
 
 use crate::jq::error::{dump_truncated_with, Control, EvalError};
 use crate::jq::eval::{
-    apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
+    apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_unrouted,
     substitute_vars, EvalTag, JqSemantics, QueryResult,
 };
 use crate::jq::expr::{
@@ -2379,7 +2379,7 @@ fn emit_delegated(expr: &Expr, input: &SVal, reg: &Reg, sink: &mut Sink<'_>) -> 
 /// Run `expr` on `input` through the existing evaluator: its outputs, and
 /// the escape that ended it.
 fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Control>) {
-    let result = eval_owned_with_file_index::<Vec<u64>, JqSemantics>(expr, input, &[]);
+    let result = eval_owned_unrouted::<Vec<u64>, JqSemantics>(expr, input, &[]);
     match result {
         QueryResult::One(v) => match crate::jq::eval_generic::to_owned::<JqSemantics, _>(&v) {
             Ok(o) => (vec![o], None),

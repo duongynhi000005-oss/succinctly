@@ -31266,6 +31266,16 @@ pub fn eval_owned_with_file_index<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     if S::TAG == EvalTag::Jq && super::path_mode::takes_program(expr) {
         return path_mode_query(expr, input.clone());
     }
+    eval_owned_unrouted::<W, S>(expr, input, file_origin)
+}
+
+/// [`eval_owned_with_file_index`] without the path-mode routing: the entry the
+/// path-mode interpreter delegates a C builtin's call through (#5223).
+pub(crate) fn eval_owned_unrouted<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    expr: &Expr,
+    input: &OwnedValue,
+    file_origin: &[usize],
+) -> QueryResult<'a, W> {
     if !needs_path_context(expr) {
         return eval_owned_input::<W, S>(expr, input, false, Reentry::REBUILT);
     }
