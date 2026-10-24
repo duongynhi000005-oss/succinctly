@@ -61302,6 +61302,12 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
     // so this is the one place the mode is stated.
     let may_alias = core::cell::OnceCell::new();
     let bound_any = core::cell::Cell::new(false);
+    // #5181: a source that navigates from a `$x` marker binds a node of the marker's value, which is the register itself
+    // where the walk shares its storage; jq's `$q` then passes the same pointer check `$x.a` does. The bound node is marked
+    // `Untracked`, which certifies a use only where it shares storage with the register there, so nothing else moves. The
+    // walk is read at most once, and only for a bind whose variable reaches path position.
+    let marker_walk: core::cell::OnceCell<Option<Vec<OwnedValue>>> = core::cell::OnceCell::new();
+    let bound_at = core::cell::Cell::new(0_usize);
     let flow = resolve_bind_source_sink::<S>(
         source,
         body,
@@ -61311,6 +61317,7 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
         frame,
         &mut |bound, origin, witnessed| {
             bound_any.set(true);
+            let at = bound_at.replace(bound_at.get() + 1);
             // Equal to the register *now*: an output that differs from it cannot be
             // its node whatever the source forwarded (`(select(false) // .a) as $v`
             // binds `.a`, which an equal-valued sibling register is not).
@@ -61319,6 +61326,35 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
                     .get_or_init(|| source_may_alias_register::<S>(source, trackable, frame))
                 // #3795: or, with the register lost upstream, could be the lost one.
                 && may_be_register_in_hand(&bound, value, trackable, frame);
+            // #5181: ...the walk's node in place of the by-value copy of it, which shares the marker's storage where the
+            // evaluator's bridge may have copied.
+            let walked = (S::TAG == EvalTag::Jq
+                && origin.is_none()
+                && !ambiguous
+                && var_reaches_path_position(body, var))
+            .then(|| {
+                marker_walk
+                    .get_or_init(|| {
+                        let navigates =
+                            any_subexpr(source, &mut |e| matches!(e, Expr::TrackedVar(_)))
+                                || snapshot.is_marked();
+                        (navigates && head_spine_navigates(unwrap_paren(source)))
+                            .then(|| {
+                                marker_navigation_outputs(
+                                    unwrap_paren(source),
+                                    snapshot.is_marked().then_some(value),
+                                )
+                            })
+                            .flatten()
+                    })
+                    .as_ref()
+                    .and_then(|outputs| outputs.get(at))
+                    .filter(|out| **out == bound)
+                    .cloned()
+            })
+            .flatten();
+            let keep_container_identity = walked.is_some();
+            let bound = walked.unwrap_or(bound);
             let substituted = substitute_bound_var_at(
                 source,
                 body,
@@ -61332,7 +61368,7 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
                 },
                 None,
                 S::TAG == EvalTag::Jq,
-                false,
+                keep_container_identity,
             );
             resolve_node_sink::<S>(&substituted, value, trackable, snapshot, frame, keep, sink)
         },
@@ -61865,7 +61901,6 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     let marker_navigation_head = || {
         *marker_navigation_head_cell.get_or_init(|| {
             S::TAG == EvalTag::Jq
-                && patterns.len() == 1
                 && (snapshot.is_marked()
                     || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
                 && head_spine_navigates(head)
@@ -73760,13 +73795,72 @@ fn is_identity_pipe(expr: &Expr) -> bool {
 /// stage that handed a frozen node on, `start`), then names, literal indexes and `[]`, with the stages that hand their
 /// input on unchanged skipped ([`strip_neutral_stages`]'s). Each step takes the child handle of the node it stands on, so
 /// an output shares storage with that node's own child exactly as jq's `jv` does, which the evaluator cannot say for a
-/// head of two or more steps: its by-value evaluation bridges the second step through a fresh copy. `None` for any other
-/// shape, a step that would raise, and a head that starts nowhere, so the caller keeps its other tests.
+/// head of two or more steps: its by-value evaluation bridges the second step through a fresh copy. `first(..)` and
+/// `limit(N; ..)` with a literal `N >= 1` around such a walk keep its first outputs (#5181). `None` for any other shape, a
+/// step that would raise, and a head that starts nowhere, so the caller keeps its other tests.
 fn marker_navigation_outputs(head: &Expr, start: Option<&OwnedValue>) -> Option<Vec<OwnedValue>> {
     fn flatten<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
         match unwrap_paren(e) {
             Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),
             other => out.push(other),
+        }
+    }
+    /// The outputs of one stage run on `node`.
+    fn walk(stage: &Expr, node: &OwnedValue) -> Option<Vec<OwnedValue>> {
+        let stage = unwrap_paren(stage);
+        if is_neutral_pass_through(stage) {
+            return Some(vec![node.clone()]);
+        }
+        match (stage, node) {
+            (Expr::Pipe(stages), _) => {
+                let mut nodes = vec![node.clone()];
+                for stage in stages {
+                    let mut next = Vec::new();
+                    for node in &nodes {
+                        next.extend(walk(stage, node)?);
+                    }
+                    nodes = next;
+                }
+                Some(nodes)
+            }
+            // A postfix `?` on a lookup is the lookup for an output.
+            (Expr::Optional(inner), _) if matches!(unwrap_paren(inner), Expr::Field(_)) => {
+                walk(inner, node)
+            }
+            (Expr::Field(name), OwnedValue::Object(map)) => Some(vec![map
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or(OwnedValue::Null)]),
+            (Expr::Field(_) | Expr::Index { .. }, OwnedValue::Null) => Some(vec![OwnedValue::Null]),
+            (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                let at = if *idx < 0 {
+                    items.len().checked_sub(idx.unsigned_abs() as usize)
+                } else {
+                    usize::try_from(*idx).ok()
+                };
+                Some(vec![at
+                    .and_then(|at| items.get(at))
+                    .cloned()
+                    .unwrap_or(OwnedValue::Null)])
+            }
+            (Expr::Iterate, OwnedValue::Array(items)) => Some(items.iter().cloned().collect()),
+            (Expr::Iterate, OwnedValue::Object(map)) => Some(map.values().cloned().collect()),
+            (Expr::FirstExpr(inner), _) => {
+                let mut outputs = walk(inner, node)?;
+                outputs.truncate(1);
+                Some(outputs)
+            }
+            (Expr::Limit { n, expr }, _) => {
+                let Expr::Literal(Literal::NumberLiteral(NumberRepr::Int(count), _)) =
+                    unwrap_paren(n)
+                else {
+                    return None;
+                };
+                let mut outputs = walk(expr, node)?;
+                outputs.truncate(usize::try_from(*count).ok().filter(|count| *count >= 1)?);
+                Some(outputs)
+            }
+            _ => None,
         }
     }
     let mut stages = Vec::new();
@@ -73780,39 +73874,9 @@ fn marker_navigation_outputs(head: &Expr, start: Option<&OwnedValue>) -> Option<
         _ => vec![start?.clone()],
     };
     for stage in stages {
-        // `select(true)` and `first(.)` hand their input on, and a postfix `?` on a lookup is the lookup for an output.
-        let stage = match stage {
-            other if is_neutral_pass_through(other) => &Expr::Identity,
-            Expr::Optional(inner) if matches!(unwrap_paren(inner), Expr::Field(_)) => {
-                unwrap_paren(inner)
-            }
-            other => other,
-        };
         let mut next = Vec::new();
         for node in &nodes {
-            match (stage, node) {
-                (Expr::Identity, _) => next.push(node.clone()),
-                (Expr::Field(name), OwnedValue::Object(map)) => {
-                    next.push(map.get(name.as_str()).cloned().unwrap_or(OwnedValue::Null));
-                }
-                (Expr::Field(_), OwnedValue::Null) => next.push(OwnedValue::Null),
-                (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
-                    let at = if *idx < 0 {
-                        items.len().checked_sub(idx.unsigned_abs() as usize)
-                    } else {
-                        usize::try_from(*idx).ok()
-                    };
-                    next.push(
-                        at.and_then(|at| items.get(at))
-                            .cloned()
-                            .unwrap_or(OwnedValue::Null),
-                    );
-                }
-                (Expr::Index { .. }, OwnedValue::Null) => next.push(OwnedValue::Null),
-                (Expr::Iterate, OwnedValue::Array(items)) => next.extend(items.iter().cloned()),
-                (Expr::Iterate, OwnedValue::Object(map)) => next.extend(map.values().cloned()),
-                _ => return None,
-            }
+            next.extend(walk(stage, node)?);
         }
         nodes = next;
     }
