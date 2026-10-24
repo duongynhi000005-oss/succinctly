@@ -55700,7 +55700,9 @@ fn source_destructures_fresh(
 /// too. In the one body [`fold_body::acc_is_register`] marked, those [`marker_identical`]
 /// certifies against `ambient`, the same test the resolver applies to a marker in path
 /// position, so a `$x` that is a *different* node (`reduce .[] as $it (.; reduce ($it as {a:$a}
-/// | .) ...)`, which jq answers) is not. Nowhere else, except on a `null` ambient (#4576): every
+/// | .) ...)`, which jq answers) is not. In a body whose frame names the register INIT moved
+/// ([`FoldSourceAmbient::frame_names_register`], #5030), those that are that register. Nowhere else,
+/// except on a `null` ambient (#4576): every
 /// `null` is `jv_identical` to a `null` register by kind, so `.` is read as the register there
 /// (`RegisterSpine::null_register`) and a `null` marker that certifies is read the same way. A
 /// `null` that is not the register, bound by a navigation or a literal, carries no marker and
@@ -55721,6 +55723,14 @@ fn fold_source_register_markers<S: EvalSemantics>(
     // #4800: in the UPDATE of a `foreach` whose source moved the register onto an element, the register is
     // that element, whatever state the steps before left: a `$x` is read against it, not against `.`.
     let register_value = fold_body::foreach_register_here();
+    // #5030: inside another fold's body, the register the frame names where INIT moved it
+    // ([`FoldSourceAmbient::frame_names_register`], which [`source_markers_certified`] grants only for containers
+    // and markers that are not it): a `$x` that is it is read as the register.
+    let register_value = register_value.or_else(|| {
+        (ambient.frame_names_register && fold_body::depth() != 0)
+            .then(|| ambient.frame.register().cloned())
+            .flatten()
+    });
     if S::TAG != EvalTag::Jq
         || !(ambient.trackable || null_by_kind_only || register_value.is_some())
         || !(null_by_kind_only
@@ -60439,6 +60449,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
     } else {
         register_markers
     };
+    // #5030: inside another fold's body, a source that destructures a `$x` which is the register the frame names
+    // walks it from a known register ([`fold_body::register_named_source_here`]).
+    let _named_mark = (S::TAG == EvalTag::Jq
+        && ambient.frame_names_register
+        && fold_body::depth() != 0
+        && !register_markers.is_empty())
+    .then(fold_body::register_named_source);
     // #4603: the `null`/boolean literals the register is not, which a destructure of raises.
     let not_register = NotRegister::at_fold::<S>(ambient);
     // #4600: inside another fold's body, a `reduce` source that also destructures a freshly built
@@ -62294,6 +62311,7 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             && (fold_body::depth() == 0
                                 || fold_body::acc_is_register_here()
                                 || fold_body::fresh_source_here()
+                                || fold_body::register_named_source_here()
                                 || fold_body::emissions_discarded_here()
                                 || fold_body::state_handed_on_here()
                                 || fold_body::foreach_register_set_here())
@@ -63039,13 +63057,13 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
     source: &Expr,
 ) -> FoldSourceAmbient<'v> {
     // #5030: inside a fold body, the frame names the register for SOURCE only where the fold's ambient is tracked (the
-    // body's `.` is at the register, which `reg` was entered from) and no `$x` SOURCE reads is the register
-    // ([`source_markers_all_off_register`]). Asked last, by [`init_moved_register_frame`]: it walks SOURCE.
+    // body's `.` is at the register, which `reg` was entered from) and every `$x` SOURCE reads is off it or a container
+    // that is it ([`source_markers_certified`]). Asked last, by [`init_moved_register_frame`]: it walks SOURCE.
     let in_body_certified = || {
         trackable
             && fold_body::depth() != 0
             && !fold_body::catching_fold_active()
-            && source_markers_all_off_register::<S>(source, reg)
+            && source_markers_certified::<S>(source, reg)
     };
     if fork_index == 0 {
         // #2031: `doc_branch` stands for the document itself (SOURCE's own
@@ -63125,7 +63143,8 @@ fn fold_source_ambient<'v, S: EvalSemantics>(
         // register's; an INIT that navigated and then computed has none), and outside every fold
         // body: inside one, a `$x` the frame then certifies walks the register somewhere the body's
         // own accumulator does not follow. #5030: except where the body's `.` is the register and no
-        // `$x` SOURCE reads is it (`in_body_certified`): none walks, each raises at its first step.
+        // `$x` SOURCE reads is a container that walks it or another node that raises at its first step
+        // (`in_body_certified`).
         // An INIT that lands on a `null` below the root keeps that live `null` on the frame.
         let init_moved_off_entry =
             init_moved_register_frame::<S>(source_trackable, in_body_certified, reg);
@@ -63213,17 +63232,23 @@ fn body_catches_a_fold(body: &Expr) -> bool {
     })
 }
 
-/// Whether every frozen `$x` `source` reads is destructured as it stands (`$x as P`, `$x | . as P`) and none of them is
-/// jq's register `reg` ([`marker_identical`] against the register's own frame, #5030): the pattern's first step then
-/// raises, as one outside every fold body does. A `$x` read any other way is not asked: `$x | .a as P` destructures a
-/// child of it, which can be the register, and a value read navigates nothing.
-fn source_markers_all_off_register<S: EvalSemantics>(source: &Expr, reg: &FoldRegister) -> bool {
+/// Whether every frozen `$x` `source` reads is destructured as it stands (`$x as P`, `$x | . as P`) and each of them is
+/// either not jq's register `reg` ([`marker_identical`] against the register's own frame, #5030) or a container that
+/// is: the pattern's first step then raises, or walks the register ([`fold_source_register_markers`]), as one outside
+/// every fold body does. A `null`, boolean or scalar `$x` that is the register is not certified, because it is the
+/// register by kind or by value, not by node. A `$x` read any other way is not asked: `$x | .a as P` destructures a child of it,
+/// which can be the register, and a value read navigates nothing.
+fn source_markers_certified<S: EvalSemantics>(source: &Expr, reg: &FoldRegister) -> bool {
     let is_marker = |e: &Expr| matches!(unwrap_paren(e), Expr::TrackedVar(_));
+    // The frame the source is read in ([`register_frame`]), the one [`fold_source_register_markers`] compares with.
+    let frame = register_frame(reg);
     let (mut total, mut destructured, mut all_off) = (0usize, 0usize, true);
     let mut check = |e: &Expr| {
         if let Expr::TrackedVar(marker) = unwrap_paren(e) {
             destructured += 1;
-            all_off &= !marker_identical::<S>(marker, &reg.value, &reg.frame);
+            // A container that is the register walks it; any other that is, by kind, is not read.
+            all_off &= !marker_identical::<S>(marker, &reg.value, &frame)
+                || matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_));
         }
     };
     any_subexpr(source, &mut |e| {
@@ -63257,8 +63282,8 @@ fn source_markers_all_off_register<S: EvalSemantics>(source: &Expr, reg: &FoldRe
 /// on a fork whose ambient is not itself the register (`source_trackable`). Inside a fold body a `$x` that
 /// frame certifies walks the register somewhere the body's own accumulator does not follow, which lost
 /// matched rows; so there it applies only where the body's `.` is the register and every `$x` SOURCE reads is
-/// provably not it (`in_body_certified`, [`source_markers_all_off_register`], #5030), which raise at their first
-/// step and walk nothing.
+/// provably not it, which raises at its first step, or a container that is it, which walks it
+/// (`in_body_certified`, [`source_markers_certified`], #5030).
 fn init_moved_register_frame<S: EvalSemantics>(
     source_trackable: bool,
     in_body_certified: impl FnOnce() -> bool,
@@ -77299,6 +77324,9 @@ mod fold_body {
         /// The body depth at which a `reduce` source that certainly raises is being resolved
         /// (#4600), 0 for none.
         static FRESH_DEPTH: Cell<u32> = const { Cell::new(0) };
+        /// The body depth at which a fold source destructures a `$x` that is the register the frame names (#5030),
+        /// 0 for none.
+        static NAMED_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which a verdict builtin discards the operand being resolved (#4698),
         /// 0 for none.
         static DISCARD_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -77510,6 +77538,30 @@ mod fold_body {
     /// Whether the body being resolved is the one [`fresh_source`] marked.
     pub(crate) fn fresh_source_here() -> bool {
         depth() > 0 && FRESH_DEPTH.with(Cell::get) == depth()
+    }
+
+    /// Restores the previous [`register_named_source`] mark.
+    pub(crate) struct NamedGuard(u32);
+
+    /// Marks the body being resolved now as one whose fold source destructures a `$x` that is the register the
+    /// frame names (#5030, [`super::fold_source_register_markers`]): the walk starts from a register that is known, so
+    /// a body of the pattern that performs no step hands the register the walk left on, as it does outside every fold
+    /// body ([`register_named_source_here`]), and the fold's UPDATE or EXTRACT is judged against it.
+    pub(crate) fn register_named_source() -> NamedGuard {
+        let previous = NAMED_DEPTH.with(Cell::get);
+        NAMED_DEPTH.with(|a| a.set(depth()));
+        NamedGuard(previous)
+    }
+
+    impl Drop for NamedGuard {
+        fn drop(&mut self) {
+            NAMED_DEPTH.with(|a| a.set(self.0));
+        }
+    }
+
+    /// Whether the body being resolved is the one [`register_named_source`] marked.
+    pub(crate) fn register_named_source_here() -> bool {
+        depth() > 0 && NAMED_DEPTH.with(Cell::get) == depth()
     }
 
     pub(crate) struct Guard;
@@ -78176,6 +78228,16 @@ mod fold_body {
     }
 
     pub(crate) fn fresh_source_here() -> bool {
+        false
+    }
+
+    pub(crate) struct NamedGuard;
+
+    pub(crate) fn register_named_source() -> NamedGuard {
+        NamedGuard
+    }
+
+    pub(crate) fn register_named_source_here() -> bool {
         false
     }
 
