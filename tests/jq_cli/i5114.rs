@@ -8,7 +8,7 @@ use crate::assert_path_rows_both_routes_3749;
 // source: jq emits the first step's path before the second step raises, and the bare UPDATE refused the first step
 // (`with result <the source element>`) with nothing on stdout. The same `//` behind a no-op `| .` already matched,
 // so a `//` with a literal alternate that is a `foreach`'s whole UPDATE is read as that pipe. A non-literal alternate
-// (`// .`, `// $x`) is refused on both routes and is not covered.
+// (`// .`, `// $x`) is read since #5156 (`tests/jq_cli/i5156.rs`), though not through the explicit pipe.
 
 /// #5114: the issue's rows and rows of a differential grid (document x source x caught-bind shape x `//` wrapper x
 /// EXTRACT x `path`/`|=`/`del`) that were refused or answered wrongly before the fix. Every row captured from

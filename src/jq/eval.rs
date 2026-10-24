@@ -43563,7 +43563,12 @@ fn emptied_update(expr: &Expr) -> Option<EmptiedUpdate<'_>> {
             let mut emptied = emptied_update(left)?;
             match unwrap_paren(right) {
                 Expr::Builtin(Builtin::Empty) => {}
-                Expr::Literal(_) => emptied.has_fallback = true,
+                // #5156: ...and a value that is no node of the register (`// .`, `// $x`, `// {b:1}`): the step falls back
+                // to the state or a variable the same way, at the register the `//` entered with.
+                Expr::Literal(_) | Expr::Identity | Expr::Var(_) | Expr::TrackedVar(_) => {
+                    emptied.has_fallback = true;
+                }
+                other if is_value_head(other) => emptied.has_fallback = true,
                 _ => return None,
             }
             Some(emptied)
@@ -54912,6 +54917,11 @@ impl FoldRegister {
                 if let BranchRegister::Unmoved(register) = b.register {
                     demoted.register = BranchRegister::Unmoved(register);
                 }
+            } else if matches!(b.register, BranchRegister::AtEntry) {
+                // #5156: a `//` alternate that runs after jq backtracked out of its left operand states the register it
+                // entered with ([`carry_frame_register`]); a value that is not the register's own (`// .` on a step whose
+                // state is the document) is demoted here, which dropped the statement.
+                demoted.register = BranchRegister::AtEntry;
             }
             demoted
         }

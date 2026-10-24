@@ -2706,6 +2706,9 @@ is the revert that established what the other one costs.
    `test_caught_foreign_marker_destructure_behind_a_fallback_or_if_in_a_foreach_update_or_extract_4776`,
    [#4776](https://github.com/rust-works/succinctly/issues/4776)). A condition that is not a pure function
    of the markers (`select($x.a == .b)`) is still opaque.
+   A `//` whose alternate is the state or a variable or a value head (`(FE) // .`, `// $x`, `// {b:1}`) around that `foreach` is read as a literal alternate is ([#5156](https://github.com/rust-works/succinctly/issues/5156), `emptied_update`'s `Alternative` arm and the `AtEntry` statement `FoldRegister::relocate_one` keeps).
+   The alternate runs after jq backtracked out of everything its left operand navigated, so its output is at the register the step entered with, and the first step's `$i` EXTRACT emits its path: `path(. as $x | foreach (.a,.) as $i (.; (FE) // .; $i))` on `{"a":null}` prints `["a"]` before the second step raises, as jq does, where it raised on the first step with nothing printed.
+   Still wrong ([#5228](https://github.com/rust-works/succinctly/issues/5228)): the explicit pipe spelling `((FE) // .) | .` (the stage after the `//` states the register itself, and refuses the first step as before), and a `?` or `try` around the `path` of the plain spelling, where the second step's refusal is a guess nothing catches and jq's is catchable (`[path(...)?]` is jq's `[["a"]]`).
 
    A `reduce` UPDATE reads, around that `foreach`, a `select(C)` ahead of it and an `if C then FE else . end` with `C` a pure function of the state
    (`.a`, `.a != null`, `.a | length > 0`; `is_pure_of_dot`), and the stages after a `// LITERAL` fallback (`(. | FE) // 5 | tostring` is `"5"`;
