@@ -141,3 +141,25 @@ fn test_5181_wrapped_head_over_a_marker_navigation_onto_the_register() -> Result
         ),
     ])
 }
+
+/// #5181: shapes the walk does not read keep the behaviour they had: a `limit(0; ..)` (no output, so no bind), a `[]` head
+/// whose siblings compare equal (only the register's own sibling could pass, and the plain bind does not walk `[]`).
+#[test]
+fn test_5181_shapes_the_walk_does_not_read_are_unchanged() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            DOC,
+            r"path(. as $x | .a | $x | limit(0; .a) as {b:$q} | $q)",
+            "",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":{},"c":{}}}"#,
+            r"path(. as $x | .a | $x.a[] as $q | $q)",
+            "",
+            "Invalid path expression with result {}",
+            5,
+        ),
+    ])
+}

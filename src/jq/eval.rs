@@ -61327,32 +61327,27 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
                 // #3795: or, with the register lost upstream, could be the lost one.
                 && may_be_register_in_hand(&bound, value, trackable, frame);
             // #5181: ...the walk's node in place of the by-value copy of it, which shares the marker's storage where the
-            // evaluator's bridge may have copied.
-            let walked = (S::TAG == EvalTag::Jq
-                && origin.is_none()
-                && !ambiguous
-                && var_reaches_path_position(body, var))
-            .then(|| {
-                marker_walk
-                    .get_or_init(|| {
-                        let navigates =
-                            any_subexpr(source, &mut |e| matches!(e, Expr::TrackedVar(_)))
-                                || snapshot.is_marked();
-                        (navigates && head_spine_navigates(unwrap_paren(source)))
-                            .then(|| {
-                                marker_navigation_outputs(
-                                    unwrap_paren(source),
-                                    snapshot.is_marked().then_some(value),
-                                )
-                            })
+            // evaluator's bridge may have copied. A head that starts at a `$x` marker and yields one output (no `[]`, so the
+            // witness route's order and the walk's cannot drift apart, and nothing is walked ahead of demand); a `.` a stage
+            // handed on is not read here (the register is not in hand: the bind stays `Unproven`).
+            let walked = (S::TAG == EvalTag::Jq && origin.is_none() && !ambiguous)
+                .then(|| {
+                    marker_walk
+                        .get_or_init(|| {
+                            (var_reaches_path_position(body, var)
+                                && !snapshot.is_marked()
+                                && any_subexpr(source, &mut |e| matches!(e, Expr::TrackedVar(_)))
+                                && !any_subexpr(source, &mut |e| matches!(e, Expr::Iterate))
+                                && head_spine_navigates(unwrap_paren(source)))
+                            .then(|| marker_navigation_outputs(unwrap_paren(source), None))
                             .flatten()
-                    })
-                    .as_ref()
-                    .and_then(|outputs| outputs.get(at))
-                    .filter(|out| **out == bound)
-                    .cloned()
-            })
-            .flatten();
+                        })
+                        .as_ref()
+                        .and_then(|outputs| outputs.get(at))
+                        .filter(|out| **out == bound)
+                        .cloned()
+                })
+                .flatten();
             let keep_container_identity = walked.is_some();
             let bound = walked.unwrap_or(bound);
             let substituted = substitute_bound_var_at(
@@ -61892,8 +61887,10 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // #4827: jq mode only (a yq variable holds a node with its own path, ADR-0018): the head reads a `$x`
     // marker and navigates from it, so the node it yields is a child of the marker's value and shares its
     // storage with the register exactly where jq's pointer comparison holds.
-    // A single pattern only, as the `wrapped_marker` rule above: a `?//` chain's retry rules keep a head
-    // unproven. Walked only for a `bound` that shares the register's storage.
+    // #5181: a `?//` chain too. The head is proven the register only by this exact storage test, so a chain whose head is
+    // not the register keeps its retry (`$x | .b as {b:$q} ?// $q`), and one whose head is passes the first step as jq's
+    // does; `wrapped_marker`'s own rule above stays a single pattern's. Walked only for a `bound` that shares the
+    // register's storage.
     // #5030: ...and so does a head navigating `.` where `.` is a `$x` marker's value a pipe stage handed on
     // (`$x | .a as {b:$q} | $q`, read as `($x | .a) as {b:$q}`): the mark says it is that frozen node.
     // Read once (#5180): it walks the head, and the `identical` chain asks it for every `bound`.
