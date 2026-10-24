@@ -92678,6 +92678,21 @@ fn delpaths_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     paths_owned: OwnedValue,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    // jq mode: one definition with the path-mode interpreter's
+    // ([`delpaths_jq_prepare`]/[`delpaths_jq_apply`]). The validation errors
+    // raise whatever `optional` says, and before the value is decoded; a
+    // decode failure bypasses `optional`, as below.
+    if S::TAG != EvalTag::Yq {
+        let paths = match delpaths_jq_prepare(paths_owned) {
+            Ok(paths) => paths,
+            Err(e) => return QueryResult::Error(e),
+        };
+        return match to_owned::<S, _>(value).and_then(|v| delpaths_jq_apply(v, &paths)) {
+            Ok(v) => QueryResult::Owned(v),
+            Err(e) if optional && !e.is_uncatchable_at_value_position() => QueryResult::None,
+            Err(e) => e.into(),
+        };
+    }
     let OwnedValue::Array(mut paths) = paths_owned else {
         return QueryResult::Error(EvalError::paths_must_be_array());
     };
@@ -92900,16 +92915,13 @@ fn delpaths_one<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     }
 }
 
-/// jq mode's `delpaths(paths)` on an owned value, for the path-mode interpreter
-/// (#5223): [`delpaths_one`]'s jq rules over an `OwnedValue` the caller owns,
-/// so a uniquely owned document is written in place. Every entry must be an
-/// array; a path holding a NaN names nothing and is dropped; the list is
-/// sorted in jq's value order and applied as one batch; an empty path deletes
-/// everything.
-pub(crate) fn delpaths_jq_owned(
-    value: OwnedValue,
-    paths: OwnedValue,
-) -> Result<OwnedValue, EvalError> {
+/// jq mode's `delpaths` argument, validated and ready to apply: every entry
+/// must be an array (checked before anything is deleted), a path holding a
+/// NaN names no element at any depth and is dropped, and the list is sorted
+/// in jq's value order, so the batch applies as one regardless of the order
+/// written. The one definition [`delpaths_one`] and the path-mode
+/// interpreter (#5223) share.
+pub(crate) fn delpaths_jq_prepare(paths: OwnedValue) -> Result<ArrayVec, EvalError> {
     let OwnedValue::Array(mut paths) = paths else {
         return Err(EvalError::paths_must_be_array());
     };
@@ -92923,6 +92935,16 @@ pub(crate) fn delpaths_jq_owned(
         _ => false,
     });
     paths.sort_by(compare_values::<JqSemantics>);
+    Ok(paths)
+}
+
+/// Delete a [`delpaths_jq_prepare`]d batch from `value`: nothing for an empty
+/// list, everything (`null`) when the first path is empty, else
+/// [`delete_paths_sorted`].
+pub(crate) fn delpaths_jq_apply(
+    value: OwnedValue,
+    paths: &ArrayVec,
+) -> Result<OwnedValue, EvalError> {
     let paths: Vec<&[OwnedValue]> = paths
         .iter()
         .filter_map(|path| match path {
@@ -92935,6 +92957,16 @@ pub(crate) fn delpaths_jq_owned(
         Some([]) => Ok(OwnedValue::Null),
         Some(_) => delete_paths_sorted::<JqSemantics>(value, &paths, 0),
     }
+}
+
+/// jq mode's `delpaths(paths)` on an owned value the caller owns, for the
+/// path-mode interpreter (#5223): [`delpaths_jq_prepare`] then
+/// [`delpaths_jq_apply`].
+pub(crate) fn delpaths_jq_owned(
+    value: OwnedValue,
+    paths: OwnedValue,
+) -> Result<OwnedValue, EvalError> {
+    delpaths_jq_apply(value, &delpaths_jq_prepare(paths)?)
 }
 
 /// [`document_number_f64`] for a `JsonNumber`: its source bytes under `S`'s

@@ -305,13 +305,15 @@ enum Frame<'e> {
     },
     /// A closure parameter: an argument expression and its caller's
     /// environment, and whether the argument is pure there
-    /// ([`Interp::pure`]), worked out on its first read.
+    /// ([`Interp::pure`]) and yields at most one output
+    /// ([`Interp::single`]), each worked out on its first read.
     Arg {
         name: &'e str,
         body: &'e Expr,
         env: Env<'e>,
         parent: Env<'e>,
         pure: Cell<Option<bool>>,
+        single: Cell<Option<bool>>,
     },
     Label {
         name: &'e str,
@@ -437,9 +439,26 @@ impl<'e> Env<'e> {
 
 const T_VAR: &str = "__sp_t";
 
-/// The prefix of a prelude variable read as `LOADVN`: `$__lvn_v` is jq's
-/// `$$$$v` ([`Env::take_var`]).
-const LOADVN: &str = "__lvn_";
+/// The prefix of a variable read as `LOADVN` ([`Env::take_var`]): the prelude
+/// spells jq's `$$$$v` as `$__lvn_v`, and [`Prelude::new`] renames it to start
+/// with this, a character no jq variable name can hold, so a program's own
+/// `$__lvn_x` stays an ordinary variable.
+const LOADVN: &str = "\u{0}";
+
+/// The prelude's spelling of a `LOADVN` read, before [`Prelude::new`] renames
+/// it to [`LOADVN`].
+const LOADVN_SPELLING: &str = "__lvn_";
+
+/// `expr` with every prelude `LOADVN` read ([`LOADVN_SPELLING`]) renamed to
+/// [`LOADVN`].
+fn mark_loadvn(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Var(name) if name.starts_with(LOADVN_SPELLING) => {
+            Expr::Var(format!("{LOADVN}{}", &name[LOADVN_SPELLING.len()..]))
+        }
+        other => super::walk::map_subexprs(other, &mut mark_loadvn),
+    }
+}
 
 /// The jq-defined builtins the interpreter runs from source.
 ///
@@ -723,7 +742,7 @@ impl Prelude {
     pub fn new() -> Self {
         let parse_ok = |src: &str| parse(src).unwrap_or_else(|e| panic!("prelude: {e:?}"));
         Self {
-            defs: parse_ok(PRELUDE),
+            defs: mark_loadvn(&parse_ok(PRELUDE)),
             t_var: parse_ok("$__sp_t"),
             iterate: parse_ok(".[]"),
         }
@@ -791,18 +810,28 @@ pub struct Run {
 /// (`NumberLiteral`), and it is moved in, so that promoting its scalars copies
 /// nothing.
 pub fn run(filter: &str, input: OwnedValue) -> Result<Run, String> {
+    Ok(run_compiled(&compile(filter)?, input))
+}
+
+/// Parse and resolve `filter` once, for [`run_compiled`].
+///
+/// Resolving runs jq's compile-time checks (an unbound `$x`, an undefined
+/// function), which the interpreter alone would only meet if evaluation
+/// reached them, and settles each shadowable call (`builtin_fallback`), as
+/// the CLI hands the program over.
+pub fn compile(filter: &str) -> Result<Expr, String> {
     let mut program = parse(filter).map_err(|e| format!("{e:?}"))?;
-    // jq's compile-time checks (an unbound `$x`, an undefined function), which
-    // the interpreter alone would only meet if evaluation reached them. It
-    // also settles each shadowable call (`builtin_fallback`), so the
-    // interpreter runs the resolved program, as the CLI hands it over.
     let diagnostics = super::resolve::resolve_all_jq(&mut program);
     if !diagnostics.is_empty() {
         return Err(format!("{diagnostics:?}"));
     }
-    let prelude = Prelude::new();
-    let interp = Interp::new(&prelude);
-    Ok(interp.run(&program, input))
+    Ok(program)
+}
+
+/// Run a [`compile`]d program on `input` (see [`run`]), with this thread's
+/// parsed prelude.
+pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
+    with_prelude(|prelude| Interp::new(prelude).run(program, input))
 }
 
 /// Whether `succinctly jq` runs `program` through this interpreter (#5223): it
@@ -2170,6 +2199,96 @@ impl<'e> Interp<'e> {
         known
     }
 
+    fn arg_is_single(&self, frame: &Env<'e>) -> bool {
+        let Some(frame) = &frame.0 else {
+            return false; // patchcov: coverage tolerate-line reason="unreachable: a Callee::Arg's frame is the parameter's own, never empty"
+        };
+        let Frame::Arg {
+            body, env, single, ..
+        } = &**frame
+        else {
+            return false; // patchcov: coverage tolerate-line reason="unreachable: a Callee::Arg's frame is always a Frame::Arg"
+        };
+        if let Some(known) = single.get() {
+            return known;
+        }
+        single.set(Some(false));
+        let known = self.single(body, env);
+        single.set(Some(known));
+        known
+    }
+
+    /// Whether `expr` in `env` yields at most one output, so collecting it
+    /// before its consumer runs costs no laziness: there is no second output
+    /// a consumer could have stopped before. Conservative, like
+    /// [`Self::pure`]: a generator (`,`, `.[]`, `..`, `range`, ...) or a
+    /// call to a `def` counts as one that may yield more.
+    fn single(&self, expr: &'e Expr, env: &Env<'e>) -> bool {
+        use Expr as E;
+        match expr {
+            E::Identity
+            | E::Literal(_)
+            | E::Loc { .. }
+            | E::Var(_)
+            | E::TrackedVar(_)
+            | E::Field(_)
+            | E::Index { .. }
+            | E::Slice { .. }
+            | E::Not
+            | E::Env
+            | E::Format(_)
+            | E::Array(_)
+            | E::Error(None) => true,
+            E::Paren(e) | E::Optional(e) | E::Negate(e) | E::Error(Some(e)) => self.single(e, env),
+            E::Pipe(stages) => stages.iter().all(|e| self.single(e, env)),
+            E::IndexExpr { target, key } => self.single(target, env) && self.single(key, env),
+            E::SliceExpr { target, start, end } => {
+                self.single(target, env)
+                    && start.as_deref().map_or(true, |e| self.single(e, env))
+                    && end.as_deref().map_or(true, |e| self.single(e, env))
+            }
+            E::Object(entries) => entries.iter().all(|entry| {
+                self.single(&entry.value, env)
+                    && match &entry.key {
+                        ObjectKey::Expr(k) => self.single(k, env),
+                        ObjectKey::Literal(_) | ObjectKey::Bare => true,
+                    }
+            }),
+            E::Arithmetic { left, right, .. }
+            | E::Compare { left, right, .. }
+            | E::And(left, right)
+            | E::Or(left, right)
+            | E::Alternative(left, right) => self.single(left, env) && self.single(right, env),
+            E::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.single(cond, env)
+                    && self.single(then_branch, env)
+                    && self.single(else_branch, env)
+            }
+            E::Try { expr, catch } => {
+                self.single(expr, env) && catch.as_deref().map_or(true, |c| self.single(c, env))
+            }
+            E::StringInterpolation(parts) => parts.iter().all(|part| match part {
+                StringPart::Expr(e) => self.single(e, env),
+                StringPart::Literal(_) => true,
+            }),
+            E::As { expr, body, .. } => self.single(expr, env) && self.single(body, env),
+            E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
+                Some(Callee::Arg { frame, .. }) => self.arg_is_single(&frame),
+                _ => false,
+            },
+            E::Builtin(builtin) => {
+                pure_builtin(builtin)
+                    && !matches!(builtin, Builtin::Path(_))
+                    && builtin_args(builtin).iter().all(|a| self.single(a, env))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether evaluating `expr` in `env` has no side effect and always
     /// terminates, so that collecting its outputs ([`Self::eager`]) cannot
     /// be told from producing them one at a time. Conservative: no call to a
@@ -2756,12 +2875,13 @@ impl<'e> Interp<'e> {
     ) -> R {
         let _depth = self.enter_call(&callee)?;
         match callee {
-            // A pure argument's outputs are collected before the caller's
-            // continuation runs, so a chain of reads (`def f(n): .. f(n - 1)`)
-            // unwinds level by level instead of nesting every level's frames
-            // under the next; nothing can tell the two apart.
+            // A pure argument with at most one output is evaluated before the
+            // caller's continuation runs, so a chain of reads (`def f(n): ..
+            // f(n - 1)`) unwinds level by level instead of nesting every
+            // level's frames under the next; nothing can tell the two apart.
+            // A generator stays lazy, so `first(g)` and `limit` still stop it.
             Callee::Arg { body, env, frame } => {
-                if self.arg_is_pure(&frame) {
+                if self.arg_is_pure(&frame) && self.arg_is_single(&frame) {
                     self.eager(body, &env, input, reg, sink)
                 } else {
                     self.eval(body, &env, input, reg, sink)
@@ -2778,6 +2898,7 @@ impl<'e> Interp<'e> {
                         env: arg_env.clone(),
                         parent: body_env.clone(),
                         pure: Cell::new(None),
+                        single: Cell::new(None),
                     });
                 }
                 self.bind_dollars(params, body, body_env, input, reg, sink)
@@ -3662,8 +3783,10 @@ fn emit_c_builtin(
             return sink(value, reg.clone());
         }
     }
-    // `setpath`/`delpaths` write the input natively, so a uniquely owned
-    // value is written in place (no copy through the shipped evaluator).
+    // `setpath`/`delpaths` write natively, with copy-on-write: the input is
+    // shared with the caller, so the written containers are copied once, as
+    // jq's own `setpath` copies a shared input (no round trip through the
+    // shipped evaluator).
     match (builtin, args) {
         (Builtin::SetPath(..), [OwnedValue::Array(keys), v]) => {
             let written =
@@ -3757,7 +3880,7 @@ fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Co
 fn control_raise(control: Control) -> Raise {
     match control {
         Control::Error(e) => raise_eval(e),
-        Control::Break(label) => unsupported(format!("a delegated break to {label}")), // patchcov: coverage tolerate-line reason="unreachable: delegate() declines any expression holding a break before delegating it"
+        Control::Break(label) => unsupported(format!("a delegated break to {label}")), // patchcov: coverage tolerate-line reason="unreachable: a delegated call is a builtin whose arguments are already values (tracked_value), so it holds no break"
         Control::Halt(code) => Raise::Halt(code),
     }
 }

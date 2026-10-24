@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use succinctly::jq::path_mode::{self, Outcome};
-use succinctly::jq::OwnedValue;
+use succinctly::jq::{Expr, OwnedValue};
 
 /// Exit status for a row the interpreter cannot run.
 const UNSUPPORTED_EXIT: i32 = 64;
@@ -40,8 +40,15 @@ pub struct JqPathModeArgs {
 /// Run the interpreter and return the process exit status.
 pub fn run(args: JqPathModeArgs) -> i32 {
     let _ = args.compact;
-    // `-n` reads stdin only for `input`/`inputs`, as jq does.
-    let bytes = if args.null_input && !args.filter.contains("input") {
+    let program = match path_mode::compile(&args.filter) {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("jq: error: {e}\njq: 1 compile error");
+            return 3;
+        }
+    };
+    // `-n` reads stdin only for the input builtins, as jq does.
+    let bytes = if args.null_input && !succinctly::jq::walk::uses_input_builtins(&program) {
         None
     } else {
         let mut bytes = Vec::new();
@@ -64,7 +71,11 @@ pub fn run(args: JqPathModeArgs) -> i32 {
         .stack_size(crate::EVAL_STACK_SIZE)
         .spawn(move || {
             succinctly::jq::with_stack_budget(crate::EVAL_STACK_SIZE, || {
-                run_inputs(&filter, bytes.as_deref(), raw, null_input)
+                // Compiled again on this thread: the program holds `Rc`s.
+                match path_mode::compile(&filter) {
+                    Ok(program) => run_inputs(&program, bytes.as_deref(), raw, null_input),
+                    Err(_) => 3, // patchcov: coverage tolerate-line reason="unreachable: the same filter compiled above"
+                }
             })
         })
         .expect("spawn the interpreter's thread");
@@ -81,7 +92,7 @@ pub fn run(args: JqPathModeArgs) -> i32 {
 /// them), the exit status the last input's, and a malformed value ending the
 /// read (exit 5, as jq's parse error does) after the values before it ran.
 /// With `-n` the filter runs once on `null`, and the queue holds every value.
-fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool, null_input: bool) -> i32 {
+fn run_inputs(program: &Expr, bytes: Option<&[u8]>, raw: bool, null_input: bool) -> i32 {
     let (spans, malformed) = match bytes {
         Some(bytes) => crate::jq_runner::split_json_values_strict(bytes),
         None => (Vec::new(), None),
@@ -99,11 +110,11 @@ fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool, null_input: bool) -
     }
     succinctly::jq::seed_remaining_inputs(documents, None);
     if null_input {
-        return report(filter, OwnedValue::Null, raw);
+        return report(program, OwnedValue::Null, raw);
     }
     let mut status = 0;
     while let Some(input) = succinctly::jq::pop_remaining_input() {
-        status = report(filter, input, raw);
+        status = report(program, input, raw);
         if status != 0 && status != 5 {
             return status;
         }
@@ -115,14 +126,8 @@ fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool, null_input: bool) -
     status
 }
 
-fn report(filter: &str, input: OwnedValue, raw: bool) -> i32 {
-    let run = match path_mode::run(filter, input) {
-        Ok(run) => run,
-        Err(e) => {
-            eprintln!("jq: error: {e}\njq: 1 compile error");
-            return 3;
-        }
-    };
+fn report(program: &Expr, input: OwnedValue, raw: bool) -> i32 {
+    let run = path_mode::run_compiled(program, input);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for value in &run.outputs {

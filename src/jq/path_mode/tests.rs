@@ -1706,3 +1706,31 @@ fn shadow_findings_match_jq_5223() {
         ]);
     });
 }
+
+/// A program's own `$__lvn_x` is an ordinary variable (the prelude's `LOADVN`
+/// spelling is renamed to one no jq name can hold), and a closure argument
+/// that is a generator stays lazy, so `limit`/`first` stop it after the
+/// outputs they take. Every expected answer is jq 1.7.1's.
+#[test]
+fn loadvn_and_generator_arguments_keep_jqs_meaning_5223() {
+    on_big_stack(|| {
+        check(&[
+            (
+                "null",
+                "1 as $x | 2 as $__lvn_x | [$__lvn_x, $x]",
+                ok(&["[2,1]"]),
+            ),
+            ("null", "3 as $__lvn_y | $__lvn_y", ok(&["3"])),
+            (
+                "null",
+                "def g(x): x; [limit(3; g(range(100000000)))]",
+                ok(&["[0,1,2]"]),
+            ),
+            (
+                "null",
+                "def g(x): first(x); g(range(100000000))",
+                ok(&["0"]),
+            ),
+        ]);
+    });
+}
