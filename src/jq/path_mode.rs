@@ -46,12 +46,13 @@ use super::c_builtin_identity::{array_index, binop_keeps, format_keeps_input, ke
 use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    owned_to_string, EvalTag, JqSemantics, QueryResult,
+    native_stack_exhausted, owned_to_string, EvalTag, JqSemantics, QueryResult, MAX_EVAL_FRAMES,
 };
 use super::expr::{
     Builtin, Expr, Literal, NumberKey, ObjectKey, Param, Pattern, SliceBoundKey, StringPart,
 };
 use super::parser::parse;
+use super::resolve::ModuleRun;
 use super::value::{
     jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral, SharableString,
 };
@@ -212,6 +213,10 @@ enum Raise {
     Wrapped(Box<Self>),
     /// `halt`/`halt_error`: nothing catches it.
     Halt(i32),
+    /// An uncatchable error: a resource limit (the recursion guard, or one a
+    /// delegated builtin raised). Nothing catches it, as in the shipped
+    /// evaluator.
+    Fatal(EvalError),
     /// A construct the interpreter does not implement: nothing catches it
     /// either.
     Unsupported(String),
@@ -249,10 +254,11 @@ fn caught(raise: Raise) -> OwnedValue {
 }
 
 fn raise_eval(error: EvalError) -> Raise {
-    if !error.is_uncatchable() {
-        return Raise::Error(error);
+    if error.is_uncatchable() {
+        Raise::Fatal(error)
+    } else {
+        Raise::Error(error)
     }
-    unsupported(format!("uncatchable delegated error: {}", error.message)) // patchcov: coverage tolerate-line reason="defensive: the delegated builtins the interpreter reaches raise only catchable errors; a resource limit would land here"
 }
 
 /// An error the interpreter raises itself (jq's three path messages, an object
@@ -287,12 +293,14 @@ enum Frame<'e> {
         parent: Env<'e>,
     },
     /// A closure parameter: an argument expression and its caller's
-    /// environment.
+    /// environment, and whether the argument is pure there
+    /// ([`Interp::pure`]), worked out on its first read.
     Arg {
         name: &'e str,
         body: &'e Expr,
         env: Env<'e>,
         parent: Env<'e>,
+        pure: Cell<Option<bool>>,
     },
     Label {
         name: &'e str,
@@ -304,6 +312,7 @@ enum Frame<'e> {
 /// A resolved function.
 enum Callee<'e> {
     Def {
+        name: &'e str,
         params: &'e [Param],
         body: &'e Expr,
         env: Env<'e>,
@@ -311,6 +320,8 @@ enum Callee<'e> {
     Arg {
         body: &'e Expr,
         env: Env<'e>,
+        /// The parameter's own frame, which caches its purity.
+        frame: Env<'e>,
     },
 }
 
@@ -365,6 +376,7 @@ impl<'e> Env<'e> {
                     ..
                 } if *n == name && params.len() == arity => {
                     return Some(Callee::Def {
+                        name: n,
                         params,
                         body,
                         env: at.clone(),
@@ -376,6 +388,7 @@ impl<'e> Env<'e> {
                     return Some(Callee::Arg {
                         body,
                         env: env.clone(),
+                        frame: at.clone(),
                     });
                 }
                 _ => {}
@@ -693,6 +706,10 @@ pub struct Interp<'e> {
     /// its marker.
     consts: RefCell<BTreeMap<usize, OwnedValue>>,
     next_label: Cell<u64>,
+    /// How many jq-function calls are live: the structural backstop under
+    /// the native-stack floor, as `MAX_EVAL_FRAMES` is for the shipped
+    /// evaluator.
+    depth: Cell<u32>,
     /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
     /// into the root allocation. Keyed by `(root, offset, size)`, so equal
     /// slices of one array are one value; each view maps back to its root
@@ -774,6 +791,7 @@ impl<'e> Interp<'e> {
             prelude_env: env,
             consts: RefCell::new(BTreeMap::new()),
             next_label: Cell::new(0),
+            depth: Cell::new(0),
             slices: RefCell::new(BTreeMap::new()),
             slice_roots: RefCell::new(BTreeMap::new()),
         }
@@ -801,6 +819,7 @@ impl<'e> Interp<'e> {
             Raise::Break(n) => Outcome::Error(EvalError::from_value(label_value(n))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects a break with no enclosing label with resolve_all_jq, and a label stops its own break"
             Raise::Wrapped(inner) => Self::outcome(*inner), // patchcov: coverage tolerate-line reason="unreachable: a wrapped error is unwrapped by the try or label that wrapped it before it can reach the top"
             Raise::Halt(code) => Outcome::Halt(code),
+            Raise::Fatal(error) => Outcome::Error(error),
             Raise::Unsupported(what) => Outcome::Unsupported(what),
         }
     }
@@ -876,7 +895,7 @@ impl<'e> Interp<'e> {
                     entries.iter().map(|e| (&e.key, &e.value)).collect();
                 self.object(&entries, IndexMap::new(), env, &input, &reg, sink)
             }
-            Expr::RecursiveDescent => self.call_prelude("_sp_recurse", &[], env, input, reg, sink),
+            Expr::RecursiveDescent => self.recurse(None, None, env, input, reg, sink),
             Expr::Arithmetic {
                 op, left, right, ..
             } => {
@@ -1003,12 +1022,17 @@ impl<'e> Interp<'e> {
                 self.call_prelude("_sp_nth", &[n, g], env, input, reg, sink)
             }
             Expr::Until { cond, update } => {
-                self.call_prelude("_sp_until", &[cond, update], env, input, reg, sink)
+                self.until_while(cond, update, false, env, input, reg, sink)
             }
             Expr::While { cond, update } => {
-                self.call_prelude("_sp_while", &[cond, update], env, input, reg, sink)
+                self.until_while(cond, update, true, env, input, reg, sink)
             }
-            Expr::Repeat(g) => self.call_prelude("_sp_repeat", &[g], env, input, reg, sink),
+            // `def _repeat: exp, _repeat;` in jq 1.7.1: every pass runs `exp` on
+            // the same input from the entry register (`FORK`), so a loop is the
+            // body exactly. A consumer ends it by raising (`limit`'s `break`).
+            Expr::Repeat(g) => loop {
+                self.eval(g, env, input.clone(), reg.clone(), sink)?;
+            },
             Expr::Range { from, to, step } => match (to, step) {
                 (Some(to), None) => self.range(from, to, env, input, reg, sink),
                 (Some(to), Some(step)) => {
@@ -1740,6 +1764,274 @@ impl<'e> Interp<'e> {
         })
     }
 
+    /// `expr`'s outputs collected, then handed to `sink` in order, and the
+    /// error that ended `expr` raised after them. For a pure `expr` (no side
+    /// effect, always terminating: [`Self::pure`]) this is indistinguishable
+    /// from producing them lazily -- a consumer that stops early stops the
+    /// replay before the deferred error, as it would stop `expr` -- and the
+    /// native stack `expr` used is released before the consumer runs.
+    fn eager(
+        &self,
+        expr: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        let outputs = self.collect_outputs(expr, env, input, reg);
+        for (value, reg) in outputs.values {
+            sink(value, reg)?;
+        }
+        outputs.end
+    }
+
+    fn collect_outputs(
+        &self,
+        expr: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+    ) -> Outputs {
+        let mut values = Vec::new();
+        let end = self.eval(expr, env, input, reg, &mut |v, r| {
+            values.push((v, r));
+            Ok(())
+        });
+        Outputs { values, end }
+    }
+
+    fn arg_is_pure(&self, frame: &Env<'e>) -> bool {
+        let Some(frame) = &frame.0 else {
+            return false; // patchcov: coverage tolerate-line reason="unreachable: a Callee::Arg's frame is the parameter's own, never empty"
+        };
+        let Frame::Arg {
+            body, env, pure, ..
+        } = &**frame
+        else {
+            return false; // patchcov: coverage tolerate-line reason="unreachable: a Callee::Arg's frame is always a Frame::Arg"
+        };
+        if let Some(known) = pure.get() {
+            return known;
+        }
+        // Not yet known while it is being worked out: a parameter whose
+        // argument reads itself (it cannot, lexically) counts as impure.
+        pure.set(Some(false));
+        let known = self.pure(body, env);
+        pure.set(Some(known));
+        known
+    }
+
+    /// Whether evaluating `expr` in `env` has no side effect and always
+    /// terminates, so that collecting its outputs ([`Self::eager`]) cannot
+    /// be told from producing them one at a time. Conservative: no call to a
+    /// `def` (which may recurse), no loop, no builtin that writes, reads input
+    /// or halts. A closure parameter is pure when its own argument is, in its
+    /// own environment.
+    fn pure(&self, expr: &'e Expr, env: &Env<'e>) -> bool {
+        use Expr as E;
+        match expr {
+            E::Identity
+            | E::Literal(_)
+            | E::Loc { .. }
+            | E::Var(_)
+            | E::TrackedVar(_)
+            | E::Field(_)
+            | E::Index { .. }
+            | E::Slice { .. }
+            | E::Iterate
+            | E::RecursiveDescent
+            | E::Not
+            | E::Env
+            | E::Format(_)
+            | E::Error(None) => true,
+            E::Paren(e) | E::Optional(e) | E::Negate(e) | E::Array(e) => self.pure(e, env),
+            E::Error(Some(e)) => self.pure(e, env),
+            E::Pipe(stages) => stages.iter().all(|e| self.pure(e, env)),
+            E::Comma(items) => items.iter().all(|e| self.pure(e, env)),
+            E::IndexExpr { target, key } => self.pure(target, env) && self.pure(key, env),
+            E::SliceExpr { target, start, end } => {
+                self.pure(target, env)
+                    && start.as_deref().map_or(true, |e| self.pure(e, env))
+                    && end.as_deref().map_or(true, |e| self.pure(e, env))
+            }
+            E::Object(entries) => entries.iter().all(|entry| {
+                self.pure(&entry.value, env)
+                    && match &entry.key {
+                        ObjectKey::Expr(k) => self.pure(k, env),
+                        ObjectKey::Literal(_) | ObjectKey::Bare => true,
+                    }
+            }),
+            E::Arithmetic { left, right, .. }
+            | E::Compare { left, right, .. }
+            | E::And(left, right)
+            | E::Or(left, right)
+            | E::Alternative(left, right) => self.pure(left, env) && self.pure(right, env),
+            E::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.pure(cond, env) && self.pure(then_branch, env) && self.pure(else_branch, env),
+            E::Try { expr, catch } => {
+                self.pure(expr, env) && catch.as_deref().map_or(true, |c| self.pure(c, env))
+            }
+            E::StringInterpolation(parts) => parts.iter().all(|part| match part {
+                StringPart::Expr(e) => self.pure(e, env),
+                StringPart::Literal(_) => true,
+            }),
+            E::As { expr, body, .. } => self.pure(expr, env) && self.pure(body, env),
+            E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
+                Some(Callee::Arg { frame, .. }) => self.arg_is_pure(&frame),
+                _ => false,
+            },
+            E::Builtin(builtin) => {
+                pure_builtin(builtin) && builtin_args(builtin).iter().all(|a| self.pure(a, env))
+            }
+            _ => false,
+        }
+    }
+
+    /// `until(cond; next)` and `while(cond; update)`:
+    ///
+    /// ```text
+    /// def until(cond; next): def _until: if cond then . else (next|_until) end; _until;
+    /// def while(cond; update): def _while: if cond then ., (update | _while) else empty end; _while;
+    /// ```
+    ///
+    /// jq runs the recursive call as a tail call, in constant stack. With a
+    /// pure `cond` and step this walks the same depth-first order on a heap
+    /// work list -- the condition a subexp, the step tracked -- so a loop
+    /// of any length costs no native stack per iteration. Otherwise it runs
+    /// the `builtin.jq` body itself.
+    #[allow(clippy::too_many_arguments)]
+    fn until_while(
+        &self,
+        cond: &'e Expr,
+        step: &'e Expr,
+        is_while: bool,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        if !(self.pure(cond, env) && self.pure(step, env)) {
+            let name = if is_while { "_sp_while" } else { "_sp_until" };
+            return self.call_prelude(name, &[cond, step], env, input, reg, sink);
+        }
+        let mut work = vec![Work::Test(input, reg)];
+        while let Some(item) = work.pop() {
+            match item {
+                Work::Emit(v, r) => sink(v, r)?,
+                Work::Raise(raise) => return Err(raise),
+                Work::Test(v, r) => {
+                    let conds = self.collect_outputs(cond, env, v.clone(), r.sub());
+                    if let Err(raise) = conds.end {
+                        work.push(Work::Raise(raise));
+                    }
+                    for (c, _) in conds.values.into_iter().rev() {
+                        match (truthy(&c), is_while) {
+                            (true, true) => {
+                                work.push(Work::Step(v.clone(), r.clone()));
+                                work.push(Work::Emit(v.clone(), r.clone()));
+                            }
+                            (true, false) => work.push(Work::Emit(v.clone(), r.clone())),
+                            (false, true) => {}
+                            (false, false) => work.push(Work::Step(v.clone(), r.clone())),
+                        }
+                    }
+                }
+                Work::Step(v, r) => {
+                    let steps = self.collect_outputs(step, env, v, r);
+                    if let Err(raise) = steps.end {
+                        work.push(Work::Raise(raise));
+                    }
+                    for (next, reg) in steps.values.into_iter().rev() {
+                        work.push(Work::Test(next, reg));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `recurse(f)`, `recurse(f; cond)` and `..` (`recurse(.[]?)`):
+    ///
+    /// ```text
+    /// def recurse(f): def r: ., (f | r); r;
+    /// def recurse(f; cond): def r: ., (f | select(cond) | r); r;
+    /// ```
+    ///
+    /// With a pure `f` (and `cond`) the same depth-first order on a heap work
+    /// list, `f` tracked and `cond` a subexp (`select`'s `if`), so a deep
+    /// recursion costs no native stack per level; otherwise the
+    /// `builtin.jq` body. `f` of `None` is `.[]?`, which `EACH_OPT` answers.
+    #[allow(clippy::too_many_arguments)]
+    fn recurse(
+        &self,
+        f: Option<&'e Expr>,
+        cond: Option<&'e Expr>,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: Reg,
+        sink: &mut Sink<'_>,
+    ) -> R {
+        let pure =
+            f.map_or(true, |f| self.pure(f, env)) && cond.map_or(true, |c| self.pure(c, env));
+        if !pure {
+            let args: Vec<&'e Expr> = f.into_iter().chain(cond).collect();
+            return self.call_prelude("_sp_recurse", &args, env, input, reg, sink);
+        }
+        let mut work = vec![Work::Test(input, reg)];
+        while let Some(item) = work.pop() {
+            match item {
+                Work::Raise(raise) => return Err(raise),
+                Work::Emit(v, r) | Work::Step(v, r) => work.push(Work::Test(v, r)), // patchcov: coverage tolerate-line reason="unreachable: recurse pushes only Test and Raise items"
+                Work::Test(v, r) => {
+                    sink(v.clone(), r.clone())?;
+                    let children = match f {
+                        Some(f) => self.collect_outputs(f, env, v, r),
+                        None => {
+                            let mut values = Vec::new();
+                            let end = self.each(v, r, true, &mut |c, rc| {
+                                values.push((c, rc));
+                                Ok(())
+                            });
+                            Outputs { values, end }
+                        }
+                    };
+                    if let Err(raise) = children.end {
+                        work.push(Work::Raise(raise));
+                    }
+                    let mut kept = Vec::with_capacity(children.values.len());
+                    for (child, rc) in children.values {
+                        let Some(cond) = cond else {
+                            kept.push((child, rc));
+                            continue;
+                        };
+                        // `select(cond)`: `cond` a subexp on the child, the
+                        // child once per truthy output.
+                        let tests = self.collect_outputs(cond, env, child.clone(), rc.sub());
+                        for (t, _) in tests.values {
+                            if truthy(&t) {
+                                kept.push((child.clone(), rc.clone()));
+                            }
+                        }
+                        // An error in `cond` ends the walk once the children
+                        // kept before it are done; `f`'s own later outputs and
+                        // error are never reached.
+                        if let Err(raise) = tests.end {
+                            work.push(Work::Raise(raise));
+                            break;
+                        }
+                    }
+                    for (child, rc) in kept.into_iter().rev() {
+                        work.push(Work::Test(child, rc));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `PATH_BEGIN … PATH_END`: a fresh register on the input; each output
     /// must be identical to where the register ended, and yields the path
     /// with the outer register restored.
@@ -1822,6 +2114,9 @@ impl<'e> Interp<'e> {
             Builtin::Sort if matches!(input, OwnedValue::Array(_)) => {
                 sink(sort_by_keys(&input, &input, false)?, reg)
             }
+            Builtin::Recurse => self.recurse(None, None, env, input, reg, sink),
+            Builtin::RecurseF(f) => self.recurse(Some(f), None, env, input, reg, sink),
+            Builtin::RecurseCond(f, c) => self.recurse(Some(f), Some(c), env, input, reg, sink),
             _ => {
                 if let Some((name, args)) = prelude_call(builtin) {
                     return self.call_prelude(name, &args, env, input, reg, sink);
@@ -2035,9 +2330,22 @@ impl<'e> Interp<'e> {
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
+        let _depth = self.enter_call(&callee)?;
         match callee {
-            Callee::Arg { body, env } => self.eval(body, &env, input, reg, sink),
-            Callee::Def { params, body, env } => {
+            // A pure argument's outputs are collected before the caller's
+            // continuation runs, so a chain of reads (`def f(n): .. f(n - 1)`)
+            // unwinds level by level instead of nesting every level's frames
+            // under the next; nothing can tell the two apart.
+            Callee::Arg { body, env, frame } => {
+                if self.arg_is_pure(&frame) {
+                    self.eager(body, &env, input, reg, sink)
+                } else {
+                    self.eval(body, &env, input, reg, sink)
+                }
+            }
+            Callee::Def {
+                params, body, env, ..
+            } => {
                 let mut body_env = env;
                 for (param, (arg, arg_env)) in params.iter().zip(args) {
                     body_env = Env::push(Frame::Arg {
@@ -2045,11 +2353,34 @@ impl<'e> Interp<'e> {
                         body: arg,
                         env: arg_env.clone(),
                         parent: body_env.clone(),
+                        pure: Cell::new(None),
                     });
                 }
                 self.bind_dollars(params, body, body_env, input, reg, sink)
             }
         }
+    }
+
+    /// The recursion guard every closure call passes through, as every
+    /// unbounded recursion does once per level (ADR-0025): refuse once the
+    /// thread's registered native stack is half spent, or past
+    /// `MAX_EVAL_FRAMES` live calls, with the shipped evaluator's uncatchable
+    /// `exceeded maximum recursion depth`.
+    fn enter_call(&self, callee: &Callee<'e>) -> Result<DepthGuard<'_>, Raise> {
+        let depth = self.depth.get() + 1;
+        if depth > MAX_EVAL_FRAMES || native_stack_exhausted() {
+            let message = match callee {
+                Callee::Def { name, params, .. } => format!(
+                    "{}/{} exceeded maximum recursion depth",
+                    ModuleRun::display_name(name.strip_prefix("_sp_").unwrap_or(name)),
+                    params.len()
+                ),
+                Callee::Arg { .. } => String::from("exceeded maximum recursion depth"),
+            };
+            return Err(Raise::Fatal(EvalError::resource_limit(message)));
+        }
+        self.depth.set(depth);
+        Ok(DepthGuard(&self.depth))
     }
 
     fn bind_dollars(
@@ -2101,6 +2432,37 @@ impl<'e> Interp<'e> {
             let args = [(path, env.clone()), (&self.prelude.t_var, env_t)];
             self.call_with(callee, &args, input.clone(), reg_t, sink)
         })
+    }
+}
+
+/// What [`Interp::collect_outputs`] gathered: every output with its register,
+/// and how the expression ended.
+struct Outputs {
+    values: Vec<(OwnedValue, Reg)>,
+    end: R,
+}
+
+/// One item of a native loop's depth-first work list
+/// ([`Interp::until_while`], [`Interp::recurse`]), pushed in reverse so the
+/// list pops in jq's order.
+enum Work {
+    /// Hand this output to the consumer.
+    Emit(OwnedValue, Reg),
+    /// Run the loop's condition (or `recurse`'s visit) on this value.
+    Test(OwnedValue, Reg),
+    /// Run the loop's step on this value.
+    Step(OwnedValue, Reg),
+    /// Raise the error a condition or step ended in, once the work it
+    /// produced before the error is done.
+    Raise(Raise),
+}
+
+/// Lowers the live-call count when a call returns.
+struct DepthGuard<'a>(&'a Cell<u32>);
+
+impl Drop for DepthGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
     }
 }
 
@@ -2220,6 +2582,83 @@ fn min_max_by(values: &OwnedValue, keys: &OwnedValue, is_min: bool) -> Result<Ow
         }
     }
     Ok(best.clone())
+}
+
+/// Whether a builtin, given pure arguments, is pure itself ([`Interp::pure`]):
+/// it writes nothing (`debug`, `stderr`), reads no input, does not halt, and
+/// always terminates (no `range`, `limit` or `recurse`, whose bounds or
+/// generators decide that).
+fn pure_builtin(builtin: &Builtin) -> bool {
+    use Builtin as B;
+    matches!(
+        builtin,
+        B::Length
+            | B::Utf8ByteLength
+            | B::Type
+            | B::ToString
+            | B::ToNumber
+            | B::Keys
+            | B::KeysUnsorted
+            | B::Has(_)
+            | B::Contains(_)
+            | B::Startswith(_)
+            | B::Endswith(_)
+            | B::Ltrimstr(_)
+            | B::Rtrimstr(_)
+            | B::Split(_)
+            | B::Explode
+            | B::Implode
+            | B::ToJson
+            | B::FromJson
+            | B::Floor
+            | B::Ceil
+            | B::Round
+            | B::Sqrt
+            | B::Fabs
+            | B::Min
+            | B::Max
+            | B::Sort
+            | B::GetPath(_)
+            | B::IsInfinite
+            | B::IsNan
+            | B::IsNormal
+            | B::IsFinite
+            | B::Infinite
+            | B::Nan
+            | B::Empty
+            | B::Select(_)
+            | B::Map(_)
+            | B::Add
+            | B::Reverse
+            | B::ToEntries
+            | B::FromEntries
+            | B::WithEntries(_)
+            | B::Arrays
+            | B::Objects
+            | B::Iterables
+            | B::Booleans
+            | B::Numbers
+            | B::Normals
+            | B::Finites
+            | B::Strings
+            | B::Nulls
+            | B::Values
+            | B::Scalars
+            | B::Join(_)
+            | B::Any
+            | B::All
+            | B::AnyF(_)
+            | B::AllF(_)
+            | B::In(_)
+            | B::Inside(_)
+            | B::Abs
+            | B::AsciiDowncase
+            | B::AsciiUpcase
+            | B::First
+            | B::Last
+            | B::Nth(_)
+            | B::Path(_)
+    )
 }
 
 /// A builtin's sub-expressions, in argument order (`map_builtin_subexprs`

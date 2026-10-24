@@ -55,13 +55,18 @@ pub fn run(args: JqPathModeArgs) -> i32 {
         }
         Some(bytes)
     };
-    // A continuation-threaded evaluator nests a frame per pipe stage and per
-    // output, so it runs on a thread with room for deep documents (values are
-    // `Rc`, so the input is parsed there too).
+    // The interpreter runs on a thread like the CLI's own evaluation thread,
+    // with the same stack and the same registered native-stack floor
+    // (ADR-0025), so a recursion that would overflow is refused instead
+    // (values are `Rc`, so the input is parsed there too).
     let (filter, raw, null_input) = (args.filter, args.raw, args.null_input);
     let worker = std::thread::Builder::new()
-        .stack_size(1 << 29)
-        .spawn(move || run_inputs(&filter, bytes.as_deref(), raw, null_input))
+        .stack_size(crate::EVAL_STACK_SIZE)
+        .spawn(move || {
+            succinctly::jq::with_stack_budget(crate::EVAL_STACK_SIZE, || {
+                run_inputs(&filter, bytes.as_deref(), raw, null_input)
+            })
+        })
         .expect("spawn the interpreter's thread");
     worker.join().unwrap_or_else(|_| {
         // A panic is an interpreter bug: count the row as unsupported, never as a

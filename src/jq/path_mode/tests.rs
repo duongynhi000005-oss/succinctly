@@ -38,12 +38,16 @@ fn answer(doc: &str, filter: &str) -> Answer {
     }
 }
 
+/// The stack a test body runs on, registered as the native-stack floor's
+/// budget, as the CLI registers its own evaluation thread's.
+const TEST_STACK: usize = 256 << 20;
+
 /// Run a test body on a thread with room for the continuation-threaded
 /// evaluator in a debug build (the binary runs it on a large stack too).
 fn on_big_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(body)
+        .stack_size(TEST_STACK)
+        .spawn(|| crate::jq::with_stack_budget(TEST_STACK, body))
         .expect("spawn")
         .join()
         .unwrap_or_else(|e| std::panic::resume_unwind(e));
@@ -951,6 +955,8 @@ fn halt_error_and_input_run_as_c_builtins_5223() {
                 run.outcome
             );
         }
+        // `no_std` has no input queue to read.
+        #[cfg(feature = "std")]
         check(&[("null", "try input catch .", ok(&[r#""break""#]))]);
     });
 }
@@ -1416,6 +1422,80 @@ fn shadowed_builtins_resolve_as_jq_5223() {
         check(&[
             ("null", "def length: 5; length", ok(&["5"])),
             ("null", "def length(x): x; [1,2,3] | length", ok(&["3"])),
+        ]);
+    });
+}
+
+/// A recursion deeper than the native stack can hold is refused with the
+/// shipped evaluator's uncatchable resource limit, never an overflow, and a
+/// `try` does not catch it; one the stack holds still answers (a debug
+/// build's frames are large, so the answering depth here is modest).
+#[test]
+// The floor lives in a thread-local, which `no_std` does not have.
+#[cfg(feature = "std")]
+fn a_recursion_too_deep_is_refused_not_overflowed_5223() {
+    on_big_stack(|| {
+        let def = "def f(n): if n == 0 then 0 else f(n - 1) end;";
+        check(&[("null", &format!("{def} f(300)"), ok(&["0"]))]);
+        // Which check trips first -- the call (`f/1 exceeded ...`) or an
+        // argument read (`exceeded ...`) -- depends on where the floor
+        // falls, as in the shipped evaluator.
+        let dollar = "def f($n): if $n == 0 then 0 else f($n - 1) end;";
+        for filter in [
+            format!("{dollar} f(10000000)"),
+            format!("{dollar} try f(10000000) catch 1"),
+            format!("{def} f(10000000)"),
+        ] {
+            let run = run(&filter, OwnedValue::Null).expect("parses");
+            match run.outcome {
+                Outcome::Error(e) => {
+                    assert!(e.is_uncatchable(), "{filter}: {e:?}");
+                    assert!(
+                        e.message.ends_with("exceeded maximum recursion depth"),
+                        "{filter}: {}",
+                        e.message
+                    );
+                }
+                other => panic!("{filter}: {other:?}"),
+            }
+        }
+    });
+}
+
+/// `until`, `while`, `range/3` and `recurse` run jq's tail-recursive bodies
+/// on a heap work list when their arguments are pure, in jq's order, so a
+/// long loop costs no native stack per iteration; an impure argument keeps
+/// the `builtin.jq` body. Every expected answer is jq 1.7.1's.
+#[test]
+fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
+    on_big_stack(|| {
+        check(&[
+            ("0", "until(. >= 100000; . + 1)", ok(&["100000"])),
+            ("0", "[range(0; 100000; 1)] | length", ok(&["100000"])),
+            (
+                "0",
+                "[recurse(if . < 50000 then . + 1 else empty end)] | length",
+                ok(&["50001"]),
+            ),
+            (
+                "1",
+                "[while(. < 20; . * 2, . * 3)]",
+                ok(&["[1,2,4,8,16,12,6,12,18,3,6,12,18,9,18]"]),
+            ),
+            (
+                "1",
+                "[until(. > 10; . * 2, . * 3)]",
+                ok(&["[16,24,12,12,18,12,18,18,27]"]),
+            ),
+            (
+                "[[1,[2]],3]",
+                "[recurse(.[]?; type == \"array\")]",
+                ok(&["[[[1,[2]],3],[1,[2]],[2]]"]),
+            ),
+            ("0", "[limit(3; repeat(1))]", ok(&["[1,1,1]"])),
+            ("1", "[limit(5; repeat(. * 2))]", ok(&["[2,2,2,2,2]"])),
+            ("0", "[until(. > 2; . + 1, error(\"x\"))]", err(&[], "x")),
+            ("0", "[until(. > 2; (. + 1 | debug))] | length", ok(&["1"])),
         ]);
     });
 }
