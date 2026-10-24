@@ -1367,7 +1367,11 @@ impl<'e> Interp<'e> {
             Expr::Assign { path, value } => {
                 self.call_prelude("_sp_assign", &[path, value], env, input, reg, sink)
             }
-            Expr::Update { path, filter } if !reg.tracking() && !Self::may_retry(filter, env) => {
+            Expr::Update { path, filter }
+                if !reg.tracking()
+                    && !Self::may_retry(path, env)
+                    && !Self::may_retry(filter, env) =>
+            {
                 let mut update =
                     |this: &Self, v: OwnedValue, emit: &mut dyn FnMut(OwnedValue) -> R| {
                         this.eval(filter, env, v, Reg::top(), &mut |u, _| emit(u))
@@ -2845,10 +2849,12 @@ impl<'e> Interp<'e> {
     /// (jq's `(., break $out)`); an update with no output queues the path for
     /// deletion, all of them deleted together at the end. The state moves
     /// from write to write, so a uniquely owned document is written in place
-    /// rather than copied per path. The caller has checked that `update`
-    /// cannot catch that `break` ([`Self::may_retry`]): one that can (a
-    /// `?//` retries past it) restores the pre-path state in jq's body,
-    /// which only that body reproduces.
+    /// rather than copied per path. The caller has checked that neither
+    /// `update` nor `paths` can retry ([`Self::may_retry`]): a `?//` in the
+    /// update catches the fold's `break`, and one in `paths` catches any
+    /// error the update or its write raises (the fold runs inside the path
+    /// generator's fork), and either retry re-reads `_modify`'s
+    /// `LOADVN`-emptied variables, which only jq's body reproduces.
     fn modify_native(
         &self,
         paths: &'e Expr,
@@ -2998,7 +3004,7 @@ impl<'e> Interp<'e> {
         sink: &mut Sink<'_>,
     ) -> R {
         self.eval(value, env, input.clone(), reg, &mut |t, reg_t| {
-            if !reg_t.tracking() {
+            if !reg_t.tracking() && !Self::may_retry(path, env) {
                 // `. op $t` and `. // $t` are single-valued and catch nothing.
                 let mut update =
                     |_: &Self, v: OwnedValue, emit: &mut dyn FnMut(OwnedValue) -> R| {

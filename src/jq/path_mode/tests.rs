@@ -1652,6 +1652,19 @@ fn updates_and_assignments_follow_modify_and_assign_5223() {
                 "del(.a[] | select(. >= 2))",
                 ok(&[r#"{"a":[1]}"#]),
             ),
+            // A `?//` in the paths catches the write's error (the fold runs in
+            // the path generator's fork) and retries into `LOADVN`-emptied
+            // variables.
+            (
+                "[1]",
+                "(. as $x ?// $y | .[if $x == null then 0 else -5 end]) |= 1",
+                err(&[], "Paths must be specified as an array"),
+            ),
+            (
+                r#"[1,"a"]"#,
+                r#"(. as $x ?// $y | .[if $x == null then 1 else 0 end]) += "x""#,
+                err(&[], "Paths must be specified as an array"),
+            ),
         ]);
     });
 }
