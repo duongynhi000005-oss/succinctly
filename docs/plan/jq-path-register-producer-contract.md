@@ -2,7 +2,9 @@
 
 **Status: B1, B2, B2b and B3 landed ([#3456](https://github.com/rust-works/succinctly/issues/3456),
 [#3428](https://github.com/rust-works/succinctly/issues/3428)); the promotions in section 10 are
-open.** This note began as the design review gate before B1 (the type change). It re-confirms the
+open.** [#5223](https://github.com/rust-works/succinctly/issues/5223) proposes replacing the
+inferred register with one the interpreter carries; its Phase 0 report is
+[jq-path-mode-interpreter-spike.md](jq-path-mode-interpreter-spike.md). This note began as the design review gate before B1 (the type change). It re-confirms the
 inventory on `main` at `ea2fcd19c`, settles the questions the issue left open, and lists what
 B1/B2/B3 had to keep green; sections 3, 6 and 10 record what was built. Functions are cited by
 name, not line: `src/jq/eval.rs` moves too fast for line numbers to survive a review round. The
