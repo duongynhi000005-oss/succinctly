@@ -52184,6 +52184,9 @@ fn step_stored_literal<S: EvalSemantics>(
     if let Some(Expr::Literal(lit)) = item_literal_arm::<S>(update, state, tail) {
         return StepStored::Literal(literal_to_owned(lit));
     }
+    if tail.foreach_last && null_state_runs_identity_fold::<S>(update, state) {
+        return StepStored::Literal(OwnedValue::Null);
+    }
     let Expr::Comma(items) = unwrap_paren(update) else {
         return StepStored::Unknown;
     };
@@ -52200,6 +52203,39 @@ fn step_stored_literal<S: EvalSemantics>(
         }
     }
     stored.map_or(StepStored::Unknown, StepStored::Literal)
+}
+
+/// Whether a step of `update` (the `if` itself, behind a handler, `?` or a no-op stage) on the `null` `state` runs a
+/// caught-destructure fold that hands its input on unchanged (`foreach (try ($x as {a:$a} | .)) as $y (.; .; .)`) in
+/// the `else` its `null`-falsy conditions reach (#5113). Whether the fold's source is empty or not, the step stores that
+/// `null` again: the state repeats, and the step is the one an INIT of `null` resolves, which answers, as the
+/// `foreach`'s last step only ([`handler_computed_arm`]): [`step_stored_literal`] asks for it under that tail. A fold
+/// that changes the value, or a state that is not `null`, is not read.
+fn null_state_runs_identity_fold<S: EvalSemantics>(update: &Expr, state: &OwnedValue) -> bool {
+    if !matches!(state, OwnedValue::Null) {
+        return false;
+    }
+    let body = match unwrap_paren(update) {
+        Expr::Try {
+            expr,
+            catch: Some(_),
+        } => expr,
+        _ => update,
+    };
+    let Some((if_item, _)) = taken_if_item(body) else {
+        return false;
+    };
+    if cannot_move_register(if_item) || arms_fold_headed(if_item, WRAPPED_CHAIN_DEPTH) != Some(true)
+    {
+        return false;
+    }
+    let arm = walk_falsy_else_chain::<S>(if_item, state);
+    !core::ptr::eq(arm, if_item)
+        && matches!(unwrap_paren(arm), Expr::Foreach { input, init, update, extract, .. }
+            if caught_marker_destructure(input).is_some()
+                && is_identity_stage(init)
+                && is_identity_stage(update)
+                && extract.as_deref().map_or(true, is_identity_stage))
 }
 
 /// The literal arm the state ran in the `if` that `item` is ([`taken_if_item`]): the `else` a falsy walk of it
