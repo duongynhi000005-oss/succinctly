@@ -60624,12 +60624,13 @@ fn drive_fold_source_with<S: EvalSemantics>(
             // #5030: ...the register of the fold whose INIT moved it, where the frame names it, not the enclosing fold's
             // step: a `$x` that is the node INIT moved onto is the register, and the caught destructure walks it
             // (`.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; $y; .); .)`).
-            || (if ambient.frame_names_register {
-                ambient.frame.register().cloned()
-            } else {
-                fold_body::foreach_step_register_here()
-            })
-            .is_some_and(|register| caught_destructure_of_other_container(source, &register)))
+            || ambient
+                .frame
+                .register()
+                .cloned()
+                .filter(|_| ambient.frame_names_register)
+                .or_else(fold_body::foreach_step_register_here)
+                .is_some_and(|register| caught_destructure_of_other_container(source, &register)))
     {
         return Flow::Exhausted;
     }
