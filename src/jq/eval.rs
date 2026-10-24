@@ -61835,12 +61835,16 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
     // unproven. Walked only for a `bound` that shares the register's storage.
     // #5030: ...and so does a head navigating `.` where `.` is a `$x` marker's value a pipe stage handed on
     // (`$x | .a as {b:$q} | $q`, read as `($x | .a) as {b:$q}`): the mark says it is that frozen node.
+    // Read once (#5180): it walks the head, and the `identical` chain asks it for every `bound`.
+    let marker_navigation_head_cell: core::cell::OnceCell<bool> = core::cell::OnceCell::new();
     let marker_navigation_head = || {
-        S::TAG == EvalTag::Jq
-            && patterns.len() == 1
-            && (snapshot.is_marked()
-                || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
-            && head_spine_navigates(head)
+        *marker_navigation_head_cell.get_or_init(|| {
+            S::TAG == EvalTag::Jq
+                && patterns.len() == 1
+                && (snapshot.is_marked()
+                    || any_subexpr(head, &mut |e| matches!(e, Expr::TrackedVar(_))))
+                && head_spine_navigates(head)
+        })
     };
     // #4831: the outputs of `head` without the stages that hand their input on unchanged, in the order
     // `sources` has them (the stripped stages neither add nor drop one), read at most once and only for a
@@ -61856,6 +61860,19 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
             let (outputs, trailing) =
                 eval_owned_expr_fork::<S>(&stripped, value, false, Reentry::at_register(trackable));
             (trailing.is_none() && outputs.len() == sources.len()).then_some(outputs)
+        })
+    };
+    // #5180: ...and a head of two or more steps from the marker, whose by-value evaluation above bridged the second step
+    // through a fresh copy: the node the steps reach is the register's own when they share storage, as in jq. Read
+    // straight off the marker's (or the frozen `.`'s) node, and only for a `bound` the cheaper tests did not place.
+    let walked_outputs: core::cell::OnceCell<Option<Vec<OwnedValue>>> = core::cell::OnceCell::new();
+    let walked_outputs = || {
+        walked_outputs.get_or_init(|| {
+            if !marker_navigation_head() {
+                return None;
+            }
+            let outputs = marker_navigation_outputs(head, snapshot.is_marked().then_some(value))?;
+            (outputs.len() == sources.len()).then_some(outputs)
         })
     };
     let bound_is_frozen = head_may_be_frozen(head, snapshot);
@@ -61925,6 +61942,13 @@ fn resolve_as_pattern<'a, S: EvalSemantics>(
                             .as_ref()
                             .and_then(|outputs| outputs.get(position))
                             .is_some_and(|out| out == bound && out.shares_storage_with(reg))
+                    })
+                    // #5180: ...and a navigation of two or more steps, whose by-value evaluation copied the node.
+                    || register.is_some_and(|reg| {
+                        walked_outputs()
+                            .as_ref()
+                            .and_then(|outputs| outputs.get(position))
+                            .is_some_and(|out| out.shares_storage_with(reg) && out == bound)
                     })
             }
         };
@@ -73707,22 +73731,89 @@ fn is_identity_pipe(expr: &Expr) -> bool {
     }
 }
 
+/// The outputs of a `$x` marker's navigation `head`, read straight off the marker's node (#5180): a variable (or, behind a
+/// stage that handed a frozen node on, `start`), then names, literal indexes and `[]`, with the stages that hand their
+/// input on unchanged skipped ([`strip_neutral_stages`]'s). Each step takes the child handle of the node it stands on, so
+/// an output shares storage with that node's own child exactly as jq's `jv` does, which the evaluator cannot say for a
+/// head of two or more steps: its by-value evaluation bridges the second step through a fresh copy. `None` for any other
+/// shape, a step that would raise, and a head that starts nowhere, so the caller keeps its other tests.
+fn marker_navigation_outputs(head: &Expr, start: Option<&OwnedValue>) -> Option<Vec<OwnedValue>> {
+    fn flatten<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match unwrap_paren(e) {
+            Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),
+            other => out.push(other),
+        }
+    }
+    let mut stages = Vec::new();
+    flatten(head, &mut stages);
+    let mut stages = stages.into_iter().peekable();
+    let mut nodes = match stages.peek() {
+        Some(Expr::TrackedVar(marker)) => {
+            stages.next();
+            vec![marker.value.clone()]
+        }
+        _ => vec![start?.clone()],
+    };
+    for stage in stages {
+        // `select(true)` and `first(.)` hand their input on, and a postfix `?` on a lookup is the lookup for an output.
+        let stage = match stage {
+            other if is_neutral_pass_through(other) => &Expr::Identity,
+            Expr::Optional(inner) if matches!(unwrap_paren(inner), Expr::Field(_)) => {
+                unwrap_paren(inner)
+            }
+            other => other,
+        };
+        let mut next = Vec::new();
+        for node in &nodes {
+            match (stage, node) {
+                (Expr::Identity, _) => next.push(node.clone()),
+                (Expr::Field(name), OwnedValue::Object(map)) => {
+                    next.push(map.get(name.as_str()).cloned().unwrap_or(OwnedValue::Null));
+                }
+                (Expr::Field(_), OwnedValue::Null) => next.push(OwnedValue::Null),
+                (Expr::Index { idx, .. }, OwnedValue::Array(items)) => {
+                    let at = if *idx < 0 {
+                        items.len().checked_sub(idx.unsigned_abs() as usize)
+                    } else {
+                        usize::try_from(*idx).ok()
+                    };
+                    next.push(
+                        at.and_then(|at| items.get(at))
+                            .cloned()
+                            .unwrap_or(OwnedValue::Null),
+                    );
+                }
+                (Expr::Index { .. }, OwnedValue::Null) => next.push(OwnedValue::Null),
+                (Expr::Iterate, OwnedValue::Array(items)) => next.extend(items.iter().cloned()),
+                (Expr::Iterate, OwnedValue::Object(map)) => next.extend(map.values().cloned()),
+                _ => return None,
+            }
+        }
+        nodes = next;
+    }
+    Some(nodes)
+}
+
+/// Whether `stage` hands its input on unchanged: `.`, `select(true)` or `first(.)` ([`strip_neutral_stages`] and
+/// [`marker_navigation_outputs`] skip exactly these).
+fn is_neutral_pass_through(stage: &Expr) -> bool {
+    match unwrap_paren(stage) {
+        Expr::Identity => true,
+        Expr::Builtin(Builtin::Select(cond)) => {
+            matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
+        }
+        Expr::FirstExpr(inner) => matches!(unwrap_paren(inner), Expr::Identity),
+        _ => false,
+    }
+}
+
 /// `head` with the stages that hand their input on unchanged removed (#4831): `.`, `select(true)`,
 /// `first(.)`, and a postfix `?` on a field lookup (which, for an output, is the lookup). `None`
 /// when `head` has none, so nothing differs from it. Read by [`resolve_as_pattern`] to find the node a
 /// navigation of a `$x` marker yields, whose storage the register may share although the by-value
 /// evaluation of the stages after it bridges through a copy.
 fn strip_neutral_stages(head: &Expr) -> Option<Expr> {
-    fn neutral(stage: &Expr) -> bool {
-        match unwrap_paren(stage) {
-            Expr::Identity => true,
-            Expr::Builtin(Builtin::Select(cond)) => {
-                matches!(unwrap_paren(cond), Expr::Literal(Literal::Bool(true)))
-            }
-            Expr::FirstExpr(inner) => matches!(unwrap_paren(inner), Expr::Identity),
-            _ => false,
-        }
-    }
+    let neutral = is_neutral_pass_through;
     fn flatten<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
         match unwrap_paren(e) {
             Expr::Pipe(stages) => stages.iter().for_each(|stage| flatten(stage, out)),
