@@ -51848,9 +51848,19 @@ struct ForkTail<'u> {
     /// UPDATE, how many steps follow this one in the fork (when the source's bound says and there are any), and
     /// whether the fork's last of them is the `foreach`'s last step (the fork is INIT's last).
     ahead: Option<(&'u Expr, usize, bool)>,
-    /// The literal a comma UPDATE ends with when its last item is one (`(if .a then 1 else FE end, 7)` stores `7`):
-    /// the state the next step enters with, in place of the literal the item the step reads emits (#5113).
-    stored: Option<&'u Literal>,
+    /// What the step stores as the state the next one enters with (#5113).
+    stored: Stored<'u>,
+}
+
+/// What a step's UPDATE leaves as the state, for [`ForkTail::stored_is_dead`].
+#[derive(Clone, Copy)]
+enum Stored<'u> {
+    /// The literal the arm the step reads emits: UPDATE is that `if`, or a comma it ends.
+    Own,
+    /// This literal, which a comma's last item emits (`(if .a then 1 else FE end, 7)` stores `7`, not `1`).
+    Literal(&'u Literal),
+    /// A comma that ends in anything else (`$i`, `.b?`): the state is not a literal the step can name.
+    Unknown,
 }
 
 /// The most steps [`ForkTail::stored_is_dead`] runs ahead.
@@ -51862,7 +51872,7 @@ impl ForkTail<'_> {
         fork_last: true,
         foreach_last: true,
         ahead: None,
-        stored: None,
+        stored: Stored::Own,
     };
 
     /// Whether the literal `stored` a step leaves as the state feeds no UPDATE that cannot read it: `last` says the
@@ -51870,22 +51880,14 @@ impl ForkTail<'_> {
     /// ([`later_steps_store_literals`]), so no step runs the fold arm on a stored literal the resolve cannot place
     /// (under a `?` that refusal truncated jq's output, #5113).
     fn stored_is_dead<S: EvalSemantics>(&self, last: bool, stored: &Literal) -> bool {
-        let stored = self.stored.unwrap_or(stored);
+        let stored = match self.stored {
+            Stored::Own => stored,
+            Stored::Literal(lit) => lit,
+            Stored::Unknown => return last,
+        };
         last || self.ahead.is_some_and(|(update, after, ends_foreach)| {
             later_steps_store_literals::<S>(update, literal_to_owned(stored), after, ends_foreach)
         })
-    }
-}
-
-/// The literal a comma UPDATE ends with, when its last item is one: jq stores the last emission, so that literal is the
-/// state the next step enters with whatever the items ahead of it emit (#5113).
-fn comma_ending_literal(update: &Expr) -> Option<&Literal> {
-    match unwrap_paren(update) {
-        Expr::Comma(items) if items.len() > 1 => match items.last().map(unwrap_paren) {
-            Some(Expr::Literal(lit)) => Some(lit),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -51925,6 +51927,38 @@ enum StepStored {
     Unknown,
 }
 
+/// The literal arm an `if` item (behind a handler, `?` or a no-op stage) runs on `state`, read as `tail` says.
+fn item_literal_arm<'e, S: EvalSemantics>(
+    item: &'e Expr,
+    state: &OwnedValue,
+    tail: ForkTail<'_>,
+) -> Option<&'e Expr> {
+    handler_literal_arm::<S>(item, state, tail, true)
+        .or_else(|| literal_taken_arm::<S>(item, state, tail))
+        .map(unwrap_paren)
+}
+
+/// What a step with state `state` stores, for the UPDATE `update` ([`ForkTail::stored`], #5113): jq keeps a comma's
+/// last emission, so a comma ending in a literal, or in an `if` that runs a literal arm, stores that literal. The `if`
+/// itself, with siblings that emit nothing or none, stores the arm the step reads. A comma ending in anything else
+/// (`$i`, `.b?`) stores a state the lookahead cannot start from.
+fn step_stored<'u, S: EvalSemantics>(update: &'u Expr, state: &OwnedValue) -> Stored<'u> {
+    if taken_if_item(update).is_some() {
+        return Stored::Own;
+    }
+    let Expr::Comma(items) = unwrap_paren(update) else {
+        return Stored::Own;
+    };
+    match items.last().map(unwrap_paren) {
+        Some(Expr::Literal(lit)) => Stored::Literal(lit),
+        Some(last) => match item_literal_arm::<S>(last, state, ForkTail::LAST) {
+            Some(Expr::Literal(lit)) => Stored::Literal(lit),
+            _ => Stored::Unknown,
+        },
+        None => Stored::Own,
+    }
+}
+
 /// What a step of `update` on `state` stores, when each part of it is a literal arm, as the last step would be read
 /// (`tail`, #5113). UPDATE is the `if` itself behind a handler, `?` or a no-op stage, or a comma of literals and such
 /// `if`s whose last item is a literal or one of them: the last emission is the state, so a literal sibling after the
@@ -51936,16 +51970,7 @@ fn step_stored_literal<S: EvalSemantics>(
     state: &OwnedValue,
     tail: ForkTail<'_>,
 ) -> StepStored {
-    fn item_literal<'e, S: EvalSemantics>(
-        item: &'e Expr,
-        state: &OwnedValue,
-        tail: ForkTail<'_>,
-    ) -> Option<&'e Expr> {
-        handler_literal_arm::<S>(item, state, tail, true)
-            .or_else(|| literal_taken_arm::<S>(item, state, tail))
-            .map(unwrap_paren)
-    }
-    if let Some(Expr::Literal(lit)) = item_literal::<S>(update, state, tail) {
+    if let Some(Expr::Literal(lit)) = item_literal_arm::<S>(update, state, tail) {
         return StepStored::Literal(literal_to_owned(lit));
     }
     let Expr::Comma(items) = unwrap_paren(update) else {
@@ -51955,7 +51980,7 @@ fn step_stored_literal<S: EvalSemantics>(
     for item in items {
         if let Expr::Literal(lit) = unwrap_paren(item) {
             stored = Some(literal_to_owned(lit));
-        } else if let Some(Expr::Literal(lit)) = item_literal::<S>(item, state, tail) {
+        } else if let Some(Expr::Literal(lit)) = item_literal_arm::<S>(item, state, tail) {
             stored = Some(literal_to_owned(lit));
         } else if if_cond_raises::<S>(item, state) {
             return StepStored::Raises;
@@ -52125,7 +52150,9 @@ fn handler_computed_arm<'a, S: EvalSemantics>(
 /// each comma item from the input the step entered UPDATE with, and each `if` item is resolved as its arm
 /// ([`resolved_if_arm`]). Every other item must be unable to move the register ([`cannot_move_register`]: `7`, `.`,
 /// `$i`), so the marks the step takes per item (a sole `foreach`, its register folds) describe nothing a sibling holds.
-/// `None` for anything else, which keeps the whole-comma resolve.
+/// A `try ... catch` item whose handler literal answers the `if` is narrowed too ([`handler_literal_arm`], for a single
+/// pattern: `single_pattern`, as the caller's `no_retry` says no `?//` chain retries UPDATE). `None` for anything else,
+/// which keeps the whole-comma resolve.
 fn if_arm_comma_items<'e, S: EvalSemantics>(
     update: &'e Expr,
     state: &OwnedValue,
@@ -67462,13 +67489,15 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 .filter(|after| *after > 0)
                                 .map(|after| {
                                     (
-                                        &bound_update,
+                                        // The unbound UPDATE: `$i` is this step's value in `bound_update`, and each
+                                        // later step has its own, so a literal it names is no literal there.
+                                        update,
                                         after,
                                         run_bounds
                                             .is_some_and(|(forks, _)| forks == fork_index + 1),
                                     )
                                 }),
-                            stored: comma_ending_literal(&bound_update),
+                            stored: step_stored::<S>(update, &entry_state),
                         };
                         // #5110: ...and `(LIT | FE) // R`, whose operands are the items, the right one run only when the left
                         // emitted nothing.

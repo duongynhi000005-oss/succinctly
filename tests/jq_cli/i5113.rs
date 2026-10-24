@@ -673,9 +673,11 @@ fn test_5113_handler_literal_read_beside_a_literal_sibling() -> Result<()> {
 
 /// #5113: what the reading leaves as it was, pinned as it stands (jq answers each; a fix flips them). A sibling that is
 /// not a literal (`.b?`) stores a computed state; a `null` sibling makes the next step's `.a` falsy, so it takes the
-/// computed `else`; the handler row runs ten steps that all store `7`, past the eight-step cap; and a `?//` pattern
-/// retries UPDATE on the stored literal. jq answers `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`, a list of twenty
-/// paths and `[["a","a"],["a","a"]]`.
+/// computed `else`; the handler row runs ten steps that all store `7`, past the eight-step cap; a `?//` pattern retries
+/// UPDATE on the stored literal; and a trailing `$i` stores each step's own element, which a lookahead started from the
+/// `then` literal cannot see (it printed a truncated answer before the lookahead ran on the unbound UPDATE). jq answers
+/// `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`, a list of twenty paths, `[["a","a"],["a","a"]]` and
+/// `[[],[],["b"],["b"],["a"]]`.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_place_the_step(
@@ -712,6 +714,13 @@ fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_pla
         (
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach (.a,.) as {a:$i} ?// $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.,.b,.a) as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, $i); $i))?]",
             "[]\n",
             "",
             0,
