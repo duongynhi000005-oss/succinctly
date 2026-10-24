@@ -38054,7 +38054,8 @@ fn bare_bind_source_key_within(
                 ) if is_identity_pipe(expr)
                     && matches!(unwrap_paren(body), Expr::Identity)
                     // A `null` or boolean marker is `jv_identical` to a register of its kind, so the step of a `null`
-                    // element passes it and is placed by a model that is wrong there (#5205): not read, as for the bare spelling.
+                    // element passes it and is placed by a model that is wrong there: the bare spelling is placed since
+                    // #5205 ([`bare_bind_foreach_update_key`]), this one is not read.
                     && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_)) =>
                 {
                     match patterns.as_slice() {
@@ -38116,7 +38117,11 @@ fn bare_bind_foreach_update_key_within(
                             || matches!(unwrap_paren(e), Expr::Var(v) if Some(v.as_str()) == name))
             };
             (name.is_some()
-                && matches!(unwrap_paren(init), Expr::Identity)
+                // #5205: ...and a literal INIT (`null`, `0`, `false`): the `foreach` emits its state with the register on
+                // the bound child whether the state is the accumulator or a value INIT built, as it does for a UPDATE or
+                // an EXTRACT that is a literal (#5183).
+                && (matches!(unwrap_paren(init), Expr::Identity)
+                    || inert_ok && matches!(unwrap_paren(init), Expr::Literal(_)))
                 && inert(update)
                 && extract.as_deref().map_or(true, inert))
             .then(|| bare_bind_source_key(input, true))
@@ -56833,14 +56838,20 @@ fn caught_marker_destructure(source: &Expr) -> Option<(&Expr, &Rc<Tracked>, &[Pa
 /// other steps lets that step's placement through, where a refusal had hidden it (five of 40,000 grid rows turned from
 /// a refusal into a wrong answer). Nor is a `?//` chain (`routes_destructuring` reads one pattern), whose retry is not
 /// modelled. The `$x | . as P` spelling is read as the bare destructure is (#5206).
-fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -> bool {
+fn caught_destructure_of_other_container(
+    source: &Expr,
+    register: &OwnedValue,
+    placed: bool,
+) -> bool {
     caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
         // The pipe spelling only as far as `bare_bind_source_key` reads it (#5206): the verdict empties a step whose
         // passing sibling steps that key places, and a source it declines (a body other than `.`, a stage after it, a
         // `// empty` outside) is empty on one and refused on the other, which a `?` over the path turns into a lost path.
         (matches!(bind, Expr::AsPattern { .. }) || bare_bind_source_key(source, false).is_some())
             && routes_destructuring(patterns)
-            && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
+            // #5205: a `null` or boolean marker only where the step's passing sibling is placed
+            // ([`bare_bind_foreach_update_key`] reads the UPDATE).
+            && (placed || matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_)))
             && marker.value != *register
             && !holds_nan(register)
     })
@@ -60667,14 +60678,18 @@ fn drive_fold_source_with<S: EvalSemantics>(
             //
             // #5030: ...the register of the fold whose INIT moved it, where the frame names it, not the enclosing fold's
             // step: a `$x` that is the node INIT moved onto is the register, and the caught destructure walks it
-            // (`.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; $y; .); .)`).
+            // (`.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; $y; .); .)`). A `null` or
+            // boolean marker is read only for the step register, where its passing sibling is placed (#5205).
             || ambient
                 .frame
                 .register()
                 .cloned()
                 .filter(|_| ambient.frame_names_register)
+                .map(|register| (register, false))
                 .or_else(fold_body::foreach_step_register_here)
-                .is_some_and(|register| caught_destructure_of_other_container(source, &register)))
+                .is_some_and(|(register, placed)| {
+                    caught_destructure_of_other_container(source, &register, placed)
+                }))
     {
         return Flow::Exhausted;
     }
@@ -67877,7 +67892,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 && _sole_update_foreach.is_some()
                                 && active_reg.trackable)
                                 .then(|| {
-                                    fold_body::foreach_step_register(active_reg.value.clone())
+                                    fold_body::foreach_step_register(
+                                        active_reg.value.clone(),
+                                        inner_bind_key.is_some(),
+                                    )
                                 });
                             // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
                             // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
@@ -77599,7 +77617,7 @@ mod fold_body {
         /// The [`foreach_register`] mark.
         static FOREACH_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
         /// The [`foreach_step_register`] mark.
-        static FOREACH_STEP_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
+        static FOREACH_STEP_REGISTER: RefCell<Option<(u32, super::OwnedValue, bool)>> = const { RefCell::new(None) };
         /// The [`update_try_entry`] mark ([`TryEntry`]).
         static UPDATE_TRY_ENTRY: RefCell<Option<TryEntry>> =
             const { RefCell::new(None) };
@@ -78058,13 +78076,17 @@ mod fold_body {
     }
 
     /// Restores the previous [`foreach_step_register`] mark.
-    pub(crate) struct StepRegisterGuard(Option<(u32, super::OwnedValue)>);
+    pub(crate) struct StepRegisterGuard(Option<(u32, super::OwnedValue, bool)>);
 
     /// Names the value of the register a `foreach` step starts its UPDATE from (`value`, the step's own), for
     /// the UPDATE about to be entered (#5113). Unlike [`foreach_register`] it switches nothing on but
     /// [`foreach_step_register_here`], which a caught destructure of a `$x` is compared against by value.
-    pub(crate) fn foreach_step_register(value: super::OwnedValue) -> StepRegisterGuard {
-        let previous = FOREACH_STEP_REGISTER.with(|a| a.borrow_mut().replace((depth() + 1, value)));
+    pub(crate) fn foreach_step_register(
+        value: super::OwnedValue,
+        placed: bool,
+    ) -> StepRegisterGuard {
+        let previous =
+            FOREACH_STEP_REGISTER.with(|a| a.borrow_mut().replace((depth() + 1, value, placed)));
         StepRegisterGuard(previous)
     }
 
@@ -78074,13 +78096,14 @@ mod fold_body {
         }
     }
 
-    /// The value [`foreach_step_register`] named for the body being resolved.
-    pub(crate) fn foreach_step_register_here() -> Option<super::OwnedValue> {
+    /// The value [`foreach_step_register`] named for the body being resolved, and whether a `null` or boolean `$x`
+    /// that passes a sibling step of the UPDATE is placed (#5205).
+    pub(crate) fn foreach_step_register_here() -> Option<(super::OwnedValue, bool)> {
         FOREACH_STEP_REGISTER.with(|a| {
             a.borrow()
                 .as_ref()
-                .filter(|(at, _)| depth() > 0 && *at == depth())
-                .map(|(_, value)| value.clone())
+                .filter(|(at, ..)| depth() > 0 && *at == depth())
+                .map(|(_, value, placed)| (value.clone(), *placed))
         })
     }
 
@@ -78422,11 +78445,14 @@ mod fold_body {
 
     pub(crate) struct StepRegisterGuard;
 
-    pub(crate) fn foreach_step_register(_value: super::OwnedValue) -> StepRegisterGuard {
+    pub(crate) fn foreach_step_register(
+        _value: super::OwnedValue,
+        _placed: bool,
+    ) -> StepRegisterGuard {
         StepRegisterGuard
     }
 
-    pub(crate) fn foreach_step_register_here() -> Option<super::OwnedValue> {
+    pub(crate) fn foreach_step_register_here() -> Option<(super::OwnedValue, bool)> {
         None
     }
 
