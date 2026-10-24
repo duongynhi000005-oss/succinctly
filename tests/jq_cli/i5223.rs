@@ -82,7 +82,7 @@ fn the_dev_entry_takes_jqs_options_and_reports_its_errors_5223() -> Result<()> {
 /// `path-mode: unsupported`, and a compile error exits 3 as jq does.
 #[test]
 fn the_dev_entry_marks_declined_runs_5223() -> Result<()> {
-    let (_, err, rc) = dev_entry(&["-n", "input"], None)?;
+    let (_, err, rc) = dev_entry(&["-n", "at_offset(0)"], None)?;
     assert_eq!(rc, 64);
     assert!(err.contains("path-mode: unsupported: "), "{err}");
     let (_, _, rc) = dev_entry(&["-n", "$a"], None)?;
@@ -94,5 +94,22 @@ fn the_dev_entry_marks_declined_runs_5223() -> Result<()> {
     let (out, err, rc) = dev_entry(&["-c", r#"path(.a | ltrimstr("z"))"#], Some(r#"{"a":"x"}"#))?;
     assert_eq!((out.as_str(), rc), ("[\"a\"]\n", 0));
     assert!(err.is_empty(), "{err}");
+    Ok(())
+}
+
+/// `input` and `inputs` draw from the same queue the dev entry's own inputs come from, and
+/// `halt_error` writes its message and halts with jq's status. Stdout and exit codes are
+/// jq 1.7.1's.
+#[test]
+fn the_dev_entry_reads_the_input_queue_and_halts_as_jq_5223() -> Result<()> {
+    let (out, err, rc) = dev_entry(&["-c", "[., input]"], Some("1 2 3"))?;
+    assert_eq!((out.as_str(), rc), ("[1,2]\n", 5));
+    assert!(err.contains("break"), "{err}");
+    let (out, _, rc) = dev_entry(&["-n", "-c", "[inputs]"], Some("1 2 3"))?;
+    assert_eq!((out.as_str(), rc), ("[1,2,3]\n", 0));
+    let (out, err, rc) = dev_entry(&["-n", r#""bye\n" | halt_error"#], None)?;
+    assert_eq!((out.as_str(), err.as_str(), rc), ("", "bye\n", 5));
+    let (_, err, rc) = dev_entry(&["-n", r#"{"a":1} | halt_error(3)"#], None)?;
+    assert_eq!((err.as_str(), rc), ("{\"a\":1}\n", 3));
     Ok(())
 }

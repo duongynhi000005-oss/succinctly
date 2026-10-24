@@ -40,7 +40,8 @@ pub struct JqPathModeArgs {
 /// Run the interpreter and return the process exit status.
 pub fn run(args: JqPathModeArgs) -> i32 {
     let _ = args.compact;
-    let bytes = if args.null_input {
+    // `-n` reads stdin only for `input`/`inputs`, as jq does.
+    let bytes = if args.null_input && !args.filter.contains("input") {
         None
     } else {
         let mut bytes = Vec::new();
@@ -57,10 +58,10 @@ pub fn run(args: JqPathModeArgs) -> i32 {
     // A continuation-threaded evaluator nests a frame per pipe stage and per
     // output, so it runs on a thread with room for deep documents (values are
     // `Rc`, so the input is parsed there too).
-    let (filter, raw) = (args.filter, args.raw);
+    let (filter, raw, null_input) = (args.filter, args.raw, args.null_input);
     let worker = std::thread::Builder::new()
         .stack_size(1 << 29)
-        .spawn(move || run_inputs(&filter, bytes.as_deref(), raw))
+        .spawn(move || run_inputs(&filter, bytes.as_deref(), raw, null_input))
         .expect("spawn the interpreter's thread");
     worker.join().unwrap_or_else(|_| {
         // A panic is an interpreter bug: count the row as unsupported, never as a
@@ -71,22 +72,32 @@ pub fn run(args: JqPathModeArgs) -> i32 {
 }
 
 /// Run the filter on every input as `jq` does: each top-level value in turn,
-/// the exit status the last input's, and a malformed value ending the read
-/// (exit 5, as jq's parse error does) after the values before it ran.
-fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool) -> i32 {
-    let Some(bytes) = bytes else {
-        return report(filter, OwnedValue::Null, raw);
+/// drawn from the same queue `input`/`inputs` read (so `[., input]` pairs
+/// them), the exit status the last input's, and a malformed value ending the
+/// read (exit 5, as jq's parse error does) after the values before it ran.
+/// With `-n` the filter runs once on `null`, and the queue holds every value.
+fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool, null_input: bool) -> i32 {
+    let (spans, malformed) = match bytes {
+        Some(bytes) => crate::jq_runner::split_json_values_strict(bytes),
+        None => (Vec::new(), None),
     };
-    let (spans, malformed) = crate::jq_runner::split_json_values_strict(bytes);
-    let mut status = 0;
+    let mut documents = Vec::new();
     for (start, end) in spans {
-        let input = match crate::jq_runner::json_bytes_to_owned_value_checked(&bytes[start..end]) {
-            Ok(value) => value,
+        let bytes = bytes.unwrap_or_default();
+        match crate::jq_runner::json_bytes_to_owned_value_checked(&bytes[start..end]) {
+            Ok(value) => documents.push((value, 0, 0)),
             Err(e) => {
                 eprintln!("jq: error (at <stdin>:0): {}", e.message);
                 return 5;
             }
-        };
+        }
+    }
+    succinctly::jq::seed_remaining_inputs(documents, None);
+    if null_input {
+        return report(filter, OwnedValue::Null, raw);
+    }
+    let mut status = 0;
+    while let Some(input) = succinctly::jq::pop_remaining_input() {
         status = report(filter, input, raw);
         if status != 0 && status != 5 {
             return status;
@@ -129,8 +140,7 @@ fn report(filter: &str, input: OwnedValue, raw: bool) -> i32 {
             }
             5
         }
-        // `halt` only: `halt_error` (which also writes its message) is
-        // unsupported in the interpreter.
+        // `halt_error` has already written its message.
         Outcome::Halt(code) => code,
         Outcome::Unsupported(what) => {
             eprintln!("path-mode: unsupported: {what}");

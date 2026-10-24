@@ -452,7 +452,7 @@ fn writes_and_jq_defined_builtins_run_from_the_prelude_5223() {
 #[test]
 fn an_unimplemented_construct_is_unsupported_not_an_error_5223() {
     on_big_stack(|| {
-        let run = run("try input catch 1", OwnedValue::Null).expect("parses");
+        let run = run("try at_offset(0) catch 1", OwnedValue::Null).expect("parses");
         assert!(
             matches!(run.outcome, Outcome::Unsupported(_)),
             "{:?}",
@@ -933,19 +933,25 @@ fn identity_is_jv_identical_on_every_kind_5223() {
     });
 }
 
-/// What the interpreter declines rather than answers: `halt_error` (its
-/// message is not carried) and the builtins that read input state.
+/// `halt_error` halts with jq's exit status (5 by default, or its argument),
+/// after the shipped builtin has written its message; `input` without an
+/// input queue raises `break`, as jq's does, and a `try` catches it. Every expected
+/// status is jq 1.7.1's.
 #[test]
-fn a_declined_row_is_unsupported_5223() {
+fn halt_error_and_input_run_as_c_builtins_5223() {
     on_big_stack(|| {
-        for filter in ["halt_error", "input_line_number", "input_filename"] {
-            let run = run(filter, OwnedValue::Null).expect(filter);
+        for (filter, code) in [
+            (r#""bye\n" | halt_error"#, 5),
+            (r#"{"a":1} | halt_error(3)"#, 3),
+        ] {
+            let run = crate::jq::with_stderr_muted(|| run(filter, OwnedValue::Null)).expect(filter);
             assert!(
-                matches!(run.outcome, Outcome::Unsupported(_)),
+                matches!(run.outcome, Outcome::Halt(c) if c == code),
                 "{filter}: {:?}",
                 run.outcome
             );
         }
+        check(&[("null", "try input catch .", ok(&[r#""break""#]))]);
     });
 }
 
@@ -1353,5 +1359,24 @@ fn leaf_paths_matches_the_shipped_extension_5223() {
             ("[]", "[leaf_paths]", ok(&["[[]]"])),
             ("[[[]]]", "[leaf_paths]", ok(&["[[0,0]]"])),
         ]);
+    });
+}
+
+/// The CLI environment reads as the shipped builtins answer it: `$__loc__`
+/// (a constant), `$ENV` and `env`, and `input_filename` with no file (jq
+/// 1.7.1's answers).
+#[test]
+fn the_cli_environment_reads_as_jq_5223() {
+    on_big_stack(|| {
+        check(&[(
+            "null",
+            "$__loc__, ($ENV|type), (env|type), input_filename",
+            ok(&[
+                r#"{"file":"<top-level>","line":1}"#,
+                r#""object""#,
+                r#""object""#,
+                "null",
+            ]),
+        )]);
     });
 }

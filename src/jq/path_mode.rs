@@ -2319,15 +2319,15 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
     Some(call)
 }
 
-/// Builtins the interpreter refuses outright: input-reading ones, succinctly
-/// extensions with no jq 1.7.1 model, and yq-only ones that reach path mode.
+/// Builtins the interpreter refuses outright: succinctly extensions with no
+/// jq 1.7.1 model, and yq-only ones that reach path mode.
+///
+/// The input builtins and `halt_error` are C builtins like any other: the
+/// shipped ones read the CLI's input queue, and `halt_error` writes its own
+/// message before it halts.
 fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     use Builtin as B;
     Some(match builtin {
-        B::Input | B::Inputs | B::InputLineNumber | B::InputFilename => {
-            "input-reading builtins (the interpreter has no input queue)"
-        }
-        B::HaltErrorCode(_) => "halt_error (its message is not carried)",
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
         B::IsValid(_) | B::Skip(..) | B::AnyC(..) | B::AllC(..) | B::RecurseDown => {
