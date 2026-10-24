@@ -280,7 +280,7 @@ fn dump_truncated(value: &OwnedValue) -> String {
 /// reused here exactly as-is (not a bespoke error-message variant): no new
 /// formatter is needed, only a dispatch. Both modes still share the same
 /// truncation budget and boundary-snapping behavior below.
-fn dump_truncated_with(tag: EvalTag, value: &OwnedValue) -> String {
+pub(crate) fn dump_truncated_with(tag: EvalTag, value: &OwnedValue) -> String {
     dump_truncated_at(tag, value, DUMP_BUDGET, DUMP_KEEP)
 }
 

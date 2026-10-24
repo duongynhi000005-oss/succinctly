@@ -89,6 +89,10 @@ mod lazy;
 mod local_zone;
 mod math;
 mod parser;
+// #5223 Phase 0: the register-carrying path-mode spike, reachable only from
+// `succinctly dev jq-path-spike` and its own tests.
+#[doc(hidden)]
+pub mod path_spike;
 pub mod resolve;
 mod slice;
 pub mod stream;
