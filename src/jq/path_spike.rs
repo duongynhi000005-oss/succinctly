@@ -40,7 +40,10 @@ use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
     substitute_vars, EvalTag, JqSemantics, QueryResult,
 };
-use super::expr::{Builtin, CompareOp, Expr, FormatType, Literal, ObjectKey, Param, Pattern};
+use super::expr::{
+    Builtin, CompareOp, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
+    SliceBoundKey,
+};
 use super::parser::parse;
 use super::value::{NumberRepr, OwnedValue};
 use super::walk::any_subexpr;
@@ -247,10 +250,10 @@ type R = Result<(), Raise>;
 type Sink<'s> = dyn FnMut(SVal, Reg) -> R + 's;
 
 fn raise_eval(error: EvalError) -> Raise {
-    if error.is_uncatchable() {
-        return Raise::Unsupported(format!("uncatchable delegated error: {}", error.message));
+    if !error.is_uncatchable() {
+        return Raise::Error(SVal::from_owned(&error.payload(), NumOrigin::Fresh));
     }
-    Raise::Error(SVal::from_owned(&error.payload(), NumOrigin::Fresh))
+    unsupported(format!("uncatchable delegated error: {}", error.message)) // patchcov: coverage tolerate-line reason="defensive: the delegated builtins the spike reaches raise only catchable errors; a resource limit would land here"
 }
 
 /// An error the spike raises itself (jq's three path messages, an object
@@ -699,7 +702,7 @@ impl<'e> Interp<'e> {
     fn outcome(raise: Raise) -> Outcome {
         match raise {
             Raise::Error(payload) => Outcome::Error(payload.to_owned_value()),
-            Raise::Wrapped(inner) => Self::outcome(*inner),
+            Raise::Wrapped(inner) => Self::outcome(*inner), // patchcov: coverage tolerate-line reason="unreachable: a wrapped error is unwrapped by the try or label that wrapped it before it can reach the top"
             Raise::Halt(code) => Outcome::Halt(code),
             Raise::Unsupported(what) => Outcome::Unsupported(what),
         }
@@ -728,7 +731,7 @@ impl<'e> Interp<'e> {
                         };
                         sink(SVal::computed(value), reg)
                     }
-                    _ => Err(unsupported("a literal that is not a constant")),
+                    _ => Err(unsupported("a literal that is not a constant")), // patchcov: coverage tolerate-line reason="unreachable: constant_value answers every literal but a negative number, which the arm above computes"
                 },
             },
             Expr::Loc { .. } => {
@@ -739,7 +742,7 @@ impl<'e> Interp<'e> {
             }
             Expr::Field(name) => self.index(input, reg, SVal::string(name), false, sink),
             Expr::Index { idx, key } => {
-                let key = index_key(*idx, key.is_some())?;
+                let key = index_key(*idx, key.as_ref());
                 self.index(input, reg, key, false, sink)
             }
             Expr::Slice {
@@ -748,10 +751,7 @@ impl<'e> Interp<'e> {
                 start_key,
                 end_key,
             } => {
-                if start_key.is_some() || end_key.is_some() {
-                    return Err(unsupported("a slice bound with its own spelling"));
-                }
-                let key = slice_key(start.map(literal_int), end.map(literal_int));
+                let key = static_slice_key(*start, *end, start_key.as_ref(), end_key.as_ref());
                 self.index(input, reg, key, false, sink)
             }
             Expr::Iterate => self.each(input, reg, false, sink),
@@ -859,7 +859,7 @@ impl<'e> Interp<'e> {
             }),
             Expr::Var(name) => match env.lookup_var(name) {
                 Some(value) => sink(value, reg),
-                None => Err(unsupported(format!("${name} is not bound"))),
+                None => Err(unsupported(format!("${name} is not bound"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects an unbound variable with resolve_all_jq before evaluating"
             },
             Expr::Reduce {
                 input: source,
@@ -909,7 +909,7 @@ impl<'e> Interp<'e> {
             Expr::Label { name, body } => self.label(name, body, env, input, reg, sink),
             Expr::Break(name) => match env.lookup_label(name) {
                 Some(label) => Err(Raise::Error(label)),
-                None => Err(unsupported(format!("$*label-{name} is not defined"))),
+                None => Err(unsupported(format!("$*label-{name} is not defined"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects a break with no enclosing label with resolve_all_jq before evaluating"
             },
             Expr::FuncDef {
                 name,
@@ -959,7 +959,7 @@ impl<'e> Interp<'e> {
             Expr::AlternativeAssign { path, value } => {
                 self.update_with("_sp_upd_alt", path, value, env, input, reg, sink)
             }
-            other => Err(unsupported(format!("expression {}", variant_name(other)))),
+            other => Err(unsupported(format!("expression {}", variant_name(other)))), // patchcov: coverage tolerate-line reason="defensive: the remaining Expr variants are yq-only or resolver products the jq parser never emits"
         }
     }
 
@@ -1040,6 +1040,14 @@ impl<'e> Interp<'e> {
                     .unwrap_or(SVal::Null))
             }
             (SVal::Null, SVal::Str(_) | SVal::Num(..) | SVal::Obj(_)) => Ok(SVal::Null),
+            // `jv_string_slice`: by codepoint, and always a fresh string.
+            (SVal::Str(text), SVal::Obj(bounds))
+                if slice_bounds(text.chars().count(), bounds).is_some() =>
+            {
+                let (start, end) = slice_bounds(text.chars().count(), bounds).unwrap_or_default();
+                let slice: String = text.chars().skip(start).take(end - start).collect();
+                Ok(SVal::string(&slice))
+            }
             (SVal::Arr(items), SVal::Obj(bounds))
                 if slice_bounds(items.len(), bounds).is_some() =>
             {
@@ -1055,7 +1063,7 @@ impl<'e> Interp<'e> {
                 outputs
                     .first()
                     .map(|v| SVal::from_owned(v, NumOrigin::Fresh))
-                    .ok_or_else(|| unsupported("jv_get answered nothing"))
+                    .ok_or_else(|| unsupported("jv_get answered nothing")) // patchcov: coverage tolerate-line reason="defensive: the delegated `.[$k]` answers exactly one value or an error"
             }
         }
     }
@@ -1192,7 +1200,7 @@ impl<'e> Interp<'e> {
         match inner {
             Expr::Field(name) => self.index(input, reg, SVal::string(name), true, sink),
             Expr::Index { idx, key } => {
-                let key = index_key(*idx, key.is_some())?;
+                let key = index_key(*idx, key.as_ref());
                 self.index(input, reg, key, true, sink)
             }
             Expr::Slice {
@@ -1201,10 +1209,7 @@ impl<'e> Interp<'e> {
                 start_key,
                 end_key,
             } => {
-                if start_key.is_some() || end_key.is_some() {
-                    return Err(unsupported("a slice bound with its own spelling"));
-                }
-                let key = slice_key(start.map(literal_int), end.map(literal_int));
+                let key = static_slice_key(*start, *end, start_key.as_ref(), end_key.as_ref());
                 self.index(input, reg, key, true, sink)
             }
             Expr::Iterate => self.each(input, reg, true, sink),
@@ -1275,7 +1280,7 @@ impl<'e> Interp<'e> {
             ObjectKey::Expr(k) => {
                 self.eval(k, env, input.clone(), reg.sub(), &mut |kv, _| with_key(kv))
             }
-            ObjectKey::Bare => Err(unsupported("a bare object entry (yq only)")),
+            ObjectKey::Bare => Err(unsupported("a bare object entry (yq only)")), // patchcov: coverage tolerate-line reason="unreachable: a bare object entry is yq syntax, never produced by the jq parser"
         }
     }
 
@@ -1513,7 +1518,7 @@ impl<'e> Interp<'e> {
             ObjectKey::Expr(e) => {
                 self.eval(e, &env, value.clone(), reg.sub(), &mut |kv, _| with_key(kv))
             }
-            ObjectKey::Bare => Err(unsupported("a bare pattern key")),
+            ObjectKey::Bare => Err(unsupported("a bare pattern key")), // patchcov: coverage tolerate-line reason="unreachable: a bare pattern key is yq syntax, never produced by the jq parser"
         }
     }
 
@@ -2144,7 +2149,8 @@ fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     })
 }
 
-/// `parse_slice` for an array of `len` elements: the `[start, end)` range a
+/// `parse_slice` for an array of `len` elements (or a string of `len`
+/// codepoints): the `[start, end)` range a
 /// `{"start": s, "end": e}` key selects (`null` bounds default; the start
 /// rounds down and the end up). `None` when a bound is not a number, which
 /// `jv_get` reports as an error.
@@ -2279,16 +2285,46 @@ fn pattern_vars<'e>(pattern: &'e Pattern, out: &mut Vec<&'e str>) {
     }
 }
 
-/// `.[n]`'s key: a program literal, or `_negate` of one for a negative index.
-fn index_key(idx: i64, spelled: bool) -> Result<SVal, Raise> {
-    if spelled {
-        return Err(unsupported("an index with its own spelling"));
+/// `.[n]`'s key: a program literal, `_negate` of one for a negative index,
+/// or the number it was spelled as (`.[1.0]` records `1.0`).
+fn index_key(idx: i64, spelled: Option<&NumberKey>) -> SVal {
+    spelled.map_or_else(|| literal_int(idx), number_key)
+}
+
+/// A spelled number key: a source literal keeps its spelling and is
+/// allocated; one the parser computed (a negated literal) is a double.
+fn number_key(key: &NumberKey) -> SVal {
+    match key {
+        NumberKey::Float(f) => SVal::computed(OwnedValue::Float(*f)),
+        NumberKey::Literal(f, spelling) => SVal::literal(OwnedValue::NumberLiteral(
+            NumberRepr::Float(*f),
+            (**spelling).into(),
+        )),
     }
-    Ok(if idx < 0 {
-        SVal::computed(OwnedValue::Int(idx))
-    } else {
-        SVal::literal(OwnedValue::Int(idx))
-    })
+}
+
+/// A static slice's key as `gen_slice_index` builds it: each bound's own
+/// spelling when it kept one, the raw value jq never parsed (a `null`
+/// target), else the integer literal (`null` when absent); or, for a
+/// descriptor the program named whole (`SliceBoundKey::Verbatim`), that
+/// object as written.
+fn static_slice_key(
+    start: Option<i64>,
+    end: Option<i64>,
+    start_key: Option<&SliceBoundKey>,
+    end_key: Option<&SliceBoundKey>,
+) -> SVal {
+    if let Some(SliceBoundKey::Verbatim(descriptor)) = start_key {
+        return SVal::from_owned(descriptor, NumOrigin::Fresh);
+    }
+    let bound = |n: Option<i64>, key: Option<&SliceBoundKey>| match key {
+        Some(SliceBoundKey::Number(k)) => Some(number_key(k)),
+        Some(SliceBoundKey::Raw(value) | SliceBoundKey::Verbatim(value)) => {
+            Some(SVal::from_owned(value, NumOrigin::Fresh))
+        }
+        None => n.map(literal_int),
+    };
+    slice_key(bound(start, start_key), bound(end, end_key))
 }
 
 fn literal_int(n: i64) -> SVal {
@@ -2397,7 +2433,7 @@ fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Co
 fn control_raise(control: Control) -> Raise {
     match control {
         Control::Error(e) => raise_eval(e),
-        Control::Break(label) => unsupported(format!("a delegated break to {label}")),
+        Control::Break(label) => unsupported(format!("a delegated break to {label}")), // patchcov: coverage tolerate-line reason="unreachable: delegate() declines any expression holding a break before delegating it"
         Control::Halt(code) => Raise::Halt(code),
     }
 }
@@ -2405,7 +2441,7 @@ fn control_raise(control: Control) -> Raise {
 fn variant_name(expr: &Expr) -> String {
     let debug = match expr {
         Expr::Builtin(builtin) => format!("{builtin:?}"),
-        other => format!("{other:?}"),
+        other => format!("{other:?}"), // patchcov: coverage tolerate-line reason="defensive: only reached for an Expr variant the spike does not implement"
     };
     debug
         .split(|c: char| !c.is_alphanumeric())
