@@ -305,16 +305,18 @@ fn test_5175_right_operand_with_a_generator_source() -> Result<()> {
 }
 
 /// #5175: a right operand whose bind bodies fan out, or that nests two generator sources, is not read: the resolver
-/// delivers only the first output of a generator body when the state is not the register (#5193), so reading it would
-/// answer a truncated sequence. Both rows raise in jq (the left operand's truthy `5`, then `3`), and still raise here, with
-/// the resolver's own wording of the step.
+/// delivers only the first output of a generator body when the state is not the register (#5193), so reading it would risk
+/// a truncated sequence. Every row raises in jq (the left operand's truthy `5`) and still raises here. Over the sweep grid
+/// the guard is observable only in the wording of the step (`of 0` where unguarded, `of null` guarded, jq's `of 1`), so
+/// this pins the refusal, not the wording.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5175_right_operand_that_fans_out_through_a_body_or_nested_sources_stays_unread(
 ) -> Result<()> {
     for program in [
         r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // ((1,2) as $q | (3,4) as $r | $r))))",
-        r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // (.a as $q | range(2)), 3)))",
+        r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // ((.a as $q | range(2)), 3))))",
+        r"path(. as $x | reduce (1,2) as $i (false; try (($x as {a:$a} | 5) // (if true then (.a as $q | range(2)) else 1 end))))",
     ] {
         let (stdout, code) = run_jq_stdin(program, r#"{"a":{"b":1}}"#, &["-c"])?;
         assert_eq!(

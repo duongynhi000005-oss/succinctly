@@ -38984,9 +38984,10 @@ fn bind_free(e: &Expr) -> bool {
 /// outputs are what the fold emits when the chain's are falsy, the resolver resolves them as branches with their own
 /// provenance, and the emission's check decides, so an operand that is the register's node passes where a constant
 /// raises. #5161 read constants, `.`, `not`, `length` and arithmetic; narrowing the operand to those left `// $x`, `// .a`
-/// and `// $i` over a source that navigates a wrong accept under a `try` (#5167). An operand with a bind is read when it is a bare chain of binds ([`right_operand_bind_chain`], #5175):
-/// jq runs it from the register the `//` was entered with, as it runs the chain; one with a comma, an `if`, a generator
-/// source, a `def` or a call keeps the resolver's refusal, and so the wrong accept under a `try`. The same test serves [`binds_only_in_tail`] and
+/// and `// $i` over a source that navigates a wrong accept under a `try` (#5167). An operand with a bind is read when it is a bare chain of binds ([`right_operand_bind_chain`], #5175) or a comma or
+/// `if` of such chains, or a bind over a comma or `.[]` ([`right_operand_with_binds`]):
+/// jq runs it from the register the `//` was entered with, as it runs the chain; one with a `def` or a call, a `?//` chain
+/// or a computed source keeps the resolver's refusal, and so the wrong accept under a `try`. The same test serves [`binds_only_in_tail`] and
 /// [`is_single_output_bind`], which read the same `//` for a three-argument `foreach`, so the three cannot disagree.
 ///
 /// `read_alternations`: whether a `?//` chain is read (a two-argument `foreach`'s). A `reduce`'s is not: its final
@@ -39033,7 +39034,8 @@ fn fans_out_siblings(left: &Expr) -> bool {
 }
 
 /// Whether the right operand of a `//` whose left operand is a tail-position bind chain is read (#5157, #5175): bind-free,
-/// or a bare chain of binds ([`right_operand_bind_chain`]) behind a left operand that does not fan out. A comma in the
+/// or a bare chain of binds ([`right_operand_bind_chain`]) or a wrapped one ([`right_operand_with_binds`]) behind a left
+/// operand that does not fan out. A comma in the
 /// left operand beside a right operand with a bind answered fewer steps than jq (`(B | (.,.)) // (B | .)`, the
 /// [#5170](https://github.com/rust-works/succinctly/issues/5170) residual) where the base refused it. The one test
 /// [`binds_only_in_tail`], [`update_binds_only_under_alternative`] and [`single_output_bind`] all ask, so the three
@@ -39052,28 +39054,23 @@ fn alternative_right_is_readable(left: &Expr, right: &Expr) -> bool {
 /// when the state is not the register ([`#5193`](https://github.com/rust-works/succinctly/issues/5193)), so reading the
 /// comma there would turn a refusal into a truncated answer.
 fn right_operand_with_binds(right: &Expr) -> bool {
-    // A bind whose source is a comma or `.[]` runs its body once per source output; the sources `right_operand_bind_chain`
-    // reads besides those (`.`, `$x`, a navigation) emit once.
-    let generator_source = |inner: &Expr| match inner {
-        Expr::AsPattern { expr, .. } | Expr::As { expr, .. } => {
-            !matches!(
-                unwrap_paren(expr),
-                Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
-            ) && !is_field_navigation(expr)
-        }
-        _ => false,
+    // A bind over a comma or `.[]` runs its body once per source output; two of them in one chain multiply
+    // (`(1,2) as $q | (3,4) as $r | ..`), which [`emits_at_most_one`] does not see through a bind's source, so a
+    // generator-source bind's body holds no other one.
+    let generator_bind = |inner: &Expr| {
+        matches!(
+            inner,
+            Expr::AsPattern { expr, .. } | Expr::As { expr, .. } if is_generator_bind_source(expr)
+        )
     };
-    let fans_out = any_subexpr(right, &mut |inner| {
-        matches!(inner, Expr::Comma(_)) || generator_source(inner)
-    });
-    // Two fan-outs in one chain multiply (`(1,2) as $q | (3,4) as $r | ..`), which [`emits_at_most_one`] does not see
-    // through a bind's source: a generator-source bind's body holds no other one.
     let nested_fan_out = any_subexpr(right, &mut |inner| match inner {
-        Expr::AsPattern { body, .. } | Expr::As { body, .. } if generator_source(inner) => {
-            any_subexpr(body, &mut |deeper| generator_source(deeper))
+        Expr::AsPattern { body, .. } | Expr::As { body, .. } if generator_bind(inner) => {
+            any_subexpr(body, &mut |deeper| generator_bind(deeper))
         }
         _ => false,
     });
+    // Every bind body emits at most once, whether or not the operand fans out elsewhere: a generator body (`range(2)`)
+    // is delivered one output at a time by the resolver when the state is not the register (#5193).
     let fan_out_body = any_subexpr(right, &mut |inner| {
         matches!(
             inner,
@@ -39081,7 +39078,7 @@ fn right_operand_with_binds(right: &Expr) -> bool {
         )
     });
     !nested_fan_out
-        && (!fans_out || !fan_out_body)
+        && !fan_out_body
         && hands_outputs_on(right, &|leaf| {
             right_operand_bind_chain(leaf, true) || bind_free(leaf)
         })
@@ -39096,28 +39093,35 @@ fn is_field_navigation(e: &Expr) -> bool {
     }
 }
 
+/// Whether `source`, the source of a bind in the right operand of a `//`, is `.`, an outer `$x`, a variable or a
+/// navigation of `.`: it yields one output (or raises) and moves no register (#5175).
+fn is_single_bind_source(source: &Expr) -> bool {
+    matches!(
+        unwrap_paren(source),
+        Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
+    ) || is_field_navigation(source)
+}
+
+/// Whether `source` is a comma of [`is_single_bind_source`] sources or `.[]`: the bind's body runs once per output of it,
+/// from the register the bind was entered with (#5175).
+fn is_generator_bind_source(source: &Expr) -> bool {
+    match unwrap_paren(source) {
+        Expr::Comma(items) => items.iter().all(is_single_bind_source),
+        Expr::Iterate => true,
+        _ => false,
+    }
+}
+
 /// Whether the right operand of a `//` is a chain of binds that each run once and end in a bind-free body (#5175): paren
-/// and pipe spine only (a comma, `if`, `try` or fold around a bind is the resolver's to refuse, and `//` swallowed
-/// that refusal under a `try`), one pattern with literal keys, and a source that is `.`, an outer `$x` or a navigation of
-/// `.`. jq runs a bind's source inside a subexpression that tracks no path, so such a source moves no register; a
-/// generator, a call or a computed source may fan out or move it, and keeps the refusal.
+/// and pipe spine only (a comma, `if`, `try` or fold around a bind is [`right_operand_with_binds`]'s, or the resolver's
+/// to refuse, and `//` swallowed that refusal under a `try`), one pattern with literal keys, and a source that is `.`, an
+/// outer `$x` or a navigation of `.` ([`is_single_bind_source`]). jq runs a bind's source inside a subexpression that
+/// tracks no path, so such a source moves no register; a call or a computed source may move it and keeps the refusal.
+/// With `generator_sources`, a comma of those sources or `.[]` too ([`is_generator_bind_source`]), the body running once
+/// per output: only [`right_operand_with_binds`] asks for that, behind its fan-out guards.
 fn right_operand_bind_chain(e: &Expr, generator_sources: bool) -> bool {
-    let single_source = |source: &Expr| {
-        matches!(
-            unwrap_paren(source),
-            Expr::Identity | Expr::TrackedVar(_) | Expr::Var(_)
-        ) || is_field_navigation(source)
-    };
-    // #5175: with `generator_sources`, a comma of such sources or `.[]` too: the body then runs once per source output, from
-    // the same register, which [`right_operand_with_binds`] reads only where every body emits at most once.
     let source_ok = |source: &Expr| {
-        single_source(source)
-            || (generator_sources
-                && match unwrap_paren(source) {
-                    Expr::Comma(items) => items.iter().all(&single_source),
-                    Expr::Iterate => true,
-                    _ => false,
-                })
+        is_single_bind_source(source) || (generator_sources && is_generator_bind_source(source))
     };
     let body_ok =
         |body: &Expr| bind_free(body) || right_operand_bind_chain(body, generator_sources);

@@ -101,7 +101,9 @@ WRAPPERS = [
     "try (({S}) // ($x as {a:$a} ?// $a | $a))",
     "try (({S}) // ((1,2) as $q | $q))",
     # #5175, the right operand beyond a bare chain: wrappers around chains and bind-free items, and a generator source
-    "try (({S}) // (.a as $q | $q), (.a as $q | 1))",
+    "try (({S}) // ((.a as $q | $q), (.a as $q | 1)))",
+    "try (({S}) // ((.a as $q | range(2)), 3))",
+    "try (({S}) // (if true then (.a as $q | range(2)) else 1 end))",
     "try (({S}) // (if true then (.a as $q | $q) else 1 end))",
     "try (({S}) // (if $i then (.a as $q | $q) else ($x as {a:$a} | .) end))",
     "try (({S}) // (.a as $q | $q, 3))",
