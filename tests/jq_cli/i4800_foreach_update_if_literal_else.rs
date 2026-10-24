@@ -514,7 +514,8 @@ fn test_foreach_update_if_with_a_literal_then_beside_a_fold_in_the_else_4800() -
 
 /// #4800: a literal `then` past a falsy `elif` condition is not read ([`taken_then_branch`]: an earlier step may run the
 /// later arm), so the chain keeps the whole-`if` resolve it had. jq answers `[[]]`, `[]`, `[[]]` and `[[],[]]`; the
-/// answers are pinned as they stand (a fix flips them). Reading it changed the last row, `(7, if .a then null elif .b
+/// answers are pinned as they stand (a fix flips them; #5208 flipped the second row, a step whose state is the register, to jq's `[]`).
+/// Reading it changed the last row, `(7, if .a then null elif .b
 /// then 2 else FE end)` on `{"b":true}`, from one wrong answer (`[]`) to another (`[[]]`).
 #[test]
 fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_4800() -> Result<()>
@@ -530,9 +531,9 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
         (
             r#"{"a":{"a":null}}"#,
             r"[path(. as $x | foreach . as $i (.; try (if .c then 7 elif .b then null else (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) end) catch 1; $i))?]",
+            "[]\n",
             "",
-            "Invalid path expression with result {\"a\":{\"a\":null}}",
-            5,
+            0,
         ),
         (
             r#"{"b":true,"a":1}"#,
