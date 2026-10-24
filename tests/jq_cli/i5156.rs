@@ -198,14 +198,14 @@ fn test_5156_foreach_update_alternative_residuals_pinned_as_they_stand_5228() ->
     assert_path_rows_both_routes_3749(&[
         (
             r#"{"a":null}"#,
-            r#"path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .) | .; $i))"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .) | .; $i))",
             "",
             "Invalid path expression with result null",
             5,
         ),
         (
             r#"{"a":null}"#,
-            r#"[path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))?]"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))?]",
             "",
             "Invalid path expression with result {\"a\":null}",
             5,
