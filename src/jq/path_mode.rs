@@ -689,6 +689,8 @@ pub struct Interp<'e> {
     prelude_env: Env<'e>,
     /// One `jv` per constant site, as `LOADK` hands out (keyed by the `Expr`'s
     /// address, which is stable: the interpreter never rewrites the program).
+    /// A substituted variable (`Expr::TrackedVar`) is one `jv` too, keyed by
+    /// its marker.
     consts: RefCell<BTreeMap<usize, OwnedValue>>,
     next_label: Cell<u64>,
     /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
@@ -732,11 +734,12 @@ pub struct Run {
 /// (`NumberLiteral`), and it is moved in, so that promoting its scalars copies
 /// nothing.
 pub fn run(filter: &str, input: OwnedValue) -> Result<Run, String> {
-    let program = parse(filter).map_err(|e| format!("{e:?}"))?;
+    let mut program = parse(filter).map_err(|e| format!("{e:?}"))?;
     // jq's compile-time checks (an unbound `$x`, an undefined function), which
-    // the interpreter alone would only meet if evaluation reached them. The
-    // resolver rewrites what it checks, so it runs on a copy.
-    let diagnostics = super::resolve::resolve_all_jq(&mut program.clone());
+    // the interpreter alone would only meet if evaluation reached them. It
+    // also settles each shadowable call (`builtin_fallback`), so the
+    // interpreter runs the resolved program, as the CLI hands it over.
+    let diagnostics = super::resolve::resolve_all_jq(&mut program);
     if !diagnostics.is_empty() {
         return Err(format!("{diagnostics:?}"));
     }
@@ -952,6 +955,18 @@ impl<'e> Interp<'e> {
                     self.eval(body, &env, input.clone(), reg, sink)
                 })
             }),
+            // A value substituted into the program (`--arg`, a library
+            // caller's binding): one `jv` however often it is read.
+            Expr::TrackedVar(tracked) => {
+                let key = Rc::as_ptr(tracked) as usize;
+                let cached = self.consts.borrow().get(&key).cloned();
+                let value = cached.unwrap_or_else(|| {
+                    let value = fresh(tracked.value.clone(), &[]);
+                    self.consts.borrow_mut().insert(key, value.clone());
+                    value
+                });
+                sink(value, reg)
+            }
             Expr::Var(name) => match env.lookup_var(name) {
                 Some(value) => sink(value, reg),
                 None => Err(unsupported(format!("${name} is not bound"))), // patchcov: coverage tolerate-line reason="unreachable: run() rejects an unbound variable with resolve_all_jq before evaluating"

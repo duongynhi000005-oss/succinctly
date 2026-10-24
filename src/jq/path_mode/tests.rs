@@ -1380,3 +1380,42 @@ fn the_cli_environment_reads_as_jq_5223() {
         )]);
     });
 }
+
+/// A value substituted into the program (`Expr::TrackedVar`, as a library
+/// caller or a CLI binding hands it over) is one `jv` however often it is
+/// read, as `$t` is in jq 1.7.1: `--argjson t '[1]' '$t as $a | $t | path($a)'`
+/// is `[]`.
+#[test]
+fn a_substituted_value_is_one_value_5223() {
+    on_big_stack(|| {
+        let marker = Expr::tracked_value(parse_doc("[1]"));
+        fn substitute(expr: &Expr, marker: &Expr) -> Expr {
+            match expr {
+                Expr::Var(name) if name == "t" => marker.clone(),
+                other => crate::jq::walk::map_subexprs(other, &mut |e| substitute(e, marker)),
+            }
+        }
+        let program = substitute(&parse("$t as $a | $t | path($a)").expect("parses"), &marker);
+        let prelude = Prelude::new();
+        let run = Interp::new(&prelude).run(&program, OwnedValue::Null);
+        assert!(matches!(run.outcome, Outcome::Done), "{:?}", run.outcome);
+        let outputs: Vec<String> = run
+            .outputs
+            .iter()
+            .map(OwnedValue::to_json_jq_preserve)
+            .collect();
+        assert_eq!(outputs, ["[]"]);
+    });
+}
+
+/// The interpreter runs the resolved program, as the CLI hands it over, so a
+/// `def` that shadows a builtin's name wins only at its own arity (jq 1.7.1).
+#[test]
+fn shadowed_builtins_resolve_as_jq_5223() {
+    on_big_stack(|| {
+        check(&[
+            ("null", "def length: 5; length", ok(&["5"])),
+            ("null", "def length(x): x; [1,2,3] | length", ok(&["3"])),
+        ]);
+    });
+}
