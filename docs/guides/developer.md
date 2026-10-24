@@ -171,9 +171,10 @@ first. A plain `cargo test --features cli` still runs everything.
 ### Differential sweeps against jq
 
 A change to the jq evaluator's path register is judged against `/usr/bin/jq` (1.7.1) over a generated grid,
-not only against the golden fixtures. The fold-register sweeps in `scripts/` each run two builds (the base,
+not only against the golden fixtures. These three sweeps in `scripts/` each run two builds (the base,
 normally `main`, and the candidate) over the same rows and exit non-zero on a row that matched jq on the base
-and no longer does. A debug build (`cargo build --features cli`) is enough; give the base its own checkout so
+and no longer does; the older `jq-nested-fold-frozen-var-sweep.py` and `jq-nested-fold-outer-var-sweep.py` take
+`--bin`/`--base` too but gate differently (read each header). A debug build (`cargo build --features cli`) is enough; give the base its own checkout so
 it is not rebuilt.
 
 - `jq-fold-body-register-grid-sweep.py --bin BIN --base BIN`: outer fold x inner fold x source shape x write
@@ -182,7 +183,7 @@ it is not rebuilt.
   them), judging the first line of stderr as well.
 - `jq-nested-fold-source-sweep.py BASE NEW [N [SEED]]`: a fold's source destructuring a frozen `$x` inside
   another fold (#5030), 6,000 rows by default, minutes. Judges stdout, exit code and stderr, and sorts the
-  rows into fixed / REGRESS / changed-wrong.
+  rows into fixed / REGRESS / changed-wrong, and also fails on a new silent accept or a candidate timeout.
 
 The first line of stderr has to be part of the verdict: a grid that judged stdout and exit code alone passed a
 change whose message regression a pinned test then caught (#5197). The register-grid and nested-fold sweeps print a

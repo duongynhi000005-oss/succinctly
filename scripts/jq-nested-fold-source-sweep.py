@@ -20,8 +20,11 @@ regression that a pinned test caught (#5197), so a different message is a mismat
   still_wrong   neither matches, and they agree with each other
   changed_wrong neither matches, and they disagree: the change moved a wrong answer
 
-Exit status 1 when any row is REGRESS. A row jq itself times out on is skipped; a build timing out is
-a mismatch, so it counts.
+Exit status 1 when any row is REGRESS, when NEW answers (exit 0) a row jq refuses and BASE did not
+(a newly silent accept: `del`/`|=`/`=` write through it), or when NEW times out (counted apart, since two
+hung builds are otherwise just `still_wrong`). A row jq itself times out on is skipped. `changed_wrong`
+alone does not fail the run: read it. `still_wrong` is large by construction, since both builds word many
+of jq's errors differently; compare it between runs, never against zero.
 
 Usage: scripts/jq-nested-fold-source-sweep.py BASE NEW [N [SEED]] [--show N] [--dump FILE] [--jobs N] [--jq JQ]
   BASE, NEW  succinctly builds (the change's parent, normally `main`, and the build under test)
@@ -29,7 +32,8 @@ Usage: scripts/jq-nested-fold-source-sweep.py BASE NEW [N [SEED]] [--show N] [--
   SEED       the draw's seed (default 1); a given N and SEED is the same row set on every machine
   --dump     write every row that is not `ok` (row, jq, base, new) as JSON to FILE
 
-N=4000 SEED=1 is the grid of the #5030 evidence comment: 335 rows differed from jq on `main` 227929b16.
+N=4000 SEED=1 is the grid of the #5030 evidence comment. On `main` 227929b16 335 of its rows differ from jq
+on stdout and exit code (the comment's count) and 664 once the stderr line counts too.
 """
 import argparse
 import collections
@@ -147,7 +151,9 @@ def classify(base, new, oracle):
 def progress_line(done, total, elapsed):
     rate = done / elapsed if elapsed > 0 else 0.0
     left = int(round((total - done) / rate)) if rate > 0 else 0
-    return f"  {done}/{total} ({elapsed:.0f}s, {rate:.0f} rows/s, ETA {left // 60}m{left % 60:02d}s)"
+    hours, rest = divmod(left, 3600)
+    eta = f"{hours}h{rest // 60:02d}m" if hours else f"{rest // 60}m{rest % 60:02d}s"
+    return f"  {done}/{total} ({elapsed:.0f}s, {rate:.0f} rows/s, ETA {eta})"
 
 
 def main():
@@ -174,6 +180,7 @@ def main():
         return row, oracle, base, new
 
     counts = collections.Counter()
+    new_timeouts = new_accepts = 0
     shown = collections.defaultdict(list)
     kept = []
     skipped = 0
@@ -185,7 +192,13 @@ def main():
             if rec is None:
                 skipped += 1
                 continue
-            klass = classify(rec[2], rec[3], rec[1])
+            _row, oracle, base, new = rec
+            klass = classify(base, new, oracle)
+            if new[0] == "TIMEOUT":
+                new_timeouts += 1
+            if oracle[1] != 0 and new[1] == 0 and base[1] != 0:
+                new_accepts += 1
+                shown["NEWACC"].append(rec)
             counts[klass] += 1
             if klass != "ok":
                 kept.append(rec)
@@ -195,10 +208,11 @@ def main():
     if args.dump:
         with open(args.dump, "w") as out:
             json.dump(kept, out)
-    for klass in ("REGRESS", "changed_wrong", "fixed"):
+    print(f"NEW timeouts: {new_timeouts}; newly accepted where jq refuses: {new_accepts}")
+    for klass in ("REGRESS", "NEWACC", "changed_wrong", "fixed"):
         for (doc, program), oracle, base, new in shown[klass][: args.show]:
             print(f"{klass} {doc} | {program}\n   jq   {oracle}\n   base {base}\n   new  {new}")
-    return 1 if counts["REGRESS"] else 0
+    return 1 if counts["REGRESS"] or new_timeouts or new_accepts else 0
 
 
 if __name__ == "__main__":
