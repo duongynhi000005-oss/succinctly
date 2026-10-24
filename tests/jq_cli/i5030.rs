@@ -891,3 +891,94 @@ fn test_fold_source_x_that_is_the_register_in_another_fold_body_trailing_dot_503
         ),
     ])
 }
+
+/// #5030: a `try`/`?` around the destructure of a `$x` that is the register INIT moved onto, in a nested `foreach` that is
+/// the sole UPDATE of another: the source is not empty (the #5113 verdict compared `$x` with the enclosing fold's step
+/// register, the root, where the register is the node INIT moved onto), the pattern's step passes and moves the register
+/// onto `$x`'s child, so the UPDATE or EXTRACT is judged against it, as the uncaught spelling is. Under `path`, `?`, `|=`
+/// and `del`, `try`, `?` and `try $x as P`, an array pattern; the last two rows stay empty (`$x` is another node).
+/// Rows captured from `/usr/bin/jq` 1.7.1, both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_fold_source_caught_x_that_is_the_register_in_another_fold_body_walks_it_5030() -> Result<()>
+{
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; $y; .); .))]",
+            "[[\"a\",\"b\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach (($x as {b:$q} | $q)?) as $y (.a; $y; .); .))]",
+            "[[\"a\",\"b\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach (try $x as {b:$q} | $q) as $y (.a; $y; .); .))]",
+            "[[\"a\",\"b\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | .)) as $y (.a; .c; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | .)) as $y (.a; .c?; .); .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; .c?; .); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; .c?; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"path(.a as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | .)) as $y (.a; .; .c); .))",
+            "",
+            "Invalid path expression near attempt to access element \"c\" of {\"b\":1,\"c\":{\"b\":3}}",
+            5,
+        ),
+        (
+            r#"{"a":[1,2],"b":0}"#,
+            r"(.a as $x | foreach 1 as $i (.; foreach (try ($x as [$q] | $q)) as $y (.a; .[0]?; .); .)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element 0 of [1,2]",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"del(. as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | .)) as $y (.a; .; .); .))",
+            "{\"a\":{\"b\":1,\"c\":{\"b\":3}},\"b\":2}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#,
+            r"[path(.b as $x | foreach 1 as $i (.; foreach (try ($x as {b:$q} | $q)) as $y (.a; $y; .); .))]",
+            "[]\n",
+            "",
+            0,
+        ),
+    ])
+}
