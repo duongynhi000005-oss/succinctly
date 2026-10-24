@@ -559,7 +559,7 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
 /// elements (the mirror shape off its last step). The `.b | FE` row stays a refusal on purpose: the step that runs it
 /// names `["b"]` where jq's register moved to `["a"]`, and narrowing the literal arm's step turned the refusal that
 /// masked it into a write of `.b`. The literal `then` is read only on the `foreach`'s last step, or on an earlier one when every later step stores a
-/// literal too (#5113, the seventh row, now jq's `[["a"],[]]`): read on the first of
+/// literal too (#5113, the fifth row, now jq's `[["a"],[]]`): read on the first of
 /// two, the `.a` EXTRACT row's refusal became a truncated `[["a","a"]]`, because the second step runs the fold arm on
 /// the stored literal and refuses where a `?` swallows it (that row, and its `$i` twin, are read since #5113 for a
 /// stored `null` that the fold arm hands on, `tests/jq_cli/i5113.rs`). The same holds for a `?//` retry that runs UPDATE again on

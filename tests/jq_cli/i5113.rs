@@ -806,9 +806,9 @@ fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_pla
 // (a fold that hands its input on stores it whether or not its caught source emits), so the lookahead reads it as the
 // step an INIT of `null` resolves, and the `then` is read on a step that is not the fork's last.
 
-/// #5113 residual: a handler `try` (and the bare, `?` and `elif` spellings) around an `if` with a `null` `then`, on a
-/// source of two steps, an unbounded source and one past the lookahead's eight-step cap. Captured from `/usr/bin/jq`
-/// 1.7.1, both routes.
+/// #5113 residual: a handler `try` (and the `?` and `elif` spellings) around an `if` with a `null` `then`, on a source
+/// of two steps, where the step that takes the fold on the stored `null` is the `foreach`'s last. Captured from
+/// `/usr/bin/jq` 1.7.1, both routes.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_null_then_read_when_the_next_step_takes_the_fold_on_the_stored_null() -> Result<()> {
@@ -829,29 +829,8 @@ fn test_5113_null_then_read_when_the_next_step_takes_the_fold_on_the_stored_null
         ),
         (
             r#"{"a":{"a":null}}"#,
-            r"[path(. as $x | foreach .[] as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
-            "[[\"a\"]]\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":{"a":null}}"#,
-            r"(. as $x | foreach .[] as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i)) |= 9",
-            "{\"a\":9}\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":{"a":null}}"#,
             r"del(. as $x | foreach (.a,.a) as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))",
             "{}\n",
-            "",
-            0,
-        ),
-        (
-            r#"{"a":{"a":null}}"#,
-            r"[path(. as $x | foreach (.a,.a,.a,.a,.a,.a,.a,.a,.a,.a,.a) as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
-            "[[\"a\"]]\n",
             "",
             0,
         ),
@@ -915,9 +894,10 @@ fn test_5113_null_state_reading_stays_unread_beside_a_leading_comma_sibling() ->
 
 /// #5113: what the `null`-state reading does not read, pinned as it stands (a fix flips them; jq answers each). It is
 /// read for a `null` state only (a stored `false`, which `.` also finds falsy), for a fold that hands its input on
-/// (`foreach ... (5; .; .)`, `(.; 5; .)` and `(.; .; 5)` store or emit `5`, not `null`), and for a fold whose source is a
-/// caught destructure of `$x` (`try (.a | .)` is not). jq answers `[]` with an error, `[["a"]]`, `["a"]` with an error,
-/// `{}` and `["a"]`, row by row; each row is a refusal here, or `[]` under a `?`.
+/// (`foreach ... (5; .; .)`, `(.; 5; .)` and `(.; .; 5)` store or emit `5`, not `null`), for a fold whose source is a
+/// caught `$x as P | .` (`try (.a | .)` and `try ($x as P | $a)` are not), and where the step that takes the fold is the `foreach`'s last:
+/// with others after it (an unbounded source, one of eleven steps, a third step with an EXTRACT that emits) the step
+/// keeps the whole-`if` refusal, which a `?` truncates. jq answers each; each row is a refusal here, or `[]` under a `?`.
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_null_state_reading_stays_unread_for_a_state_or_fold_it_does_not_name() -> Result<()> {
@@ -949,6 +929,48 @@ fn test_5113_null_state_reading_stays_unread_for_a_state_or_fold_it_does_not_nam
             "",
             "Invalid path expression with result {\"a\":null}",
             5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"(. as $x | foreach .[] as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.a,.a,.a,.a,.a,.a,.a,.a,.a,.a) as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach (.a,.,.a) as $i (.; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"path(. as $x | foreach (.a,.,.a) as $i (.; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of null",
+            5,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.a) as $i (.; try (if .a then null else foreach (try ($x as {a:$a} | $a)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[]\n",
+            "",
+            0,
         ),
         (
             r#"{"b":true}"#,
