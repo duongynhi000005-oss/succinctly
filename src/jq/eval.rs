@@ -52082,9 +52082,11 @@ fn later_steps_store_literals<S: EvalSemantics>(
             return true;
         }
         entered.push(state);
+        // The same literal, spelling included (`1` and `1.0` are equal numbers a condition can tell apart).
+        let next_text = next.to_json_jq_preserve();
         let Some(from) = entered
             .iter()
-            .position(|seen| owned_value_eq::<S>(seen, &next))
+            .position(|seen| seen.to_json_jq_preserve() == next_text)
         else {
             state = next;
             continue;

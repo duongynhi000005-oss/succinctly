@@ -323,6 +323,20 @@ fn test_5113_literal_then_lookahead_reads_an_unbounded_source() -> Result<()> {
             0,
         ),
         (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i ((., .a); try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .[] as $i ((., null, .a); try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
             "[1]",
             r"[path(. as $x | foreach .[] as $i (.; (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); $i))?]",
             "[]\n",
