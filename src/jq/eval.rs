@@ -56261,16 +56261,10 @@ fn foreign_destructure_raise<S: EvalSemantics>(
     matches!(flow, Flow::Escaped(_)).then_some(flow)
 }
 
-/// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
-/// destructure of a `$x` that [`foreign_register_markers`] proves is not the register (#4709): the
-/// pattern's step raises, the `try` catches it and `source` is empty. Of a `foreach` that is the
-/// whole UPDATE of an enclosing `reduce`, that leaves the reduce's state `null` (the caller's
-/// check). A source with another output, or a stage ahead of the bind, is left alone.
-fn caught_foreign_destructure<S: EvalSemantics>(
-    source: &Expr,
-    ambient: &FoldSourceAmbient<'_>,
-    off_body: bool,
-) -> bool {
+/// The `$x` marker and patterns of a destructure that a `try`/`?` catches, the shape
+/// [`caught_foreign_destructure`] and [`caught_destructure_of_other_container`] read (#4709, #5113): `source` is
+/// nothing but the catching wrappers, an `// empty` on the outside, around `$x as P | ..` or `$x | . as P | ..`.
+fn caught_marker_destructure(source: &Expr) -> Option<(&Expr, &Rc<Tracked>, &[Pattern])> {
     // #4754: through any number of them, and an `// empty` on the outside: each hands an empty
     // operand on as empty.
     let mut inner = source;
@@ -56289,7 +56283,7 @@ fn caught_foreign_destructure<S: EvalSemantics>(
         }
     }
     if !caught {
-        return false;
+        return None;
     }
     let bind = unwrap_paren(inner);
     // #5017: ...or `$x | . as P | ..`, the destructure of the marker's value spelled through `.`, which
@@ -56297,7 +56291,7 @@ fn caught_foreign_destructure<S: EvalSemantics>(
     let (marker, patterns) = match bind {
         Expr::AsPattern { expr, patterns, .. } => {
             let Expr::TrackedVar(marker) = unwrap_paren(expr) else {
-                return false;
+                return None;
             };
             (marker, patterns)
         }
@@ -56312,10 +56306,68 @@ fn caught_foreign_destructure<S: EvalSemantics>(
                 {
                     (marker, patterns)
                 }
-                _ => return false,
+                _ => return None,
             }
         }
-        _ => return false,
+        _ => return None,
+    };
+    Some((bind, marker, patterns))
+}
+
+/// Whether `source` is a caught destructure ([`caught_marker_destructure`]) of a `$x` holding an object or an array
+/// that is not `register`'s value (#5113): jq compares containers by pointer, so an unequal one is no node of the
+/// register, the pattern's step fails `path_intact` whatever position (or none) the marker was bound at, and the `try`
+/// leaves the source empty. An equal one may be the register itself and is not read. Nor is a `null` or boolean
+/// marker, which is `jv_identical` to a register of its kind and so passes the step of a `null` element: emptying the
+/// other steps lets that step's placement through, where a refusal had hidden it (five of 40,000 grid rows turned from
+/// a refusal into a wrong answer). Nor is a `?//` chain (`routes_destructuring` reads one pattern), whose retry is not
+/// modelled, or the `$x | . as P` spelling, which was not measured.
+fn caught_destructure_of_other_container(source: &Expr, register: &OwnedValue) -> bool {
+    caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
+        matches!(bind, Expr::AsPattern { .. })
+            && routes_destructuring(patterns)
+            && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
+            && marker.value != *register
+            && !holds_nan(register)
+    })
+}
+
+/// Whether `source` is a caught destructure ([`caught_marker_destructure`]) of one pattern whose `$x` holds an object or
+/// an array. A `null` or boolean marker is `jv_identical` to a register of its kind, so the step of a `null` element
+/// passes it and a verdict that empties the other steps lets that step's placement through; a `?//` chain's retry is
+/// not modelled (#5113).
+fn caught_destructure_of_container_marker(source: &Expr) -> bool {
+    caught_marker_destructure(source).is_some_and(|(bind, marker, patterns)| {
+        matches!(bind, Expr::AsPattern { .. })
+            && routes_destructuring(patterns)
+            && matches!(marker.value, OwnedValue::Object(_) | OwnedValue::Array(_))
+    })
+}
+
+/// Whether `value` holds a NaN at any depth. `==` is not reflexive on one, so a container that is the register's own
+/// node still compares unequal to itself (`{"a":[nan]}`) and [`caught_destructure_of_other_container`] would take it for
+/// another. The node is the same one, so scanning the register is enough.
+fn holds_nan(value: &OwnedValue) -> bool {
+    match value {
+        OwnedValue::Float(f) | OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => f.is_nan(),
+        OwnedValue::Array(items) => items.iter().any(holds_nan),
+        OwnedValue::Object(fields) => fields.values().any(holds_nan),
+        _ => false,
+    }
+}
+
+/// Whether `source` is nothing but a `try`/`?` (its handler, if any, emits nothing) around the
+/// destructure of a `$x` that [`foreign_register_markers`] proves is not the register (#4709): the
+/// pattern's step raises, the `try` catches it and `source` is empty. Of a `foreach` that is the
+/// whole UPDATE of an enclosing `reduce`, that leaves the reduce's state `null` (the caller's
+/// check). A source with another output, or a stage ahead of the bind, is left alone.
+fn caught_foreign_destructure<S: EvalSemantics>(
+    source: &Expr,
+    ambient: &FoldSourceAmbient<'_>,
+    off_body: bool,
+) -> bool {
+    let Some((bind, marker, patterns)) = caught_marker_destructure(source) else {
+        return false;
     };
     // #4777: in the body of a `reduce` whose source moved the register, `$x` is foreign on the steps
     // whose element is another node. The verdict is read per step, from the position of that step's
@@ -60090,10 +60142,16 @@ fn drive_fold_source_with<S: EvalSemantics>(
         .unwrap_or_else(|| caught_foreign_destructure::<S>(source, ambient, false))
             // #5176: ...or against the element a `foreach` source moved the register onto, where the state is
             // not it: a `$x` bound elsewhere fails `path_intact` on that node.
-            || with_foreach_register_ambient(ambient, |ambient| {
-                caught_foreign_destructure::<S>(source, ambient, false)
-            })
-            .unwrap_or(false))
+            || (caught_destructure_of_container_marker(source)
+                && with_foreach_register_ambient(ambient, |ambient| {
+                    caught_foreign_destructure::<S>(source, ambient, false)
+                })
+                .unwrap_or(false))
+            // #5113: ...and against the value of the register the step's source left, which the frame of a
+            // `foreach` UPDATE does not carry: a `$x` holding another container is no node of it, whatever
+            // position (or none: `. as $x`, `.b as $x`) the marker was bound at.
+            || fold_body::foreach_step_register_here()
+                .is_some_and(|register| caught_destructure_of_other_container(source, &register)))
     {
         return Flow::Exhausted;
     }
@@ -67201,6 +67259,16 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // #4723: and a `foreach` UPDATE that is a `foreach` and nothing else emits what it
                             // emits, so an inner source that is empty leaves this one emitting nothing.
                             let _sole_update_foreach = sole_update_mark::<S>(item, update_body);
+                            // #5113: ...and the value of the register this step starts it from, which a caught destructure of
+                            // a `$x` holding another container fails against ([`caught_destructure_of_other_container`]):
+                            // jq's `foreach` emits nothing for the step. The outermost fold only, as the readings above.
+                            let _step_register = (S::TAG == EvalTag::Jq
+                                && fold_body::depth() == 0
+                                && _sole_update_foreach.is_some()
+                                && active_reg.trackable)
+                                .then(|| {
+                                    fold_body::foreach_step_register(active_reg.value.clone())
+                                });
                             // #5004: a `try` around the `foreach` the UPDATE is made of restores the register the step
                             // entered UPDATE with, so its handler's output is placed there ([`update_entry_try_bodies`]).
                             // Only for a step that binds one bare `$name`: a destructure or a `?//` chain moves the
@@ -76797,6 +76865,8 @@ mod fold_body {
         static MOVED_AT: RefCell<Option<(u32, super::Rc<super::PathPrefix>)>> = const { RefCell::new(None) };
         /// The [`foreach_register`] mark.
         static FOREACH_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
+        /// The [`foreach_step_register`] mark.
+        static FOREACH_STEP_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
         /// The [`update_try_entry`] mark ([`TryEntry`]).
         static UPDATE_TRY_ENTRY: RefCell<Option<TryEntry>> =
             const { RefCell::new(None) };
@@ -77203,6 +77273,33 @@ mod fold_body {
         })
     }
 
+    /// Restores the previous [`foreach_step_register`] mark.
+    pub(crate) struct StepRegisterGuard(Option<(u32, super::OwnedValue)>);
+
+    /// Names the value of the register a `foreach` step starts its UPDATE from (`value`, the step's own), for
+    /// the UPDATE about to be entered (#5113). Unlike [`foreach_register`] it switches nothing on but
+    /// [`foreach_step_register_here`], which a caught destructure of a `$x` is compared against by value.
+    pub(crate) fn foreach_step_register(value: super::OwnedValue) -> StepRegisterGuard {
+        let previous = FOREACH_STEP_REGISTER.with(|a| a.borrow_mut().replace((depth() + 1, value)));
+        StepRegisterGuard(previous)
+    }
+
+    impl Drop for StepRegisterGuard {
+        fn drop(&mut self) {
+            FOREACH_STEP_REGISTER.with(|a| *a.borrow_mut() = self.0.take());
+        }
+    }
+
+    /// The value [`foreach_step_register`] named for the body being resolved.
+    pub(crate) fn foreach_step_register_here() -> Option<super::OwnedValue> {
+        FOREACH_STEP_REGISTER.with(|a| {
+            a.borrow()
+                .as_ref()
+                .filter(|(at, _)| depth() > 0 && *at == depth())
+                .map(|(_, value)| value.clone())
+        })
+    }
+
     /// Restores the previous [`update_try_entry`] mark.
     pub(crate) struct TryEntryGuard(Option<TryEntry>);
 
@@ -77526,6 +77623,16 @@ mod fold_body {
     }
 
     pub(crate) fn foreach_register_here() -> Option<super::OwnedValue> {
+        None
+    }
+
+    pub(crate) struct StepRegisterGuard;
+
+    pub(crate) fn foreach_step_register(_value: super::OwnedValue) -> StepRegisterGuard {
+        StepRegisterGuard
+    }
+
+    pub(crate) fn foreach_step_register_here() -> Option<super::OwnedValue> {
         None
     }
 
