@@ -22,4 +22,5 @@ while (($#)); do
   esac
   shift
 done
-exec "$bin" dev jq-path-spike "${opts[@]}" -- "$@"
+# `${opts[@]+...}`: bash 3.2 (macOS) treats an empty array as unset under `set -u`.
+exec "$bin" dev jq-path-spike ${opts[@]+"${opts[@]}"} -- "$@"

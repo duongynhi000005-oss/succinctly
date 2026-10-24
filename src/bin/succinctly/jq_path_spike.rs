@@ -2,8 +2,8 @@
 //! through the register-carrying path-mode spike
 //! (`succinctly::jq::path_spike`) instead of the shipped evaluator.
 //!
-//! Only the surface the differential sweeps use: one JSON document on stdin
-//! (or a file), `-c`, `-r` and `-n`. Output is always compact. An uncaught
+//! Only the surface the differential sweeps use: the JSON values on stdin (or
+//! a file), `-c`, `-r` and `-n`. Output is always compact. An uncaught
 //! error exits 5, as `jq` does; a construct the spike does not implement
 //! exits [`UNSUPPORTED_EXIT`] with a `path-spike: unsupported` diagnostic, so
 //! `scripts/jq-path-spike-3way.py` can count those rows apart from verdicts.
@@ -14,8 +14,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use succinctly::jq::path_spike::{self, Outcome};
-use succinctly::jq::{JqSemantics, OwnedValue};
-use succinctly::json::JsonIndex;
+use succinctly::jq::OwnedValue;
 
 /// Exit status for a row the spike cannot run.
 const UNSUPPORTED_EXIT: i32 = 64;
@@ -53,9 +52,6 @@ pub fn run(args: JqPathSpikeArgs) -> i32 {
             eprintln!("jq: error: could not read input: {e}");
             return 2;
         }
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            return 0;
-        }
         Some(bytes)
     };
     // A continuation-threaded evaluator nests a frame per pipe stage and per
@@ -64,26 +60,43 @@ pub fn run(args: JqPathSpikeArgs) -> i32 {
     let (filter, raw) = (args.filter, args.raw);
     let worker = std::thread::Builder::new()
         .stack_size(1 << 29)
-        .spawn(move || {
-            let input = match bytes {
-                None => OwnedValue::Null,
-                Some(bytes) => {
-                    let index = JsonIndex::build(&bytes);
-                    let cursor = index.root(&bytes);
-                    match succinctly::jq::eval_generic::to_owned::<JqSemantics, _>(&cursor.value())
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            eprintln!("jq: error (at <stdin>:0): {}", e.message);
-                            return 2;
-                        }
-                    }
-                }
-            };
-            report(&filter, &input, raw)
-        })
+        .spawn(move || run_inputs(&filter, bytes.as_deref(), raw))
         .expect("spawn the spike's thread");
-    worker.join().unwrap_or(UNSUPPORTED_EXIT)
+    worker.join().unwrap_or_else(|_| {
+        // A panic is a spike bug: count the row as unsupported, never as a
+        // verdict on the register model.
+        eprintln!("path-spike: unsupported: the spike panicked");
+        UNSUPPORTED_EXIT
+    })
+}
+
+/// Run the filter on every input as `jq` does: each top-level value in turn,
+/// the exit status the last input's, and a malformed value ending the read
+/// (exit 5, as jq's parse error does) after the values before it ran.
+fn run_inputs(filter: &str, bytes: Option<&[u8]>, raw: bool) -> i32 {
+    let Some(bytes) = bytes else {
+        return report(filter, &OwnedValue::Null, raw);
+    };
+    let (spans, malformed) = crate::jq_runner::split_json_values_strict(bytes);
+    let mut status = 0;
+    for (start, end) in spans {
+        let input = match crate::jq_runner::json_bytes_to_owned_value_checked(&bytes[start..end]) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("jq: error (at <stdin>:0): {}", e.message);
+                return 5;
+            }
+        };
+        status = report(filter, &input, raw);
+        if status != 0 && status != 5 {
+            return status;
+        }
+    }
+    if malformed.is_some() {
+        eprintln!("jq: error (at <stdin>:0): Cannot parse the input as JSON");
+        return 5;
+    }
+    status
 }
 
 fn report(filter: &str, input: &OwnedValue, raw: bool) -> i32 {
@@ -119,6 +132,8 @@ fn report(filter: &str, input: &OwnedValue, raw: bool) -> i32 {
             }
             5
         }
+        // `halt` only: `halt_error` (which also writes its message) is
+        // unsupported in the spike.
         Outcome::Halt(code) => code,
         Outcome::Unsupported(what) => {
             eprintln!("path-spike: unsupported: {what}");

@@ -7387,7 +7387,7 @@ fn span_is_refused_by_jq(span: &[u8]) -> bool {
 /// `{1:2}`) taken as the malformed one (#4311): the spans before it, and its start. That is
 /// where `get_inputs`' stream parse stops, so the read jq resumes at follows it. Validates
 /// every span, so only the routes that resume past a parse error ask for it.
-fn split_json_values_strict(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
+pub(crate) fn split_json_values_strict(bytes: &[u8]) -> (Vec<(usize, usize)>, Option<usize>) {
     let (mut spans, malformed) = split_json_values(bytes);
     match spans
         .iter()
@@ -10063,7 +10063,9 @@ fn validate_json_delimiters<W: Clone + AsRef<[u64]>>(
 /// `validate::validate`'s own designed guard for `--seq`) -- fragile if
 /// that upstream step were ever skipped, relaxed, or its own limit changed
 /// independently of this one.
-fn json_bytes_to_owned_value_checked(bytes: &[u8]) -> core::result::Result<OwnedValue, EvalError> {
+pub(crate) fn json_bytes_to_owned_value_checked(
+    bytes: &[u8],
+) -> core::result::Result<OwnedValue, EvalError> {
     let index = JsonIndex::build(bytes);
     let cursor = index.root(bytes);
     validate_json_delimiters(&cursor, 0)?;

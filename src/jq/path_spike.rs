@@ -35,10 +35,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use super::error::{dump_truncated, Control, EvalError};
+use super::error::{dump_truncated_with, Control, EvalError};
 use super::eval::{
     apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    substitute_vars, JqSemantics, QueryResult,
+    substitute_vars, EvalTag, JqSemantics, QueryResult,
 };
 use super::expr::{Builtin, CompareOp, Expr, FormatType, Literal, ObjectKey, Param, Pattern};
 use super::parser::parse;
@@ -580,6 +580,9 @@ impl Default for Prelude {
     }
 }
 
+/// An array's elements, shared.
+type Items = Rc<Vec<SVal>>;
+
 /// The interpreter: one per program run.
 pub struct Interp<'e> {
     prelude: &'e Prelude,
@@ -596,8 +599,8 @@ pub struct Interp<'e> {
     /// slices of one array are one value; each view maps back to its root
     /// and offset, so a slice of a slice lands on the same key. Both hold
     /// the root, so a compared address is never reused.
-    slices: RefCell<BTreeMap<(usize, usize, usize), Rc<Vec<SVal>>>>,
-    slice_roots: RefCell<BTreeMap<usize, (Rc<Vec<SVal>>, usize)>>,
+    slices: RefCell<BTreeMap<(usize, usize, usize), Items>>,
+    slice_roots: RefCell<BTreeMap<usize, (Items, usize)>>,
 }
 
 /// How a run ended.
@@ -1005,7 +1008,9 @@ impl<'e> Interp<'e> {
                 let reg = reg.append(key, value.clone());
                 sink(value, reg)
             }
-            Err(_) if opt => Ok(()),
+            // `INDEX_OPT` drops the get's own error, never an escape the spike
+            // raises past every handler.
+            Err(Raise::Error(_)) if opt => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -1604,14 +1609,17 @@ impl<'e> Interp<'e> {
                     return Err(Raise::Error(SVal::string("Range bounds must be numeric")));
                 };
                 let mut first = Some(start.clone());
-                while cur.partial_cmp(&max) == Some(core::cmp::Ordering::Less) {
+                // `RANGE` stops only on `>=`, which a NaN bound never is.
+                loop {
+                    if cur >= max {
+                        return Ok(());
+                    }
                     let value = first
                         .take()
                         .unwrap_or_else(|| SVal::computed(number_owned(cur)));
                     sink(value, reg_e.clone())?;
                     cur += 1.0;
                 }
-                Ok(())
             })
         })
     }
@@ -1927,9 +1935,9 @@ fn type_error2(a: &SVal, b: &SVal, msg: &str) -> Raise {
     Raise::Error(SVal::string(&format!(
         "{} ({}) and {} ({}) {msg}",
         a.type_name(),
-        dump_truncated(&a),
+        dump_truncated_with(EvalTag::Jq, &a),
         b.type_name(),
-        dump_truncated(&b)
+        dump_truncated_with(EvalTag::Jq, &b)
     )))
 }
 
@@ -2122,7 +2130,10 @@ fn prelude_call(builtin: &Builtin) -> Option<(&'static str, Vec<&Expr>)> {
 fn unsupported_builtin(builtin: &Builtin) -> Option<&'static str> {
     use Builtin as B;
     Some(match builtin {
-        B::Input | B::Inputs => "input/inputs",
+        B::Input | B::Inputs | B::InputLineNumber | B::InputFilename => {
+            "input-reading builtins (the spike has no input queue)"
+        }
+        B::HaltError | B::HaltErrorCode(_) => "halt_error (its message is not carried)",
         B::LeafPaths => "leaf_paths (a succinctly extension)",
         B::AtOffset(_) | B::AtPosition(..) => "at_offset/at_position (a succinctly extension)",
         B::PathNoArg | B::Parent | B::ParentN(_) => "a yq path builtin",
