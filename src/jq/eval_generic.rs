@@ -10578,6 +10578,31 @@ fn eval_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     expr: &Expr,
     cursor: C,
 ) -> GenericResult<C::Value> {
+    // #5223 Phase 2: the shipped answer, compared with the path-mode
+    // interpreter's on every program the interpreter would take.
+    #[cfg(feature = "path-shadow")]
+    if S::TAG == EvalTag::Jq && super::path_mode::shadows(expr) {
+        if let Ok(input) = to_owned_cursor::<S, _>(&cursor) {
+            let mut shipped = Vec::new();
+            let control = fold_generic_owned_values::<_, S>(
+                eval_with_cursor_shipped::<S, C>(expr, cursor),
+                &mut |v, _| shipped.push(v),
+            );
+            super::path_mode::shadow::compare(expr, &input, &shipped, control.as_ref());
+            return match control {
+                Some(control) => partial_generic(shipped, control),
+                None => owned_vec_to_generic_result(shipped),
+            };
+        }
+    }
+    eval_with_cursor_shipped::<S, C>(expr, cursor)
+}
+
+/// [`eval_with_cursor_unscoped`]'s shipped route.
+fn eval_with_cursor_shipped<S: EvalSemantics, C: DocumentCursor>(
+    expr: &Expr,
+    cursor: C,
+) -> GenericResult<C::Value> {
     // #3702: the scans for the slots this evaluation reads resume across its
     // fan-outs, over this document.
     let _slots = slot_memo::enter(cursor.document_token());
@@ -10700,6 +10725,54 @@ pub fn eval_each_with_cursor_using<S: EvalSemantics, C: DocumentCursor>(
 
 /// [`eval_each_with_cursor_using`] inside the anchor scope it opens (#3134).
 fn eval_each_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
+    expr: &Expr,
+    cursor: C,
+    on_value: &mut dyn FnMut(GenericResult<C::Value>) -> bool,
+) -> Option<Control> {
+    // #5223 Phase 2: the shipped answer, delivered as owned values and
+    // compared with the path-mode interpreter's on every program the
+    // interpreter would take.
+    #[cfg(feature = "path-shadow")]
+    if S::TAG == EvalTag::Jq && super::path_mode::shadows(expr) {
+        if let Ok(input) = to_owned_cursor::<S, _>(&cursor) {
+            let mut shipped: Vec<OwnedValue> = Vec::new();
+            let control = {
+                let mut recording = |result: GenericResult<C::Value>| -> bool {
+                    let mut values = Vec::new();
+                    if let Some(control) =
+                        fold_generic_owned_values::<_, S>(result, &mut |v, _| values.push(v))
+                    {
+                        return on_value(control_to_generic(control));
+                    }
+                    for v in values {
+                        shipped.push(v.clone());
+                        if !on_value(GenericResult::Owned(v)) {
+                            return false;
+                        }
+                    }
+                    true
+                };
+                eval_each_with_cursor_shipped::<S, C>(expr, cursor, &mut recording)
+            };
+            super::path_mode::shadow::compare(expr, &input, &shipped, control.as_ref());
+            return control;
+        }
+    }
+    eval_each_with_cursor_shipped::<S, C>(expr, cursor, on_value)
+}
+
+/// A control as the one-result answer that raises it.
+#[cfg(feature = "path-shadow")]
+fn control_to_generic<V: DocumentValue>(control: Control) -> GenericResult<V> {
+    match control {
+        Control::Error(e) => GenericResult::Error(e),
+        Control::Break(label) => GenericResult::Break(label),
+        Control::Halt(code) => GenericResult::Halt(code),
+    }
+}
+
+/// [`eval_each_with_cursor_unscoped`]'s shipped route.
+fn eval_each_with_cursor_shipped<S: EvalSemantics, C: DocumentCursor>(
     expr: &Expr,
     cursor: C,
     on_value: &mut dyn FnMut(GenericResult<C::Value>) -> bool,

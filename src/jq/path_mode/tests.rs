@@ -1499,3 +1499,35 @@ fn loops_run_in_constant_stack_and_in_jqs_order_5223() {
         ]);
     });
 }
+
+/// `takes_program` routes a program to the interpreter exactly when it holds
+/// a path target that is not plain navigation, and nothing the interpreter
+/// declines.
+#[test]
+fn takes_program_routes_dynamic_path_targets_only_5223() {
+    let takes = |filter: &str| takes_program(&parse(filter).expect(filter));
+    for filter in [
+        "del(.users[] | select(.score < 100))",
+        "path(.a as $x | $x)",
+        "(.. | numbers) |= . + 1",
+        "[paths(type == \"number\") ] as $p | .a | path(first(.[]))",
+        "def f: .a; f |= 1",
+        "pick(first(.[]))",
+        ".a //= (path(if . then .b else .c end) | length)",
+    ] {
+        assert!(takes(filter), "{filter}");
+    }
+    for filter in [
+        ".users[] | .name",
+        "del(.a, .b[0])",
+        "[path(.users[] | .age)] | length",
+        "(.users[] | .score) = 1",
+        ".a |= (.b | select(. > 1))",
+        "path(..)",
+        "[paths]",
+        "to_entries",
+        "path(.a | select(.)) | line",
+    ] {
+        assert!(!takes(filter), "{filter}");
+    }
+}

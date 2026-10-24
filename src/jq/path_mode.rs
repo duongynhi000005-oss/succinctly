@@ -56,7 +56,7 @@ use super::resolve::ModuleRun;
 use super::value::{
     jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral, SharableString,
 };
-use super::walk::{builtin_kids, map_builtin_subexprs, BuiltinKids};
+use super::walk::{any_subexpr, builtin_kids, map_builtin_subexprs, BuiltinKids};
 
 /// A string with storage of its own: a fresh `jv_string`.
 fn string(s: &str) -> OwnedValue {
@@ -220,6 +220,10 @@ enum Raise {
     /// A construct the interpreter does not implement: nothing catches it
     /// either.
     Unsupported(String),
+    /// The consumer of the program's outputs wants no more: unwinds the run
+    /// past every handler.
+    #[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+    Stop,
 }
 
 impl Raise {
@@ -765,6 +769,237 @@ pub fn run(filter: &str, input: OwnedValue) -> Result<Run, String> {
     Ok(interp.run(&program, input))
 }
 
+/// Whether `succinctly jq` runs `program` through this interpreter (#5223): it
+/// holds a path target the shipped walkers cannot take natively, and nothing
+/// the interpreter declines.
+///
+/// A path target is the argument of `path`, `del` or `pick`, or the left side
+/// of `=`, `|=`, an arithmetic update-assignment or `//=`. The walkers take a
+/// static one natively -- `.k`, `.[n]`, `.[i:j]`, `.[]`, `..`, and pipes, commas
+/// and `?` of those -- with no register to carry, and exactly; every other
+/// target asks where jq's register is, which this interpreter answers by
+/// carrying it. A program that reads cursor metadata (`line`, `at_offset`,
+/// ...) stays on the shipped route, which holds the cursor.
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+pub(crate) fn takes_program(program: &Expr) -> bool {
+    if super::walk::uses_cursor_metadata_builtins(program) {
+        return false;
+    }
+    let mut dynamic = false;
+    let declined = any_subexpr(program, &mut |e| {
+        dynamic |= is_dynamic_path_target(e);
+        !runs(e)
+    });
+    dynamic && !declined
+}
+
+/// Whether the shadow build compares `program` (`path-shadow`): one the
+/// interpreter takes that reads no input, since the second run would read
+/// other values from the shared queue.
+#[cfg(feature = "path-shadow")]
+pub(crate) fn shadows(program: &Expr) -> bool {
+    takes_program(program) && !super::walk::uses_input_builtins(program)
+}
+
+/// Whether `expr` is a path construct whose target is not static.
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+fn is_dynamic_path_target(expr: &Expr) -> bool {
+    match expr {
+        Expr::Builtin(Builtin::Path(target) | Builtin::Del(target) | Builtin::Pick(target)) => {
+            !is_static_target(target)
+        }
+        Expr::Assign { path, .. }
+        | Expr::Update { path, .. }
+        | Expr::CompoundAssign { path, .. }
+        | Expr::AlternativeAssign { path, .. } => !is_static_target(path),
+        _ => false,
+    }
+}
+
+/// A target the shipped walkers resolve natively: navigation only.
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+fn is_static_target(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index { .. }
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::RecursiveDescent
+        | Expr::Builtin(Builtin::Recurse) => true,
+        Expr::Paren(inner) | Expr::Optional(inner) => is_static_target(inner),
+        Expr::Pipe(stages) => stages.iter().all(is_static_target),
+        Expr::Comma(items) => items.iter().all(is_static_target),
+        _ => false,
+    }
+}
+
+/// Whether the interpreter runs this node: not a product of the shipped
+/// evaluator's own run (`DefCall`, `Shared`, `DeferredVar`), not yq syntax,
+/// and not a builtin it declines ([`unsupported_builtin`]).
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+fn runs(expr: &Expr) -> bool {
+    match expr {
+        Expr::DefCall { .. }
+        | Expr::Shared(_)
+        | Expr::DeferredVar(_)
+        | Expr::NamespacedCall { .. }
+        | Expr::MetaAssign { .. }
+        | Expr::RecursiveDescentWithKeys
+        | Expr::ArrayKey(_) => false,
+        Expr::Object(entries) => entries
+            .iter()
+            .all(|entry| !matches!(entry.key, ObjectKey::Bare)),
+        Expr::Builtin(builtin) => unsupported_builtin(builtin).is_none(),
+        _ => true,
+    }
+}
+
+/// Run `program` on `input` (a document, materialized for this run), handing
+/// each output to `on_value` until it answers `false`. The escape that ended
+/// the run, if any, is the shipped evaluator's `Control`.
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+pub(crate) fn run_program(
+    program: &Expr,
+    input: OwnedValue,
+    on_value: &mut dyn FnMut(OwnedValue) -> bool,
+) -> Option<Control> {
+    with_prelude(|prelude| {
+        let interp = Interp::new(prelude);
+        let mut input = input;
+        input.promote_identities();
+        let result = interp.eval(program, &Env::default(), input, Reg::top(), &mut |v, _| {
+            if on_value(v) {
+                Ok(())
+            } else {
+                Err(Raise::Stop)
+            }
+        });
+        match result {
+            Ok(()) | Err(Raise::Stop) => None,
+            Err(raise) => match Interp::outcome(raise) {
+                Outcome::Done => None, // patchcov: coverage tolerate-line reason="unreachable: an error outcome is never Done"
+                Outcome::Error(e) => Some(Control::Error(e)),
+                Outcome::Halt(code) => Some(Control::Halt(code)),
+                Outcome::Unsupported(what) => Some(Control::Error(EvalError::new(format!(
+                    "internal error: the path-mode interpreter cannot run {what}"
+                )))),
+            },
+        }
+    })
+}
+
+/// Run `f` with this thread's parsed [`PRELUDE`]: parsed once per thread
+/// under `std`, so a stream of inputs does not reparse it per document.
+#[cfg_attr(not(feature = "path-shadow"), allow(dead_code))]
+fn with_prelude<R>(f: impl FnOnce(&Prelude) -> R) -> R {
+    #[cfg(feature = "std")]
+    {
+        std::thread_local! {
+            static PRELUDE_PARSED: &'static Prelude = Box::leak(Box::new(Prelude::new()));
+        }
+        let prelude: &'static Prelude = PRELUDE_PARSED.with(|p| *p);
+        f(prelude)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        f(&Prelude::new())
+    }
+}
+
+/// `path-shadow`'s comparison of the two evaluators (#5223 Phase 2).
+#[cfg(feature = "path-shadow")]
+pub mod shadow {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    use super::super::error::Control;
+    use super::super::expr::Expr;
+    use super::super::value::OwnedValue;
+    use indexmap::IndexMap;
+
+    std::thread_local! {
+        static FILTER: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Record the program's source text, for the disagreement log; the CLI
+    /// calls it once it has read the filter.
+    pub fn set_filter(text: &str) {
+        FILTER.with(|f| *f.borrow_mut() = Some(String::from(text)));
+    }
+
+    fn ending(control: Option<&Control>) -> String {
+        match control {
+            None => String::from("done"),
+            Some(Control::Error(e)) => alloc::format!("error {}", e.message),
+            Some(Control::Break(label)) => alloc::format!("break {label}"),
+            Some(Control::Halt(code)) => alloc::format!("halt {code}"),
+        }
+    }
+
+    /// Run the interpreter on `input` and report it if it answers other than
+    /// the shipped evaluator did (`shipped`, ended by `control`). The
+    /// interpreter's own stderr writes are muted: the shipped run made them.
+    pub(crate) fn compare(
+        program: &Expr,
+        input: &OwnedValue,
+        shipped: &[OwnedValue],
+        control: Option<&Control>,
+    ) {
+        let mut interp: Vec<OwnedValue> = Vec::new();
+        // Far past the shipped count the answer already disagrees: stop
+        // there, so a program the shipped route refused early cannot run
+        // without end. The margin keeps the interpreter's own ending (an
+        // error after a few more outputs) in the log.
+        let cap = shipped.len() + 1000;
+        let end = super::super::eval::with_stderr_muted(|| {
+            super::run_program(program, input.clone(), &mut |v| {
+                interp.push(v);
+                interp.len() < cap
+            })
+        });
+        let render = |values: &[OwnedValue]| -> Vec<OwnedValue> {
+            values
+                .iter()
+                .map(|v| OwnedValue::string(v.to_json_jq_preserve()))
+                .collect()
+        };
+        let (want, got) = (render(shipped), render(&interp));
+        let (want_end, got_end) = (ending(control), ending(end.as_ref()));
+        if want == got && want_end == got_end {
+            return;
+        }
+        let filter = FILTER
+            .with(|f| f.borrow().clone())
+            .unwrap_or_else(|| alloc::format!("{program:?}"));
+        let mut row = IndexMap::new();
+        row.insert(String::from("filter"), OwnedValue::string(filter));
+        row.insert(
+            String::from("input"),
+            OwnedValue::string(input.to_json_jq_preserve()),
+        );
+        row.insert(String::from("shipped"), OwnedValue::Array(want.into()));
+        row.insert(String::from("shipped_end"), OwnedValue::string(want_end));
+        row.insert(String::from("interp"), OwnedValue::Array(got.into()));
+        row.insert(String::from("interp_end"), OwnedValue::string(got_end));
+        let line = OwnedValue::Object(row.into()).to_json_jq_preserve();
+        match std::env::var_os("PATH_SHADOW_LOG") {
+            Some(path) => {
+                use std::io::Write;
+                if let Ok(mut log) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = log.write_all(alloc::format!("{line}\n").as_bytes());
+                }
+            }
+            None => std::eprintln!("path-shadow: disagree {line}"),
+        }
+    }
+}
+
 impl<'e> Interp<'e> {
     /// An interpreter over `prelude`'s definitions.
     pub fn new(prelude: &'e Prelude) -> Self {
@@ -821,6 +1056,7 @@ impl<'e> Interp<'e> {
             Raise::Halt(code) => Outcome::Halt(code),
             Raise::Fatal(error) => Outcome::Error(error),
             Raise::Unsupported(what) => Outcome::Unsupported(what),
+            Raise::Stop => Outcome::Done,
         }
     }
 
