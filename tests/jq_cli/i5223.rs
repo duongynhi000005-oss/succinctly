@@ -13,7 +13,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::{spawn_with_signal_retry, succinctly_bin};
+use crate::{assert_path_rows_both_routes_3749, spawn_with_signal_retry, succinctly_bin};
 
 /// Run the dev entry with `args` (options, then the filter), returning stdout, stderr and the
 /// exit code.
@@ -112,4 +112,324 @@ fn the_dev_entry_reads_the_input_queue_and_halts_as_jq_5223() -> Result<()> {
     let (_, err, rc) = dev_entry(&["-n", r#"{"a":1} | halt_error(3)"#], None)?;
     assert_eq!((err.as_str(), rc), ("{\"a\":1}\n", 3));
     Ok(())
+}
+
+/// #5223 Phase 3: this issue's repro rows, with `path`, `del` and `|=`
+/// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
+/// first error message, the exit code). The path-mode interpreter carries
+/// jq's register, so they match by construction, on both routes.
+#[test]
+#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
+fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5223() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce (.a,.a) as $x (.; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(reduce (.a,.a) as $x (.; .a))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(reduce (.a,.a) as $x (.; .a)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(reduce .a as $v (.; .))",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(reduce .a as $v (.; .))",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(reduce .a as $v (.; .)) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach (1,2) as $x (.; .a; .b))",
+            "[\"a\",\"b\"]\n",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach (1,2) as $x (.; .a; .b))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(foreach (1,2) as $x (.; .a; .b)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(foreach .a as $v (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(foreach .a as $v (.; .; .))",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(foreach .a as $v (.; .; .)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(.a as {b:$v} | .)",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(.a as {b:$v} | .)",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(.a as {b:$v} | .) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"b\" of {\"b\":1}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path([{} | .a])",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del([{} | .a])",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"([{} | .a]) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | [.a] | $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | [.a] | $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | [.a] | $x) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | try (.a | error) catch $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | try (.a | error) catch $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | try (.a | error) catch $x) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | (.a | empty) // $x)",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | (.a | empty) // $x)",
+            "null\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | (.a | empty) // $x) |= 9",
+            "9\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"path(. as $x | .a | (1 + (.b)) | $x)",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"del(. as $x | .a | (1 + (.b)) | $x)",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r"(. as $x | .a | (1 + (.b)) | $x) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":{\"b\":1}}",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"path(.a | {c:2} | getpath(["c"]))"#,
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"del(.a | {c:2} | getpath(["c"]))"#,
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":{"b":1}}"#,
+            r#"(.a | {c:2} | getpath(["c"])) |= 9"#,
+            "",
+            "Invalid path expression with result 2",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r#"path(.a | ltrimstr("z"))"#,
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+        (r#"{"a":"x"}"#, r#"del(.a | ltrimstr("z"))"#, "{}\n", "", 0),
+        (
+            r#"{"a":"x"}"#,
+            r#"(.a | ltrimstr("z")) |= 9"#,
+            "{\"a\":9}\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r#"path(.a | ltrimstr("x"))"#,
+            "",
+            "Invalid path expression with result \"\"",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r#"del(.a | ltrimstr("x"))"#,
+            "",
+            "Invalid path expression with result \"\"",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r#"(.a | ltrimstr("x")) |= 9"#,
+            "",
+            "Invalid path expression with result \"\"",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r"path(.a | ascii_downcase)",
+            "",
+            "Invalid path expression near attempt to iterate through [120]",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r"del(.a | ascii_downcase)",
+            "",
+            "Invalid path expression near attempt to iterate through [120]",
+            5,
+        ),
+        (
+            r#"{"a":"x"}"#,
+            r"(.a | ascii_downcase) |= 9",
+            "",
+            "Invalid path expression near attempt to iterate through [120]",
+            5,
+        ),
+        (
+            r#"{"a":1,"b":1}"#,
+            r"path(.a as $v | .b | select(. == $v) | $v)",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1,"b":1}"#,
+            r"del(.a as $v | .b | select(. == $v) | $v)",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+        (
+            r#"{"a":1,"b":1}"#,
+            r"(.a as $v | .b | select(. == $v) | $v) |= 9",
+            "",
+            "Invalid path expression with result 1",
+            5,
+        ),
+    ])
 }

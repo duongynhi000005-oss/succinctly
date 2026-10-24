@@ -215,3 +215,118 @@ fn test_5156_foreach_update_alternative_residuals_pinned_as_they_stand_5228() ->
         ),
     ])
 }
+
+/// #5223 Phase 3: this issue's repro rows, with `path`, `del` and `|=`
+/// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
+/// first error message, the exit code). The path-mode interpreter carries
+/// jq's register, so they match by construction, on both routes.
+#[test]
+fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5156() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))",
+            "[\"a\"]\n",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // $x; $i))",
+            "[\"a\"]\n",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // $x; $i))",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // $x; $i)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // (5,6); $i))",
+            "[\"a\"]\n[\"a\"]\n",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // (5,6); $i))",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // (5,6); $i)) |= 9",
+            "",
+            "Invalid path expression with result {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // error("z"); $i))"#,
+            "",
+            "z",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"del(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // error("z"); $i))"#,
+            "",
+            "z",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r#"(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // error("z"); $i)) |= 9"#,
+            "",
+            "z",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .a; $i))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"del(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .a; $i))",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+        (
+            r#"{"a":null}"#,
+            r"(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .a; $i)) |= 9",
+            "",
+            "Invalid path expression near attempt to access element \"a\" of {\"a\":null}",
+            5,
+        ),
+    ])
+}

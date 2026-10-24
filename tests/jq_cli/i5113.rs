@@ -803,3 +803,41 @@ fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_pla
         ),
     ])
 }
+
+/// #5223 Phase 3: this issue's repro rows, with `path`, `del` and `|=`
+/// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
+/// first error message, the exit code). The path-mode interpreter carries
+/// jq's register, so they match by construction, on both routes.
+#[test]
+fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5113() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach .a as $i ((.,.); try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .a then 1 else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; $i))?]",
+            "[[\"a\"],[]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"b":true}"#,
+            r"[path(. as $x | foreach (.a,.) as $i (.; try (if .b then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end) catch 1; .a))?]",
+            "[[\"a\",\"a\"],[\"a\",\"a\"]]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":{"a":null}}"#,
+            r#"[path(. as $x | foreach .a as {a:$k} ?// $k (.; (if .a then null else foreach (try ($x as {a:$a} | .)) as $y (.; .; .) end, 7); if $k == null then error("x") else $k end))?]"#,
+            "[[\"a\"]]\n",
+            "",
+            0,
+        ),
+    ])
+}
