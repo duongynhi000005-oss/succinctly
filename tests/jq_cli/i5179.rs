@@ -660,6 +660,7 @@ fn test_foreach_update_try_handler_array_and_multi_entry_patterns_5179() -> Resu
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_try_handler_landing_shapes_the_test_does_not_read_stay_refused_5179(
 ) -> Result<()> {

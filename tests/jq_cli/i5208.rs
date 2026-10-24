@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 
-use crate::{assert_path_rows_both_routes_3749, run_jq_stdin_streams};
+use crate::assert_path_rows_both_routes_3749;
+#[cfg(not(feature = "unshared-containers"))]
+use crate::run_jq_stdin_streams;
 
 // #5177 let the resolver decide a step whose state is the register and whose pattern RAISES, which is jq's own
 // catchable error whichever node `$x` is. A pattern that does not raise passes `path_intact` only where `$x` *is* the
@@ -121,6 +123,7 @@ fn test_5208_a_rebuilt_state_is_not_the_node_x_is() -> Result<()> {
 
 /// #5208: a handler that navigates (`catch ($i | .a?)`) kept the earlier refusal: its step is followed by one the resolver
 /// placed wrongly (#5213). The path-mode interpreter (#5223) raises jq's own error (`Cannot index number with string "a"`).
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5208_a_navigating_handler_raises_as_jq_does() -> Result<()> {

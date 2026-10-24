@@ -15,6 +15,7 @@ use anyhow::Result;
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_limit_of_dot_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

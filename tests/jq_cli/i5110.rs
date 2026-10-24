@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 
-use crate::{assert_path_rows_3289, assert_path_rows_both_routes_3749};
+#[cfg(not(feature = "unshared-containers"))]
+use crate::assert_path_rows_3289;
+use crate::assert_path_rows_both_routes_3749;
 
 // `. as $x | foreach . as $i (.; 1 | foreach ($x as {a:$a} | .) as $y (.; .; .); $i)` on `null`: the nested `foreach`'s
 // source steps jq's register from `$x` (the register) to `$x.a`, the `1` stage moves nothing, and EXTRACT's `$i` is judged
@@ -782,6 +784,7 @@ fn test_5110_literal_stage_ahead_of_a_bare_bind_foreach_behind_an_alternative_up
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5110_alternative_update_shapes_not_read_keep_their_refusal() -> Result<()> {

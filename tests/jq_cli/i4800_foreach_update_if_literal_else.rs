@@ -520,6 +520,7 @@ fn test_foreach_update_if_with_a_literal_then_beside_a_fold_in_the_else_4800() -
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_4800() -> Result<()>
 {
@@ -571,6 +572,7 @@ fn test_foreach_update_if_with_a_literal_then_past_a_falsy_elif_stays_differing_
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -638,6 +640,7 @@ fn test_foreach_update_wrapped_if_with_a_literal_else_stays_differing_4800() -> 
 /// read by `alternate_update_shape`, which is the one route that still reaches the `return None` of its `Pipe` arm
 /// (the literal-arm rows above are resolved as the arm and never get there). Where jq answers `[[]]` or `[[],[]]`
 /// these answer `[]`; the answers are pinned as they stand (a fix flips them), and the rows keep the arm covered.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_wrapped_if_with_an_undecidable_condition_stays_differing_4800() -> Result<()>
 {

@@ -724,6 +724,7 @@ fn test_caught_foreign_marker_destructure_foreach_beside_an_empty_comma_item_480
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_caught_foreign_marker_destructure_foreach_beside_a_value_item_stays_refused_4800(
 ) -> Result<()> {

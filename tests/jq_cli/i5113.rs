@@ -352,6 +352,7 @@ fn test_5113_literal_then_lookahead_reads_an_unbounded_source() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_lookahead_agrees_with_the_last_step_of_an_earlier_init_fork() -> Result<()> {
@@ -761,6 +762,7 @@ fn test_5113_handler_literal_read_beside_a_literal_sibling() -> Result<()> {
 /// element, which a lookahead started from the `then` literal cannot see (it printed a truncated answer before the
 /// lookahead ran on the unbound UPDATE). jq answers `[["a"]]`, `[["a"],["a"]]`, `[["a"],["a"]]`,
 /// `[["a","a"],["a","a"]]` and `[[],[],["b"],["b"],["a"]]`.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_place_the_step(
@@ -808,6 +810,7 @@ fn test_5113_literal_sibling_reading_stays_unread_where_the_lookahead_cannot_pla
 /// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
 /// first error message, the exit code). The path-mode interpreter carries
 /// jq's register, so they match by construction, on both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5113() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

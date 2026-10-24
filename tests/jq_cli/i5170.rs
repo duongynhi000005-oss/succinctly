@@ -95,6 +95,7 @@ fn test_5170_rows_that_keep_their_reading() -> Result<()> {
 /// #5170: a bind whose body emits more than once (`(.,.)`, `range(2)`) beside a literal sibling was refused, not read: the
 /// resolver delivered a generator body's outputs fewer times than jq when the state is not the register (#5193). The
 /// path-mode interpreter (#5223) answers each with jq's paths. Rows captured from jq 1.7.1, both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5170_a_fanning_out_bind_body_beside_a_sibling_answers_as_jq_does() -> Result<()> {

@@ -466,6 +466,7 @@ fn test_foreach_update_try_handler_before_the_run_last_step_is_placed_5012() -> 
 /// the source in jq and moves the register first; a `try .. catch 1` around the source's destructure emits from the
 /// raise. (A step whose element `$x` is, with a one-entry pattern landing on the state, is read by position since
 /// #5179, `tests/jq_cli/i5179.rs`.) Both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_try_handler_where_the_reading_does_not_hold_stays_refused_5012() -> Result<()>
 {

@@ -3959,6 +3959,7 @@ fn test_cannot_index_wording_is_spelling_independent() -> Result<()> {
 /// and, in an assignment, overwrites — element zero. jq yields null on the read
 /// and errors on the write; both halves are checked here because only the read
 /// half is observable in the golden corpus (`index_nan_key`).
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_nan_key_reads_null_and_rejects_writes() -> Result<()> {
     let (output, _) = run_jq_stdin("[.[nan]]", "[10,20,30]", &["-c"])?;
@@ -18618,6 +18619,7 @@ fn test_resolve_recurse_cond_still_gates_null_child_emission() -> Result<()> {
 /// own documented divergence instead. Since #5223 the path-mode interpreter
 /// walks it as jq does, so the walk is bounded by the `recurse` cap (#3716),
 /// not by pruning the null node (#856): 10,000 paths, then the cap's error.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_resolve_recurse_cond_still_bounds_null_current_growth_854() -> Result<()> {
     let (stdout, stderr, code) =
@@ -32620,6 +32622,7 @@ fn test_settled_operand_keeps_jq_order_3296() -> Result<()> {
 /// generic evaluator's path-context arms) refuses where it aborted the process,
 /// and answers shallow. The same chain read inside `path()` or `|=` runs through
 /// the path-mode interpreter since #5223 and answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_argument_chain_refuses_on_the_path_routes_3262() -> Result<()> {
     let def = "def f(n): if n == 0 then .a else f(n - 1 | select(true)) end;";
@@ -44116,6 +44119,7 @@ fn test_generator_argument_backtracking_still_evaluates_the_tail_1279() -> Resul
 /// spelled in `path(...)`; since #5223 those programs run through the
 /// path-mode interpreter, which raises jq's path error in both spellings, so
 /// both rows now hold jq's answer and the asymmetry is no longer pinned here.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_short_circuit_side_effect_leaks_820_932_987() -> Result<()> {
     let cases: &[SideEffectCase] = &[
@@ -57876,6 +57880,7 @@ fn test_recurse_cap_stopping_consumers_and_boundary_3716() -> Result<()> {
 /// #3716, the less common routes: past the native stack budget both walkers
 /// fall back to an explicit stack that checks the cap itself, a `?//` inside `f`
 /// does not retry past the cap, and the shape the cap exists for.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_recurse_cap_queued_walk_retry_and_null_loop_3716() -> Result<()> {
     let cap_error = "recurse: maximum nodes exceeded";
@@ -66412,6 +66417,7 @@ fn test_literal_null_destructure_in_a_fold_source_moves_a_null_register_below_th
 /// `null` document: jq restores its register at the comma's fork point, so the `1` is no path output.
 /// The shipped resolver raised `Invalid path expression with result 1` on the second pass of the
 /// innermost fold; the path-mode interpreter (#5223) prints jq 1.7.1's paths.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_comma_after_a_null_destructure_in_the_innermost_of_three_folds_answers_as_jq_does_4707(
 ) -> Result<()> {
@@ -67399,6 +67405,7 @@ fn test_bound_result_under_swallowing_construct_is_judged_per_value_4444() -> Re
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_walk_identity_of_a_container_is_not_swallowed_4444() -> Result<()> {
     const DOC: &str = r#"{"o":{"x":1},"a":[1],"s":"s"}"#;
@@ -70886,6 +70893,7 @@ fn test_argument_navigation_builtins_forward_a_computed_result_2746() -> Result<
 /// `INDEX(gen; f)` is `reduce`-based in jq's own definition and keeps it (`[]`).
 /// The shipped resolver did not carry the live register through `INDEX` and
 /// raised for both; the path-mode interpreter (#5223) answers each as jq does.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_argument_navigation_builtins_drop_the_register_like_reduce_2746() -> Result<()> {
     assert_path_rows_3289(&[
@@ -73082,6 +73090,7 @@ fn test_destructuring_reduce_leaves_the_register_4048() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_fold_steps_from_known_untracked_register_4049() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -74339,6 +74348,7 @@ fn test_foreach_that_is_a_fold_update_reads_the_outer_frozen_var_4499() -> Resul
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_that_is_a_fold_update_keeps_init_marker_refused_4499() -> Result<()> {
     assert_path_rows_3289(&[
@@ -76756,6 +76766,7 @@ fn test_foreach_update_verdict_over_a_reduce_computed_extract_or_non_null_regist
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_verdict_over_forking_extract_recurse_or_alt_bind_operand_follows_jq_4698(
 ) -> Result<()> {
@@ -77815,6 +77826,7 @@ fn test_foreach_update_zero_arity_def_around_verdict_follows_jq_4720() -> Result
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_composed_any_recurse_not_decided_on_the_seed_stays_refused_4706(
 ) -> Result<()> {
@@ -78211,6 +78223,7 @@ fn test_fold_alt_bind_of_init_dot_behind_a_navigating_source_retries_4596() -> R
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_fold_update_isempty_with_a_pattern_bind_keeps_the_register_4354() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -78288,6 +78301,7 @@ fn test_fold_update_isempty_with_a_pattern_bind_keeps_the_register_4354() -> Res
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_nested_fold_over_frozen_var_with_untracked_register_stays_loud_3984() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -78398,6 +78412,7 @@ fn test_nested_fold_over_frozen_var_with_untracked_register_stays_loud_3984() ->
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_fold_init_that_navigates_then_computes_does_not_keep_the_ambient_register_4013(
 ) -> Result<()> {
@@ -79282,6 +79297,7 @@ fn test_nested_foreach_pattern_chain_on_a_null_register_answers_the_member_it_mo
 /// instead (a recorded divergence, #2974); the path-mode interpreter (#5223) runs jq's `_modify`
 /// body when the paths can retry and raises jq's message. `=` (which carries on with the retried
 /// alternative) and the two-alternative chain (whose retry raises its own error) answer as jq does.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_three_alternative_chain_under_limit_update_raises_as_jq_does_3963() -> Result<()> {
     let nested = r"foreach (foreach . as [$a] ?// {a:$a} ?// $a (0; .; .)) as $x (.; .; .)";
@@ -81073,6 +81089,7 @@ fn test_reduce_update_try_body_navigation_is_caught_4459() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_any_all_pipe_stage_verdict_residuals_stay_refused_3757() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -82540,6 +82557,7 @@ fn assert_path_rows_via_3749(
 /// 1.7.1; an empty message means no stderr. For the generated matrices whose
 /// programs the shipped resolver refused and the path-mode interpreter answers
 /// as jq does.
+#[cfg(not(feature = "unshared-containers"))]
 fn assert_filters_match_jq_5223(
     input: &str,
     filters: &[String],
@@ -84004,6 +84022,7 @@ fn test_path_register_long_and_chain_is_bounded_3456() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_drain_producers_lose_the_register_uncatchably_3456() -> Result<()> {
     let doc = r#"{"a":{"b":1},"k":1,"l":[1,2]}"#;
@@ -84096,6 +84115,7 @@ fn test_path_register_drain_producers_keep_where_they_lost_it_3456() -> Result<(
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_last_f_does_not_move_it_3643() -> Result<()> {
     let doc = r#"{"a":{"b":1},"k":2}"#;
@@ -84619,6 +84639,7 @@ fn test_collect_last_f_keeps_the_register_3767() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_last_f_keeps_the_identity_of_its_output_3766() -> Result<()> {
     let doc = r#"{"a":{"b":1},"k":2}"#;
@@ -85675,6 +85696,7 @@ fn test_foreach_keeps_the_register_for_a_frozen_variable_after_it_3761() -> Resu
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_true_or_update_extracting_the_variable_never_answers_the_root_3775() -> Result<()> {
     assert_path_rows_3289(&[
@@ -87142,6 +87164,7 @@ fn test_foreach_update_comma_with_a_bare_builtin_sibling_3960() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_comma_bare_builtin_exclusions_characterize_3960() -> Result<()> {
     let doc = r#"{"a":{"b":1,"c":[1,2]},"z":0}"#;
@@ -89156,6 +89179,7 @@ fn test_foreach_update_null_source_register_shapes_keep_the_register_4063() -> R
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_navigating_handler_then_stage_answers_4071() -> Result<()> {
     let doc = r#"{"a":{"b":{"b":3}},"z":1}"#;
@@ -89230,6 +89254,7 @@ fn test_foreach_update_navigating_handler_then_stage_answers_4071() -> Result<()
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_unprovable_register_stage_4071() -> Result<()> {
     let doc = r#"{"a":{"b":{"b":3}},"z":1}"#;
@@ -89296,6 +89321,7 @@ fn test_foreach_update_unprovable_register_stage_4071() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_navigated_then_def_keeps_the_register_lost_at_the_node_4252() -> Result<()> {
     let obj = r#"{"a":{"b":1,"c":[1,2]},"z":0}"#;
@@ -92102,6 +92128,7 @@ fn test_foreach_update_alternate_first_wrapper_keeps_the_register_4028() -> Resu
 /// is C-coded: none of them leaves jq's path register anywhere but where the
 /// stage entered it, so a `$x` frozen there re-establishes it after the stage
 /// and a write through it lands. Every row captured from jq 1.7.1 with `-c`.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_by_value_builtin_stages_do_not_move_it_3361() -> Result<()> {
     assert_path_rows_3289(&[
@@ -92407,6 +92434,7 @@ fn test_path_register_by_value_builtin_stages_do_not_move_it_3361() -> Result<()
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_more_by_value_builtins_do_not_move_it_3711() -> Result<()> {
     let objs = r#"[{"a":1},{"a":2}]"#;
@@ -93365,6 +93393,7 @@ fn test_walk_over_an_array_that_produces_stays_silent_for_a_body_jq_answers_3723
 /// The one #3723 shape the shipped resolver answered where jq raises: a collect
 /// that holds a `getpath` was evaluated by value (#2759), so nothing in it was
 /// path-checked. The path-mode interpreter (#5223) raises as jq 1.7.1 does.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_walk_over_an_array_getpath_collect_raises_as_jq_does_3723() -> Result<()> {
     let filter = r#"path(. as $x | [walk(getpath(["a"])?)] | try .[0])"#;
@@ -93431,6 +93460,7 @@ fn test_walk_over_an_array_observes_trailing_f_inline_3736() -> Result<()> {
 /// delivering any output, so `first(path(walk(debug, debug)))` over
 /// `[null,[null]]` printed 8 `DEBUG` lines. The path-mode interpreter (#5223)
 /// runs `walk` as jq's own definition and prints jq 1.7.1's 7.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_walk_over_an_array_root_f_debugs_as_jq_does_under_first_3736() -> Result<()> {
     let (stdout, stderr, code) = run_jq_full(
@@ -94900,6 +94930,7 @@ fn test_and_or_path_by_value_operands_track_the_register_3428() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_register_range_and_paths_do_not_move_it_3456() -> Result<()> {
     assert_path_rows_3289(&[
@@ -96248,6 +96279,7 @@ fn assert_rows_3579(rows: &[(&str, &str, &str, &str, i32)]) -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_terminal_null_after_a_navigation_refuses_loudly_3579() -> Result<()> {
     assert_rows_3579(&[
@@ -96378,6 +96410,7 @@ fn test_terminal_null_after_a_navigation_refuses_loudly_3579() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_terminal_null_carve_out_keeps_its_answers_3579() -> Result<()> {
     assert_rows_3579(&[
@@ -99101,6 +99134,7 @@ fn test_path_through_bound_variable_matches_jq_2072() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_destructuring_moves_path_register_2649() -> Result<()> {
     let d = r#"{"a":[1,2,3],"b":{"c":5}}"#;
@@ -105183,6 +105217,7 @@ fn test_try_wrapped_if_bind_source_keeps_register_3279() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_alt_destructuring_of_a_passthrough_source_under_try_never_writes_3781() -> Result<()> {
     let doc = r#"{"a":{"b":1}}"#;
@@ -105366,6 +105401,7 @@ fn test_alt_destructuring_of_a_passthrough_source_under_try_never_writes_3781() 
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_try_if_widening_does_not_leak_3279() -> Result<()> {
     for (input, filter, expected, expected_code) in [
@@ -109081,6 +109117,7 @@ fn test_owned_embed_keeps_node_identity_on_the_input_bridge_2889() -> Result<()>
 /// - A scalar root, which never enters the embed table on this route.
 #[test]
 // jq filter literals are not formatting strings.
+#[cfg(not(feature = "unshared-containers"))]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_input_bridge_embed_residuals_refuse_cleanly_2889() -> Result<()> {
     for (input, filter) in [
@@ -113471,6 +113508,7 @@ fn test_write_through_root_snapshot_after_subexp_stage_under_try_3186() -> Resul
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_guessed_path_refusal_is_not_caught_by_try_3267() -> Result<()> {
     assert_path_rows_3289(&[
@@ -114950,6 +114988,7 @@ fn test_recurse_seed_through_nth_bind_and_fold_recurse_f_3892() -> Result<()> {
 /// bind keeps its own rule.) The rows pin the *current* refusal, and every write
 /// form must exit non-zero -- never 0 with the document unchanged, which is the
 /// silent write loss #3267 closed.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_recurse_seed_residuals_stay_loud_3580() -> Result<()> {
     assert_rows_2764(&[
@@ -115625,6 +115664,7 @@ fn test_array_admits_self_checked_builtins_via_cli_3283() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_map_values_first_path_error_message_residual_3884() -> Result<()> {
     let object = r#"{"a":[1],"b":null}"#;
@@ -125268,6 +125308,7 @@ fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()>
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_frozen_source_through_a_composite_head_refuses_loudly_3334() -> Result<()> {
     assert_path_rows_3289(&[
@@ -129171,6 +129212,7 @@ fn test_destructuring_bind_controls_refuse_3466() -> Result<()> {
 /// behind it, and #3191 declined to carry identity through construction, so the
 /// shipped resolver refused where jq answers `["a","b"]`. The path-mode
 /// interpreter (#5223) keeps the element's identity through the array, as jq does.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_destructuring_bind_constructed_source_answers_as_jq_does_3466() -> Result<()> {
     let (stdout, stderr, code) = run_jq_full(
@@ -129227,6 +129269,7 @@ fn test_destructuring_bind_duplicate_and_computed_keys_3466() -> Result<()> {
 /// value, so its per-step member scan could not go quadratic, and refused the
 /// 65-entry one (`MAX_TRACKED_PATTERN_ENTRIES`). jq answers both widths, and so
 /// does the path-mode interpreter (#5223).
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_destructuring_bind_wide_pattern_answers_as_jq_does_3466() -> Result<()> {
     let pattern = |entries: usize| {
@@ -130516,6 +130559,7 @@ fn test_reduce_whole_array_slice_under_optional_is_the_register_3734() -> Result
 /// wrapped steps, so the shipped chain walk refused it; jq answers `[]`, as it
 /// does for the unwrapped `(.[0:] | .[0:])`, and so does the path-mode
 /// interpreter (#5223).
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_reduce_whole_array_slice_group_under_optional_answers_as_jq_does_3734() -> Result<()> {
     // jq 1.7.1: `[]`, exit 0.
@@ -132167,6 +132211,7 @@ fn test_path_sink_retry_door_3808() -> Result<()> {
     assert_path_retry_rows_3808(Some(r#"{"a":[[1]],"b":2}"#), "", rows)?;
     assert_path_retry_rows_3808(None, r#"{"a":[[1]],"b":2} | "#, rows)
 }
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_path_sink_retry_write_3808() -> Result<()> {
     // Captured from /usr/bin/jq 1.7.1. The shipped evaluator kept the input on
@@ -135735,6 +135780,7 @@ fn test_bind_sources_beyond_the_alias_grammar_keep_the_write_3795() -> Result<()
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_bind_sources_the_resolver_cannot_place_refuse_loudly_3795() -> Result<()> {
     let doc = r#"{"a":{"b":1}}"#;
@@ -143507,6 +143553,7 @@ fn test_register_catch_handler_that_never_runs_4309() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_register_catch_handler_over_register_keeping_stage_3767() -> Result<()> {
     let doc = r#"{"a":{"b":1},"k":2}"#;
@@ -145004,6 +145051,7 @@ fn test_def_call_with_a_literal_body_keeps_the_register_4124() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_def_call_over_a_register_keeping_body_keeps_the_register_4109() -> Result<()> {
     let doc = r#"{"a":{"b":1},"k":2}"#;
@@ -145107,6 +145155,7 @@ fn test_def_call_chain_fanout_is_bounded_4124() -> Result<()> {
 /// - a body that raises `. // X` or `select(. // 1) | error` may raise the register's
 ///   node, so the handler's `(.a)?` cannot be pruned as a path error: pruning it
 ///   dropped the answer (`del` of the negation wrote nothing, `path` printed nothing).
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_try_catch_operand_of_and_or_negate_refuses_like_jq_4125() -> Result<()> {
     for (program, doc, message) in [
@@ -145893,6 +145942,7 @@ fn test_destructure_bind_refusal_survives_try_and_fold_init_4150() -> Result<()>
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_path_f_stage_leaves_register_4118() -> Result<()> {
@@ -155177,6 +155227,7 @@ fn test_foreach_source_def_parameter_bound_to_a_literal_4485() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() -> Result<()> {
     const ROWS: &[(&str, &str, &str, i32)] = &[
@@ -155329,6 +155380,7 @@ fn test_foreach_source_call_args_and_nested_foreach_on_untracked_entry_4615() ->
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_4615() -> Result<()> {
     const ROWS: &[(&str, &str, &str, i32)] = &[
@@ -155599,6 +155651,7 @@ fn test_foreach_source_chain_inside_another_foreach_update_on_untracked_entry_46
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_source_null_or_null_marker_headed_chain_walks_the_null_register_4756() -> Result<()>
 {
@@ -156207,6 +156260,7 @@ fn test_foreach_source_null_or_marker_headed_chain_on_a_boolean_register_4773() 
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_reduce_with_a_chain_on_untracked_entry_4757() -> Result<()> {
     const REFUSED: &str = "Invalid path expression";
@@ -162383,6 +162437,7 @@ fn test_caught_foreign_marker_destructure_foreach_update_behind_a_gate_or_fallba
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refused_4800(
@@ -162504,6 +162559,7 @@ fn test_foreach_extract_after_an_update_that_may_have_moved_the_register_is_refu
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_4800() -> Result<()>
@@ -162892,6 +162948,7 @@ fn test_foreach_extract_after_a_register_moving_update_is_refused_behind_stages_
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() -> Result<()> {
@@ -163096,6 +163153,7 @@ fn test_foreach_extract_after_an_alternative_update_is_read_per_branch_4800() ->
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_branch_4837(
@@ -163275,6 +163333,7 @@ fn test_foreach_extract_after_an_alternative_update_behind_a_stage_is_read_per_b
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_foreach_extract_after_alternatives_in_a_pipe_is_read_per_branch_4843() -> Result<()> {
@@ -163396,6 +163455,7 @@ fn test_foreach_extract_after_alternatives_in_a_pipe_is_read_per_branch_4843() -
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_extract_after_an_alternative_behind_an_if_is_read_per_branch_4853() -> Result<()> {
     let fe = r"foreach ($x as {a:$a}|.) as $y (.; .; .)";
@@ -164313,6 +164373,7 @@ fn test_foreach_update_single_pattern_bind_beside_an_empty_4800() -> Result<()> 
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_a_spelled_out_empty_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -164472,6 +164533,7 @@ fn test_foreach_update_single_pattern_bind_beside_a_spelled_out_empty_4800() -> 
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -164764,6 +164826,7 @@ fn test_foreach_update_single_pattern_bind_beside_a_computed_empty_4800() -> Res
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_single_pattern_bind_beside_a_constant_division_count_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -165547,6 +165610,7 @@ fn test_caught_foreign_marker_destructure_in_a_foreach_update_patterns_4800() ->
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_caught_foreign_marker_destructure_in_a_foreach_update_computed_key_stays_refused_nested_pattern_read_4800(
 ) -> Result<()> {
@@ -168980,6 +169044,7 @@ fn test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_e
 /// `select(.)`, a `try ... catch` handler, an `if` whose condition navigates (`.a` moves jq's register
 /// before the branch runs) and an inner INIT that navigates behind a wrapper (the `del` and the
 /// middle-fold-INIT rows match jq). Every other row captured from jq 1.7.1 with `-c`.
+#[cfg(not(feature = "unshared-containers"))]
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
 fn test_foreach_source_bounded_alt_chain_behind_stages_in_other_fold_body_positions_counts_every_emission_4835(
@@ -169314,6 +169379,7 @@ fn test_foreach_source_isempty_of_alt_chain_counts_every_emission_4819() -> Resu
 /// rest). Inside another fold's UPDATE the source is routed since #4818
 /// (`test_foreach_source_bounded_alt_chain_behind_stages_in_a_fold_update_counts_every_emission_4818`).
 /// Every other row captured from jq 1.7.1 with `-c`.
+#[cfg(not(feature = "unshared-containers"))]
 #[allow(clippy::literal_string_with_formatting_args)]
 #[test]
 fn test_foreach_source_isempty_of_alt_chain_leaves_value_mode_and_excluded_operands_4819(

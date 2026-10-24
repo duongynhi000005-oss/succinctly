@@ -173,6 +173,7 @@ fn test_5182_uncaught_foreign_foreach_where_the_marker_is_the_register_is_unchan
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5182_step_two_refusal_a_question_mark_drops_until_a_non_dot_bind_body_is_read() -> Result<()>

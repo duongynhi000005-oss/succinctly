@@ -11,6 +11,7 @@ use crate::assert_path_rows_both_routes_3749;
 /// #5205: the issue's row and its `?`, `path`, `del` and `|=` forms, a literal INIT (`0`, `false`, `true`), a one-element
 /// and a three-element source, a boolean marker, a marker bound two levels down, and INIT `.`. Captured from
 /// `/usr/bin/jq` 1.7.1, both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_foreach_update_caught_bind_of_a_null_or_boolean_marker_5205() -> Result<()> {

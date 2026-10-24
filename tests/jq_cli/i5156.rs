@@ -195,6 +195,7 @@ fn test_5156_foreach_update_alternative_with_a_value_alternate_of_a_caught_forei
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5156_foreach_update_alternative_residuals_pinned_as_they_stand_5228() -> Result<()> {
@@ -220,6 +221,7 @@ fn test_5156_foreach_update_alternative_residuals_pinned_as_they_stand_5228() ->
 /// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
 /// first error message, the exit code). The path-mode interpreter carries
 /// jq's register, so they match by construction, on both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5156() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

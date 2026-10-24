@@ -168,6 +168,7 @@ fn test_5181_shapes_the_walk_does_not_read_are_unchanged() -> Result<()> {
 /// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
 /// first error message, the exit code). The path-mode interpreter carries
 /// jq's register, so they match by construction, on both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5181() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

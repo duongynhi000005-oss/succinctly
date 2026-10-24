@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 
-use crate::{assert_path_rows_3289, assert_path_rows_both_routes_3749};
+#[cfg(not(feature = "unshared-containers"))]
+use crate::assert_path_rows_3289;
+use crate::assert_path_rows_both_routes_3749;
 
 // `reduce SRC as $i (INIT; W(. as {b:$q} | .))`: every output of the UPDATE is the accumulator's own node, so jq's register
 // is INIT's however far the bind navigated, and the final check passes. `update_returns_its_input` read `.`, a pipe, a
@@ -591,6 +593,7 @@ fn test_5140_reduce_update_bind_of_dot_behind_first_limit_nth_comma_if() -> Resu
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5140_wrappers_not_read_keep_their_refusal() -> Result<()> {

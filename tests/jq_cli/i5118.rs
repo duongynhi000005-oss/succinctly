@@ -35,6 +35,7 @@ fn test_5118_a_slice_past_65535_of_a_view_is_refused_as_jq_refuses() -> Result<(
 /// keeps its offset of 60,000 and the second slice reaches 66,000 and is copied: jq refuses. The path-mode interpreter's
 /// write builds a new array at offset 0, so the second slice is a view and the path answers. Recorded in
 /// `docs/compliance/jq/limitations.md`.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_5118_a_written_view_answers_where_jq_refuses_5223() -> Result<()> {
     let (stdout, stderr, code) = run_jq_full(

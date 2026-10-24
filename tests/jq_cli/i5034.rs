@@ -234,6 +234,7 @@ fn test_foreach_update_if_with_a_navigating_else_keeps_the_rows_that_matched_503
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_foreach_update_if_with_a_navigating_else_keeps_the_extract_and_mirrored_foreach_reading_5034(
 ) -> Result<()> {

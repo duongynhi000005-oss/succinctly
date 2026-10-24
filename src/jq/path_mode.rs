@@ -884,12 +884,18 @@ pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
 ///
 /// A path target is the argument of `path`, `del` or `pick`, or the left side
 /// of `=`, `|=`, an arithmetic update-assignment or `//=`. The walkers take a
-/// static one natively -- `.k`, `.[n]`, `.[i:j]`, `.[]`, `..`, and pipes, commas
-/// and `?` of those -- with no register to carry, and exactly; every other
+/// static one natively -- `.k`, `.[n]`, `.[$k]`, `.[i:j]`, `.[]`, `..`, and
+/// pipes, commas and `?` of those, and the value filters over them in
+/// [`is_static_target`] -- with no register to carry, and exactly; every other
 /// target asks where jq's register is, which this interpreter answers by
 /// carrying it. A program that reads cursor metadata (`line`, `at_offset`,
 /// ...) stays on the shipped route, which holds the cursor.
 pub(crate) fn takes_program(program: &Expr) -> bool {
+    // The interpreter reads storage identity, which the `unshared-containers`
+    // A/B holdout (#2999) does not have: that build keeps the shipped routing.
+    if cfg!(feature = "unshared-containers") {
+        return false;
+    }
     // One walk of the program: the entries ask once per document.
     let mut dynamic = false;
     let declined = any_subexpr(program, &mut |e| {

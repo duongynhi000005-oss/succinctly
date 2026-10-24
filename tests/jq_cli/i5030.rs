@@ -987,6 +987,7 @@ fn test_fold_source_caught_x_that_is_the_register_in_another_fold_body_walks_it_
 /// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
 /// first error message, the exit code). The path-mode interpreter carries
 /// jq's register, so they match by construction, on both routes.
+#[cfg(not(feature = "unshared-containers"))]
 #[test]
 fn test_superseded_rows_match_jq_through_the_path_mode_interpreter_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
