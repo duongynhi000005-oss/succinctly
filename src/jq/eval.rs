@@ -38039,14 +38039,21 @@ fn bare_bind_source_key(e: &Expr, refuse_handler: bool) -> Option<PatternKey<'_>
 /// it has the same key. An `if` around the `foreach` does not (which arm ran decides whether the bind moved the
 /// register): `update_wraps_bare_bind_foreach` reads it without a key.
 fn bare_bind_foreach_update_key(update: &Expr) -> Option<PatternKey<'_>> {
-    bare_bind_foreach_update_key_within(update, WRAPPED_CHAIN_DEPTH)
+    bare_bind_foreach_update_key_within(update, WRAPPED_CHAIN_DEPTH, true)
 }
 
-fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<PatternKey<'_>> {
+/// `inert_ok` is whether the `foreach`'s own UPDATE and EXTRACT may be the loop variable or a literal (#5183) and not
+/// only `.`: true for the `foreach` and the `try`/`?` around it, false behind a stage that changes what it emits
+/// (`FE | 7` is a wrong accept for a `$x` that is not the register even with the `.` forms, which stay as they were).
+fn bare_bind_foreach_update_key_within(
+    update: &Expr,
+    budget: u8,
+    inert_ok: bool,
+) -> Option<PatternKey<'_>> {
     let budget = budget.checked_sub(1)?;
     match unwrap_paren(without_empty_siblings(update)) {
         Expr::Try { expr, catch: None } | Expr::Optional(expr) => {
-            bare_bind_foreach_update_key_within(expr, budget)
+            bare_bind_foreach_update_key_within(expr, budget, inert_ok)
         }
         Expr::Foreach {
             input,
@@ -38054,14 +38061,27 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
             init,
             update,
             extract,
-        } => (matches!(patterns.as_slice(), [Pattern::Var(_)])
-            && matches!(unwrap_paren(init), Expr::Identity)
-            && matches!(unwrap_paren(update), Expr::Identity)
-            && extract.as_deref().map_or(true, |extract| {
-                matches!(unwrap_paren(extract), Expr::Identity)
-            }))
-        .then(|| bare_bind_source_key(input, true))
-        .flatten(),
+        } => {
+            // #5183: the loop variable and a literal move no register either, and emit once a step like `.`:
+            // the nested `foreach` still emits for each source output the bind passes, with the register on the
+            // bound child.
+            let name = match patterns.as_slice() {
+                [Pattern::Var(name)] => Some(name.as_str()),
+                _ => None,
+            };
+            let inert = |e: &Expr| {
+                matches!(unwrap_paren(e), Expr::Identity)
+                    || inert_ok
+                        && (matches!(unwrap_paren(e), Expr::Literal(_))
+                            || matches!(unwrap_paren(e), Expr::Var(v) if Some(v.as_str()) == name))
+            };
+            (name.is_some()
+                && matches!(unwrap_paren(init), Expr::Identity)
+                && inert(update)
+                && extract.as_deref().map_or(true, inert))
+            .then(|| bare_bind_source_key(input, true))
+            .flatten()
+        }
         // #4957: a pipe whose later stages leave the register where it is (`FE | .`) hands the `foreach`'s
         // emission on unchanged. #5018: and one that emits a `null` or boolean (`FE | null`) leaves the register
         // where the bind put it, so what the EXTRACT is judged against does not depend on the tail's value.
@@ -38070,7 +38090,7 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
             // #5110: a literal stage ahead of the `foreach` hands it a value that is not the register, and
             // moves nothing: the bind steps from the register as it does without the stage.
             if let ([only], Expr::Literal(_)) = (tail, unwrap_paren(head)) {
-                return bare_bind_foreach_update_key_within(only, budget);
+                return bare_bind_foreach_update_key_within(only, budget, false);
             }
             // #5107: field navigations ahead of the `foreach` move the register to that child, where the bind
             // steps from ([`update_nav_head`] says which); the restatement starts there.
@@ -38079,12 +38099,17 @@ fn bare_bind_foreach_update_key_within(update: &Expr, budget: u8) -> Option<Patt
                     && matches!(unwrap_paren(last), Expr::Foreach { .. })
                     && nav.iter().all(|stage| nav_head_fields(stage).is_some())
                 {
-                    return bare_bind_foreach_update_key_within(last, budget);
+                    return bare_bind_foreach_update_key_within(last, budget, false);
                 }
             }
+            let identity_tail = tail
+                .iter()
+                .all(|stage| matches!(unwrap_paren(stage), Expr::Identity));
             tail.iter()
                 .all(cannot_move_register)
-                .then(|| bare_bind_foreach_update_key_within(head, budget))
+                .then(|| {
+                    bare_bind_foreach_update_key_within(head, budget, inert_ok && identity_tail)
+                })
                 .flatten()
         }
         _ => None,
