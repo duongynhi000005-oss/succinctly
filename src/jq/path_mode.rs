@@ -25,7 +25,7 @@
 //!   or an argument (`c_builtin_identity`), when that value itself is the
 //!   answer.
 //!
-//! It is reachable from `succinctly dev jq-path-spike` (hidden) and from tests,
+//! It is reachable from `succinctly dev jq-path-mode` (hidden) and from tests,
 //! never from `succinctly jq`. A construct it does not implement raises
 //! `Raise::Unsupported`, which nothing catches, so a row it cannot run is never
 //! mistaken for one it answers. See `docs/plan/jq-path-mode-interpreter-spike.md`

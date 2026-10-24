@@ -16,7 +16,7 @@ struct Answer {
     error: Option<String>,
 }
 
-fn spike(doc: &str, filter: &str) -> Answer {
+fn answer(doc: &str, filter: &str) -> Answer {
     let index = JsonIndex::build(doc.as_bytes());
     let input = to_owned::<JqSemantics, _>(&index.root(doc.as_bytes()).value()).expect("doc");
     let run = run(filter, input).expect("parses");
@@ -65,7 +65,7 @@ fn err(outputs: &[&str], message: &str) -> Answer {
 
 fn check(rows: &[(&str, &str, Answer)]) {
     for (doc, filter, want) in rows {
-        assert_eq!(&spike(doc, filter), want, "{doc} | {filter}");
+        assert_eq!(&answer(doc, filter), want, "{doc} | {filter}");
     }
 }
 
@@ -422,7 +422,7 @@ fn navigation_records_jqs_own_components_5223() {
 }
 
 /// The write doors run `builtin.jq`'s `_modify`/`_assign`/`del` over the
-/// spike's own `path()`.
+/// interpreter's own `path()`.
 #[test]
 fn writes_and_jq_defined_builtins_run_from_the_prelude_5223() {
     on_big_stack(|| {
@@ -447,7 +447,7 @@ fn writes_and_jq_defined_builtins_run_from_the_prelude_5223() {
     });
 }
 
-/// A construct the spike does not implement ends the run as unsupported,
+/// A construct the interpreter does not implement ends the run as unsupported,
 /// never as a jq error a `try` could swallow.
 #[test]
 fn an_unimplemented_construct_is_unsupported_not_an_error_5223() {
@@ -462,7 +462,7 @@ fn an_unimplemented_construct_is_unsupported_not_an_error_5223() {
 }
 
 /// jq rejects an unbound variable at compile time, before the input is read;
-/// the spike reports it the same way rather than when evaluation reaches it.
+/// the interpreter reports it the same way rather than when evaluation reaches it.
 #[test]
 fn an_unbound_variable_is_a_compile_error_5223() {
     on_big_stack(|| {
@@ -902,7 +902,7 @@ fn identity_is_jv_identical_on_every_kind_5223() {
     });
 }
 
-/// What the spike declines rather than answers: a closure call inside a
+/// What the interpreter declines rather than answers: a closure call inside a
 /// delegated builtin, `halt_error` (its message is not carried) and the
 /// builtins that read input state.
 #[test]
@@ -1021,13 +1021,13 @@ fn parse_doc(doc: &str) -> OwnedValue {
 }
 
 /// The differential corpus: every issue repro, and a grid of two-stage path
-/// programs over the construct forms the spike's tests pin, on a handful of
+/// programs over the construct forms these tests pin, on a handful of
 /// documents. The builtins whose identity the Phase 0 stub got wrong
 /// (`. + null` and the other operands `binop_plus` hands back) are pinned
 /// against jq by the C-builtin table's own tests instead.
 fn differential_corpus() -> Vec<(String, String)> {
     let mut rows = Vec::new();
-    for line in include_str!("../../../scripts/jq-path-spike-rows/repros.jsonl").lines() {
+    for line in include_str!("../../../scripts/jq-path-mode-rows/repros.jsonl").lines() {
         let row: serde_json::Value = serde_json::from_str(line).expect("a JSON row");
         let args = row["args"].as_array().expect("args");
         let filter = args.last().and_then(|a| a.as_str()).expect("a filter");

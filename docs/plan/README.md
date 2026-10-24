@@ -32,7 +32,7 @@ These plans are kept for:
 | [path-context-arm-reachability.md](path-context-arm-reachability.md)           | Current     | `src/jq/eval.rs`                   | Eager path-context evaluator arm reachability audit     |
 | [jq-bind-origin-frame.md](jq-bind-origin-frame.md)                             | Implemented | `src/jq/eval.rs`, `src/jq/expr.rs` | Node identity for a navigated `$var` in path position   |
 | [jq-path-register-producer-contract.md](jq-path-register-producer-contract.md) | Partial     | `src/jq/eval.rs`                   | Truthful `PathBranch::register` at the producer (#3456) |
-| [jq-path-mode-interpreter-spike.md](jq-path-mode-interpreter-spike.md)         | Partial     | `src/jq/path_spike.rs`             | Phase 0 report: a register-carrying interpreter (#5223) |
+| [jq-path-mode-interpreter-spike.md](jq-path-mode-interpreter-spike.md)         | Partial     | `src/jq/path_mode.rs`             | Phase 0 report: a register-carrying interpreter (#5223) |
 
 ## Archived Plans
 

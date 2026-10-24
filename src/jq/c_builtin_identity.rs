@@ -173,7 +173,7 @@ pub(crate) fn array_index(len: usize, key: &OwnedValue) -> Option<usize> {
 mod tests {
     use super::*;
     #[cfg(not(feature = "unshared-containers"))]
-    use crate::jq::path_spike::run;
+    use crate::jq::path_mode::run;
 
     fn doc(text: &str) -> OwnedValue {
         let index = crate::json::JsonIndex::build(text.as_bytes());
@@ -296,11 +296,11 @@ mod tests {
         for (input, filter, want) in rows {
             let run = run(filter, doc(input)).expect(filter);
             let got = match run.outcome {
-                crate::jq::path_spike::Outcome::Done => {
+                crate::jq::path_mode::Outcome::Done => {
                     assert_eq!(run.outputs.len(), 1, "{filter}");
                     Ok(run.outputs[0].to_json_jq_preserve())
                 }
-                crate::jq::path_spike::Outcome::Error(e) => Err(e.message),
+                crate::jq::path_mode::Outcome::Error(e) => Err(e.message),
                 other => panic!("{filter}: {other:?}"),
             };
             let want = want.map(String::from).map_err(String::from);
