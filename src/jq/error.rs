@@ -269,7 +269,7 @@ const DUMP_KEEP_WIDE: usize = 26;
 /// [`EvalTag::Jq`]. Migrate a call site to `dump_truncated_with(S::TAG, ..)`
 /// once `S: EvalSemantics` is in scope there; this shim (and [`describe`]
 /// below) can be deleted once every call site has moved.
-fn dump_truncated(value: &OwnedValue) -> String {
+pub(crate) fn dump_truncated(value: &OwnedValue) -> String {
     dump_truncated_with(EvalTag::Jq, value)
 }
 
