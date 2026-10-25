@@ -938,20 +938,30 @@ pub(crate) fn route(program: &Expr) -> Route {
     // rows jq answers. Nor does the shipped resolver answer a dynamic target any
     // more (#5233), so that measurement build refuses one outright rather than
     // answer it wrongly.
-    if cfg!(feature = "unshared-containers") {
-        // patchcov: coverage tolerate reason="unreachable in the shipped build: only the non-default `unshared-containers` A/B holdout (#2999) takes this branch, and that build is not a coverage leg (#5233)"
-        return Route::Refused(EvalError::new(
-            "a path expression that does more than navigate is not supported in the \
-             unshared-containers build",
-        )); // patchcov: coverage end
-    }
-    match extension {
-        None => Route::Interpreter,
-        Some(name) => Route::Refused(EvalError::new(format!(
-            "{name} is not supported in a program whose path expression does more than navigate"
-        ))),
-    }
+    HOLDOUT_REFUSAL
+        .map(str::to_owned)
+        .or_else(|| {
+            extension.map(|name| {
+                format!(
+                    "{name} is not supported in a program whose path expression does more than navigate"
+                )
+            })
+        })
+        .map_or(Route::Interpreter, |message| {
+            Route::Refused(EvalError::new(message))
+        })
 }
+
+/// What the `unshared-containers` holdout refuses a dynamic path target with
+/// (#5233): a constant, not a branch, so the shipped build holds no line only
+/// the holdout runs.
+#[cfg(feature = "unshared-containers")]
+const HOLDOUT_REFUSAL: Option<&str> = Some(
+    "a path expression that does more than navigate is not supported in the \
+     unshared-containers build",
+);
+#[cfg(not(feature = "unshared-containers"))]
+const HOLDOUT_REFUSAL: Option<&str> = None;
 
 /// Why `succinctly jq` refuses `program`, if it does (#5233).
 ///
@@ -1011,7 +1021,7 @@ fn path_context_name(builtin: &Builtin) -> Option<&'static str> {
     Some(match builtin {
         B::Key => "key",
         B::FileIndex => "file_index",
-        B::Filename => "filename", // patchcov: coverage tolerate-line reason="unreachable in jq mode: the jq parser leaves filename an undefined function"
+        B::Filename => "filename",
         B::PathNoArg => "path",
         B::Parent | B::ParentN(_) => "parent",
         _ => return None,

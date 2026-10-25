@@ -2135,3 +2135,20 @@ fn loadvn_and_generator_arguments_keep_jqs_meaning_5223() {
         ]);
     });
 }
+
+/// `filename` is a yq builtin, so the jq parser never hands it to the router,
+/// but the name table is shared: each path-context builtin is named, and a
+/// builtin that reads no path context is not (#5233).
+#[test]
+fn path_context_builtins_are_named_5233() {
+    assert_eq!(path_context_name(&Builtin::Key), Some("key"));
+    assert_eq!(path_context_name(&Builtin::FileIndex), Some("file_index"));
+    assert_eq!(path_context_name(&Builtin::Filename), Some("filename"));
+    assert_eq!(path_context_name(&Builtin::PathNoArg), Some("path"));
+    assert_eq!(path_context_name(&Builtin::Parent), Some("parent"));
+    assert_eq!(
+        path_context_name(&Builtin::ParentN(Box::new(Expr::Identity))),
+        Some("parent")
+    );
+    assert_eq!(path_context_name(&Builtin::Length), None);
+}
