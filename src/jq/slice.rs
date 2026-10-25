@@ -153,9 +153,17 @@ impl SliceBounds {
     /// an object's child-node layout) -- kept as one body, not two
     /// near-identical ones, per this crate's own "duplicated predicates
     /// diverge silently" lesson.
+    ///
+    /// A NaN bound is not symmetric (#5231): jq's `parse_slice` sends a NaN
+    /// start to `0` but a NaN *end* to the length, so `.[1:nan]` is `.[1:]`.
+    /// [`clamp`] sends NaN to `0`, which is right for the start only, so a
+    /// NaN end is replaced by `len` before it gets there.
     fn resolve_with_end_default(&self, len: usize, end_default: f64) -> Range<usize> {
         let start = clamp(self.start.unwrap_or(0.0), len, f64::floor);
-        let end = clamp(self.end.unwrap_or(end_default), len, f64::ceil);
+        let end = match self.end {
+            Some(end) if end.is_nan() => len,
+            end => clamp(end.unwrap_or(end_default), len, f64::ceil),
+        };
         start..end.max(start)
     }
 
@@ -209,8 +217,9 @@ fn bound(slot: Option<&OwnedValue>) -> Result<Option<f64>, EvalError> {
 ///
 /// Written over `f64` so that a bound too large for a `usize` saturates at
 /// `len` instead of wrapping: `[1,2,3] | .[1:1e100]` is `[2,3]`, and a NaN
-/// bound — reachable only through a runtime descriptor — falls to `0`, since
-/// every comparison against it is false.
+/// bound falls to `0`, since every comparison against it is false. That is
+/// jq's answer for a start bound only: a NaN end bound is the length, which
+/// [`SliceBounds::resolve_with_end_default`] substitutes before calling this.
 fn clamp(bound: f64, len: usize, round: fn(f64) -> f64) -> usize {
     let folded = if bound < 0.0 {
         bound + len as f64
@@ -432,6 +441,19 @@ mod tests {
             end: Some(1e100),
         };
         assert_eq!(huge.resolve(3), 1..3);
+    }
+
+    /// #5231: jq's `parse_slice` sends a NaN start to `0` and a NaN end to the
+    /// length, so only the end bound differs from [`clamp`]'s NaN handling.
+    #[test]
+    fn nan_end_bound_is_the_length_and_nan_start_is_zero_5231() {
+        let nan = f64::NAN;
+        let bounds = |start, end| SliceBounds { start, end };
+        assert_eq!(bounds(Some(1.0), Some(nan)).resolve(4), 1..4);
+        assert_eq!(bounds(None, Some(nan)).resolve(4), 0..4);
+        assert_eq!(bounds(Some(nan), Some(nan)).resolve(4), 0..4);
+        assert_eq!(bounds(Some(nan), Some(2.0)).resolve(4), 0..2);
+        assert_eq!(bounds(Some(nan), None).resolve(4), 0..4);
     }
 
     #[test]

@@ -29708,12 +29708,21 @@ pub(crate) fn owned_bound_to_i64(
 ) -> Result<Option<i64>, EvalError> {
     Ok(SliceBounds::resolved_bound(v)?.map(|f| {
         let rounded = round(f);
-        if f < 0.0 && rounded == 0.0 {
+        // A NaN *end* is the length (#5231, `parse_slice`'s `dend = len`), the same
+        // past-the-end answer as above; a NaN start is `0`, which `as i64` gives.
+        if (f < 0.0 && rounded == 0.0) || (f.is_nan() && rounds_up(round)) {
             i64::MAX
         } else {
             rounded as i64
         }
     }))
+}
+
+/// Whether `round` is the ceiling an end bound takes rather than the floor a start bound takes: the
+/// callers of [`owned_bound_to_i64`] pass `f64::ceil` for an end and `f64::floor` for a start, and
+/// nothing else, so `ceil(0.5)` is `1` where `floor(0.5)` is `0` (#5231).
+fn rounds_up(round: fn(f64) -> f64) -> bool {
+    round(0.5) > 0.5
 }
 
 /// [`owned_bound_to_i64`] under the mode's own bound grammar (#3415).
