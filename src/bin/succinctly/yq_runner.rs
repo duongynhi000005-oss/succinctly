@@ -4043,6 +4043,7 @@ fn propagate_assign_alias_marks(expr: &Expr, tree: &mut CommentTree) {
         let source = nav_node(tree, value_expr)
             .filter(|node| contains_alias_mark(node))
             .cloned();
+        let targets_len = targets.len();
         for path_steps in targets {
             match &source {
                 // The source node is an alias itself: the target becomes one too, created if
@@ -4060,13 +4061,18 @@ fn propagate_assign_alias_marks(expr: &Expr, tree: &mut CommentTree) {
                         copy_alias_marks(src, node);
                     }
                 }
-                None => {
+                // A stale mark on the target goes when the write replaced its value. Only for
+                // a lone target: a source that is absent writes nothing in yq, so a comma's
+                // branches would lose a mark yq keeps (`(.c, .d) = .z` on `c: *x`), the flaw
+                // the lone target already has and this pass does not widen.
+                None if targets_len == 1 => {
                     if let Some(node) = comment_tree_at_path_mut(tree, &path_steps) {
                         if matches!(node.anchor_mark(), Some(AnchorMark::Aliases(_))) {
                             node.meta_mut().anchor = None;
                         }
                     }
                 }
+                None => {}
             }
         }
     }

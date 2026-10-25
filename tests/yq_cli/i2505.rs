@@ -152,10 +152,8 @@ fn test_alias_mark_propagation_leaves_the_values_alone_2505() -> Result<()> {
 /// `.a = .b` on this document (#2497), so every alias drops to its value.
 #[test]
 fn test_alias_mark_dropped_when_the_write_destroys_the_anchor_2505() -> Result<()> {
-    for (input, filter, expected) in [("a: &x 1\nb: *x\n", "(.a, .c) = .b", "a: 1\nb: 1\nc: 1\n")] {
-        let (output, exit_code) = run_yq_stdin(filter, input, &[])?;
-        assert_eq!(exit_code, 0, "filter: {filter}");
-        assert_eq!(output, expected, "filter: {filter}");
-    }
+    let (output, exit_code) = run_yq_stdin("(.a, .c) = .b", "a: &x 1\nb: *x\n", &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "a: 1\nb: 1\nc: 1\n");
     Ok(())
 }
