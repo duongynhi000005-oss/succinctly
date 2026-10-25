@@ -180,8 +180,9 @@ Still plain where yq prints `*x`, each listed on #5249 (the residual of #2505): 
 Since [#5249](https://github.com/rust-works/succinctly/issues/5249) the source's trailing comment and flow style are copied too (`.c = .b` on `b: *x # bc` is `c: *x # bc`, on `b: [*x]` it is `c: [*x]`), and so is everything under a copied container (each item's and field's comment and style).
 This is `propagate_assign_copied_presentation`, and it is not specific to aliases: `.c = .b` on `b: [1, 2] # t` copies the comment and the flow style of a document with no alias in it.
 The source's comment wins when it has one, and the target's own comment stays when it has none, as in yq.
-The node's own style is the source's when the target is new, an alias, a scalar or an empty container, and the target's own when a non-empty container of the same kind is written over it.
-The copy is skipped when a later stage rewrites the source (`.c = .b | .b = 5` leaves `c` plain where yq prints `c: [1] # t`), because presentation read from the finished tree no longer describes the target.
+The node's own style is flow when either node is flow, and otherwise the source's unless the target was a non-empty container of the same kind, which keeps the style it had (`b: [1]` over a block `c` is `c: [1]`, a block `b` over a non-empty flow `c` stays flow, a block `b` over an empty `c: []` is block).
+The copy is skipped when a later stage rewrites the source (`.c = .b | .b = 5` leaves `c` plain where yq prints `c: [1] # t`), because presentation read from the finished tree no longer describes the target; the same holds when a later stage edits or replaces the target (`.c = .b | .c[0].a = 2`, `.c = .b | .c = 5`, where yq prints `c: [{a: 2}] # t` and `c: 5 # t`).
+A target that is not a static path (`.[] = .b`, `.c[] = .b`) is not reached either.
 Not copied, where yq copies them: a scalar's own quoting (`b: "q"` copies to a new `c: "q"` in yq, `c: q` here), an explicit tag (`b: !!seq [1]` copies to `c: !!seq [1]`), the node's own head and foot lines, and an anchor declaration nested inside a copied container (yq prints the `&y` twice; the pass writes no anchor mark of its own, so only the alias marks of [#2505](https://github.com/rust-works/succinctly/issues/2505) reach the copy).
 
 **Rule 4(b)**, on the same `propagate_assign_alias_marks` pass: a computed `value` side

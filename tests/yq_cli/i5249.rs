@@ -129,6 +129,34 @@ const ROWS: &[(&str, &str, &str)] = &[
         "(.c, .b) = .b",
         "b: [1, 2] # t\nc: [1, 2] # t\n",
     ),
+    // A flow node wins over a block one: yq prints a flow source over a block target as flow, and
+    // keeps a non-empty flow target flow under a block source, while an empty one takes the block.
+    ("b: [1]\nc:\n  - 2\n", ".c = .b", "b: [1]\nc: [1]\n"),
+    (
+        "b: {x: 1}\nc:\n  y: 2\n",
+        ".c = .b",
+        "b: {x: 1}\nc: {x: 1}\n",
+    ),
+    ("b: [[1]]\nc:\n  - - 9\n", ".c = .b", "b: [[1]]\nc: [[1]]\n"),
+    (
+        "b: [1] # t\nc:\n  - 2 # q\n",
+        ".c = .b",
+        "b: [1] # t\nc: [1] # t\n",
+    ),
+    ("b:\n  - 1\nc: [2]\n", ".c = .b", "b:\n  - 1\nc: [1]\n"),
+    ("b:\n  - 1\nc: []\n", ".c = .b", "b:\n  - 1\nc:\n  - 1\n"),
+    ("b: []\nc: [9]\n", ".c = .b", "b: []\nc: []\n"),
+    ("b: {x: 1}\nc: {}\n", ".c = .b", "b: {x: 1}\nc: {x: 1}\n"),
+    (
+        "a: &x [2]\nb: [1]\nc: *x\n",
+        ".c = .b",
+        "a: &x [2]\nb: [1]\nc: [1]\n",
+    ),
+    (
+        "a: &x [2]\nb:\n  - 1\nc: *x\n",
+        ".c = .b",
+        "a: &x [2]\nb:\n  - 1\nc:\n  - 1\n",
+    ),
     // A source the write created under a new parent has no node in the presentation tree yet.
     (
         "b: 1 # t\n",
@@ -170,5 +198,26 @@ fn test_a_source_rewritten_by_a_later_stage_copies_nothing_5249() -> Result<()> 
     let (output, exit_code) = run_yq_stdin(".c = .b | .b = 5", "b: [1] # t\n", &[])?;
     assert_eq!(exit_code, 0);
     assert_eq!(output, "b: 5\nc:\n  - 1\n");
+    Ok(())
+}
+
+/// A target a later stage edits or replaces, and a target that is not a static path, take no copy:
+/// yq prints `c: [{a: 2}] # t`, `c: 5 # t` and `c: [1] # t` for these (recorded in
+/// `limitations.md`). The value is right in every one.
+#[test]
+fn test_targets_the_pass_does_not_reach_stay_plain_5249() -> Result<()> {
+    for (input, filter, expected) in [
+        (
+            "b: [{a: 1}] # t\n",
+            ".c = .b | .c[0].a = 2",
+            "b: [{a: 1}] # t\nc:\n  - a: 2\n",
+        ),
+        ("b: [1] # t\n", ".c = .b | .c = 5", "b: [1] # t\nc: 5\n"),
+        ("b: [1] # t\nc: 3\n", ".[] = .b", "b: [1] # t\nc:\n  - 1\n"),
+    ] {
+        let (output, exit_code) = run_yq_stdin(filter, input, &[])?;
+        assert_eq!(exit_code, 0, "filter: {filter} on {input:?}");
+        assert_eq!(output, expected, "filter: {filter} on {input:?}");
+    }
     Ok(())
 }
