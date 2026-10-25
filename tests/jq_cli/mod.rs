@@ -137,3 +137,4 @@ mod i5256;
 mod i5263;
 mod i5271;
 mod i5274;
+mod i5273;

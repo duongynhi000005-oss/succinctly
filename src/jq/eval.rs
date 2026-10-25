@@ -12599,6 +12599,9 @@ enum OwnedAssignRhs<'f> {
     Combine(ArithOp, OwnedValue),
     /// `//=`: the old value if truthy, else this one.
     Alternative(OwnedValue),
+    /// `|= (. // C) + R`, `= (.k // C) + R` (#5273): the old value if truthy, else `C`,
+    /// then `+ R`. `(C, R)`.
+    DefaultCombine(OwnedValue, OwnedValue),
 }
 
 /// Answer `PATH = V`, `PATH |= F`, `PATH op= V` or `PATH //= V` directly
@@ -12682,11 +12685,30 @@ fn owned_assign_step<S: EvalSemantics>(
         }
         Expr::Assign { path, value } => (
             path,
-            OwnedAssignRhs::Value(owned_assign_operand::<S>(value, state)?),
+            match owned_self_read_grow::<S>(path, value) {
+                Some(rhs) => rhs,
+                None => OwnedAssignRhs::Value(owned_assign_operand::<S>(value, state)?),
+            },
         ),
         Expr::Update { path, filter } => (
             path,
             match filter.as_ref() {
+                // `|= (. // C) + R` (#5273): grows the old value like `|= . + R`.
+                Expr::Arithmetic {
+                    op: ArithOp::Add,
+                    left,
+                    right,
+                    ..
+                } if S::TAG == EvalTag::Jq
+                    && alternative_default_of(left, &|e| matches!(e, Expr::Identity)).is_some() =>
+                {
+                    match owned_default_combine::<S>(left, right, &|e| matches!(e, Expr::Identity))
+                    {
+                        Some(rhs) => rhs,
+                        None if owned_state_expr_shape(filter) => OwnedAssignRhs::Filter(filter),
+                        None => return None,
+                    }
+                }
                 Expr::Arithmetic {
                     op, left, right, ..
                 } if matches!(left.as_ref(), Expr::Identity) => {
@@ -12754,6 +12776,20 @@ fn owned_assign_step<S: EvalSemantics>(
         SingleStep::Unclosed => None,
         SingleStep::Step(key) => {
             let old = owned_assign_step_child(&key, state)?;
+            // #5273: `+` onto a container the slot holds, with the slot's own handle, so the
+            // array, object or string grows where it is instead of being copied.
+            if S::TAG == EvalTag::Jq && owned_grows_in_place(old, &rhs) {
+                let (OwnedAssignRhs::Combine(_, right) | OwnedAssignRhs::DefaultCombine(_, right)) =
+                    rhs
+                else {
+                    return None;
+                };
+                let slot = owned_slot_mut(&key, state)?;
+                // Moved out for the sum, which fails only on an allocation failure for two
+                // containers of one kind, after which the fold is over (as `. += X` above).
+                let taken = core::mem::replace(slot, OwnedValue::Null);
+                return Some(arith_combine::<S>(ArithOp::Add, taken, right).map(|sum| *slot = sum));
+            }
             let yq_shape =
                 matches!(key, StepKey::Field(_)) && matches!(state, OwnedValue::Object(_));
             let new_value = owned_assign_new_value::<S>(expr, rhs, old, yq_shape)?;
@@ -12787,6 +12823,98 @@ fn owned_assign_step<S: EvalSemantics>(
     }
 }
 
+/// `(READ // C)` for a `READ` the caller names: the default `C`.
+fn alternative_default_of<'e>(expr: &'e Expr, reads: &dyn Fn(&Expr) -> bool) -> Option<&'e Expr> {
+    match unwrap_paren(expr) {
+        Expr::Alternative(left, default) if reads(unwrap_paren(left)) => Some(default),
+        _ => None,
+    }
+}
+
+/// `(READ // C) + R` as a [`OwnedAssignRhs::DefaultCombine`] (#5273), for closed `C` and `R`;
+/// `None` when either reads anything.
+fn owned_default_combine<S: EvalSemantics>(
+    left: &Expr,
+    right: &Expr,
+    reads: &dyn Fn(&Expr) -> bool,
+) -> Option<OwnedAssignRhs<'static>> {
+    // The read of `.` is the old value, which a binding the embed table tracks could be
+    // (as [`owned_assign_operand`] declines, #5263).
+    if super::eval_generic::embed_table_active() {
+        return None;
+    }
+    let default = closed_expr_to_owned::<S>(alternative_default_of(left, reads)?)?;
+    Some(OwnedAssignRhs::DefaultCombine(
+        default,
+        closed_expr_to_owned::<S>(right)?,
+    ))
+}
+
+/// `PATH = PATH + R` and `PATH = (PATH // C) + R` (#5273), for a path of one static step and
+/// closed `C` and `R`: reading the slot being written, so the old value there is the left of
+/// the `+` and the write can grow it where it is, rather than evaluating the read on the whole
+/// state. `None` is every other right side.
+fn owned_self_read_grow<S: EvalSemantics>(
+    path: &Expr,
+    value: &Expr,
+) -> Option<OwnedAssignRhs<'static>> {
+    if S::TAG != EvalTag::Jq || super::eval_generic::embed_table_active() {
+        return None;
+    }
+    let Expr::Arithmetic {
+        op: ArithOp::Add,
+        left,
+        right,
+        ..
+    } = unwrap_paren(value)
+    else {
+        return None;
+    };
+    let step = static_step(unwrap_paren(path))?;
+    let reads = |e: &Expr| match (static_step(e), &step) {
+        (Some(StepKey::Field(a)), StepKey::Field(b)) => a == *b,
+        (Some(StepKey::Index(a)), StepKey::Index(b)) => a == *b,
+        _ => false,
+    };
+    if reads(unwrap_paren(left)) {
+        return Some(OwnedAssignRhs::Combine(
+            ArithOp::Add,
+            closed_expr_to_owned::<S>(right)?,
+        ));
+    }
+    owned_default_combine::<S>(left, right, &reads)
+}
+
+/// Whether the write `rhs` is a `+` of two arrays, two objects or two strings onto `old`, which
+/// cannot fail, so [`owned_assign_step`] may take `old` out of its slot to extend it (#5273).
+fn owned_grows_in_place(old: &OwnedValue, rhs: &OwnedAssignRhs) -> bool {
+    let right = match rhs {
+        OwnedAssignRhs::Combine(ArithOp::Add, right) => right,
+        OwnedAssignRhs::DefaultCombine(_, right) if old.is_truthy() => right,
+        _ => return false,
+    };
+    matches!(
+        (old, right),
+        (OwnedValue::Array(_), OwnedValue::Array(_))
+            | (OwnedValue::Object(_), OwnedValue::Object(_))
+            | (OwnedValue::String(_), OwnedValue::String(_))
+    )
+}
+
+/// The slot `step` names inside `container`, if it holds one already.
+fn owned_slot_mut<'v>(
+    step: &StepKey<'_>,
+    container: &'v mut OwnedValue,
+) -> Option<&'v mut OwnedValue> {
+    match (step, container) {
+        (StepKey::Field(name), OwnedValue::Object(map)) => map.get_mut(name.as_ref()),
+        (StepKey::Index(idx), OwnedValue::Array(items)) => {
+            items.get_mut(usize::try_from(*idx).ok()?)
+        }
+        _ => None,
+    }
+}
+
 /// The value [`owned_assign_step`] writes, given the old value at its path,
 /// or `None` to decline. yq mode keeps only #3025's `.field op= <number>`
 /// shape (`yq_shape`: one field step into an object), since its `=`
@@ -12817,6 +12945,14 @@ fn owned_assign_new_value<S: EvalSemantics>(
             }
         }
         OwnedAssignRhs::Combine(op, right) => arith_combine::<S>(op, old.clone(), right).ok(),
+        OwnedAssignRhs::DefaultCombine(default, right) => {
+            let base = if old.is_truthy() {
+                old.clone()
+            } else {
+                default
+            };
+            arith_combine::<S>(ArithOp::Add, base, right).ok()
+        }
         OwnedAssignRhs::Alternative(_) if old.is_truthy() => Some(old.clone()),
         OwnedAssignRhs::Alternative(value) => Some(value),
     }
@@ -151304,6 +151440,8 @@ mod share_audit_2999 {
         let json = format!("[{}]", body.join(",")).into_bytes();
         for filter in [
             "reduce .[] as $r ({}; .[$r.name] |= (. // 0) + 1)",
+            // #5273: the default is the array that grows, so a first step copies nothing either.
+            "reduce .[] as $r ({}; .[$r.name] |= (. // []) + [$r.score, $r])",
             "reduce .[] as $r ({}; .[$r.name] |= if . == null then 1 else . + 1 end)",
             "reduce .[] as $r ({}; .total |= (. // 0) + $r.score)",
             "reduce .[] as $r ([]; .[length] = $r.score)",
@@ -151327,11 +151465,34 @@ mod share_audit_2999 {
         // #5271: an array operand (`[]`, `[a, b]`) is one value, so the step is taken. What
         // each step still copies is the one array it extends (a group, here of one
         // element), not the accumulator: 1,000 small copies, none of the 1,000-key state.
-        for filter in [
-            "reduce .[] as $r ({}; .[$r.name] |= (. // []) + [$r.score, $r])",
+        assert_forced(
+            &json,
             "reduce .[] as $r ({}; .[$r.name] |= [.] + [$r.score])",
+            &[(Kind::ArrayUnwrap, 1000)],
+        );
+    }
+
+    /// #5273: one field that grows -- an array, an object or a string -- is extended where it
+    /// is: the step takes the old value out of its slot for the `+`, so 1,000 steps force no
+    /// copy of it (before, each step copied the whole value, so the loop was quadratic).
+    #[test]
+    fn fold_growing_one_slot_copies_nothing_5273() {
+        let body: Vec<String> = (0..1000)
+            .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
+            .collect();
+        let json = format!("[{}]", body.join(",")).into_bytes();
+        for filter in [
+            "reduce .[] as $r ({}; .a |= (. // []) + [$r.score])",
+            "reduce .[] as $r ({}; .a = .a + [$r.score])",
+            "reduce .[] as $r ({}; .a = (.a // []) + [$r.score])",
+            "reduce .[] as $r ({}; .a += [$r.score])",
+            "reduce .[] as $r ({}; .a |= . + [$r.score])",
+            "reduce .[] as $r ({}; .a += {($r.name): $r.score})",
+            "reduce .[] as $r ({}; .a |= (. // {}) + {($r.name): $r.score})",
+            "reduce .[] as $r ({}; .a += $r.name)",
+            "reduce .[] as $r ([[]]; .[0] = .[0] + [$r.score])",
         ] {
-            assert_forced(&json, filter, &[(Kind::ArrayUnwrap, 1000)]);
+            assert_forced(&json, filter, &[]);
         }
     }
 
