@@ -75632,6 +75632,12 @@ fn fold_step_each<S: EvalSemantics>(
 /// `eval_generic`'s `loop_step_generic`), so the gate below cannot drift
 /// between them.
 ///
+/// Also taken (#5279): an `if` whose condition the step can settle is the branch it chooses,
+/// itself a step ([`owned_if_step`], jq mode; a condition that reads the state is declined under
+/// the table, a closed one is not); a left-associated chain of arithmetic on the accumulator
+/// (`. + a + b`) is applied link by link ([`owned_arith_chain_step`], not under the table); and
+/// the single-field append of [`owned_assign_step`].
+///
 /// While the #2889 embed table is live (the loop runs inside an `as` binding
 /// that holds a document node) only the assignment half of the step runs -- not
 /// the slice cut of [`try_eval_owned_step`] either (#5274), whose result shares the
@@ -75654,11 +75660,45 @@ fn fold_step_each<S: EvalSemantics>(
 /// the table, so this gate is a no-op there.
 #[inline(always)]
 pub(crate) fn owned_update_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
-    // `if C then A else B end` whose `C` is one value the step can settle (closed, or reading
-    // the state, #5279): the UPDATE is whichever branch `C` chooses, and that is a step of its
-    // own. A branch that is no step hands the state back, and the whole `if` is the
-    // evaluator's.
-    if let (
+    // An `if` UPDATE is a branch choice (#5279); kept out of line, with the chain below, so the
+    // function every fold driver inlines stays the size it was.
+    if matches!(expr, Expr::If { .. } | Expr::Paren(_)) {
+        return match owned_if_step::<S>(expr, state) {
+            Ok(done) => done,
+            Err(state) => owned_update_step_arith::<S>(expr, state),
+        };
+    }
+    owned_update_step_arith::<S>(expr, state)
+}
+
+/// The rest of [`owned_update_step`], once `expr` is no settleable `if`.
+#[inline(always)]
+fn owned_update_step_arith<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
+    match owned_arith_accumulator_shape::<S>(expr) {
+        Some((op, rhs)) => OwnedStep::Handled(arith_combine::<S>(op, state, rhs)),
+        None if super::eval_generic::embed_table_active() => {
+            try_owned_assign_step::<S>(expr, state)
+        }
+        None if matches!(expr, Expr::Arithmetic { left, .. } if matches!(**left, Expr::Arithmetic { .. })) => {
+            match owned_arith_chain_step::<S>(expr, state) {
+                OwnedStep::Declined(state) => try_eval_owned_step::<S>(expr, state),
+                done => done,
+            }
+        }
+        None => try_eval_owned_step::<S>(expr, state),
+    }
+}
+
+/// `if C then A else B end` whose `C` is one value the step can settle (closed, or reading the
+/// state, #5279): the UPDATE is whichever branch `C` chooses, and that is a step of its own.
+/// `Err(state)` when `expr` is no such `if`, or `C` cannot be settled; a branch that is no step
+/// hands the state back as `Declined`, and the whole `if` is then the evaluator's.
+#[inline(never)]
+fn owned_if_step<S: EvalSemantics>(
+    expr: &Expr,
+    state: OwnedValue,
+) -> Result<OwnedStep, OwnedValue> {
+    let (
         EvalTag::Jq,
         Expr::If {
             cond,
@@ -75666,29 +75706,30 @@ pub(crate) fn owned_update_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue
             else_branch,
         },
     ) = (S::TAG, unwrap_paren(expr))
-    {
-        if let Some(chosen) = owned_assign_operand::<S>(cond, &state) {
-            let branch = if chosen.is_truthy() {
-                then_branch
-            } else {
-                else_branch
-            };
-            return owned_update_step::<S>(branch, state);
-        }
-    }
-    match owned_arith_accumulator_shape::<S>(expr) {
-        Some((op, rhs)) => OwnedStep::Handled(arith_combine::<S>(op, state, rhs)),
-        None if super::eval_generic::embed_table_active() => {
-            try_owned_assign_step::<S>(expr, state)
-        }
-        None => match owned_arith_chain_shape::<S>(expr) {
-            Some(links) => OwnedStep::Handled(
-                links
-                    .into_iter()
-                    .try_fold(state, |acc, (op, rhs)| arith_combine::<S>(op, acc, rhs)),
-            ),
-            None => try_eval_owned_step::<S>(expr, state),
-        },
+    else {
+        return Err(state);
+    };
+    let Some(chosen) = owned_assign_operand::<S>(cond, &state) else {
+        return Err(state);
+    };
+    let branch = if chosen.is_truthy() {
+        then_branch
+    } else {
+        else_branch
+    };
+    Ok(owned_update_step::<S>(branch, state))
+}
+
+/// `. + a + b`: [`owned_arith_chain_shape`] applied to the moved state, link by link.
+#[inline(never)]
+fn owned_arith_chain_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
+    match owned_arith_chain_shape::<S>(expr) {
+        Some(links) => OwnedStep::Handled(
+            links
+                .into_iter()
+                .try_fold(state, |acc, (op, rhs)| arith_combine::<S>(op, acc, rhs)),
+        ),
+        None => OwnedStep::Declined(state),
     }
 }
 
@@ -98928,6 +98969,78 @@ mod tests {
             };
             assert_eq!(returned, input);
         }
+    }
+
+    /// #5279: an `if` UPDATE is its chosen branch's step, and a chain of `+` is a step, except
+    /// where they would read what the #2889 embed table guards: under the table a condition that
+    /// reads the state declines, a closed one still chooses, and a chain is the evaluator's. A
+    /// branch that is no step hands the state back untouched, whole `if` and all.
+    #[test]
+    #[cfg(all(feature = "std", not(feature = "unshared-containers")))]
+    fn if_and_chain_steps_under_the_embed_table_and_when_the_branch_is_no_step_5279() {
+        use crate::jq::eval_generic::embed_table_push;
+
+        let state = || {
+            OwnedValue::object_from([
+                ("a".to_string(), OwnedValue::Int(1)),
+                ("b".to_string(), OwnedValue::Int(2)),
+            ])
+        };
+        let handled = |src: &str| {
+            matches!(
+                owned_update_step::<JqSemantics>(&parse(src).unwrap(), state()),
+                OwnedStep::Handled(Ok(_))
+            )
+        };
+        let declined_untouched = |src: &str| {
+            let OwnedStep::Declined(returned) =
+                owned_update_step::<JqSemantics>(&parse(src).unwrap(), state())
+            else {
+                return false;
+            };
+            returned == state()
+        };
+        let text_chain = |src: &str| {
+            owned_update_step::<JqSemantics>(&parse(src).unwrap(), OwnedValue::string("x"))
+        };
+
+        // Outside the table.
+        assert!(handled("if length > 1 then .c = 1 else .d = 2 end"));
+        assert!(handled("if true then .c = 1 else .d = 2 end"));
+        // A branch that is no step: the state comes back, for the whole `if`.
+        assert!(declined_untouched(
+            "if length > 1 then .a | length else . end"
+        ));
+        assert!(declined_untouched(
+            "if true then map_values(. + 1) else . end"
+        ));
+        let OwnedStep::Handled(Ok(chained)) = text_chain(r#". + "y" + "z""#) else {
+            panic!("a chain of + must be taken outside the table");
+        };
+        assert_eq!(chained, OwnedValue::string("xyz"));
+
+        // Under the table.
+        let bound = OwnedValue::object_from([("a".to_string(), OwnedValue::Int(1))]);
+        let origin = BindOrigin::Node {
+            node: 1,
+            document: 1,
+        };
+        let _guard = embed_table_push::<JqSemantics>(Some(&origin), &mut bound.clone());
+        assert!(
+            declined_untouched("if length > 1 then .c = 1 else .d = 2 end"),
+            "a condition that reads the state must decline under the table"
+        );
+        assert!(
+            handled("if true then .c = 1 else .d = 2 end"),
+            "a closed condition still chooses a branch under the table"
+        );
+        assert!(
+            matches!(
+                text_chain(r#". + "y" + "z""#),
+                OwnedStep::Declined(returned) if returned == OwnedValue::string("x")
+            ),
+            "a chain of + is the evaluator's under the table"
+        );
     }
 
     /// #5263: an operand that reads `.` is evaluated on the state, which a binding the

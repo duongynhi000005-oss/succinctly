@@ -196,6 +196,30 @@ fn test_if_chain_and_field_append_folds_answer_as_jq_5279() -> Result<()> {
             r#"{a:""} | [while(.a | length < 4; .a += "x")]"#,
             r#"[{"a":""},{"a":"x"},{"a":"xx"},{"a":"xxx"}]"#,
         ),
+        (
+            ". as $d | reduce .[] as $x ($d; if length > 2 then .[1:] else . + [$x.id] end) | [., $d | length]",
+            "[2,5]",
+        ),
+        (
+            "[.[0].id] as $d | reduce .[] as $x ($d; if length > 2 then .[1:] else . + [$x.id] end)",
+            "[2,4]",
+        ),
+        (
+            "reduce .[] as $x ([]; if length > 2 then map(. + 1) else . + [$x.id] end)",
+            "[3,4,5]",
+        ),
+        (
+            "reduce .[] as $x ([]; if length > 2 then (.[0] |= . + 10) else . + [$x.id] end)",
+            "[21,2,3]",
+        ),
+        (
+            r#"reduce .[] as $x ([]; if $x.id > 3 then error("big") else . + [$x.id] end)?"#,
+            "",
+        ),
+        (
+            r#". as $d | reduce .[] as $x (""; . + ($x.name | ascii_upcase) + "-") | [., ($d | length)]"#,
+            r#"["A-B-A-C-D-",5]"#,
+        ),
     ] {
         let (stdout, stderr, code) =
             run_jq_full(&["-n", "-c", &format!("{RECORDS} | {filter}")], None)?;
