@@ -225,10 +225,18 @@ class CiWiringTests(unittest.TestCase):
 
     def test_no_other_leg_runs_jq_cli_tests_with_the_two_tests_twice(self):
         # A third place running `--test jq_cli_tests` unskipped would run them twice.
+        # The `holdout` leg (#5254) runs it under `--all-features`, and so skips them too.
         for job in MATRIX_JOBS:
             with self.subTest(job=job):
                 for name, leg in matrix_legs(job).items():
-                    if name != "cli-gated":
+                    if name == "holdout":
+                        self.assertEqual(
+                            leg.count("skip=$(scripts/deep-recursion-tests.sh skip-args)"),
+                            1,
+                            name,
+                        )
+                        self.assertIn(" -- $skip", leg, name)
+                    elif name != "cli-gated":
                         self.assertNotIn("--test jq_cli_tests", leg, name)
 
 

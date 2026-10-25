@@ -61113,6 +61113,7 @@ fn test_path_register_survives_non_matching_trim_4016() -> Result<()> {
 /// names it. A non-empty path set builds a fresh value and keeps raising, which the rows pin
 /// in the other direction (`[1]` under `.[]?`, `{"a":1}` under `.b?`). Every row is a live jq
 /// 1.7.1 capture: (input, filter, stdout, exit code).
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_path_accepts_del_with_an_empty_path_set_4295() -> Result<()> {
     const ROWS: &[(&str, &str, &str, i32)] = &[
@@ -81243,6 +81244,7 @@ fn test_nested_fold_in_reduce_update_navigates_the_accumulator_4438() -> Result<
 /// jq raises on the handler's `1` (and `del` of it wrote), and `try .a` raised where jq answers
 /// `["a"]`. Controls: a body that navigates nothing, a source that moves nothing, nested `try`s.
 /// Every row captured from jq 1.7.1 (`/usr/bin/jq`), on the stdin and `-n` routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_reduce_update_try_body_navigation_is_caught_4459() -> Result<()> {
     let doc = r#"{"a":true}"#;
@@ -103309,6 +103311,7 @@ fn test_tracked_var_rebuilt_root_fix_does_not_over_demote_2642() -> Result<()> {
 /// the path is the one navigated inside the `path()` call, so this row was
 /// never even the same *answer* as its siblings. Closed by #3177 -- see
 /// [`test_owned_embed_navigated_inside_path_argument_3177`].
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_tracked_var_owned_embed_residual_closed_3177() -> Result<()> {
     let filter = ". as $x | [.] | path(.[0] | $x)";
@@ -103336,6 +103339,7 @@ fn test_tracked_var_owned_embed_residual_closed_3177() -> Result<()> {
 /// every wider spelling -- `[.,.]`, `{k:.}`, `[[.]]`, `.[]` -- since none
 /// of those is a lazy sequence, so they are pinned here alongside. Every
 /// answer captured live from jq 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{k:.}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone.
@@ -103413,6 +103417,7 @@ fn test_owned_embed_navigated_inside_path_argument_3177() -> Result<()> {
 /// from their input's own children in jq, and a literal `getpath` answers a
 /// node, so an embed of `$x` keeps its identity through them. Every
 /// expected output captured live against jq 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_owned_embed_identity_through_relocating_builtins_3178() -> Result<()> {
@@ -103752,6 +103757,7 @@ fn test_full_range_slice_yq_mode_style_unaffected_3306() -> Result<()> {
 /// root resolves that target over the caller's own tree, as `path(f)` does
 /// since #3177, so `del`, `=`, `|=`, `op=` and `//=` answer where jq does.
 /// Every expected output captured live against jq 1.7.1 on `{"a":1}`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_owned_embed_write_target_3188() -> Result<()> {
@@ -104039,6 +104045,7 @@ fn test_del_fractional_index_yq_mode_refused_4749() -> Result<()> {
 /// missing or non-number bound an error only on an array or string, start
 /// floored and end ceiled, and the key appended to a path verbatim. Every
 /// row captured live against jq 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_object_index_key_is_a_slice_descriptor_3300() -> Result<()> {
     for (input, filter, expected) in [
@@ -104591,6 +104598,10 @@ fn test_getpath_array_segment_yq_mode_unchanged_2429() -> Result<()> {
 /// needle is `[]` (`null` for `index`/`rindex`), and a scalar pattern is the
 /// one-element needle. A `null`, object or string input still refuses an array
 /// pattern. Every expectation was captured from `/usr/bin/jq` 1.7.1.
+#[cfg_attr(
+    feature = "unshared-containers",
+    ignore = "holdout has no node identity or sharing (#5254)"
+)]
 #[test]
 fn test_array_pattern_is_a_subarray_search_3453() -> Result<()> {
     for (input, filter, expected) in [
@@ -106413,6 +106424,7 @@ fn test_tracked_var_rebuilt_root_in_evaluator_routes_refuse_3036() -> Result<()>
 /// and scalars included (the values `eval.rs` cannot recover a node
 /// identity for, which is why the fix does not rely on one). Captured live
 /// against jq 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{a:1}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone.
@@ -106819,6 +106831,7 @@ fn test_fold_source_runs_against_null_after_first_init_fork_3895() -> Result<()>
 /// and a different node that merely looks equal all refuse, as does everything
 /// #3329 already refused (a literal INIT, a later fork). Both routes, every row
 /// captured live from jq 1.7.1 over `{"a":1}`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{a:1}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone (as in the #3329 test below).
@@ -106928,6 +106941,7 @@ fn test_fold_loop_variable_rebound_by_as_3898() -> Result<()> {
 /// and source materialize separately, so INIT's own `Rc` is registered for the
 /// source to reuse) and `-n 'input | ...'` through `eval.rs`'s owned fold --
 /// and every expected value is captured from `/usr/bin/jq` 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{k:.}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone.
@@ -107223,6 +107237,7 @@ fn test_fold_loop_variable_in_path_position_3329() -> Result<()> {
 /// Every row runs on both routes: stdin through the generic evaluator, and
 /// `-n 'input | ...'` through `eval.rs`'s own bind sites. All rows are
 /// captured from jq 1.7.1, and every answering row refused on `main`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_update_marker_naming_the_accumulator_3181() -> Result<()> {
     let answering = [
@@ -107382,6 +107397,7 @@ fn test_fold_update_marker_naming_the_accumulator_3181() -> Result<()> {
 /// marker's recorded node the marker is the invocation root, and
 /// `Origin::Snapshot`'s value rule is sound for it. Read, and every write
 /// operator; all captured live from jq 1.7.1, all refused on `main`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{k:.a}` are not formatting strings; clippy
 // cannot tell the two apart from the brace shape alone (as `*_2642`).
@@ -108341,6 +108357,7 @@ fn test_owned_root_scalar_anchor_is_jq_mode_only_3482() -> Result<()> {
 /// value for a nested container, not only at its depth 0, so `{k:.}`'s copy
 /// of the root holds `$y`'s very value at `.a`, as jq's does. Every expected
 /// output captured live against jq 1.7.1 on `{"a":{"b":1},"c":{"b":1}}`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_embed_reused_below_depth_zero_3179() -> Result<()> {
@@ -108679,6 +108696,7 @@ fn test_navigated_bind_on_owned_root_yq_mode_unchanged_3135() -> Result<()> {
 /// position below the root for the one resolver invocation they enter.
 /// Every row captured live from `/usr/bin/jq` 1.7.1; every one exited 5
 /// on `main` before.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_navigated_bind_positional_scalar_and_nested_rows_answer_3134() -> Result<()> {
     for (input, filter, expected) in [
@@ -108912,6 +108930,7 @@ fn test_navigated_bind_yq_mode_unchanged_3037() -> Result<()> {
 /// that allocates a fresh one. succinctly promotes a bound scalar to shared
 /// storage at the bind (`SharableString::promote`, #3191), so both halves
 /// hold here as well. Every row captured live from `/usr/bin/jq` 1.7.1.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_scalar_bind_keeps_node_identity_3191() -> Result<()> {
@@ -109136,6 +109155,7 @@ fn test_scalar_bind_keeps_node_identity_3191() -> Result<()> {
 /// it always named. Both halves are pinned: the `path($x)` read *and* the
 /// write (`=`, `|=`, `del`), since a write is where getting this wrong
 /// costs data rather than an answer.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{k:.}`/`{a:1}` are not formatting strings;
 // clippy cannot tell the two apart from the brace shape alone.
@@ -109281,6 +109301,7 @@ fn test_owned_embed_keeps_node_identity_2889() -> Result<()> {
 /// as jq's eager `map` does, where the lazy `first` arm alone would not
 /// (#725/#2174's documented divergence, kept from spreading to a new
 /// spelling).
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{a:1}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone.
@@ -109374,6 +109395,7 @@ fn test_owned_embed_fold_ties_and_identity_stage_2889() -> Result<()> {
 /// promotion): the node named is a *child* of the re-indexed root, which is
 /// what proves the mint is the cursor's own node rather than "the root of
 /// whatever document we just built".
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 // jq filter literals like `{k:.}` are not formatting strings; clippy cannot
 // tell the two apart from the brace shape alone.
@@ -109858,6 +109880,7 @@ fn test_default_route_empty_container_embed_keeps_identity_3180() -> Result<()> 
 /// fold, so the stage standing on the embed sees the node rather than a
 /// copy. Every expected output captured live against jq 1.7.1 (`-n`, the
 /// document twice on stdin).
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_input_route_array_collect_keeps_embed_identity_3180() -> Result<()> {
@@ -110398,6 +110421,7 @@ fn test_fold_assign_under_embed_table_matches_jq_3241() -> Result<()> {
 /// write destroyed (the accumulator being the bound document itself, a child
 /// reached through a node the write replaced, a combine that allocates in jq
 /// too) or swallow an error raised mid-fold.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)]
 fn test_fold_assign_under_embed_table_still_refuses_3241() -> Result<()> {
@@ -116855,6 +116879,10 @@ fn test_fold_container_loop_variable_identity_through_document_input_3896() -> R
 /// value in the in-place step, and that must not lose jq's instance check (#3896): a
 /// NaN-bearing container is equal to itself because both operands are one shared node, and
 /// unequal to a distinct node with the same contents. Every row captured from jq 1.7.1.
+#[cfg_attr(
+    feature = "unshared-containers",
+    ignore = "holdout has no node identity or sharing (#5254)"
+)]
 #[test]
 fn test_fold_assignment_compares_a_loop_variable_by_identity_4005() -> Result<()> {
     for (filter, expected) in [
@@ -125435,6 +125463,7 @@ fn test_comma_bind_source_is_classified_per_branch_3334() -> Result<()> {
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_bind_source_that_may_be_the_register_refuses_loudly_3423() -> Result<()> {
     let doc = r#"{"a":{"b":1}}"#;
@@ -127697,6 +127726,7 @@ fn test_comma_head_pipe_array_multi_stage_tail_3476() -> Result<()> {
 /// that reached it (`.b?`, `.[-1]`, `.[1.0]`), and `Frame::names` compared
 /// those spellings, so two routes to one node refused. jq's `jv_identical`
 /// sees the node, not the spelling. Every value is from jq 1.7.1 with `-c`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_resolver_frame_position_is_spelling_insensitive_3464() -> Result<()> {
     let doc = r#"{"a":{"b":1},"x":[1,1]}"#;
@@ -127854,6 +127884,7 @@ fn test_resolver_frame_position_is_spelling_insensitive_3464() -> Result<()> {
 /// source's node in lockstep with the owned value (`CursorPatternMode`), for
 /// an object key, an array position, a computed key, a `?//` alternative and
 /// a nested pattern alike.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_destructuring_bind_keeps_node_identity_3466() -> Result<()> {
     assert_path_rows_3289(&[
@@ -129631,6 +129662,7 @@ fn test_destructuring_bind_constructed_source_answers_as_jq_does_3466() -> Resul
 /// on which value the variable holds), and a computed key steps by its
 /// evaluated value -- a literal `0`, a computed `-1`, an out-of-range one --
 /// end to end (rows captured from jq 1.7.1).
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_destructuring_bind_duplicate_and_computed_keys_3466() -> Result<()> {
     assert_path_rows_3289(&[
@@ -136079,6 +136111,7 @@ fn for_both_evaluators_3795(
 /// - a `reduce`/`foreach` over such a source, which the resolver now drives.
 ///
 /// Every expected value captured live against jq 1.7.1. Both evaluators.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_bind_sources_beyond_the_alias_grammar_keep_the_write_3795() -> Result<()> {
     let doc = r#"{"a":{"b":1}}"#;
@@ -145662,6 +145695,7 @@ fn test_try_catch_operand_of_and_or_negate_refuses_like_jq_4125() -> Result<()> 
 /// `and` whose `L` is falsy stops before `R` (so `R`'s `try` never runs), a body that
 /// raises a fresh value cannot be the register's node, and a body that raises its input
 /// outright is still seeded as the register.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_try_catch_operand_neighbours_keep_their_answers_4125() -> Result<()> {
     for (program, doc, want) in [
@@ -147396,6 +147430,10 @@ fn test_owned_array_slice_read_keeps_node_identity_answers_4286() -> Result<()> 
 /// milliseconds.
 /// The bound is far above the fused time and far below the unfused one, so it fails on the
 /// regression and not on a loaded machine.
+#[cfg_attr(
+    feature = "unshared-containers",
+    ignore = "holdout has no node identity or sharing (#5254)"
+)]
 #[test]
 fn test_computed_slice_read_loop_does_not_grow_with_the_slice_4286() -> Result<()> {
     let doc = format!(
@@ -147508,6 +147546,7 @@ fn test_path_of_a_computed_slice_read_names_the_slice_and_the_index_4356() -> Re
 /// second (a debug build a few). Both halves are needed: the resolver's slice and the path walk's. The
 /// bound sits far above the fused time and far below the unfused one, so it fails on the
 /// regression and not on a loaded machine.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_path_of_a_computed_slice_read_loop_does_not_grow_with_the_slice_4356() -> Result<()> {
     let doc = format!(
@@ -167152,6 +167191,7 @@ fn test_uncaught_foreign_marker_destructure_in_a_foreach_update_behind_same_kind
 /// element, so jq raises `with result`. The controls: `$x.c`, equal in value to the register but another node, and the root
 /// `$x` itself raise at the step, and `$x.a` over a document whose `.a` carries no key the pattern names. Every row captured
 /// from `/usr/bin/jq` 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_value_head_4827(
 ) -> Result<()> {
@@ -167297,6 +167337,7 @@ fn test_foreach_update_destructuring_a_navigation_of_the_root_marker_behind_a_va
 /// storage test of #4827 saw a node that was not the register's; the head without those stages is asked instead.
 /// The controls: `$x.c` (equal in value to the register, another node) still raises, also first in a comma beside the register's
 /// own node (a comma head is not stripped, so nothing changes there), and a `1` value head raises `with result`. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_destructuring_a_wrapped_navigation_of_the_root_marker_4831() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

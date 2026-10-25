@@ -51363,6 +51363,7 @@ mod tests {
     /// pins that: it was one per round (100 rounds over a 1.4 MB state cost
     /// 286 ms, jq 15 ms) and is now flat in the round count. The outputs are
     /// jq 1.7.1's (captured live).
+    #[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
     #[test]
     #[allow(clippy::literal_string_with_formatting_args)] // STYLE-0004: jq object literals, not format strings
     fn test_until_while_owned_update_needs_no_reindex_per_round_3674() {
