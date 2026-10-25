@@ -1057,10 +1057,17 @@ fn is_static_target(expr: &Expr) -> bool {
         Expr::Builtin(Builtin::RecurseF(f)) => {
             matches!(&**f, Expr::Optional(inner) if matches!(**inner, Expr::Iterate))
         }
-        // A key that is a variable reads no register: jq's identity check at
-        // `INDEX` is on the target, which is static here (#4001's walker).
+        // jq runs an index key as a subexpression, so a key that only computes
+        // a value (`$x`, `$r.name`, `.k`, `$i + 1`) reads no register: jq's
+        // identity check at `INDEX` is on the target, which is static here
+        // (#4001's walker). A key that could retry, hide one in a call, or
+        // hold a dynamic path target of its own stays dynamic (#5243), and so
+        // does one that names `nan`: the walker refuses a NaN component where
+        // jq's `path(.[nan])` is `[null]` (#5245).
         Expr::IndexExpr { target, key } => {
-            matches!(**key, Expr::Var(_)) && is_static_target(target)
+            is_value_only_condition(key)
+                && !any_subexpr(key, &mut |e| matches!(e, Expr::Builtin(Builtin::Nan)))
+                && is_static_target(target)
         }
         Expr::Paren(inner) | Expr::Optional(inner) => is_static_target(inner),
         Expr::Pipe(stages) => stages.iter().all(is_static_target),

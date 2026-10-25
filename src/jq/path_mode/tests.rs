@@ -1862,6 +1862,13 @@ fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
         "del(.[] | select(path(if . then .a else .b end) == [\"a\"]))",
         // A handler that does more than drop the error.
         "path(try .a catch .b)",
+        // An index key that can retry, calls a function, holds a dynamic
+        // target of its own, or names `nan` (#5243, #5245).
+        ".[. as [$a] ?// $a | $a] = 1",
+        "def k: \"a\"; .[k] = 1",
+        ".[path(if . then .a else .b end) | length] = 1",
+        "path(.[nan])",
+        "path(.a[$x | . / nan])",
     ] {
         assert!(takes(filter), "{filter}");
     }
@@ -1882,6 +1889,13 @@ fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
         "path(.a // .b)",
         "[path(.[$k])]",
         "path(recurse(.[]?))",
+        // A value-only index key, which jq runs as a subexpression (#5243).
+        "reduce .[] as $r ({}; .[$r.name] = $r.score)",
+        "reduce .[] as $r ({}; .x[$r.name | tostring] += 1)",
+        ".[.k] = 1",
+        "del(.[(0, 1)])",
+        "path(.a[$i + 1][length - 1])",
+        "(.[$x // \"z\"] | select(. > 1)) |= . + 1",
     ] {
         assert!(!takes(filter), "{filter}");
         assert!(
