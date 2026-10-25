@@ -3080,9 +3080,10 @@ shapes:**
 - **`sort`/`sort_by` on a non-array/map**: real yq's wording is `"node at path <path> is not
   an array or map (it's a <tag>)"`, where `<path>` genuinely varies with navigation depth
   (confirmed live: `[]` at the top level, `[a.b]` after `.a.b`, `[[2]]` after `.[2]`) — unlike
-  the seven builtins above, whose wording never names a path. `builtin_sort`/`builtin_sort_by`
-  receive only a bare value with no path context today, so this needs real path-tracking
-  plumbing threaded into these builtins, not just a wording swap.
+  the seven builtins above, whose wording never names a path.
+  Since [#1998](https://github.com/rust-works/succinctly/issues/1998) `sort`, `sort_by`, `reverse` and `shuffle` raise that wording (`reverse` and `shuffle` without `or map`) with the right tag, in yq mode, on every route (`EvalError::yq_node_not_an_array`).
+  The path is always `[]`: `builtin_sort`/`builtin_sort_by` receive only a bare value with no path context, so a navigated input (`.a | sort` on `a: 5`) prints `node at path [] ...` where yq prints `node at path [a] ...`.
+  Real path text needs path-tracking plumbing threaded into these builtins (it would also fix `tonumber`'s `cannot convert node value [x] at path a.b of tag !!str to number`), which is not done.
 - **`.[]`'s own read-side behavior on a scalar**: real yq treats this as a **silent no-op**
   (exit 0, no output) rather than an error at all (`5 | .[]` prints nothing on real yq).
   succinctly raises `cannot_iterate_with` here in yq mode too, matching jq's own `.[]`

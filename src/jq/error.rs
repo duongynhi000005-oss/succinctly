@@ -1630,6 +1630,17 @@ impl EvalError {
         Self::subject(value, "cannot be sorted, as it is not an array")
     }
 
+    /// yq's `node at path [] is not an array{ or map} (it's a !!tag)`, raised by `sort`, `sort_by`,
+    /// `reverse` and `shuffle` on a non-array (#1998). The path is fixed at `[]`: yq prints the node's
+    /// lineage (`[a]` after `.a`), which succinctly does not carry to these builtins, so the text is
+    /// exact for a root or literal input only (recorded in `docs/compliance/yq/limitations.md`).
+    pub fn yq_node_not_an_array(or_map: bool, tag: &str) -> Self {
+        let or_map = if or_map { " or map" } else { "" };
+        Self::new(format!(
+            "node at path [] is not an array{or_map} (it's a {tag})"
+        ))
+    }
+
     /// `<v> cannot be matched, as it is not a string`.
     pub fn cannot_be_matched(value: &OwnedValue) -> Self {
         Self::subject(value, "cannot be matched, as it is not a string")
