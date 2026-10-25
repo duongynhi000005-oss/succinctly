@@ -5423,8 +5423,14 @@ pub(crate) fn jq_identical<S: EvalSemantics>(a: &OwnedValue, b: &OwnedValue) -> 
 /// instances, this is the whole rule. Its precondition is promotion: an
 /// unpromoted string or literal is identical to nothing, so a caller that
 /// asks it of document scalars materializes them promoted first
-/// (`promote_identities`). Under the `unshared-containers` holdout nothing is
-/// ever shared, so only the unallocated kinds can be identical there.
+/// (`promote_identities`).
+///
+/// Under the `unshared-containers` holdout nothing is ever shared, so the
+/// allocated kinds compare by kind and value instead: the holdout runs the
+/// path-mode interpreter too (#5233), and must answer where the shipped build
+/// does on the programs it is measured on. It also answers some programs jq
+/// refuses (a copy of a node is identical to it there), which a measurement
+/// build that never ships can afford.
 pub(crate) fn jv_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
     match (a, b) {
         (OwnedValue::Null, OwnedValue::Null) => true,
@@ -5433,6 +5439,12 @@ pub(crate) fn jv_identical(a: &OwnedValue, b: &OwnedValue) -> bool {
         (OwnedValue::Int(_) | OwnedValue::Float(_), OwnedValue::Int(_) | OwnedValue::Float(_)) => {
             a.as_f64().map(f64::to_bits) == b.as_f64().map(f64::to_bits)
         }
+        #[cfg(feature = "unshared-containers")]
+        _ => {
+            core::mem::discriminant(a) == core::mem::discriminant(b)
+                && owned_value_eq_at_depth(a, b, 0)
+        }
+        #[cfg(not(feature = "unshared-containers"))]
         _ => a.shares_storage_with(b),
     }
 }
@@ -6275,14 +6287,22 @@ mod tests {
         assert!(!jv_identical(&map["e"], &e_storage));
     }
 
-    /// Under the holdout nothing shares storage, so only the kinds jq compares
-    /// by value can be identical (#5223).
+    /// Under the holdout nothing shares storage, so every kind compares by
+    /// kind and value (#5223, #5233): a copy is identical, a number literal
+    /// is still not identical to a computed number.
     #[test]
     #[cfg(feature = "unshared-containers")]
     fn jv_identical_under_the_holdout_compares_only_by_value_5223() {
         let array = OwnedValue::Array(vec![OwnedValue::Null].into());
-        assert!(!jv_identical(&array, &array.clone()));
+        assert!(jv_identical(&array, &array.clone()));
+        assert!(!jv_identical(&array, &OwnedValue::Array(vec![].into())));
         assert!(jv_identical(&OwnedValue::Int(2), &OwnedValue::Float(2.0)));
+        let literal = OwnedValue::NumberLiteral(NumberRepr::Int(2), "2".into());
+        assert!(!jv_identical(&literal, &OwnedValue::Int(2)));
+        assert!(jv_identical(
+            &OwnedValue::string("s"),
+            &OwnedValue::string("s")
+        ));
     }
 
     /// The holdout never promotes: its A/B twin must not share a scalar
