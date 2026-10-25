@@ -135,11 +135,11 @@ runs:
         # action's own default, so a patchcov release cannot change measured coverage
         # under an unrelated PR (0.4.0 is also the action's current default, but the default
         # moves with the action's tag and this pin does not). 0.4.0 carries the extracted coverage engine:
-        # `.patchcov/config.yaml` discovery and the symmetric ignore list mask
-        # popcount's CPU flap (#302); patience diff preserves patch attribution on
-        # repetitive evaluator refactors (#1554); source coverage `tolerate` /
-        # `tolerate-line` / `end` markers mask runtime CPU and unreachable-line
-        # variance (#2467). It ships prebuilt Linux x86_64 + ARM64 binaries (#3750),
+        # `.patchcov/config.yaml` discovery and the symmetric ignore list (#302);
+        # patience diff preserves patch attribution on repetitive evaluator
+        # refactors (#1554); source coverage `tolerate` / `tolerate-line` / `end`
+        # markers mask runtime CPU and unreachable-line variance, which is how
+        # popcount.rs's CPU flap is handled now (#2467). It ships prebuilt Linux x86_64 + ARM64 binaries (#3750),
         # avoiding cargo install on cache misses, and `patchcov merge` for future
         # shards. Since 0.4.0 a nonempty report whose paths match no tracked file fails
         # with exit 7 instead of diffing nothing; the lcov paths here are the checkout

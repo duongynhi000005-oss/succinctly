@@ -11,21 +11,28 @@ diff:
   # `--ignore-filename-regex` flag, with which this list is set-unioned.
   #
   # Only files whose coverage is *inherently non-deterministic across runs*
-  # belong here: a region gated on a runtime CPU-feature check (not a `#[cfg]`)
-  # is compiled into the denominator on every run but executed only on a host
-  # whose CPU has the instruction. When the `main` baseline run and the PR-head
+  # and cannot be fenced with a `tolerate` region belong here: a region gated
+  # on a runtime CPU-feature check (not a `#[cfg]`) is compiled into the
+  # denominator on every run but executed only on a host whose CPU has the
+  # instruction. When the `main` baseline run and the PR-head
   # run draw different runner CPUs, the file moves with no source change.
   # Matching files are dropped from *both* reports before the diff, so they can
   # no longer produce a phantom entry in the "unchanged file(s) also moved"
   # note. See CONTRIBUTING.md "SIMD CI coverage" and succinctly#302.
-  ignore-filename-regex:
-    # ~30 lines behind `is_x86_feature_detected!("avx512vpopcntdq")`. The x86
-    # runners are usually Zen 3 (EPYC 7763, no AVX-512) but the fleet is not
-    # CPU-homogeneous, so this file reports ~93% on a capable host and ~66%
-    # otherwise — a ±26pp swing observed on unrelated PRs (#287, #357).
-    # `SUCCINCTLY_EXPECT_SIMD` intentionally omits `avx512vpopcntdq`, so this
-    # cannot be made deterministic by pinning the runner's feature set.
-    - 'src/bits/popcount\.rs'
+  ignore-filename-regex: []
+
+  # Narrowed from a whole-file entry (#2467). `src/bits/popcount.rs` used to be
+  # listed here: ~30 lines behind `is_x86_feature_detected!("avx512vpopcntdq")`
+  # made it report ~93% on a capable host and ~66% otherwise -- a +/-26pp swing
+  # observed on unrelated PRs (#287, #357) -- and the exclusion also dropped the
+  # file's other ~440 lines from the reported total. The x86 runners are
+  # usually Zen 3 (EPYC 7763, no AVX-512) but the fleet is not CPU-homogeneous,
+  # and `SUCCINCTLY_EXPECT_SIMD` intentionally omits `avx512vpopcntdq`, so the
+  # swing cannot be pinned away. The CPU-gated regions (the AVX-512 kernel and
+  # its dispatch, the two tests that return early without the CPU feature) are
+  # now wrapped in coverage `tolerate` markers directly in the source: the file
+  # keeps contributing its real coverage to the total, and only the CPU-gated
+  # delta is masked.
 
   # Deliberately NOT excluded, contrary to the illustrative list in
   # rust-works/omni-dev#1398:
