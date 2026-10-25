@@ -19403,10 +19403,9 @@ fn builtin_reverse<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         },
         _ if optional => QueryResult::None,
         // #1998: yq's own wording.
-        _ if S::TAG == EvalTag::Yq => QueryResult::Error(EvalError::yq_node_not_an_array(
-            false,
-            yaml_type_tag(&value),
-        )),
+        _ if S::TAG == EvalTag::Yq => {
+            QueryResult::Error(EvalError::yq_node_not_an_array(yaml_type_tag(&value)))
+        }
         _ => QueryResult::Error(EvalError::cannot_index_with_type(
             type_name(&value),
             "number",
@@ -20066,7 +20065,7 @@ fn builtin_sort<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         _ => scalar_fallback(&value, optional, || {
             if S::TAG == EvalTag::Yq {
                 // #1998: yq's own wording.
-                return EvalError::yq_node_not_an_array(true, yaml_type_tag(&value));
+                return EvalError::yq_node_not_an_array_or_map(yaml_type_tag(&value));
             }
             EvalError::cannot_be_sorted(&to_owned_lossy::<S, _>(&value))
         }),
@@ -20149,7 +20148,7 @@ fn builtin_sort_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         _ => scalar_fallback(&value, optional, || {
             if S::TAG == EvalTag::Yq {
                 // #1998: yq's own wording.
-                return EvalError::yq_node_not_an_array(true, yaml_type_tag(&value));
+                return EvalError::yq_node_not_an_array_or_map(yaml_type_tag(&value));
             }
             EvalError::cannot_iterate_with(S::TAG, &to_owned_lossy::<S, _>(&value))
         }),
@@ -95191,10 +95190,7 @@ fn builtin_shuffle<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         }
         _ if optional => QueryResult::None,
         // #1998: yq's own wording (`shuffle` is yq-only).
-        _ => QueryResult::Error(EvalError::yq_node_not_an_array(
-            false,
-            yaml_type_tag(&value),
-        )),
+        _ => QueryResult::Error(EvalError::yq_node_not_an_array(yaml_type_tag(&value))),
     }
 }
 

@@ -32594,10 +32594,9 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                     GenericResult::Owned(OwnedValue::array_from(values))
                 } else {
                     // #1998: yq's own wording (`shuffle` is yq-only).
-                    GenericResult::Error(EvalError::yq_node_not_an_array(
-                        false,
-                        &yq_type_tag(&value, cursor),
-                    ))
+                    GenericResult::Error(EvalError::yq_node_not_an_array(&yq_type_tag(
+                        &value, cursor,
+                    )))
                 }
             }
             #[cfg(not(feature = "cli"))]
@@ -33475,10 +33474,9 @@ fn eval_builtin_in<S: EvalSemantics, V: DocumentValue>(
                 GenericResult::None
             } else if S::TAG == EvalTag::Yq {
                 // #1998: yq's own wording.
-                GenericResult::Error(EvalError::yq_node_not_an_array(
-                    false,
-                    &yq_type_tag(&value, cursor),
-                ))
+                GenericResult::Error(EvalError::yq_node_not_an_array(&yq_type_tag(
+                    &value, cursor,
+                )))
             } else {
                 GenericResult::Error(EvalError::cannot_index_with_type(
                     tagged_type_name(&value, cursor),
