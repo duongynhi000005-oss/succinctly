@@ -333,24 +333,26 @@ VPOPCNTDQ (`SUCCINCTLY_EXPECT_SIMD` intentionally omits it — see the note in
 so **`src/bits/popcount.rs` reports a non-deterministic x86 coverage number**:
 ~93% when the run happens to draw a VPOPCNTDQ-capable host, ~66% when it
 doesn't — a ±~26pp swing driven purely by which CPU the run landed on, not by
-any code change. This is expected, not a regression — and it is now **filtered
-out of the PR comment** rather than merely tolerated: `src/bits/popcount.rs` is
-listed in [`.patchcov/config.yaml`](.patchcov/config.yaml), which
-`patchcov diff` (version pinned in `.github/actions/coverage/action.yml`) reads straight from the
-checkout and applies to *both* the baseline and head reports before diffing, so
-the file can no longer generate a phantom entry. Note the exclusion is symmetric
-and therefore also removes the file from the **`Total:`** the comment reports —
-that number is a couple of points off the raw `cargo llvm-cov` total for this
-reason. It does not weaken any gate: `fail-under-lines` is computed by
-`cargo llvm-cov` itself, independently of `patchcov`, over the unfiltered set
-(and has ~19pp of headroom over the ~74.5% total regardless).
+any code change. This is expected, not a regression — and it is **masked in the
+PR comment** rather than merely tolerated: the CPU-gated regions of
+`src/bits/popcount.rs` (the AVX-512 kernel and its dispatch, and the two
+host-gated tests) are wrapped in `// patchcov: coverage tolerate` ... `coverage end`
+markers in the source, which `patchcov diff` (version pinned in
+`.github/actions/coverage/action.yml`) reads from each revision's own text.
+`tolerate` keeps the lines in the reported percentage but scores them against
+the baseline, so a flip between a VPOPCNTDQ-capable host and one without cannot
+generate a phantom delta. Since #2467 the file is no longer excluded wholesale
+(it used to be listed in [`.patchcov/config.yaml`](.patchcov/config.yaml)), so its
+other ~440 lines count in the **`Total:`** the comment reports at their real
+coverage. The `fail-under-lines` gate is computed by `cargo llvm-cov` itself,
+independently of `patchcov`, over the unfiltered set.
 
-If you are reading a *pre-filter* PR comment, or `popcount.rs` moves by ±26pp on
-an otherwise-unrelated PR (e.g. a dependabot bump), that's this — no need to
-re-triage it. Tracked in #302 (and omni-dev#1398 for the mechanism); the
-kernel's correctness is still validated on capable hardware by the two
-host-gated tests in `popcount.rs`, which the exclusion does not affect — it
-suppresses *reporting*, not measurement or testing.
+If `popcount.rs` moves by ±26pp on an otherwise-unrelated PR (e.g. a dependabot
+bump), it is the CPU-gated lines, not the change — a region that is missing its
+marker will show up as that. Tracked in #302 (and omni-dev#1398 for the
+mechanism); the kernel's correctness is still validated on capable hardware by
+the two host-gated tests in `popcount.rs`, which the markers do not affect — they
+suppress *reporting*, not measurement or testing.
 
 ### Unsafe Code
 

@@ -206,6 +206,7 @@ unsafe fn popcount_64bytes_neon(ptr: *const u8) -> u32 {
     }
 }
 
+// patchcov: coverage tolerate reason="CPU-gated: the AVX-512 VPOPCNTDQ kernel and its dispatch arm run only on a runner whose CPU has avx512vpopcntdq (Ice Lake+/Zen 4+), and on the others the count_ones fallback below runs instead, so these lines flip between runs with no source change (#287, #357, #2467)"
 /// AVX-512 VPOPCNTDQ: 8x parallel u64 popcount.
 ///
 /// Processes 8 u64 words (512 bits) at once using AVX-512 VPOPCNTDQ instruction.
@@ -286,6 +287,7 @@ fn popcount_words_x86(words: &[u64]) -> usize {
     }
     total
 }
+// patchcov: coverage end
 
 #[cfg(test)]
 mod tests {
@@ -412,6 +414,7 @@ mod tests {
         }
     }
 
+    // patchcov: coverage tolerate reason="CPU-gated: both tests return early unless the runner's CPU has avx512vpopcntdq, so their bodies run on some runners and not others (#287, #357, #2467)"
     #[cfg(all(
         feature = "simd",
         target_arch = "x86_64",
@@ -472,4 +475,5 @@ mod tests {
         let alt = vec![0xAAAA_AAAA_AAAA_AAAA; 100];
         assert_eq!(unsafe { popcount_words_avx512vpopcntdq(&alt) }, 100 * 32);
     }
+    // patchcov: coverage end
 }
