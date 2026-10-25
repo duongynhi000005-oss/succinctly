@@ -34908,6 +34908,15 @@ fn trailing_array_key(component: &Expr) -> Option<&OwnedValue> {
     }
 }
 
+/// Whether a path component is, or holds anywhere in a `?`-scoped group, a NaN array key (#5245).
+fn names_nan_index(component: &Expr) -> bool {
+    match unwrap_path_component(component).0 {
+        Expr::ArrayKey(key) => is_nan_index_key(key),
+        Expr::Pipe(exprs) => exprs.iter().any(names_nan_index),
+        _ => false,
+    }
+}
+
 /// #1428's stranded-write test, shared by `=`'s and `|=`'s chain walkers.
 ///
 /// Walking toward a write target creates every missing step on the way. A
@@ -37416,10 +37425,14 @@ fn update_path_steps<S: EvalSemantics>(
             // `delpaths` for a multi-component path rewrites the parent with
             // `setpath`, so even a filter with no output ends in the update
             // wording, unlike the terminal key in `update_path_with_deletes`.
+            //
+            // #5245: not for a NaN index, which names nothing to delete or rewrite: a filter with
+            // no output leaves the document as it is (jq's `delpaths` on a `null` or absent parent,
+            // and the array parent it never returns on); one that writes meets the NaN refusal.
             Expr::ArrayKey(key) => {
                 let mut read = index_one_owned::<S>(root, key, false)?
                     .expect("non-optional index yields a value or errors");
-                update_path_steps::<S>(
+                let wrote = update_path_steps::<S>(
                     &mut read,
                     rest,
                     filter_expr,
@@ -37430,6 +37443,9 @@ fn update_path_steps<S: EvalSemantics>(
                 )?;
                 if let Some(deletes) = deletes.as_deref_mut() {
                     deletes.at.truncate(entry_depth);
+                }
+                if !wrote && is_nan_index_key(key) {
+                    return Ok(false);
                 }
                 return Err(array_key_write_error(
                     key,
@@ -84114,11 +84130,8 @@ impl DeleteTrieBuilder {
             // terminal one is refused before the walk, in `insert_branch`,
             // with the delete wording. (`insert_expr`'s rewritten paths are
             // yq's, which has no such key.)
-            Expr::ArrayKey(key) => {
-                return Err(array_key_write_error(
-                    key,
-                    EvalError::cannot_update_field_at_array_index_of_array(),
-                ))
+            Expr::ArrayKey(_) => {
+                return Err(EvalError::cannot_update_field_at_array_index_of_array())
             }
             _ => return Err(EvalError::new("cannot use expression as delete target")),
         };
@@ -84233,7 +84246,10 @@ impl DeleteTrieBuilder {
     /// pre-#1690 walker, which recursed here too). Making the whole route
     /// depth-safe means giving the apply walk an explicit stack as well,
     /// which #1690 did not attempt.
-    fn intern(&mut self, path: &Rc<PathPrefix>) -> Result<u32, EvalError> {
+    ///
+    /// `None` when a component names a NaN index (#5245): the path deletes nothing, and no node of
+    /// it is created.
+    fn intern(&mut self, path: &Rc<PathPrefix>) -> Result<Option<u32>, EvalError> {
         let mut pending: Vec<(usize, &Expr)> = Vec::new();
         let mut cur = path;
         let mut id = loop {
@@ -84249,6 +84265,9 @@ impl DeleteTrieBuilder {
                 PathPrefix::Node {
                     parent, component, ..
                 } => {
+                    if names_nan_index(component) {
+                        return Ok(None);
+                    }
                     pending.push((key, component));
                     cur = parent;
                 }
@@ -84258,7 +84277,7 @@ impl DeleteTrieBuilder {
             id = self.push_component(id, component)?;
             self.memo.insert(key, id);
         }
-        Ok(id)
+        Ok(Some(id))
     }
 
     fn insert_branch(&mut self, path: &Rc<PathPrefix>) -> Result<(), EvalError> {
@@ -84276,10 +84295,8 @@ impl DeleteTrieBuilder {
                 return Err(EvalError::cannot_delete_element_of_array("array"));
             }
         }
-        let id = match self.intern(path) {
-            Ok(id) => id,
-            Err(e) if e.is_nan_index() => return Ok(()),
-            Err(e) => return Err(e),
+        let Some(id) = self.intern(path)? else {
+            return Ok(());
         };
         self.trie.nodes[id as usize].terminal = true;
         Ok(())

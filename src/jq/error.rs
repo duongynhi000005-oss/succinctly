@@ -838,11 +838,6 @@ impl EvalError {
         Self::new(Self::NAN_INDEX)
     }
 
-    /// Whether this is [`Self::nan_index`].
-    pub fn is_nan_index(&self) -> bool {
-        self.message == Self::NAN_INDEX
-    }
-
     const CANNOT_UPDATE_ARRAY_INDEX_OF_ARRAY: &'static str =
         "Cannot update field at array index of array";
     const NAN_INDEX: &'static str = "Cannot set array element at NaN index";
