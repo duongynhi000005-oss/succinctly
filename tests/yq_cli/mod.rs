@@ -82,4 +82,5 @@ mod i5083;
 mod i5086;
 mod i5086_quoted;
 mod i5089;
+mod i5233;
 mod i865;

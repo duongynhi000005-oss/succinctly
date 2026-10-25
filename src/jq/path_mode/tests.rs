@@ -1772,6 +1772,56 @@ fn a_hand_raised_label_payload_breaks_its_label_5223() {
     });
 }
 
+/// Every routed library entry raises the refusal for a program `route` refuses
+/// (the CLI reports it at compile time, before any entry runs): a library
+/// caller reaches it through the entry itself (#5233).
+#[test]
+fn every_routed_library_entry_raises_the_refusal_5233() {
+    on_big_stack(|| {
+        let doc = br#"{"a":{"b":1}}"#;
+        let index = JsonIndex::build(doc);
+        let expr = parse("path(.a as $x | .b), key").expect("parses");
+        let Route::Refused(want) = route(&expr) else {
+            panic!("not refused");
+        };
+        use crate::jq::eval::QueryResult;
+        use crate::jq::eval_generic::GenericResult;
+
+        let result = crate::jq::eval::eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(doc));
+        assert!(
+            matches!(&result, QueryResult::Error(e) if e.message == want.message),
+            "eval_full"
+        );
+        let owned = to_owned::<JqSemantics, _>(&index.root(doc).value()).expect("doc");
+        let result = crate::jq::eval::eval_owned_with_file_index::<Vec<u64>, JqSemantics>(
+            &expr,
+            &owned,
+            &[],
+        );
+        assert!(
+            matches!(&result, QueryResult::Error(e) if e.message == want.message),
+            "eval_owned_with_file_index"
+        );
+        let result = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(doc));
+        assert!(
+            matches!(&result, GenericResult::Error(e) if e.message == want.message),
+            "eval_with_cursor"
+        );
+        let result =
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(doc).value());
+        assert!(
+            matches!(&result, GenericResult::Error(e) if e.message == want.message),
+            "eval_using"
+        );
+        let escape =
+            crate::jq::eval_generic::eval_each_with_cursor(&expr, index.root(doc), &mut |_| true);
+        assert!(
+            matches!(&escape, Some(Control::Error(e)) if e.message == want.message),
+            "eval_each_with_cursor"
+        );
+    });
+}
+
 /// A program that skipped `resolve_all_jq` (a library caller parsing it
 /// itself) raises the shipped evaluator's errors for an unbound variable or a
 /// `break` with no enclosing label, rather than an internal error.

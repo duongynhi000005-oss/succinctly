@@ -66794,9 +66794,10 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                                         {
                                                             inner == emitting
                                                         }
+                                                        // patchcov: coverage tolerate reason="unreachable from a test since #5233: `elem.register_path` is set only for a jq fold in a path target, which now runs on the path-mode interpreter; only a program holding a def the shipped route rewrites keeps this arm, and the suite builds none"
                                                         Some((tries, inner)) if bare_step => {
                                                             tries.len() + inner == emitting
-                                                        }
+                                                        } // patchcov: coverage end
                                                         _ => false,
                                                     },
                                                 })
@@ -150721,9 +150722,10 @@ mod share_audit_2999 {
     /// did not see the change; ignored until the interpreter writes in place.
     #[test]
     #[ignore = "the path-mode interpreter copies where the shipped evaluator did not (#5223); see #5233's PR"]
+    // patchcov: coverage tolerate reason="the test is #[ignore]d, so it never runs (#5233)"
     fn computed_key_delete_copies_nothing() {
         assert_forced(&ints(1000), "del(.[(0,1)])", &[]);
-    }
+    } // patchcov: coverage end
 
     /// Reads share and never copy: binding the document to a variable and
     /// reading it back through the binding is free.
