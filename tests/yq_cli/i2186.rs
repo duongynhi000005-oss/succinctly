@@ -3,21 +3,48 @@
 //! The DOM route's result is an `OwnedValue` (`ResultWithComments`), so anything that reaches
 //! it has merged `a: 1 / a: 2` into `a: 2` before output; `docs/compliance/yq/limitations.md`
 //! lists the routes. The collapsed rows pin today's answer, not yq's: when a duplicate-capable
-//! value (#1344 (b)) lands, a row flips to `KEPT` and its entry in that page goes.
-//! The `KEPT` rows are the controls that show the document really has a repeated key, and
-//! that the cursor route, which a plain `.` takes, still keeps it.
+//! value (#1344 (b)) lands, a row flips to yq's answer (the document, every key kept) and its
+//! entry in that page goes. The first test is the control: it shows the document really has a
+//! repeated key and that the cursor route, which a plain `.` takes, still keeps it.
+
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::Result;
+use tempfile::NamedTempFile;
 
 use crate::run_yq_stdin;
 
+/// What the file holds after `succinctly yq -i filter` ran over `contents`.
+fn inplace(contents: &str, filter: &str) -> Result<String> {
+    let mut file = NamedTempFile::new()?;
+    write!(file, "{contents}")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_succinctly"))
+        .arg("yq")
+        .arg("-i")
+        .arg(filter)
+        .arg(file.path())
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(std::fs::read_to_string(file.path())?)
+}
+
 const DUP: &str = "a: 1\na: 2\nb: 3\n";
-const KEPT: &str = "a: 1\na: 2\nb: 3\n";
 const COLLAPSED: &str = "a: 2\nb: 3\n";
 
 #[test]
 fn the_cursor_route_keeps_the_repeated_key_2186() -> Result<()> {
-    assert_eq!(run_yq_stdin(".", DUP, &[])?, (KEPT.to_string(), 0));
+    // `-o=json` rewrites the text, so a verbatim echo of the input cannot satisfy this.
+    assert_eq!(
+        run_yq_stdin(".", DUP, &["-o=json", "-I=0"])?,
+        ("{\"a\":1,\"a\":2,\"b\":3}\n".to_string(), 0)
+    );
+    assert_eq!(run_yq_stdin(".", DUP, &[])?, (DUP.to_string(), 0));
     assert_eq!(
         run_yq_stdin(".", DUP, &["--slurp"])?.0,
         "- a: 1\n  a: 2\n  b: 3\n"
@@ -48,11 +75,28 @@ fn the_dom_forcing_routes_collapse_the_repeated_key_2186() -> Result<()> {
 #[test]
 fn the_dom_route_keeps_a_large_integers_spelling_through_a_lazy_seq_2186() -> Result<()> {
     let doc = "- 99999999999999999999\n- 1\n";
-    for filter in ["map(.)", "reverse"] {
-        let (out, code) = run_yq_stdin(filter, doc, &["-P"])?;
-        assert_eq!(code, 0, "{filter}");
-        assert!(out.contains("99999999999999999999"), "{filter}: {out}");
-        assert!(!out.contains("e+"), "{filter}: {out}");
+    let rows: &[(&str, &str)] = &[
+        ("map(.)", "- 99999999999999999999\n- 1\n"),
+        ("sort", "- 1\n- 99999999999999999999\n"),
+        ("reverse", "- 1\n- 99999999999999999999\n"),
+    ];
+    for (filter, expected) in rows {
+        assert_eq!(
+            run_yq_stdin(filter, doc, &["-P"])?,
+            ((*expected).to_string(), 0),
+            "{filter}"
+        );
     }
+    Ok(())
+}
+
+/// `-i` follows stdout: a read-only filter is evaluated on cursors and keeps the repeated key
+/// (the #1343 bullet no longer lists `-i`), while a write rebuilds the document and collapses.
+#[test]
+fn inplace_keeps_the_key_for_a_read_only_filter_and_collapses_for_a_write_2186() -> Result<()> {
+    assert_eq!(inplace(DUP, "keys")?, "- a\n- a\n- b\n");
+    assert_eq!(inplace(DUP, "to_entries | length")?, "3\n");
+    assert_eq!(inplace(DUP, ".b = 5")?, "a: 2\nb: 5\n");
+    assert_eq!(inplace(DUP, "del(.b)")?, "a: 2\n");
     Ok(())
 }
