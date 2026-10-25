@@ -176,7 +176,13 @@ Since [#2505](https://github.com/rust-works/succinctly/issues/2505) the same pas
 a target under a parent the write created (`.c.d = .b`, `.c[0] = .b`), a comma of targets (`(.c, .d) = .b`), a negative index on the source (`.c = .b[-1]`, read from the comment tree, which knows the array's length) and a source container that holds an alias (`.c = .b` on a block `b:\n  - *x`, each alias inside it stays one in the copy).
 Pinned by `tests/yq_cli/i2505.rs`.
 A negative index is read from the finished tree, so a later stage that changes the length of that array (`.d = .b[-1] | .b[2] = 1`) leaves the copy plain where yq aliases the element it read at the time; the value is right.
-Still plain where yq prints `*x`, each listed on #2505: a constructed right side (`.c = [.b]`, `.c = {"z": .b}`), a right side that is not syntactic navigation although the path register knows its source (`.c = (.b // 0)`, `.c = (.b | select(true))`, `.c = (.a, .b)`; rule 4(b) below for the shapes that change the value), a compound assignment (`.c += .b`), the source's trailing comment (`.c = .b` on `b: *x # bc` is `c: *x # bc` in yq), a copied container's flow style (`b: [*x]` copies to `c: [*x]` in yq, to a block here), and the alias group a copy joins (`.c = .b | .a = 5` leaves `c` an alias of the rewritten anchor in yq).
+Still plain where yq prints `*x`, each listed on #5249 (the residual of #2505): a constructed right side (`.c = [.b]`, `.c = {"z": .b}`), a right side that is not syntactic navigation although the path register knows its source (`.c = (.b // 0)`, `.c = (.b | select(true))`, `.c = (.a, .b)`; rule 4(b) below for the shapes that change the value), a compound assignment (`.c += .b`), and the alias group a copy joins (`.c = .b | .a = 5` leaves `c` an alias of the rewritten anchor in yq).
+Since [#5249](https://github.com/rust-works/succinctly/issues/5249) the source's trailing comment and flow style are copied too (`.c = .b` on `b: *x # bc` is `c: *x # bc`, on `b: [*x]` it is `c: [*x]`), and so is everything under a copied container (each item's and field's comment and style).
+This is `propagate_assign_copied_presentation`, and it is not specific to aliases: `.c = .b` on `b: [1, 2] # t` copies the comment and the flow style of a document with no alias in it.
+The source's comment wins when it has one, and the target's own comment stays when it has none, as in yq.
+The node's own style is the source's when the target is new, an alias, a scalar or an empty container, and the target's own when a non-empty container of the same kind is written over it.
+The copy is skipped when a later stage rewrites the source (`.c = .b | .b = 5` leaves `c` plain where yq prints `c: [1] # t`), because presentation read from the finished tree no longer describes the target.
+Not copied, where yq copies them: a scalar's own quoting (`b: "q"` copies to a new `c: "q"` in yq, `c: q` here), an explicit tag (`b: !!seq [1]` copies to `c: !!seq [1]`), the node's own head and foot lines, and an anchor declaration nested inside a copied container (yq prints the `&y` twice; the pass writes no anchor mark of its own, so only the alias marks of [#2505](https://github.com/rust-works/succinctly/issues/2505) reach the copy).
 
 **Rule 4(b)**, on the same `propagate_assign_alias_marks` pass: a computed `value` side
 (`.c = (.b + 1)`) is not a static read of `.b`, so the pass leaves `.c` a plain scalar
@@ -5149,7 +5155,9 @@ its text (`numeric_display_string`, so `==` and `tostring` agree about a compute
     construction of plain reads keeps it since #865), `map(.)` over a mapping,
     and a source a later stage rewrites (`.c = .a | .a = 5`) all print the plain value where yq
     keeps the text. yq copies the whole node, so quoting, flow style and a trailing comment ride
-    along there (`.c = .a` on `a: "x" # n` is `c: "x" # n`), which is still dropped here;
+    along there (`.c = .a` on `a: "x" # n` is `c: "x" # n`); the trailing comment and the flow
+    style of a plain `=` from a static read are copied since #5249, the quoting is still dropped
+    here (`c: x # n`);
   - an empty value inside a flow collection (`{x: , y: 1}`) prints `null` where yq prints `''`.
 - **Spellings `OwnedValue` cannot keep** ([#2802](https://github.com/rust-works/succinctly/issues/2802)):
   `True == "true"` and `!!bool "yes" == true` are `true` here (yq `false`, its text is
