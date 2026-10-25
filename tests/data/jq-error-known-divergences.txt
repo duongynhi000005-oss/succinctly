@@ -60,5 +60,3 @@
 # step. Recorded as a permanent divergence, not fixed — see
 # docs/compliance/jq/limitations.md.
 
-path_non_path_ascii_downcase_prelude_step  wording  jq's error names the exploded codepoint array, not the outer string — #1561
-path_non_path_ascii_upcase_prelude_step    wording  jq's error names the exploded codepoint array, not the outer string — #1561

@@ -33,11 +33,11 @@ Measured against jq-1.7.1 over the 240 probes in
 **both** evaluators — the full one (`src/jq/eval.rs`) and the generic one
 (`src/jq/eval_generic.rs`, which the CLI uses):
 
-| Dimension                                    | Result              | Meaning                                                |
-|----------------------------------------------|---------------------|--------------------------------------------------------|
-| **Message text** (both evaluators, verbatim) | **238/240 = 99.2%** | Byte-identical to jq                                   |
-| **Wording divergences**                      | **2**               | Both evaluators raise, but word it differently from jq |
-| **Behaviour / parser gaps**                  | **0**               | succinctly does not raise the error at all             |
+| Dimension                                    | Result               | Meaning                                                |
+|----------------------------------------------|----------------------|--------------------------------------------------------|
+| **Message text** (both evaluators, verbatim) | **240/240 = 100.0%** | Byte-identical to jq                                   |
+| **Wording divergences**                      | **0**                | Both evaluators raise, but word it differently from jq |
+| **Behaviour / parser gaps**                  | **0**                | succinctly does not raise the error at all             |
 
 These three numbers are asserted, not maintained by hand: `jq_error_message_tests.rs`
 parses them back out of this page and fails if they drift from the corpus (they went stale
@@ -9938,7 +9938,11 @@ are unaffected by any of this — real yq genuinely *is* sticky-any-error across
 unlike jq, so `yq_runner.rs`'s own use of `sink.hit()` at its final exit-code check already
 matches and needs no exception recorded in [yq Limitations](../yq/limitations.md).
 
-### `ascii_downcase`/`ascii_upcase` inside `path()` name the outer value, not jq's inner exploded-array step — no carve-out; recorded on its merits
+### `ascii_downcase`/`ascii_upcase` inside `path()` named the outer value, not jq's inner exploded-array step — fixed by the path-mode interpreter (#5223, #5233)
+
+Since [#5223](https://github.com/rust-works/succinctly/issues/5223) the path-mode interpreter runs jq's prelude definitions, so `path(.a | ascii_downcase)` raises jq's `near attempt to iterate through [120,121,122]`.
+Since [#5233](https://github.com/rust-works/succinctly/issues/5233) every jq-mode entry does, and the two probes left the divergence manifest.
+The rest of this section records the shipped resolver's answer before that.
 
 ```console
 $ echo '{"a":"xyz"}' | jq -c 'path(.a | ascii_downcase)'

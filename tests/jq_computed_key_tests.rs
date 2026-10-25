@@ -44,7 +44,12 @@ fn full(json: &[u8], filter: &str) -> Outcome {
     let index = JsonIndex::build(json);
     let cursor = index.root(json);
     let expr = parse(filter).expect("parse failed");
-    let result: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+    let result: QueryResult<Vec<u64>> =
+        if succinctly::jq::path_mode::leaves_the_shipped_route(&expr) {
+            succinctly::jq::eval::<Vec<u64>, JqSemantics>(&expr, cursor)
+        } else {
+            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
+        };
     match result {
         QueryResult::Error(e) => Outcome::Error(e.message),
         other => Outcome::Values(
@@ -1426,14 +1431,13 @@ fn test_write_clobber_through_a_static_optional_comma_raises_instead_of_swallowi
 /// filtering it out, so it is no longer bounded by pruning — it runs to its
 /// own 10,000-node `RECURSE_MAX_ITEMS` cap, which raises (#3716; it ended the
 /// walk silently and answered the root followed by 9,999 nulls before).
-/// `resolve_recurse_sink` (the path-tracking evaluator behind
-/// `path(recurse(f) | ...)`) still has to prune the null child instead: its
-/// queue holds `(path, value)` pairs, so running it to the same cutoff would
-/// grow the path prefix by one component every round — quadratic, and
-/// previously measured at 9 GB resident and 5s of CPU for this 18-byte
-/// document. So the two evaluators deliberately disagree on this one
-/// adversarial shape: the value form below hits the cap, the path form
-/// still terminates after one output.
+/// The path form, `path(recurse(f) | ...)`, runs on the path-mode interpreter
+/// in jq mode (#5223, #5233), which meets the same cap. (The shipped resolver's
+/// `resolve_recurse_sink`, still behind yq mode's paths, prunes the null child
+/// instead: its queue holds `(path, value)` pairs, so running it to the same
+/// cutoff would grow the path prefix by one component every round —
+/// quadratic, previously measured at 9 GB resident and 5s of CPU for this
+/// 18-byte document.)
 #[test]
 fn test_recurse_over_a_null_producing_filter() {
     let doc = r#"{"k":"a","a":null}"#;
@@ -1445,19 +1449,16 @@ fn test_recurse_over_a_null_producing_filter() {
         Outcome::error("recurse: maximum nodes exceeded"),
     );
 
-    // The same walk in path position meets the cap too through the library
-    // entry, which runs it on the path-mode interpreter (#5223) and walks `.a?`
-    // of `null` as jq does (jq never returns). `eval_full`, this evaluator alone,
-    // keeps `resolve_recurse_sink`'s pruning of the null child: one output.
+    // The same walk in path position meets the cap too: every jq-mode entry
+    // runs it on the path-mode interpreter (#5223, #5233), which walks `.a?` of
+    // `null` as jq does (jq never returns).
     let filter = r"[path(recurse(.a?) | objects | .[.k]?)]";
-    assert_eq!(
+    for outcome in [
         generic(doc.as_bytes(), filter),
-        Outcome::error("recurse: maximum nodes exceeded")
-    );
-    assert_eq!(
         full(doc.as_bytes(), filter),
-        Outcome::values(&[r#"[["a"]]"#])
-    );
+    ] {
+        assert_eq!(outcome, Outcome::error("recurse: maximum nodes exceeded"));
+    }
 }
 
 /// The three parameterised `recurse` spellings, which

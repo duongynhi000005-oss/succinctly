@@ -26,7 +26,12 @@ fn full_outputs(json: &[u8], filter: &str) -> Vec<String> {
     let index = JsonIndex::build(json);
     let cursor = index.root(json);
     let expr = parse(filter).expect("parse failed");
-    let result: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+    let result: QueryResult<Vec<u64>> =
+        if succinctly::jq::path_mode::leaves_the_shipped_route(&expr) {
+            succinctly::jq::eval::<Vec<u64>, JqSemantics>(&expr, cursor)
+        } else {
+            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
+        };
     result
         .collect_owned::<JqSemantics>()
         .iter()

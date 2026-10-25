@@ -25,7 +25,7 @@
 //!
 //! Run with: cargo test --test jq_recurse_depth_tests
 
-use succinctly::jq::{eval_full, parse, JqSemantics, OwnedValue, QueryResult};
+use succinctly::jq::{eval_full, parse, JqSemantics, OwnedValue, QueryResult, YqSemantics};
 use succinctly::json::JsonIndex;
 
 /// Deep enough to exercise many recursion frames; see module doc for why this
@@ -54,7 +54,12 @@ fn run_paths(json: &str, filter: &str) -> Vec<String> {
     let index = JsonIndex::build(bytes);
     let cursor = index.root(bytes);
     let expr = parse(filter).expect("parse failed");
-    let result: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+    let result: QueryResult<Vec<u64>> =
+        if succinctly::jq::path_mode::leaves_the_shipped_route(&expr) {
+            succinctly::jq::eval::<Vec<u64>, JqSemantics>(&expr, cursor)
+        } else {
+            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
+        };
     assert!(
         !result.is_error(),
         "`{filter}` errored on the depth-{DEPTH} document: {result:?}"
@@ -83,13 +88,23 @@ fn bare_recurse_correct_at_depth() {
 }
 
 /// `recurse(f; cond)` — the `resolve_recurse_sink` stack-based path. `cond` stops
-/// exactly at the `{}` leaf (its `.k` is `null`, not an object), producing
-/// the same path set as the bare form on this document.
+/// exactly at the `{}` leaf (its `.k` is `null`), producing the same path set
+/// as the bare form on this document.
+///
+/// In yq mode (`--jq-extensions`): a jq-mode `recurse(f; cond)` in a path is a
+/// dynamic target, which runs on the path-mode interpreter and so stops at
+/// nesting depth 256 (#5233), where `resolve_recurse_sink` still serves yq.
 #[test]
 fn parameterized_recurse_correct_at_depth() {
     let json = linear_nest(DEPTH);
-    assert_eq!(
-        run_paths(&json, r#"path(recurse(.k; type=="object"))"#),
-        expected_paths(DEPTH)
-    );
+    let index = JsonIndex::build(json.as_bytes());
+    let expr = parse("path(recurse(.k; . != null))").expect("parse failed");
+    let result: QueryResult<Vec<u64>> =
+        eval_full::<Vec<u64>, YqSemantics>(&expr, index.root(json.as_bytes()));
+    let paths: Vec<String> = result
+        .collect_owned::<YqSemantics>()
+        .iter()
+        .map(OwnedValue::to_json)
+        .collect();
+    assert_eq!(paths, expected_paths(DEPTH));
 }

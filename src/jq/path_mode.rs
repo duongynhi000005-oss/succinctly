@@ -923,6 +923,16 @@ pub(crate) fn route(program: &Expr) -> Route {
     }
 }
 
+/// Whether a jq-mode entry hands `program` to this interpreter, or refuses it,
+/// rather than running it on the shipped evaluator (#5233). For the tests that
+/// drive the unrouted `eval_full` directly: the shipped evaluator no longer
+/// answers a dynamic path target, so they send such a program through the
+/// routed entry, as the CLI does.
+#[doc(hidden)]
+pub fn leaves_the_shipped_route(program: &Expr) -> bool {
+    route(program) != Route::Shipped
+}
+
 /// The error a [`Route::Refuse`] program raises.
 pub(crate) fn refusal(what: &str) -> EvalError {
     EvalError::new(format!(

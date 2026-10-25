@@ -114,3 +114,30 @@ fn test_undecodable_document_raises_for_a_dynamic_path_target_5233() -> Result<(
     }
     Ok(())
 }
+
+/// The rows of the library tests that pinned the shipped resolver's jq-mode answers for a
+/// dynamic path target, as jq 1.7.1 answers them (stdout and exit status, captured live), run
+/// through the CLI. Since #5223 the CLI answers them on the path-mode interpreter; since #5233
+/// nothing else does, and the resolver code those tests pinned is retired. A row whose answer
+/// the resolver got wrong (`of null` where jq says `of {"__jq":0}`, ...) holds jq's answer.
+#[test]
+fn test_retired_resolver_rows_match_jq_through_the_interpreter_5233() -> Result<()> {
+    const ROWS: &str = include_str!("../data/jq-path-mode/retired-resolver-rows-5233.jsonl");
+    let mut checked = 0;
+    for line in ROWS.lines().filter(|l| !l.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line)?;
+        let field = |name: &str| row[name].as_str().expect(name).to_string();
+        let (input, filter, want) = (field("input"), field("filter"), field("stdout"));
+        let status = row["status"].as_i64().expect("status");
+        let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some(&input))?;
+        assert_eq!(
+            (stdout.as_str(), i64::from(code)),
+            (want.as_str(), status),
+            "{} `{filter}` on {input}: stderr={stderr:?}",
+            field("source")
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 186);
+    Ok(())
+}

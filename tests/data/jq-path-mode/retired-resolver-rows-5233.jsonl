@@ -1,0 +1,186 @@
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.a)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.b | .[0])] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.[]?)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(select(.a))] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.a, .b)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(if .a then .b else .a end)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.b | length)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map((.a | length))] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(tostring | length)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.a, length)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(if .a then .b else length end)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(if .a then length else .b end)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [any(.a)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [all(.a)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(..)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1,\"b\":[2]},{\"a\":3}]", "filter": "del(. as $x | [map(.a?)] | $x[0])", "stdout": "[{\"a\":3}]\n", "status": 0}
+{"source": "#3724", "input": "[[1,2],[3]]", "filter": "del(. as $x | [map(last)] | $x[0])", "stdout": "[[3]]\n", "status": 0}
+{"source": "#3724", "input": "[[1,2],[3]]", "filter": "del(. as $x | [map(.[0:1])] | $x[0])", "stdout": "[[3]]\n", "status": 0}
+{"source": "#3724", "input": "[[3]]", "filter": "del(. as $x | [map(.a[.k:])] | $x[0])", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[[3]]", "filter": "del(. as $x | [map(.a[.k:1])] | $x[0])", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"k\":\"a\",\"a\":1}]", "filter": "del(. as $x | [map(.[.k])] | $x[0])", "stdout": "[]\n", "status": 0}
+{"source": "#3724", "input": "[[1],[2]]", "filter": "del(. as $x | [map(first)] | $x[0])", "stdout": "[[2]]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [map({k:1} | .k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [map(.a | {k:1} | .k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [any({k:1} | .k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [all(.a | {k:1} | .k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[[1]]", "filter": "path(. as $x | [map(sort | .[0])] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"a\":{\"b\":1}}]", "filter": "path(. as $x | [map((.a, length) | .b?)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[1]", "filter": "path(. as $x | [walk(.[0]?)] | $x)", "stdout": "", "status": 5}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [map(try .a)] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [map(.a // .b)] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3724", "input": "[{\"a\":1}]", "filter": "path(. as $x | [map(.a)] | .[0])", "stdout": "", "status": 5}
+{"source": "#2743", "input": "null", "filter": "del(. as $x | {filter})", "stdout": "", "status": 5}
+{"source": "#2743", "input": "null", "filter": "del(try (1 | fromstream(1|tostream)))", "stdout": "null\n", "status": 0}
+{"source": "#2743", "input": "null", "filter": "del(try (\"AB\" | ascii_downcase))", "stdout": "null\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [first] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [last] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [add] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [any] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [all] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[[1],[2]]", "filter": "del(. as $x | [flatten] | $x[0])", "stdout": "[[2]]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [map(.)] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [any(. > 1)] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2,3]", "filter": "del(. as $x | [all(. > 1)] | $x[0])", "stdout": "[2,3]\n", "status": 0}
+{"source": "#3283", "input": "[1,2]", "filter": "del(. as $x | [walk(.)] | $x[0])", "stdout": "[2]\n", "status": 0}
+{"source": "#3283", "input": "{\"k\":1}", "filter": "del(. as $x | (.k = 3) | $x.k)", "stdout": "{}\n", "status": 0}
+{"source": "#3283", "input": "{\"k\":1}", "filter": "del(. as $x | [.k = 3] | $x.k)", "stdout": "{}\n", "status": 0}
+{"source": "#3283", "input": "[{\"a\":1},{\"a\":2}]", "filter": "del(. as $x | [map(.a = 3)] | $x[0])", "stdout": "[{\"a\":2}]\n", "status": 0}
+{"source": "#3283", "input": "{\"a\":[1,2,3],\"k\":1}", "filter": "del(. as $x | [.a|first] | $x.a)", "stdout": "{\"k\":1}\n", "status": 0}
+{"source": "#3283", "input": "{\"arr\":[{\"a\":1},{\"a\":2}],\"k\":1}", "filter": "del(. as $x | [try (.arr|map(.a))] | $x.k)", "stdout": "{\"arr\":[{\"a\":1},{\"a\":2}]}\n", "status": 0}
+{"source": "#3283", "input": "{\"arr\":[{\"a\":1}],\"k\":1}", "filter": "del(. as $x | [try (.arr|walk(.a))] | $x.k)", "stdout": "{\"arr\":[{\"a\":1}]}\n", "status": 0}
+{"source": "#3283", "input": "[{\"k\":1},{\"k\":2}]", "filter": "path(. as $x | [map({k:1}|.k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3283", "input": "[{\"k\":1}]", "filter": "path(. as $x | [any({k:1}|.k)] | $x)", "stdout": "", "status": 5}
+{"source": "#3283", "input": "[1,2,3]", "filter": "path(. as $x | first | $x)", "stdout": "", "status": 5}
+{"source": "#3283", "input": "[1,[2,{\"a\":1}]]", "filter": "path([walk(.)] | empty)", "stdout": "", "status": 5}
+{"source": "#3283", "input": "[1,[2,3]]", "filter": "path([walk(.)] | empty)", "stdout": "", "status": 0}
+{"source": "#3284", "input": "{\"k\":1}", "filter": "del(. as $x | [try (.a|tostring|ascii_upcase)] | $x.a)", "stdout": "{\"k\":1}\n", "status": 0}
+{"source": "#3284", "input": "{\"k\":1}", "filter": "del(. as $x | [try (.a|[.]|unique)] | $x.a)", "stdout": "{\"k\":1}\n", "status": 0}
+{"source": "#3284", "input": "{\"k\":1}", "filter": "del(. as $x | [try (.a|[.]|unique_by(.))] | $x.a)", "stdout": "{\"k\":1}\n", "status": 0}
+{"source": "#3284", "input": "{\"k\":1}", "filter": "del(. as $x | [try fromstream(.a|tostream)] | $x.a)", "stdout": "{\"k\":1}\n", "status": 0}
+{"source": "#3284", "input": "{\"a\":1,\"k\":1}", "filter": "del(. as $x | [fromstream(.a|tostream)] | $x.k)", "stdout": "", "status": 5}
+{"source": "#3284", "input": "[{\"key\":\"a\",\"value\":1}]", "filter": "del(. as $x | [try from_entries] | $x[0])", "stdout": "[]\n", "status": 0}
+{"source": "#3284", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [try with_entries(.)] | $x)", "stdout": "null\n", "status": 0}
+{"source": "#3284", "input": "{\"a\":1}", "filter": "del(. as $x | [try with_entries(.) catch .] | $x.a)", "stdout": "{}\n", "status": 0}
+{"source": "#3284", "input": "[{\"key\":\"a\",\"value\":1}]", "filter": "path(. as $x | [try from_entries catch .] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3284", "input": "[{\"key\":\"a\",\"value\":1}]", "filter": "path(. as $x | [try from_entries catch .zz] | $x)", "stdout": "", "status": 5}
+{"source": "#3284", "input": "[{\"key\":\"a\",\"value\":1}]", "filter": "path(. as $x | [try from_entries catch error] | $x)", "stdout": "", "status": 5}
+{"source": "#3284", "input": "{\"a\":1}", "filter": "path(. as $x | [try with_entries(.) catch .zz] | $x.a)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "null", "filter": "path(try (.a | error(null)) catch .b)", "stdout": "[\"b\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":null}", "filter": "path(.a | (try error(null) catch .) | .b)", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a as $y | .a | try error(1) catch $y)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a as $y | .a | try (.b | error(1)) catch $y)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a as $y | .a | try error(1) catch ($y | .b))", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(. as $x | try error($x) catch $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "[path(.a | (try error(null) catch .) | empty)]", "stdout": "[]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":null}", "filter": "path(.a as $y | .a | label $out | try (break $out) catch $y)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a | try error(.) catch .)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a | try error(.) catch .b)", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3133", "input": "[\"a\",\"b\"]", "filter": "(.a | try error(null) catch .b) = 1", "stdout": "", "status": 5}
+{"source": "#3133", "input": "[\"a\",\"b\"]", "filter": "del(. as {a:$w} | try ($w | .b))", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"x\":{\"a\":1,\"b\":2}}", "filter": "path(.x | try (.a | error(null)) catch .b)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"x\":{\"a\":1,\"b\":2}}", "filter": "path(.x | try (.a | error({\"a\":1,\"b\":2})) catch .b)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a | (try error(null) catch .) | .b)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a | try error({\"b\":1}) catch .)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":null}", "filter": "path(label $out | try (break $out) catch .b)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":null}", "filter": "(.a | label $out | try (break $out) catch .b) = 1", "stdout": "", "status": 5}
+{"source": "#1466", "input": "{\"a\":{\"b\":1}}", "filter": "path(. as $x | reduce (1) as $i (0; $x + {}))", "stdout": "[]\n", "status": 0}
+{"source": "#1466", "input": "{\"a\":{\"b\":1}}", "filter": "path(. as $x | reduce (1) as $i (0; $x * {}))", "stdout": "[]\n", "status": 0}
+{"source": "#1466", "input": "{\"a\":{\"b\":1}}", "filter": "path(. as $x | reduce (1) as $i (0; $x + null))", "stdout": "[]\n", "status": 0}
+{"source": "#1466", "input": "{\"a\":1}", "filter": "path(. as $x | reduce (1) as $i (0; {} + $x))", "stdout": "", "status": 5}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "path(foreach .a as $v (.; try ($v | .b); .))", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "del(foreach .a as $v (.; try ($v | .b); .))", "stdout": "{\"a\":{}}\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "path(foreach .a as $v (.; if true then ($v | .b) else . end; .))", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a as $y | .a | foreach range(1) as $i (0; .; try ($y | .b)))", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1},\"c\":{\"b\":1}}", "filter": "del(foreach .c as $v (.; try ($v | .b); .))", "stdout": "{\"a\":{\"b\":1},\"c\":{}}\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1},\"c\":{\"b\":1}}", "filter": "del(.a as $y | foreach .c as $v (.; try ($y | .b); .))", "stdout": "{\"a\":{\"b\":1},\"c\":{\"b\":1}}\n", "status": 0}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "path(foreach .a as $v (.; ($v | .b), 1; .))", "stdout": "[\"a\",\"b\"]\n", "status": 5}
+{"source": "#3145", "input": "{\"a\":{\"b\":1}}", "filter": "del(.a as $y | .a | 5 | foreach range(1) as $i (0; .; try ($y | .b)))", "stdout": "{\"a\":{}}\n", "status": 0}
+{"source": "#3099", "input": "{\"a\":1}", "filter": "label $out | path(foreach .a as $x (null; .; ($x, halt)))", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3099", "input": "{\"a\":1}", "filter": "label $out | path(foreach .a as $x (null; .; ($x, halt_error)))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#3099", "input": "{\"a\":1,\"b\":2}", "filter": "label $out | path(foreach .a as $x (null; .; ($x, halt_error(.b))))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "path(.a | {b:{c:1}} | . as $x | $x)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "del(.a | {b:{c:1}} | . as $x | $x)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "path(.a | {b:{c:1}} | . as $x | $x | .b | .c)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "path(.a | {b:{c:1}} | . as $x | $x | getpath([\"b\"]) | .c)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "path(.a | 5 | (try . catch 1) as $x | $x)", "stdout": "", "status": 5}
+{"source": "#3133", "input": "{\"a\":{\"b\":{\"c\":1}}}", "filter": "path(. as $x | 5 | (if true then $x else . end) as $y | $y)", "stdout": "[]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":null}", "filter": "path(.a | null | . as $x | $x | .b)", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#3133", "input": "{\"a\":true}", "filter": "path(.a | true | . as $x | $x)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#3133", "input": "[\"a\"]", "filter": "path(. as $x | 5 | $x as $y | $y)", "stdout": "[]\n", "status": 0}
+{"source": "#3133", "input": "[]", "filter": "path(.a | select(true) | . as $x | $x)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"b\":2},\"c\":{\"b\":2}}", "filter": "path(. as $x | .a | $x | getpath([\"c\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"b\":2},\"c\":{\"b\":3}}", "filter": "path(. as $x | .a | $x | getpath([\"c\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"c\":{\"b\":1},\"a\":{\"c\":{\"b\":1}}}}", "filter": "path(.a | . as $x | .c | $x | getpath([\"a\",\"c\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"c\":{\"b\":1},\"a\":{\"c\":{\"b\":1}}}}", "filter": "del(.a | . as $x | .c | $x | getpath([\"a\",\"c\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"c\":{\"b\":1}},\"c\":{\"b\":1}}", "filter": "path(. as $x | .a | ($x as $y | .c | $y | getpath([\"c\"]) | .b))", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"b\":2}}", "filter": "path(. as $x | .a | ($x | tojson | fromjson) | getpath([\"a\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":null}", "filter": "path(.a | (. // {\"c\":{\"b\":1}}) as $x | .c | $x | getpath([\"c\"]) | .b)", "stdout": "", "status": 5}
+{"source": "#2978", "input": "{\"a\":{\"b\":2}}", "filter": "path(. as $p | .a | (if true then $p else . end) as $x | $x | getpath([\"a\"]) | .b)", "stdout": "[\"a\",\"b\"]\n", "status": 0}
+{"source": "#2978", "input": "{\"a\":{\"b\":{\"c\":1}},\"b\":{\"c\":1}}", "filter": "del(. as $p | .a | ((if empty then . else . end) // $p) as $x | .b | $x | getpath([\"b\"]) | .c)", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [with_entries(.)] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [.k |= 3] | try (.[0] | .b))", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [map_values(.)] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [.k += 1] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [.k //= 1] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "[3,1,2]", "filter": "del(. as $x | [unique] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "[3,1,2]", "filter": "del(. as $x | [unique_by(.)] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "{\"a\":1}", "filter": "del(. as $x | [walk(.)] | try .[0])", "stdout": "", "status": 5}
+{"source": "#3271", "input": "false", "filter": "del(try with_entries(.))", "stdout": "false\n", "status": 0}
+{"source": "#3271", "input": "false", "filter": "del(. as $x | try with_entries(.) | $x)", "stdout": "false\n", "status": 0}
+{"source": "#3271", "input": "false", "filter": "del(try (.k |= 3))", "stdout": "false\n", "status": 0}
+{"source": "#3271", "input": "false", "filter": "del(. as $x | try (.k |= 3) | $x)", "stdout": "false\n", "status": 0}
+{"source": "#3271", "input": "{\"a\":{\"b\":1},\"k\":1}", "filter": "del(. as $x | [try (.k |= 3)] | $x)", "stdout": "null\n", "status": 0}
+{"source": "#3271", "input": "[1,2]", "filter": "del(. as $x | [walk(.)] | $x)", "stdout": "null\n", "status": 0}
+{"source": "#843", "input": "{\"a\":10}", "filter": "try (.a, error({\"y\":99})) catch select(true) = \"X\"", "stdout": "", "status": 5}
+{"source": "#843", "input": "{\"a\":10,\"other\":{\"qqq\":1}}", "filter": "path(try (.a, error({\"other\":{\"qqq\":42}})) catch getpath([\"other\"]))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error({\"b\":1})) catch .)", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":1}", "filter": "label $out | path(try (.a, break $out) catch (.b, \"z\"))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error([1,2,3])) catch getpath([\"b\"]))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error([1,2,3])) catch getpath([]))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error({\"b\":1})) catch (.b)?)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error({\"b\":1})) catch (try .b catch \"caught\"))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#843", "input": "{\"a\":10}", "filter": "path(try (.a, error({\"b\":1})) catch (. | .))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#844", "input": "0", "filter": "0 as $x | path($x)", "stdout": "", "status": 5}
+{"source": "#3362", "input": "{\"foo\":1}", "filter": ".[] | path(\"\\(length|tostring)\")", "stdout": "", "status": 5}
+{"source": "#2044", "input": "null", "filter": "path(null | .a)", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#2044", "input": "null", "filter": "path(true | .a)", "stdout": "", "status": 5}
+{"source": "#2044", "input": "null", "filter": "path((try . catch 1) as $v | null | .[0] | $v)", "stdout": "[0]\n", "status": 0}
+{"source": "#2044", "input": "null", "filter": "(null | .a) = 5", "stdout": "{\"a\":5}\n", "status": 0}
+{"source": "#2896", "input": "{\"a\":1}", "filter": "path(try (.a, error([1,2,3])) catch getpath([]))", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#2896", "input": "{\"a\":1}", "filter": "path(getpath([]))", "stdout": "[]\n", "status": 0}
+{"source": "#2896", "input": "{\"a\":1}", "filter": "path(.a | getpath([]))", "stdout": "[\"a\"]\n", "status": 0}
+{"source": "#1573", "input": "{\"a\":{\"b\":1}}", "filter": "path(. as $x | .a | $x)", "stdout": "", "status": 5}
+{"source": "#1573", "input": "{\"a\":{\"b\":1}}", "filter": "path(.a | 5)", "stdout": "", "status": 5}
+{"source": "#1573", "input": "{\"a\":{\"b\":1},\"c\":9}", "filter": "path(. as $x | 5 | $x | .c | 5)", "stdout": "", "status": 5}
+{"source": "#832", "input": "{\"a\":1,\"x\":5}", "filter": "path(try (.a, .x[0]) catch \"x\")", "stdout": "[\"a\"]\n", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.a, .k] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.[]] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [..] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.a.b] | $x | .a)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[\"a\"]", "filter": "path(. as $x | [.a | select(.b)] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | 5 | [select(true)] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.[.k | tostring]] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [if .k then .a else .k end] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(.a as $y | .a | [.b] | $y | .b)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[\"a\",\"b\"]", "filter": "path(. as $x | [.a?] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [(.a)?] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "{\"a\":{\"c\":[1,2]},\"k\":1}", "filter": "path(. as $x | [.a.c[.k:]] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | { k: .a } | [.k] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.a] | [.a] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.a] | .[0])", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path([.a])", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.k |= . + 1] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [.[] |= 1] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [with_entries(.)] | $x)", "stdout": "", "status": 5}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [walk(.)] | $x)", "stdout": "[]\n", "status": 0}
+{"source": "#3263", "input": "[]", "filter": "path(. as $x | [map_values(.)] | $x)", "stdout": "", "status": 5}
+{"source": "#2743", "input": "null", "filter": "del(try (\"abc\" | match(\"z\")))", "stdout": "null\n", "status": 0}
+{"source": "#2743", "input": "null", "filter": "del(try (\"abc\" | scan(\"z\")))", "stdout": "null\n", "status": 0}
+{"source": "#2743", "input": "null", "filter": "del(try (\"abc\" | capture(\"(?<x>z)\")))", "stdout": "null\n", "status": 0}
+{"source": "#3049", "input": "null", "filter": "path([[1] | .[0]] | empty)", "stdout": "", "status": 5}
+{"source": "#3049", "input": "{\"a\":[1],\"b\":{\"k\":1}}", "filter": "path(.b as $x | [$x.k] | empty)", "stdout": "", "status": 5}
+{"source": "#3049", "input": "{\"a\":[1],\"b\":{\"k\":1}}", "filter": "path([.b.k] | empty)", "stdout": "", "status": 0}
+{"source": "#3049", "input": "{\"x\":{\"a\":1}}", "filter": "path(.x | .x | tojson | fromjson | .a)", "stdout": "[\"x\",\"x\",\"a\"]\n", "status": 0}
+{"source": "#3049", "input": "[\"x\",\"x\",\"a\"]", "filter": "path(.x | [.x | tojson | fromjson | .a] | empty)", "stdout": "", "status": 5}
+{"source": "test_resolve_foreach_extract_budget_exceeded_errors", "input": "null", "filter": "path(foreach (1) as $x (.; .[]; .))", "stdout": "", "status": 5}
