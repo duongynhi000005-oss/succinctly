@@ -45172,74 +45172,18 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
             {
                 return ResolveFlow::Exhausted;
             }
-            // jq mode only, like every other register admission in this
-            // file: real yq's lexer rejects `try`, so there is no oracle,
-            // and yq's scalar-write no-op convention would turn a wrong
-            // acceptance into silent corruption rather than a loud error.
-            let entry_register = match (S::TAG, trackable) {
-                (EvalTag::Jq, true) => Some(value),
-                (EvalTag::Jq, false) => frame.register(),
-                _ => None,
-            };
+            // jq mode reaches this arm only for a static target, whose handler
+            // is absent or `empty` (a handler that does more runs on the
+            // path-mode interpreter, #5233), so the handler below is yq's: the
+            // payload is untracked and no register is in hand.
             match resolve_node_sink::<S>(expr, value, trackable, snapshot, frame, keep, sink) {
                 ResolveFlow::Escaped(EvalEscape::Error(e)) if !e.is_uncatchable() => {
-                    let caught = if trackable && trackable_body_raises_its_input::<S>(expr) {
-                        CaughtPayload::OfRegister
-                    } else if trackable
-                        && e.payload_is_not_a_string()
-                        && marker_body_raises_register::<S>(expr, value, frame)
-                    {
-                        // #4127: the payload is not a message and the body can raise
-                        // nothing else, so it is the frozen `$x` the register's node.
-                        CaughtPayload::OfRegister
-                    } else if error_body_raises_its_input::<S>(expr) {
-                        CaughtPayload::OfInput
-                    } else if S::TAG == EvalTag::Jq
-                        && (fold_body::depth() == 0 || fold_body::acc_is_register_here())
-                        && try_body_may_raise_alias(expr)
-                    {
-                        CaughtPayload::MayBeRegister
-                    } else {
-                        CaughtPayload::Value
-                    };
-                    let update_entry = foreach_update_try_entry::<S>(expr, catch.as_deref(), frame);
-                    let entry_register = entry_register.or(update_entry.as_ref());
-                    let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
-                    // The handler runs past the `try`s the mark names: a `try` inside it with an equal body is not
-                    // one of them.
-                    let _past_entry_tries = fold_body::hide_update_try_entry_at(fold_body::depth());
-                    resolve_catch_sink::<S>(
-                        catch.as_deref(),
-                        e.payload(),
-                        frame,
-                        entry_register,
-                        caught,
-                        keep,
-                        sink,
-                    )
+                    resolve_catch_sink::<S>(catch.as_deref(), e.payload(), frame, keep, sink)
                 }
                 // A caught `break`'s payload is jq's `{"__jq":N}` label
-                // object, modelled as `null` here (a wording residual): it
-                // is never the register's node, so the handler must not be
-                // seeded trackable on a `null` register (#3133 review: `(.a
-                // | label $out | try (break $out) catch .b) = 1` on
-                // `{"a":null}` wrote where jq refuses).
+                // object, modelled as `null` here (a wording residual).
                 ResolveFlow::Escaped(EvalEscape::Break(_)) => {
-                    let update_entry = foreach_update_try_entry::<S>(expr, catch.as_deref(), frame);
-                    let entry_register = entry_register.or(update_entry.as_ref());
-                    let _handler = entry_handler_mark(update_entry.as_ref(), entry_register);
-                    // The handler runs past the `try`s the mark names: a `try` inside it with an equal body is not
-                    // one of them.
-                    let _past_entry_tries = fold_body::hide_update_try_entry_at(fold_body::depth());
-                    resolve_catch_sink::<S>(
-                        catch.as_deref(),
-                        OwnedValue::Null,
-                        frame,
-                        entry_register,
-                        CaughtPayload::Label,
-                        keep,
-                        sink,
-                    )
+                    resolve_catch_sink::<S>(catch.as_deref(), OwnedValue::Null, frame, keep, sink)
                 }
                 other => other,
             }
@@ -46526,7 +46470,7 @@ fn resolve_alternative_per_left_output_sink<'a, S: EvalSemantics>(
 /// A leaf computing by value says nothing about jq's register on an untracked
 /// entry, which the enclosing stage carries ([`leaf_register`]); a pipe stage
 /// fills it in from [`cannot_move_register`] of *its* expression
-/// ([`register_after`]). A compound node (`//`, `,`, `if`) forwards what the
+/// (`register_after`). A compound node (`//`, `,`, `if`) forwards what the
 /// branch says, so its stage asks the question of the whole node, and one
 /// operand that navigates makes every operand's branch unknown. For an
 /// operand jq runs only after backtracking out of the others, the operand's
@@ -46784,21 +46728,6 @@ fn is_bare_register_neutral_builtin(expr: &Expr) -> bool {
         },
         _ => false,
     }
-}
-
-/// Whether an `any`/`all` `cond` navigates nothing, so it can neither move jq's register nor raise
-/// a path error on the element it is run on (#4641): [`cannot_move_register`] of it, of what is
-/// under the wrappers that add no movement ([`operand_leaves_register`]), a `select`/type filter
-/// ([`is_select_stage`]) under them, whose condition is a subexp, or a pipe or comma of those.
-fn cond_navigates_nothing(cond: &Expr) -> bool {
-    cannot_move_register(cond)
-        || operand_leaves_register(cond)
-        || match peel_register_transparent(cond) {
-            stage @ Expr::Builtin(_) => is_select_stage(stage),
-            Expr::Pipe(stages) => stages.iter().all(cond_navigates_nothing),
-            Expr::Comma(items) => items.iter().all(cond_navigates_nothing),
-            _ => false,
-        }
 }
 
 /// Whether `operand`, run from jq's register, leaves it where it entered (#3906):
@@ -48639,7 +48568,7 @@ fn leaf_register<'a, S: EvalSemantics>(
 ///
 /// Not part of [`cannot_move_register`], because that predicate also stands
 /// for "navigates nothing, so a register that is not on this expression's
-/// input is never checked": [`resolve_from_restored_input`] runs `R` on an
+/// input is never checked": `resolve_from_restored_input` runs `R` on an
 /// input that is *not* the register, and an `R` of `add`, `flatten` or `map(.)`
 /// does check its `.[]` there ([`builtin_navigation`] raises for it). It is
 /// sound *here* because a leaf's input is the register itself on a trackable
@@ -48712,7 +48641,7 @@ fn leaves_register_in_place<S: EvalSemantics>(expr: &Expr) -> bool {
 /// A stage-level fact, read by [`resolve_seq_stage`] beside
 /// [`cannot_move_register`] and not folded into it: that predicate also stands
 /// for "navigates nothing, so a register not on this input is never checked"
-/// ([`resolve_from_restored_input`]), and these stages either navigate or take a
+/// (`resolve_from_restored_input`), and these stages either navigate or take a
 /// navigating condition. (`entry_marker_stage` reads a per-output statement
 /// through its own, different set of wrappers; the two answer different
 /// questions.) It does read that predicate once for what a wrapper encloses
@@ -48949,7 +48878,7 @@ fn collect_keeps_register<S: EvalSemantics>(expr: &Expr) -> bool {
 /// `isempty(first(g | (c or empty))) | not`), so the register is back where the
 /// stage entered exactly when nothing inside it was emitted, and wherever the
 /// emitting branch left it when something was ([`drained_register_after`],
-/// [`register_after`]). A static predicate cannot say which of the two a given
+/// `register_after`). A static predicate cannot say which of the two a given
 /// result is, so this only admits the stage to *read* its leaf's statement:
 /// [`resolve_seq_stage`] then trusts the register on a result that navigated
 /// nothing, the way it already trusts the one on a result that did
@@ -49023,7 +48952,7 @@ fn compound_states_register_per_result<S: EvalSemantics>(expr: &Expr) -> bool {
             // path error in jq) if the payload were the register's node and the
             // seed said it was not. So a navigating handler is admitted only
             // where the seed is exact: behind a body that cannot raise, or one
-            // whose every raise is its own input ([`error_body_raises_its_input`],
+            // whose every raise is its own input (`error_body_raises_its_input`,
             // #4019), which [`resolve_catch_sink`] seeds as the register's node
             // so the handler's navigations are tracked and each output states its
             // own register. The handler machinery (#3133, #3987) answers the rest.
@@ -49250,66 +49179,20 @@ fn lost_at<'a, S: EvalSemantics>(value: &OwnedValue) -> BranchRegister<'a> {
     }
 }
 
-/// The path-position body of `any(gen; cond)`/`all(gen; cond)` (#3349, #3749),
-/// shared with the bare `any`/`all`/`any(f)`/`all(f)` that jq defines over
-/// `.[]` (#3763). `target_truthy` is `any` (a truthy element decides) or `all`
-/// (a falsy one does, and the answer is `false`).
+/// `any(gen; cond)`/`all(gen; cond)` in path position (#3349): `gen` is resolved
+/// live, so an untracked value inside it raises as it does in jq, and `cond` is
+/// probed by value on each element until one decides. The answer is a computed
+/// boolean, stated at the register the drive left ([`drained_register_after`]
+/// when an element decided, [`drained_register_at_entry`] when none did).
 ///
-/// jq defines `any(g; c)` as `isempty(first(g | (c or empty))) | not` and
-/// `all(g; c)` as `isempty(g | (c and empty))`, so `gen` is resolved live (an
-/// untracked value inside it raises as it does in jq; value mode,
-/// `each_any_all_gen_cond`, runs `gen` on the owned bridge and never reaches the
-/// resolver) and the first decisive element stops it.
-///
-/// `cond` is `or`'s (or `and`'s) left operand there, which is not a subexp, so
-/// jq path-checks it: it moves jq's register onto its own node (`any(.[]; .a)`
-/// is `[0,"a"]`), and on a computed element it raises a path error (`any(1;
-/// .[]?)` raises `near attempt to iterate through 1`, a postfix `?` does not
-/// catch it, and so does `all(unique_by(.))`). Two routes in jq mode (#3757):
-///
-/// - A `cond` that provably navigates nothing ([`cond_navigates_nothing`]: the
-///   allowlist `cannot_move_register` -- `.`, a literal, a comparison, ... -- and,
-///   since #4641, `select(f)` and the wrappers over such a `cond` such as `first(.)`)
-///   can neither move the register nor raise, so evaluating it by value is exact
-///   ([`any_all_probe_element_verdict`]).
-/// - Anything else is resolved live, as a pipe stage on each branch `gen`
-///   produced -- `gen | cond`, which is what jq runs -- so a path error on a
-///   computed element raises as jq's does (catchable by `try`, as jq's is), and a
-///   deciding output carries the register `cond` left. That covers a navigating
-///   `cond` (`.a`), and a builtin whose own path rules the resolver
-///   already models (`unique_by(.)`, an update assignment).
-///
-/// An *untracked* element (one `gen` computed) can still be jq's register: `path_intact`
-/// compares by `jv_identical`, which is pointer identity for a string, array or object and
-/// equality for `null`, `true` and `false`. A pass-through builtin hands back the value it
-/// was given (`ltrimstr("x")` on a non-string, `tostring` on a string) and a computed `true`
-/// over a `true` register is it by kind; `cond` then navigates it with no path error, where
-/// over any other value it raises one an enclosing `try` catches. The stage is given such an
-/// element only when the producer vouches for the register (`Unmoved`, or the frame's
-/// carried register when `gen` provably moves nothing and the entry is untracked): equal by
-/// kind it is re-established where the register stands, unequal it cannot be it (identical
-/// implies equal) and the stage raises as jq does. Anything else -- an equal string or
-/// container, a producer that lost the register, a `gen` the allowlist cannot vouch for
-/// -- is ambiguous and refuses as an uncatchable guess (#3267): a live stage could raise an
-/// error jq does not, which a `try` swallows so a write goes through. It also keeps a
-/// lost-register state out of the stage, whose entry asserts it never meets one.
-///
-/// yq mode keeps the by-value route (ADR-0018: no oracle).
+/// Only yq reaches this resolver with such a target: in jq it is a dynamic path
+/// target, which runs on the path-mode interpreter (#5233), so the register jq
+/// carries through `gen | cond` is not modelled here.
 ///
 /// A `?//` inside `gen` can retry after a failed alternative and resolve a
 /// later one, so an escape a branch stashed before the retry is superseded by
-/// it, as in the `and`/`or`/negate arms (#3293): both slots are cleared on each
-/// branch and checked against the retry generation after the drive.
-///
-/// The result is a computed boolean, but jq's register is not where this
-/// entered, and `path()` accepts a result that is `jv_identical` to it. A
-/// decisive output is emitted from inside `gen | cond`, so the register is
-/// wherever that left it, and `any(.[]; .)` on `[true,false]` is `[0]`: `true`
-/// is identical to the element it stopped at ([`register_after`],
-/// [`computed_at_register`], the `and`/`or` arms' rule). A generator that
-/// produced no decisive output backtracked every branch, so the register is
-/// where this entered ([`drained_register_at_entry`]): sound on both routes,
-/// because nothing in `cond` could have raised that jq would not have.
+/// it (#3293): the slot is cleared on each branch and checked against the retry
+/// generation after the drive.
 #[allow(clippy::too_many_arguments)] // STYLE-0004: the resolver's threaded ambient state, plus the arm's two operands.
 fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
     gen: &Expr,
@@ -49321,31 +49204,8 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
     frame: &Frame,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
-    // #4641: `select(f)` and the wrappers that add no movement of their own over a `cond` that
-    // navigates nothing (`first(.)`) are as inert as the allowlist's own members: `f` is a subexp and
-    // `.` an identity, so neither can move the register or raise a path error on a computed element,
-    // and the by-value probe is exact. Resolved live, an untracked element equal to the register
-    // (`all(1; first(.))` over a `1` it holds) was an ambiguous guess and refused where jq answers.
-    let live = S::TAG == EvalTag::Jq && !cond_navigates_nothing(cond);
-    // Whether `gen` provably leaves the register where this entered, so the
-    // frame's carried register is still the one `cond` meets.
-    let gen_inert = live && cannot_move_register(gen);
-    // `gen | cond`'s second stage, flattened on the first branch `gen` produces
-    // rather than per call: a `gen` that yields nothing never pays the clone.
-    let mut stages: Vec<Expr> = Vec::new();
-    let mut flattened = false;
     let mut decided = false;
-    // One answer per decisive output, in the order jq's path tracker sees them
-    // (#3827), handed to the consumer from inside the drain (#3899) so a retried
-    // alternative's side effects run after it, as jq's lazy `first(...)` runs them.
-    // Jq mode only: yq keeps its single by-value answer.
-    let mut delivery = AnswerDelivery::new(sink, target_truthy);
-    // A stop's stashed escape, with the retry generation it was stashed at: a
-    // `?//` inside `gen` can retry after a failed alternative and resolve a later
-    // one, which supersedes it (#3293, the `and`/`or`/negate arms' rule), so each
-    // slot is cleared on every branch and checked against the retry afterwards.
     let mut probe_escape: Option<(Control, u64)> = None;
-    let mut stage_escape: Option<(EvalEscape, u64)> = None;
     let flow = resolve_node_sink::<S>(
         gen,
         value,
@@ -49355,309 +49215,43 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
         Keep::AtMost(usize::MAX),
         &mut |branch| {
             probe_escape = None;
-            stage_escape = None;
-            if !live {
-                let PathBranch {
-                    path: elem_path,
-                    value: elem,
-                    trackable: elem_trackable,
-                    register: elem_register,
-                    ..
-                } = branch;
-                let probe =
-                    any_all_probe_element_notifying::<S>(cond, &elem, target_truthy, &mut || {
-                        // `cond` is inert here, so jq mode states the register. #3827: a `?//`
-                        // in `cond` that swallows the decisive output's break decides again,
-                        // one answer each, and #3899: each is the consumer's before the
-                        // retry that follows it runs.
-                        if S::TAG == EvalTag::Jq {
-                            delivery.answer(register_after_parts(
-                                gen,
-                                Rc::clone(&elem_path),
-                                if elem_trackable {
-                                    elem.clone()
-                                } else {
-                                    Cow::Owned(OwnedValue::Null)
-                                },
-                                elem_trackable,
-                                elem_register.clone(),
-                                frame,
-                            ));
-                        }
-                    });
-                return match probe {
-                    Ok(ElementProbe::Decided { after, .. }) => {
-                        decided = true;
-                        if S::TAG != EvalTag::Jq {
-                            return Demand::Stop;
-                        }
-                        match after {
-                            AfterVerdict::Stop => Demand::Stop,
-                            // The retry ran dry: `gen` runs on. A consumer stop no retry
-                            // passes never gets here: with no retry to supersede it, the
-                            // probe says `Stop`.
-                            AfterVerdict::Resume => Demand::Continue,
-                            // The retry's raise follows the answers: a refused one is
-                            // superseded by it, a valid path is printed first.
-                            AfterVerdict::Raise(control) => {
-                                let mut slot = None;
-                                let demand = stop_with_escape(&mut slot, control);
-                                probe_escape =
-                                    slot.map(|control| (control, pipe_retry_generation()));
-                                demand
-                            }
-                        }
-                    }
-                    Ok(ElementProbe::Undecided) => Demand::Continue,
-                    Err(control) => {
-                        let mut slot = None;
-                        let demand = stop_with_escape(&mut slot, control);
-                        probe_escape = slot.map(|control| (control, pipe_retry_generation()));
-                        demand
-                    }
-                };
-            }
-            // jq's `path_intact` compares by `jv_identical`: pointer identity for a
-            // string, array or object, equality for `null`, `true` and `false`. So
-            // an *untracked* element can still be the register -- a pass-through
-            // builtin hands back the very value it was given (`ltrimstr("x")` on a
-            // non-string, `tostring` on a string), and a computed `true` over a
-            // `true` register is it by kind -- and `cond` navigates it with no path
-            // error (`any(true; .[0]?)` on `true` raises only the type error its `?`
-            // catches), where over any other value it raises a path error that an
-            // enclosing `try` catches. Which of the two holds is decided exactly
-            // only when the producer vouches for where the register is
-            // (`Unmoved`): equal by kind, it is the register, re-established where
-            // that stands; unequal, it cannot be (identical implies equal), and the
-            // stage raises as jq does. Anything else -- an equal string or
-            // container that may be the same pointer, a producer that lost the
-            // register, an untracked entry, which states none -- is ambiguous: a
-            // live stage could raise an error jq does not (swallowed by a `try`, so
-            // a write goes through) or miss one it does. That is a guess, refused
-            // where nothing can catch it (#3267).
-            let branch = if branch.trackable {
-                branch
-            } else {
-                // The register the producer vouches for sits at the branch's own
-                // path. On an untracked entry a `gen` that provably moves nothing
-                // leaves the frame's carried register in place, whose value is
-                // known and whose position is not: enough to tell an unequal
-                // element (it cannot be it), not to re-establish an equal one.
-                let carried = if !trackable && gen_inert {
-                    frame.register()
-                } else {
-                    None
-                };
-                match (branch.register.unmoved_value(), carried) {
-                    (Some(register), _) if null_bool_identical(&branch.value, register) => {
-                        PathBranch::new(Rc::clone(&branch.path), branch.value, true)
-                    }
-                    (Some(register), _) | (None, Some(register)) if *branch.value != *register => {
-                        branch
-                    }
-                    _ => {
-                        let refusal = EvalError::invalid_path_expression_guessed(&branch.value);
-                        let mut slot = None;
-                        let demand = stop_with_eval_escape(&mut slot, EvalEscape::Error(refusal));
-                        stage_escape = slot.map(|escape| (escape, pipe_retry_generation()));
-                        return demand;
-                    }
-                }
-            };
-            // `c or empty`: each output of `cond` that is truthy emits `true`
-            // (`c and empty`: a falsy one emits `false`), the rest backtrack.
-            let mut decide = |output: PathBranch<'a>| -> Demand {
-                if output.value.is_truthy() == target_truthy {
-                    decided = true;
-                    debug_assert!(
-                        S::TAG == EvalTag::Jq,
-                        "only the jq-mode route resolves live"
-                    );
-                    // #3827: a `?//` that swallows this stop decides again, and
-                    // each decisive output is an answer jq's path tracker sees.
-                    // #3899: the consumer has it before that retry runs.
-                    delivery.answer(register_after(cond, output, frame));
-                    Demand::Stop
-                } else {
-                    Demand::Continue
-                }
-            };
-            if !flattened {
-                push_path_components(&mut stages, cond);
-                flattened = true;
-                // `cannot_move_register` admits `.` and a pipe of `.`, the only
-                // conds that flatten to nothing, so a live one has a stage.
-                debug_assert!(!stages.is_empty(), "a live cond flattens to a stage");
-            }
-            let Some(last) = stages.len().checked_sub(1) else {
-                // `cond` flattened to nothing: it is the branch itself.
-                return decide(branch); // patchcov: coverage tolerate-line reason="unreachable: a cond that flattens to no stages is `.` or a pipe of `.`, which cannot_move_register admits, so it never takes the live route (#3757); the debug_assert where `stages` is built fails a test build that breaks that"
-            };
-            match resolve_seq_stage::<S>(
-                &stages,
-                last,
-                0,
-                branch,
-                frame,
-                Keep::AtMost(usize::MAX),
-                &mut decide,
+            match any_all_probe_element_notifying::<S>(
+                cond,
+                &branch.value,
+                target_truthy,
+                &mut || {},
             ) {
-                ResolveFlow::Exhausted => Demand::Continue,
-                ResolveFlow::Stopped => Demand::Stop,
-                ResolveFlow::Escaped(escape) => {
+                Ok(ElementProbe::Decided { .. }) => {
+                    decided = true;
+                    Demand::Stop
+                }
+                Ok(ElementProbe::Undecided) => Demand::Continue,
+                Err(control) => {
                     let mut slot = None;
-                    let demand = stop_with_eval_escape(&mut slot, escape);
-                    stage_escape = slot.map(|escape| (escape, pipe_retry_generation()));
+                    let demand = stop_with_escape(&mut slot, control);
+                    probe_escape = slot.map(|control| (control, pipe_retry_generation()));
                     demand
                 }
             }
         },
     );
-    let direct_retry = direct_pattern_retry(gen);
     // The escape the drive still owes, unless a `?//` retry consumed it.
-    let mut owed: Option<EvalEscape> = None;
-    if let Some((escape, at)) = stage_escape {
-        if !resolve_retry_superseded(&flow, at, direct_retry) {
-            owed = Some(escape);
+    if let Some((control, at)) = probe_escape {
+        if !resolve_retry_superseded(&flow, at, direct_pattern_retry(gen)) {
+            return ResolveFlow::Escaped(EvalEscape::from(control));
         }
     }
-    if owed.is_none() {
-        if let Some((control, at)) = probe_escape {
-            if !resolve_retry_superseded(&flow, at, direct_retry) {
-                owed = Some(EvalEscape::from(control));
-            }
-        }
-    }
-    if delivery.delivered == 0 {
-        if let Some(escape) = owed {
-            return ResolveFlow::Escaped(escape);
-        }
-        // `any` answers true when an element decided, `all` answers false.
-        let answer = OwnedValue::Bool(decided == target_truthy);
-        return forward_drained_result(
-            flow,
-            answer,
-            // yq decides without delivering (it keeps the single by-value answer), so
-            // `decided` can hold here and the register is then the emitting branch's.
-            if decided {
-                drained_register_after::<S>(trackable, value, true)
-            } else {
-                drained_register_at_entry::<S>(trackable, value, frame)
-            },
-            delivery.sink,
-        );
-    }
-    finish_any_all_answers(
-        delivery,
+    // `any` answers true when an element decided, `all` answers false.
+    forward_drained_result(
         flow,
-        owed,
-        // `gen` ran to its end after a swallowed answer, so every one of its forks was
-        // backtracked and jq's register is back where this entered, exactly as for a
-        // generator that emitted nothing. `emitted` is that restoration, not whether
-        // `gen` produced outputs: passing `true` would re-break #3858.
-        drained_register_at_entry::<S>(trackable, value, frame),
+        OwnedValue::Bool(decided == target_truthy),
+        if decided {
+            drained_register_after::<S>(trackable, value, true)
+        } else {
+            drained_register_at_entry::<S>(trackable, value, frame)
+        },
+        sink,
     )
-}
-
-/// The consumer side of `any`/`all`'s path answers (#3827, #3899): each decisive
-/// output is handed to `sink` from inside the drain, the way jq's path tracker
-/// sees it, so what a retried alternative does (`stderr`, `debug`, `halt`) runs
-/// after the consumer has the answer rather than before.
-///
-/// jq checks each answer against its register as it is emitted, and the `?//`
-/// that swallowed the decisive output's break also swallows the error that
-/// check raises, so only the last answer's refusal survives and names its
-/// value: `path(.x | any(.; (. as {a:$q} ?// {b:$z} | if $q != null then true
-/// else empty end)))` on `{"x":{"a":[1],"b":[2]}}` raises `with result false`,
-/// the identity element, not `true`. Every answer but the last is one a retry
-/// follows, so a stop on it is that swallowed break and the next is delivered
-/// all the same; the terminal sink re-enters after a stop for the same reason
-/// (`resolve_terminal_sink`, #3808). A stop a `?//` retries nothing past (a
-/// `halt`, a decode failure) is never followed by another answer: with no retry
-/// to run, nothing is left to deliver.
-struct AnswerDelivery<'s, 'a> {
-    sink: &'s mut dyn FnMut(PathBranch<'a>) -> Demand,
-    target_truthy: bool,
-    /// Answers handed to `sink` so far.
-    delivered: usize,
-    /// What `sink` answered the last one.
-    demand: Demand,
-}
-
-impl<'s, 'a> AnswerDelivery<'s, 'a> {
-    fn new(sink: &'s mut dyn FnMut(PathBranch<'a>) -> Demand, target_truthy: bool) -> Self {
-        AnswerDelivery {
-            sink,
-            target_truthy,
-            delivered: 0,
-            demand: Demand::Continue,
-        }
-    }
-
-    /// Announce the retry that follows a stop to the sinks that stashed a verdict
-    /// on it (#3293). The stop is the break the `?//` swallowed; a stop no `?//`
-    /// retries past (`halt`, a decode failure) is never followed by a delivery or
-    /// an owed escape, because the retry that would produce either never runs.
-    fn resume(&self) {
-        if self.demand == Demand::Stop {
-            debug_assert!(
-                is_retryable_stop(false),
-                "a final stop (halt, decode failure) was followed by another answer"
-            );
-            clear_nonretryable_stop();
-        }
-    }
-
-    /// Hand `branch` to the consumer.
-    fn deliver(&mut self, branch: PathBranch<'a>) -> Demand {
-        self.resume();
-        self.delivered += 1;
-        self.demand = (self.sink)(branch);
-        self.demand
-    }
-
-    /// Answer the target boolean at the register `at` states.
-    fn answer(&mut self, at: (Rc<PathPrefix>, BranchRegister<'a>)) -> Demand {
-        let (path, register) = at;
-        self.deliver(computed_at_register(
-            OwnedValue::Bool(self.target_truthy),
-            path,
-            register,
-        ))
-    }
-}
-
-/// What follows `any`/`all`'s answers once the drain has ended (#3827): the
-/// identity element when `gen` ran to its end (a retry that came up dry leaves
-/// `gen` running, #3819), then an escape the drive still owes, which is raised
-/// after the answers as jq does -- an answer that is a valid path is printed
-/// first, and a refused one is the refusal the retry that raised supersedes.
-fn finish_any_all_answers<'a>(
-    mut delivery: AnswerDelivery<'_, 'a>,
-    flow: ResolveFlow,
-    owed: Option<EvalEscape>,
-    identity_register: BranchRegister<'a>,
-) -> ResolveFlow {
-    let target_truthy = delivery.target_truthy;
-    let (escape, identity_follows) = match (owed, flow) {
-        (Some(escape), _) | (None, ResolveFlow::Escaped(escape)) => (Some(escape), false),
-        (None, ResolveFlow::Stopped) => (None, false),
-        (None, ResolveFlow::Exhausted) => (None, true),
-    };
-    if identity_follows {
-        delivery.deliver(untracked_at_register(
-            Cow::Owned(OwnedValue::Bool(!target_truthy)),
-            identity_register,
-        ));
-    }
-    if let Some(escape) = escape {
-        delivery.resume();
-        return ResolveFlow::Escaped(escape);
-    }
-    match delivery.demand {
-        Demand::Continue => ResolveFlow::Exhausted,
-        Demand::Stop => ResolveFlow::Stopped,
-    }
 }
 
 /// [`leaf_register`] for the drain arms (`isempty` in yq mode, `INDEX`, and `last` outside
@@ -49749,7 +49343,7 @@ fn drained_register_at_entry<'a, S: EvalSemantics>(
 /// refuses (#3428). They no longer need to: each operand's branch says what
 /// became of the register ([`BranchRegister`]), an operand that may have
 /// moved it states a loss, and `R` then resolves from a lost seed whose
-/// refusals are the resolver's guess and so are loud ([`resolve_from_restored_input`]).
+/// refusals are the resolver's guess and so are loud (`resolve_from_restored_input`).
 fn and_or_negate_resolves_live<S: EvalSemantics>(expr: &Expr) -> bool {
     S::TAG == EvalTag::Jq
         && matches!(
@@ -49774,7 +49368,7 @@ fn and_or_negate_resolves_live<S: EvalSemantics>(expr: &Expr) -> bool {
 /// source and `UPDATE` ([`reduce_leaves_register_in_place`],
 /// [`fold_update_movement_tracked`], #3732/#3580): the `and`/`or` arms
 /// no longer decline an operand this rejects, because each operand's branch
-/// states its own register ([`register_after`]). An `[E]` still needs an
+/// states its own register (`register_after`). An `[E]` still needs an
 /// allowlist, because its claim is that the resolver checks everything jq
 /// checks inside the brackets -- a stronger statement than "the register is
 /// known afterwards". Since #3724 that claim is this predicate *or*
@@ -49824,89 +49418,9 @@ fn register_movement_tracked(expr: &Expr) -> bool {
     }
 }
 
-/// Where jq's path register stands after operand `expr` produced `branch`,
-/// and what it holds (#3289, #3456) -- the one definition the `and`/`or`/unary
-/// minus arms read.
-///
-/// The path is always the branch's own. The register is:
-///
-/// - the branch's own value while it is trackable -- it *is* the register;
-/// - otherwise what the branch's producer says it is. Every producer states
-///   its own register ([`PathBranch::register`]): a by-value leaf by what it
-///   can prove ([`leaf_register`]), a pipe by what its stages carry
-///   (`resolve_seq_stage`), a compound or wrapper node (`,`, `//`, `if`,
-///   `try`, `?`, a `def` call) by passing through whatever the branch it
-///   forwards says, because jq backtracks to the fork and each leaf's
-///   register is its own. So an [`Unmoved`](BranchRegister::Unmoved) register
-///   is read as given, whatever shape the operand has. It used to be re-derived
-///   here from an allowlist of operand shapes ([`register_movement_tracked`]),
-///   which is what each of #3289's review rounds got wrong somewhere;
-/// - for an operand that provably cannot move the register
-///   ([`cannot_move_register`]) whose branch states none, the register the
-///   enclosing stage carries on `frame`, which no leaf producer sees;
-/// - otherwise unknown.
-///
-/// Returned as a [`BranchRegister`]: [`Unmoved`](BranchRegister::Unmoved) where
-/// a register is known, [`LostSomewhere`](BranchRegister::LostSomewhere) where
-/// it is not, and [`None`](BranchRegister::None) where the operand cannot
-/// move it and there is no frame register to fall back on.
-///
-/// An operand's own `LostAt` position is deliberately *not* passed on: the
-/// result is `LostSomewhere`, which is what this arm's callers derived before
-/// the producers stated anything (a missing register on a trackable entry is
-/// a loss with no position). Carrying the position would let a `try` catch a
-/// refusal that is kept loud today -- a promotion with oracle rows of its
-/// own.
-fn register_after<'a>(
-    expr: &Expr,
-    branch: PathBranch<'a>,
-    frame: &Frame,
-) -> (Rc<PathPrefix>, BranchRegister<'a>) {
-    register_after_parts(
-        expr,
-        branch.path,
-        branch.value,
-        branch.trackable,
-        branch.register,
-        frame,
-    )
-}
-
-/// [`register_after`] over a branch's parts, for a caller that must keep the
-/// branch's value borrowed while it asks (`any`/`all`'s by-value probe, #3899).
-/// `value` is read only when `trackable`.
-fn register_after_parts<'a>(
-    expr: &Expr,
-    path: Rc<PathPrefix>,
-    value: Cow<'a, OwnedValue>,
-    trackable: bool,
-    register: BranchRegister<'a>,
-    frame: &Frame,
-) -> (Rc<PathPrefix>, BranchRegister<'a>) {
-    let register = if trackable {
-        BranchRegister::Unmoved(value)
-    } else {
-        match register {
-            BranchRegister::Unmoved(register) => BranchRegister::Unmoved(register),
-            BranchRegister::AtEntry => frame.register().map_or(BranchRegister::None, |reg| {
-                BranchRegister::Unmoved(Cow::Owned(reg.clone()))
-            }),
-            // #4660: a verdict builtin over operands that leave the register hands its boolean on
-            // at the register it entered with ([`verdict_builtin_leaves_register`]).
-            _ if cannot_move_register(expr) || verdict_builtin_leaves_register(expr) => {
-                frame.register().map_or(BranchRegister::None, |reg| {
-                    BranchRegister::Unmoved(Cow::Owned(reg.clone()))
-                })
-            }
-            _ => BranchRegister::LostSomewhere,
-        }
-    };
-    (path, register)
-}
-
 /// A value `and`/`or`/unary minus computed (#3289), or `any(gen; cond)`/
 /// `all(gen; cond)` answered from a deciding element (#3749), emitted at `path`
-/// with the register [`register_after`] found there.
+/// with the register `register_after` found there.
 ///
 /// Trackable again only when it is identical to that register -- jq's
 /// `PATH_END` check, and for a fresh `true`/`false`/number only the
@@ -49948,8 +49462,8 @@ fn resolve_flow_as_flow(flow: &ResolveFlow) -> Flow {
 /// Shared tail for every "drain an argument fully via a discarding sink,
 /// then forward one computed value" arm in [`resolve_node_sink`] (`Array`,
 /// `LastExpr`/`LastStream` in yq mode,
-/// `IsEmpty` in yq mode (jq mode answers per output, [`resolve_isempty_sink`], #4114), `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond` when nothing
-/// decided or `cond` may move the register, #3749): once the drain itself is done (`flow`), build the one branch it
+/// `IsEmpty`, `UpperIndexStream` -- #2746 -- and `AnyCond`/`AllCond`, #3749; each in yq mode only since
+/// #5233): once the drain itself is done (`flow`), build the one branch it
 /// produced and forward it to `sink`, propagating an escape from the drain
 /// immediately and mapping the caller's own `Demand` back to a `ResolveFlow`.
 /// Lets each call site's own match arm differ only in *what* `computed` is,
@@ -50585,7 +50099,7 @@ fn array_contents_are_checked(inner: &Expr) -> bool {
 /// `first` navigates off it and does raise (`[last and first]`). What makes
 /// the union sound there is the resolver's `and`/`or` arm, not this predicate:
 /// it resolves the right operand live from the register the left one left
-/// ([`register_after`], [`resolve_from_restored_input`]), so a navigation off
+/// (`register_after`, `resolve_from_restored_input`), so a navigation off
 /// it is refused as jq refuses it, and the claim only has to say that nothing
 /// jq checks is left unchecked. A change to that arm needs the sweep's
 /// `[L and R]` operands (`scripts/jq-path-register-sweep.py`, #3724 item 2).
@@ -50690,7 +50204,7 @@ fn patterns_all_bare(patterns: &[Pattern]) -> bool {
 ///
 /// Its `patterns_all_bare` conjunct is load-bearing for that claim and is **not** the
 /// one [`reduce_leaves_register_in_place`] dropped (#4048): "navigates nothing" is also
-/// what [`resolve_from_restored_input`] reads, where a register that is not on the input
+/// what `resolve_from_restored_input` reads, where a register that is not on the input
 /// is never checked, and a destructuring pattern's steps are checked there. Do not align
 /// the two.
 fn reduce_cannot_move_register(
@@ -52820,7 +52334,7 @@ fn entry_marker_shape_in(expr: &Expr, calls: &core::cell::Cell<u32>) -> EntryMar
             EntryMarkers::Forwarded
         }
         // #4661: a verdict builtin states the register of each answer itself
-        // ([`register_after`], [`drained_register_at_entry`]), whatever its operands do: they are
+        // (`register_after`, [`drained_register_at_entry`]), whatever its operands do: they are
         // run and backtracked, and an answer whose register the arm cannot place states none. A
         // producer in its own right, like a `catch` handler; its operands' statements never reach
         // the sink.
@@ -53049,7 +52563,7 @@ fn single_output_chain(expr: &Expr, through_alternative: bool, siblings_read: bo
 /// [`fans_out`] with `patterns_fan_out` saying whether a destructuring `as` counts.
 ///
 /// #4354: `isempty(g)` hands every answer to its consumer itself, each at the register the
-/// arm states ([`resolve_isempty_sink`]), and the identity element at the frame's register
+/// arm states (`resolve_isempty_sink`), and the identity element at the frame's register
 /// ([`drained_register_at_entry`]), so a `?//` bind *inside* its operand
 /// (`isempty(. as $q ?// $z | ..)`) is not a sibling that sees the register differently: it
 /// fans out into answers the arm itself orders. Withholding the register for it left the
@@ -53265,7 +52779,7 @@ fn is_null_or_bool(value: &OwnedValue) -> bool {
 /// of `[]` is a fresh `jv_array()`, equal by value and not identical, and a
 /// string slice is a copy (#3494). One definition for the places that apply
 /// the rule -- [`Frame::certifies_value`], [`slice_witnesses_node`] and
-/// [`restored_register_is_input`] -- so a refinement (nested empties, say)
+/// `restored_register_is_input` -- so a refinement (nested empties, say)
 /// cannot reach one and miss the others.
 fn slice_is_same_array(value: &OwnedValue) -> bool {
     matches!(value, OwnedValue::Array(items) if !items.is_empty())
@@ -53857,8 +53371,6 @@ impl FoldRegister {
         let _in_fold_body = fold_body::enter();
         let _catching_fold =
             (S::TAG == EvalTag::Jq && body_catches_a_fold(expr)).then(fold_body::catching_fold);
-        // #5004: the body this resolves, which a `catch` handler's statement is read for.
-        let body_depth = fold_body::depth();
         let tr = self.trackable && at_register;
         // #2042: the register's own position is what a navigated marker in
         // UPDATE/EXTRACT is certified against -- whether or not the
@@ -53985,13 +53497,7 @@ impl FoldRegister {
                     // `Unmoved` of a `//` UPDATE, whose shape a nested `foreach` in the left
                     // operand makes opaque, against the register an untracked entry holds.
                     let by_alternate = alternate && matches!(branch.register, BranchRegister::Unmoved(_));
-                    // #5004: or an `Unmoved` of a `catch` handler around the `foreach` the UPDATE is made of,
-                    // seeded with the register the step entered UPDATE with ([`foreach_update_try_entry`]),
-                    // which no allowlisted shape forwards: the nested fold makes the UPDATE opaque.
-                    let by_entry_handler = matches!(branch.register, BranchRegister::Unmoved(_))
-                        && fold_body::entry_handler_delivering_at(body_depth);
                     (by_alternate
-                        || by_entry_handler
                         || *forwards.get_or_insert_with(|| {
                             matches!(entry_marker_shape(expr), EntryMarkers::Forwarded)
                         }))
@@ -54003,9 +53509,6 @@ impl FoldRegister {
                         )
                 };
             let relocated = self.relocate_one::<S>(branch.into_owned_value(), identical_eligible);
-            // #5004: what runs downstream of an UPDATE output (a 2-arg `foreach` emits from here, at this body's
-            // depth) is past the `try`s the mark names, whatever it looks like.
-            let _past_entry_tries = fold_body::hide_update_try_entry_at(body_depth);
             sink(if at_entry && !relocated.trackable {
                 relocated.with_register(BranchRegister::AtEntry)
             } else {
@@ -65748,7 +65251,7 @@ fn resolve_reduce<'a, S: EvalSemantics>(
         // the stricter of that and its own verdict. #4048: an untracked entry
         // carries its register on the stage's frame, and a pipe stage reads it
         // from there; an `and`/`or`/unary-minus operand is resolved live and its
-        // result's register is the branch's own statement ([`register_after`]),
+        // result's register is the branch's own statement (`register_after`),
         // so the fold states the frame's register too -- when the frame still
         // holds one ([`Frame::register`]), not a lost one.
         if register_unmoved && !emitted.trackable {
@@ -66839,7 +66342,7 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                 // $i)`): jq emits from inside the loop, so its register is still on
                                 // what UPDATE reached. The computed emission is no node of it, but a
                                 // consumer that needs to know where the register is (a verdict
-                                // builtin handing it to an enclosing fold, [`register_after`]) is
+                                // builtin handing it to an enclosing fold, `register_after`) is
                                 // told, as it is for an EXTRACT that is `.`. Only an emission that
                                 // navigated nowhere from the register (its path is the register's
                                 // own) states nothing yet, and only for an EXTRACT that
@@ -67213,13 +66716,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                             // register, or retries an alternative on the body's raise, in ways the step does not report.
                             let bare_step =
                                 matches!(patterns, [Pattern::Var(_)]) && active_reg.trackable;
-                            // On every step the reading below covers, not only the run's last (#5012): a step that
-                            // places its handler lets the `foreach` reach later steps a refusal at this one never
-                            // reached, and the reading covers the container state an earlier step's handler leaves
-                            // ([`nested_source_destructures_off_register`], [`source_destructures_off_state`]). Asked
-                            // per step, and only where a reading holds (the bodies copy the nested `foreach`, as
-                            // `bind.apply` already copies the whole UPDATE for the step).
-                            let mut entry_tries = None;
                             // #4800: ...and a caught foreign `$x` is read against the element the source moved the
                             // register onto, not the state the last step left. Where the pattern lands on a
                             // container the `foreach` is handed a `null`/boolean, which is never that node; behind a
@@ -67285,12 +66781,8 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                                         {
                                                             inner == emitting
                                                         }
-                                                        Some(handlers) if bare_step => {
-                                                            let placed = handlers.0.len()
-                                                                + handlers.1
-                                                                == emitting;
-                                                            entry_tries = Some(handlers);
-                                                            placed
+                                                        Some((tries, inner)) if bare_step => {
+                                                            tries.len() + inner == emitting
                                                         }
                                                         _ => false,
                                                     },
@@ -67298,21 +66790,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
                                     })
                                 }))
                             .then(|| fold_body::foreach_register(elem.value.clone()));
-                            // #5004: placed only where that reading holds, which is where the resolver models whether
-                            // the nested `foreach` raises: elsewhere a handler it runs where jq's never does would
-                            // answer where it is refused now (a two-entry pattern, a `(..)?` source; differential
-                            // grids turned 33 of 40,000 rows into wrong answers).
-                            let _update_try_entry = (bare_step && _register.is_some())
-                                .then(|| {
-                                    entry_tries
-                                        .take()
-                                        .map(|(tries, _)| tries)
-                                        .or_else(|| update_entry_try_bodies(item))
-                                })
-                                .flatten()
-                                .map(|tries| {
-                                    fold_body::update_try_entry(tries, active_reg.value.clone())
-                                });
                             // #4779: ...and the `foreach`es it is made of, through a `try` or a comma,
                             // read the register the step left.
                             let _register_folds = (S::TAG == EvalTag::Jq)
@@ -67478,59 +66955,6 @@ fn resolve_foreach<'a, S: EvalSemantics>(
     }
 }
 
-/// What a `try` caught, as far as jq's `jv_identical` against the register goes
-/// (#3133, #3891).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CaughtPayload {
-    /// A caught `break`: jq's `{"__jq":N}` label object, never the register's node.
-    Label,
-    /// An error value. A `null`/`bool` equal to the register is identical to it
-    /// whatever raised it (jq's `jv_identical` compares those by value).
-    Value,
-    /// The value `error` / `error(P)` raised with `P` a passthrough of `.`
-    /// ([`error_body_raises_its_input`]): the very node the body stood on, so a
-    /// container sharing the register's storage is the register's node too.
-    OfInput,
-    /// [`OfInput`](Self::OfInput) from a `try` entered on a trackable branch (#4019):
-    /// the node the body stood on *is* jq's register there, so the payload is the
-    /// register's node for a scalar too, which has no storage to compare.
-    OfRegister,
-    /// A body that may raise the register's node without the resolver proving it
-    /// ([`try_body_may_raise_alias`]: `error(. // 5)`, `select(. // 1) | error`).
-    /// A payload equal to the register is then jq's register node or a copy of
-    /// it, and which one is not known here, so the handler's seed is marked
-    /// ([`Snapshot::register_entry`]) and a refusal of it is a guess, loud,
-    /// instead of a `(.a)?` quietly pruning an answer jq gives (#4125).
-    MayBeRegister,
-}
-
-/// Whether a `try` body that raised raises *its own input*: `error`, or `error(P)`
-/// with `P` a passthrough of `.`, optionally after passthrough stages (#3891).
-///
-/// jq evaluates `error(msg)`'s argument in path mode, so only a path-preserving
-/// `P` keeps the register: `error(.)` raises the node and a handler navigates it
-/// (`path(try error(.) catch .a)` is `["a"]`), while `error([.][0])` or
-/// `error({"a":.}|.a)` fail with a path error inside the argument, ahead of the
-/// handler (captured live, jq 1.7.1). A payload built by value can still share
-/// the register's storage here -- the `Rc` survives the construction -- so storage
-/// alone is not enough: the expression has to be one jq keeps tracked. The
-/// grammar is [`is_identity_passthrough`]'s, so a path-preserving `P` it does not
-/// know (`first(.)`, `getpath([])`) refuses, as it did before.
-///
-/// This is the grammar for a `try` entered on an *untracked* value, where
-/// [`resolve_catch_sink`] backs it with a storage test; a trackable entry reads the
-/// wider [`body_raises_only_its_input`] (#4019).
-fn error_body_raises_its_input<S: EvalSemantics>(body: &Expr) -> bool {
-    match unwrap_bind_source(body) {
-        Expr::Error(None) => true,
-        Expr::Error(Some(msg)) => is_identity_passthrough::<S>(msg),
-        Expr::Pipe(stages) => stages.split_last().is_some_and(|(last, lead)| {
-            lead.iter().all(is_identity_passthrough::<S>) && error_body_raises_its_input::<S>(last)
-        }),
-        _ => false,
-    }
-}
-
 /// Whether every error a `try` body entered on a *trackable* value can raise is that
 /// value itself (#4019): jq's register is the node the body stands on there, so the
 /// payload is the register's node and a handler navigates it.
@@ -67594,110 +67018,6 @@ fn body_raises_only_its_input(body: &Expr) -> bool {
     }
 }
 
-/// Whether a `try` body entered on a *trackable* value `reg` can raise only a message
-/// string or a frozen `$x` that is `reg`'s very node (#4127): the other half of
-/// [`trackable_body_raises_its_input`], whose grammar is marker-free because a `$x` frozen
-/// elsewhere (`. as $x | .a | try error($x) catch .b`) is not the register.
-///
-/// Here the marker is asked ([`marker_identical`], the rule `path(... | $x)` itself uses), so
-/// `. as $y | .[0] | error($y)` raises the node the `try` stood on even though `.[0]` stepped
-/// off it first: `error`'s argument is evaluated with path tracking suspended and jq's
-/// handler runs against the register the `try`'s fork restored, so
-/// `path(.s | try (. as $y | .[0] | error($y)) catch .[0])` is `["s",0]`.
-///
-/// The grammar is closed over what can raise: navigation by a static key, index, slice or
-/// iterate raises only jq's own message (a string), a comparison or boolean over such
-/// operands is total, and `error` is admitted for a string literal or a marker certified
-/// as `reg`. Anything else (`error`, which raises its input, `error(. // 1)`, a call, a
-/// computed key) could raise a non-string that is not `reg`, so it refuses, as it did. The
-/// caller still has to see a payload that is not a string -- message strings are told
-/// apart by type, never by value, so a string register keeps refusing. Jq mode only
-/// (ADR-0018), and under the same fold gate as [`trackable_body_raises_its_input`].
-fn marker_body_raises_register<S: EvalSemantics>(
-    body: &Expr,
-    reg: &OwnedValue,
-    frame: &Frame,
-) -> bool {
-    S::TAG == EvalTag::Jq
-        && (fold_body::depth() == 0 || fold_body::acc_is_register_here())
-        && has_a_marker_or_a_bind(body)
-        && raises_only_strings_or_register::<S>(body, reg, frame, &[], true)
-}
-
-/// Whether `body` mentions a frozen `$x` marker or has an `as` binding to freeze a variable at:
-/// the `try` body is classified before it is resolved, so a `. as $y | ...` inside it holds a
-/// `Var`, not yet a marker. One walk, since this runs on every caught non-string error.
-fn has_a_marker_or_a_bind(body: &Expr) -> bool {
-    crate::jq::walk::any_subexpr(body, &mut |e| {
-        matches!(e, Expr::TrackedVar(_) | Expr::As { .. })
-    })
-}
-
-/// [`marker_body_raises_register`]'s grammar. `bound` names the variables an `as` inside the
-/// body froze at `reg` itself ([`resolves_to_register`]), which a `$name` stands for in the
-/// way a marker already certified by [`marker_identical`] does. `at_entry` is whether `.` is
-/// still the node the `try` stood on: only there is an `as` source `.` the register, and any
-/// stage that is not `.` takes it off (`.[0] | . as $y | error($y)` raises `1`, not `reg`).
-fn raises_only_strings_or_register<S: EvalSemantics>(
-    expr: &Expr,
-    reg: &OwnedValue,
-    frame: &Frame,
-    bound: &[&str],
-    at_entry: bool,
-) -> bool {
-    let sound = |e: &Expr| raises_only_strings_or_register::<S>(e, reg, frame, bound, at_entry);
-    match unwrap_bind_source(expr) {
-        Expr::Identity
-        | Expr::Literal(_)
-        | Expr::TrackedVar(_)
-        | Expr::Var(_)
-        | Expr::Field(_)
-        | Expr::Index { .. }
-        | Expr::Slice { .. }
-        | Expr::Iterate
-        | Expr::Not
-        | Expr::Builtin(Builtin::Empty) => true,
-        // Stages run on each other's output, so `.` is the entry node only until the first
-        // stage that is not `.` itself.
-        Expr::Pipe(stages) => {
-            let mut here = at_entry;
-            stages.iter().all(|stage| {
-                let ok = raises_only_strings_or_register::<S>(stage, reg, frame, bound, here);
-                here = here && matches!(unwrap_bind_source(stage), Expr::Identity);
-                ok
-            })
-        }
-        Expr::Comma(items) => items.iter().all(sound),
-        Expr::Compare { left, right, .. } | Expr::And(left, right) | Expr::Or(left, right) => {
-            sound(left) && sound(right)
-        }
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => sound(cond) && sound(then_branch) && sound(else_branch),
-        // The source runs with path tracking suspended and raises only what it raises on
-        // its own; the body then sees `var` as `reg` only if the source provably is.
-        Expr::As { expr, var, body } => {
-            sound(expr) && {
-                let mut inner: Vec<&str> =
-                    bound.iter().copied().filter(|name| *name != var).collect();
-                if at_entry && resolves_to_register::<S>(expr, true, reg, frame) {
-                    inner.push(var);
-                }
-                raises_only_strings_or_register::<S>(body, reg, frame, &inner, at_entry)
-            }
-        }
-        Expr::Error(Some(msg)) => match unwrap_bind_source(msg) {
-            Expr::TrackedVar(marker) => marker_identical::<S>(marker, reg, frame),
-            Expr::Var(name) => bound.contains(&name.as_str()),
-            Expr::Literal(Literal::String(_)) => true,
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// `expr` is `error` or `error(P)` with `P` an [exact passthrough](exact_passthrough_stage)
 /// of `.`: it always raises, and what it raises is its input.
 fn stage_raises_its_input(expr: &Expr) -> bool {
@@ -67741,37 +67061,6 @@ fn exact_passthrough_stage(expr: &Expr) -> bool {
     }
 }
 
-/// The register jq restores at the entry of a `try` around the `foreach` a fold UPDATE is made of (#5004): the
-/// register the `foreach` step entered its UPDATE with, which [`fold_body::update_try_entry`] names for the `try`s on
-/// the way to that `foreach` ([`update_entry_try_bodies`]). Nothing ahead of such a `try` in the UPDATE moves the
-/// register (value heads and wrappers do not), so a handler's output is placed there, seeded with it where the frame
-/// carries no register (the UPDATE fans out) and stated back to the fold either way:
-/// `path(. as $x | foreach (.a,.) as $i (.; try (FE) catch (.); $i))` on `{"a":null}` is jq's `[]`, with `FE` a
-/// caught foreign-`$x` `foreach` whose EXTRACT raises. Asked only once the `try` caught something, so a `try` that
-/// raises nothing pays nothing. Jq mode only; a `try` without a handler has nothing to place, and a frame whose
-/// register is lost carries none ([`Frame::with_register`]).
-fn foreach_update_try_entry<S: EvalSemantics>(
-    body: &Expr,
-    catch: Option<&Expr>,
-    frame: &Frame,
-) -> Option<OwnedValue> {
-    if S::TAG != EvalTag::Jq || catch.is_none() || frame.register_loss.is_lost() {
-        return None;
-    }
-    fold_body::update_try_entry_for(body)
-}
-
-/// Marks a handler seeded with the register [`foreach_update_try_entry`] found (`update_entry`) as stating it to the
-/// fold ([`fold_body::entry_handler_delivering`], #5004), however the register reached the `try` (a value head's
-/// stage carries it on the frame): `entry_register` is the one the handler is seeded with.
-fn entry_handler_mark(
-    update_entry: Option<&OwnedValue>,
-    entry_register: Option<&OwnedValue>,
-) -> Option<fold_body::EntryHandlerGuard> {
-    (update_entry.is_some() && entry_register == update_entry)
-        .then(fold_body::entry_handler_delivering)
-}
-
 /// The most outputs a `foreach` source or INIT can emit, where its shape says (#5004): a comma of items that each
 /// yield at most one value ([`yields_at_most_one_value`], or such an item behind a `?`, which only drops outputs) emits
 /// at most as many as it has items, whether or not one raises or is empty. A `foreach` that has driven that many is on
@@ -67810,25 +67099,6 @@ fn is_single_caught_destructure(source: &Expr) -> bool {
         }
         _ => false,
     }
-}
-
-/// The bodies (address and copy) of the `try`s with a handler that emits around the `foreach` a fold UPDATE is made
-/// of ([`plain_update_heads`]), on the way to it, for [`fold_body::update_try_entry`] (#5004); `None` when there is
-/// none, or the UPDATE is no such shape. A `try` elsewhere (in that `foreach`'s INIT or source, or nested deeper)
-/// is not one of them. Nor is any `try` when that `foreach`'s source is not one caught destructure
-/// ([`is_single_caught_destructure`]), or its INIT can move the register: the raise such an INIT
-/// leads its source to (a foreign `$x` no longer the register) is not one the resolver models, so an earlier step
-/// already emits nothing where jq's handler emits, and placing the later steps' handler outputs turned the refusal
-/// of `(. as $x | foreach (.,.a) as $i (.; (try (foreach ($x as {a:$a} | .) as $y (.a?; empty; error($x))) catch
-/// null)?; $i)) = 9` on `{"a":{"a":true}}` into a write of `{"a":9}` (jq raises).
-fn update_entry_try_bodies(update: &Expr) -> Option<Vec<(usize, Expr)>> {
-    update_entry_tries(update).map(|(tries, _)| tries)
-}
-
-/// [`update_entry_try_bodies`], with how many handlers that can emit sit inside that `foreach`'s INIT, UPDATE and
-/// EXTRACT: those emit into its own state, not at the outer `try`'s entry, so they are no output #5004 must place.
-fn update_entry_tries(update: &Expr) -> Option<(Vec<(usize, Expr)>, usize)> {
-    update_foreach_handlers(update).filter(|(tries, _)| !tries.is_empty())
 }
 
 /// [`update_entry_tries`] without requiring a `try` around the `foreach`: `Some` with no `try`s for an UPDATE whose
@@ -67953,8 +67223,6 @@ fn resolve_catch_sink<'a, S: EvalSemantics>(
     catch: Option<&Expr>,
     payload: OwnedValue,
     frame: &Frame,
-    entry_register: Option<&OwnedValue>,
-    caught: CaughtPayload,
     keep: Keep,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
@@ -67967,68 +67235,19 @@ fn resolve_catch_sink<'a, S: EvalSemantics>(
     if is_empty_handler(catch_expr) {
         return ResolveFlow::Exhausted;
     }
-    // A caught error/break payload is never a snapshot (#1591): jq's own
-    // handler binding is unrelated to any `$x` frozen elsewhere in scope.
-    //
-    // #3133: the handler runs against the payload with the register jq
-    // restored at the `try`'s entry (`entry_register`, jq mode only), at
-    // this frame's own position when that is provable (`at` is the
-    // register's position, trackable or carried; the register itself does
-    // not need one -- see `Frame::register`). It is resolved as a seeded
-    // pipe, exactly as a destructuring bind's body is: untracked with that
-    // register in hand, so a `$y` marker for it re-establishes (`path(.a as
-    // $y | .a | try error(1) catch $y)` is jq's `["a"]`; it refused under
-    // the old `frame.unknown()`), or trackable outright when the payload is
-    // a `null`/`bool` identical to the register by jq's `jv_identical`
-    // (`null | path(try (.a | error(null)) catch .b)` is `["b"]`) -- for an
-    // *error* payload only (anything but [`CaughtPayload::Label`]): a caught `break`'s is a
-    // label object jq never finds identical. With no register in hand the
-    // seed is a plain untracked branch, exactly as before.
+    // A caught error/break payload is never a snapshot (#1591), and the
+    // handler is resolved with no register in hand: only yq reaches here
+    // (jq's handler that does more than `empty` runs on the path-mode
+    // interpreter, #5233), and yq's frames carry none.
     //
     // Driven through `resolve_seq_stage` directly, every stage dynamic,
     // rather than `resolve_seq_from_seed`: that function's static-tail fast
     // path refuses an untracked seed on the spot, which is right for a
     // pattern body (it ends the pipe) but not for a handler, whose untracked
     // output must reach the stages after the `try` exactly as the direct
-    // route used to hand it on -- `[path(.a | (try error(null) catch .) |
-    // empty)]` is jq's `[]`, and an eager refusal here turned it into an
-    // exit 5.
-    let frame = frame.with_register(entry_register);
-    let seed = match frame.register() {
-        Some(register)
-            if caught != CaughtPayload::Label
-                && (null_bool_identical(&payload, register)
-                    // #3891: `error` and `error(.)` raise the very node the `try`
-                    // stood on, so jq's `jv_identical` holds for a container too
-                    // (`try error catch .a` is `["a"]`), and storage identity is
-                    // that pointer test where the resolver holds the caller's own
-                    // tree. It answers for containers (and a scalar a bind has
-                    // promoted, [`OwnedValue::shares_storage_with`]); a string or a
-                    // computed number has no storage to compare, so a handler
-                    // navigating one still refuses, as it did (`"abc" | try error
-                    // catch .[1:]` is a path in jq). Where it does not hold at all (a
-                    // reindex bridge) this is false and the arm below decides. Only
-                    // for a body that raised its own input
-                    // ([`CaughtPayload::OfInput`]): a payload built by value can share
-                    // the storage too, which jq does not treat as the node.
-                    // `register` is only ever present in jq mode (`entry_register`).
-                    || caught == CaughtPayload::OfRegister
-                    || (caught == CaughtPayload::OfInput
-                        && payload.shares_storage_with(register))) =>
-        {
-            PathBranch::new(PathPrefix::root(), Cow::Owned(payload), true)
-        }
-        Some(register) => {
-            let snapshot = if caught == CaughtPayload::MayBeRegister && payload == *register {
-                Snapshot::register_entry()
-            } else {
-                Snapshot::No
-            };
-            PathBranch::passthrough(PathPrefix::root(), Cow::Owned(payload), false, snapshot)
-                .with_register(BranchRegister::Unmoved(Cow::Owned(register.clone())))
-        }
-        None => PathBranch::untracked(Cow::Owned(payload)),
-    };
+    // route used to hand it on.
+    let frame = frame.with_register(None);
+    let seed = PathBranch::untracked(Cow::Owned(payload));
     let mut flat = Vec::new();
     push_path_components(&mut flat, catch_expr);
     let Some(last) = flat.len().checked_sub(1) else {
@@ -72335,7 +71554,7 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
     // answered inside `place_step` by `seed_pending` below, not here.
     // #3289: when `and`/`or`/unary minus resolve their operands live
     // ([`and_or_negate_resolves_live`]), each result sits at the register its
-    // own branch left ([`register_after`]), path components included, so the
+    // own branch left (`register_after`), path components included, so the
     // step itself says where the register is -- including a position its
     // operand navigated to, which `navigated` below would otherwise read as
     // a refused navigation and drop.
@@ -72476,7 +71695,7 @@ fn resolve_seq_stage<'a, S: EvalSemantics>(
         // The contract this rests on, for these builtins only: on an untracked
         // entry a leaf states `None` only for a result that backtracked every
         // branch ([`drained_register`]) or whose generator provably moves
-        // nothing, and states a loss ([`register_after`]) for anything it
+        // nothing, and states a loss (`register_after`) for anything it
         // cannot vouch for. A leaf or wrapper that returned `None` for a
         // generator that moves the register would re-establish a stale `$x`
         // here; the residual rows (`1 | isempty(def f: 2; f)`) pin the loss side.
@@ -76807,14 +76026,6 @@ mod terminal_retry {
 mod fold_body {
     use std::cell::{Cell, RefCell};
 
-    /// The [`update_try_entry`] mark: the body depth, the `try` bodies it names (address and copy), and the
-    /// register those `try`s are entered with.
-    type TryEntry = (
-        u32,
-        alloc::vec::Vec<(usize, super::Expr)>,
-        super::OwnedValue,
-    );
-
     thread_local! {
         static DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth at which `.` is known to be jq's register (#3953), 0 for none.
@@ -76837,11 +76048,6 @@ mod fold_body {
         static FOREACH_REGISTER: RefCell<Option<(u32, super::OwnedValue)>> = const { RefCell::new(None) };
         /// The [`foreach_step_register`] mark.
         static FOREACH_STEP_REGISTER: RefCell<Option<(u32, super::OwnedValue, bool)>> = const { RefCell::new(None) };
-        /// The [`update_try_entry`] mark ([`TryEntry`]).
-        static UPDATE_TRY_ENTRY: RefCell<Option<TryEntry>> =
-            const { RefCell::new(None) };
-        /// The body depth whose `try` handler, seeded from [`UPDATE_TRY_ENTRY`], is delivering, 0 for none.
-        static ENTRY_HANDLER_DEPTH: Cell<u32> = const { Cell::new(0) };
         /// The body depth of a `foreach` UPDATE or EXTRACT (#4564), 0 for none, shifted left two:
         /// bit 0 is the moved bit, bit 1 the stating bit.
         static LOOP_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -77326,94 +76532,6 @@ mod fold_body {
         })
     }
 
-    /// Restores the previous [`update_try_entry`] mark.
-    pub(crate) struct TryEntryGuard(Option<TryEntry>);
-
-    /// Names the register a `foreach` UPDATE about to be entered starts from (`register`, the step's own), for
-    /// the `try`s around the `foreach` that UPDATE is made of, by each one's body (`tries`, its address and a copy:
-    /// a pipe hands its stages on copied, [`super::update_entry_try_bodies`], #5004): jq restores that register
-    /// when such a `try` catches, so its handler's output carries it. Only [`update_try_entry_for`] reads it.
-    pub(crate) fn update_try_entry(
-        tries: alloc::vec::Vec<(usize, super::Expr)>,
-        register: super::OwnedValue,
-    ) -> TryEntryGuard {
-        let previous =
-            UPDATE_TRY_ENTRY.with(|a| a.borrow_mut().replace((depth() + 1, tries, register)));
-        TryEntryGuard(previous)
-    }
-
-    impl Drop for TryEntryGuard {
-        fn drop(&mut self) {
-            UPDATE_TRY_ENTRY.with(|a| *a.borrow_mut() = self.0.take());
-        }
-    }
-
-    /// The register [`update_try_entry`] named for the `try` whose body is `body`, in the body being resolved: the
-    /// same node, or an equal copy of one. Every other `try` the body resolves is inside one of those bodies, so
-    /// never equal to one; what runs downstream of the body's outputs, or inside the handler, does not see the mark
-    /// ([`hide_update_try_entry_at`]).
-    pub(crate) fn update_try_entry_for(body: &super::Expr) -> Option<super::OwnedValue> {
-        let key = super::expr_key(body);
-        UPDATE_TRY_ENTRY.with(|a| {
-            a.borrow()
-                .as_ref()
-                .filter(|(at, tries, _)| {
-                    depth() > 0
-                        && *at == depth()
-                        && tries
-                            .iter()
-                            .any(|(address, copy)| *address == key || copy == body)
-                })
-                .map(|(_, _, register)| register.clone())
-        })
-    }
-
-    /// Restores an [`update_try_entry`] mark [`hide_update_try_entry_at`] took.
-    pub(crate) struct HiddenTryEntry(Option<TryEntry>);
-
-    /// Takes the [`update_try_entry`] mark of the body at `body_depth` while an output of it is delivered
-    /// downstream: a stage there is past the `try`s it names, even one that looks like them.
-    pub(crate) fn hide_update_try_entry_at(body_depth: u32) -> HiddenTryEntry {
-        HiddenTryEntry(UPDATE_TRY_ENTRY.with(|a| {
-            let mut mark = a.borrow_mut();
-            if mark.as_ref().is_some_and(|(at, ..)| *at == body_depth) {
-                mark.take()
-            } else {
-                None
-            }
-        }))
-    }
-
-    impl Drop for HiddenTryEntry {
-        fn drop(&mut self) {
-            if let Some(mark) = self.0.take() {
-                UPDATE_TRY_ENTRY.with(|a| *a.borrow_mut() = Some(mark));
-            }
-        }
-    }
-
-    /// Restores the previous [`entry_handler_delivering`] mark.
-    pub(crate) struct EntryHandlerGuard(u32);
-
-    /// Marks the body being resolved as delivering the outputs of a `catch` handler seeded from
-    /// [`update_try_entry_for`] (#5004), which state the register the `try` was entered with.
-    pub(crate) fn entry_handler_delivering() -> EntryHandlerGuard {
-        EntryHandlerGuard(ENTRY_HANDLER_DEPTH.with(|a| a.replace(depth())))
-    }
-
-    impl Drop for EntryHandlerGuard {
-        fn drop(&mut self) {
-            ENTRY_HANDLER_DEPTH.with(|a| a.set(self.0));
-        }
-    }
-
-    /// Whether the output being delivered now comes from an [`entry_handler_delivering`] handler of the body at
-    /// `body_depth`, the one whose fold is asking. A fold nested in the handler emits from a deeper body, and a fold
-    /// the handler's body emits into was entered at a shallower one, so neither reads it.
-    pub(crate) fn entry_handler_delivering_at(body_depth: u32) -> bool {
-        body_depth > 0 && ENTRY_HANDLER_DEPTH.with(Cell::get) == body_depth
-    }
-
     /// Marks the body about to be entered as moved too when the body being resolved is (#4651): a
     /// nested fold whose source cannot move the register and whose INIT is `.` runs its UPDATE on
     /// the accumulator the moved body handed it, which the register is still not at. The element's
@@ -77673,35 +76791,6 @@ mod fold_body {
 
     pub(crate) fn foreach_step_register_here() -> Option<(super::OwnedValue, bool)> {
         None
-    }
-
-    pub(crate) struct TryEntryGuard;
-
-    pub(crate) fn update_try_entry(
-        _tries: alloc::vec::Vec<(usize, super::Expr)>,
-        _register: super::OwnedValue,
-    ) -> TryEntryGuard {
-        TryEntryGuard
-    }
-
-    pub(crate) fn update_try_entry_for(_body: &super::Expr) -> Option<super::OwnedValue> {
-        None
-    }
-
-    pub(crate) struct EntryHandlerGuard;
-
-    pub(crate) struct HiddenTryEntry;
-
-    pub(crate) fn hide_update_try_entry_at(_body_depth: u32) -> HiddenTryEntry {
-        HiddenTryEntry
-    }
-
-    pub(crate) fn entry_handler_delivering() -> EntryHandlerGuard {
-        EntryHandlerGuard
-    }
-
-    pub(crate) fn entry_handler_delivering_at(_body_depth: u32) -> bool {
-        false
     }
 
     pub(crate) fn foreach_register_set_here() -> bool {
@@ -78018,40 +77107,13 @@ pub(crate) fn stop_with_escape(slot: &mut Option<Control>, control: Control) -> 
     Demand::Stop
 }
 
-/// [`stop_with_escape`] for the live negation arm of [`resolve_node_sink`]
-/// (#3299), whose out-of-band slot holds an [`EvalEscape`] rather than a bare
-/// [`Control`]. Its return type ([`ResolveFlow`]) has a dedicated `Escaped`
-/// variant, so the escape it stashes is never lost at its own boundary the way
-/// it would be for a driver returning bare `Flow`/`Demand`. It still owes `?//`
-/// the same classification `stop_with_escape` records, though: the operand
-/// generator it is driving sees only this stop, and if a `?//` sits inside that
-/// generator's own body it needs `nonretryable_stop` set to classify it
-/// correctly, exactly as any other escape-behind-a-stop does.
-///
-/// `resolve_index_expr_sink` (#2924) and `resolve_slice_expr_sink` were its
-/// other callers. They stash into a [`StashedEscape`] since #3293, which a
-/// `?//` retry inside their key or bound can supersede, and reach the same
-/// classification through [`stop_with_escape_cell`].
-///
-/// Round-trips through [`stop_with_escape`] itself, the same shape
-/// [`stop_with_error`] below uses -- not just its classifier -- so a second
-/// responsibility added to that plumbing later is inherited here for free,
-/// rather than needing its own copy the way [`mark_nonretryable_escape`]'s
-/// own doc comment already lists three drifted copies of (#106/#1313/#1457).
-pub(crate) fn stop_with_eval_escape(slot: &mut Option<EvalEscape>, escape: EvalEscape) -> Demand {
-    let mut control = None;
-    let demand = stop_with_escape(&mut control, Control::from(escape));
-    *slot = control.map(EvalEscape::from);
-    demand
-}
-
 /// The one definition of "a `?//` may not retry past this escape, wherever
 /// it lands" -- `Halt` and decode failures, [`is_retryable_control`]'s two
 /// position-independent exclusions.
 ///
-/// [`stop_with_escape`], [`stop_with_escape_cell`], [`stop_with_error`] and
-/// [`stop_with_eval_escape`] cover the drivers whose slot holds a `Control`,
-/// an `EvalError`, or an `EvalEscape`; [`stop_with_downstream`] covers the
+/// [`stop_with_escape`], [`stop_with_escape_cell`] and [`stop_with_error`]
+/// cover the drivers whose slot holds a `Control` or an `EvalError`;
+/// [`stop_with_downstream`] covers the
 /// one whose slot holds a whole `Flow`. [`StashedVerdict`] round-trips
 /// through `stop_with_escape_cell`/`stop_with_downstream` (#3293). The
 /// owned-identity stages in `eval_generic.rs` keep [`StashedEscape`]s and
@@ -152120,77 +151182,6 @@ mod touched_edge_cases_2999 {
     fn yq_zero_arity_path_at_the_root_is_empty() {
         assert_eq!(yq_json(br#"{"a":1}"#, "path"), "[]");
         assert_eq!(yq_json(br#"{"a":1}"#, ".a | path"), r#"["a"]"#);
-    }
-
-    /// #2924: `stop_with_eval_escape` -- the helper `resolve_index_expr_sink`
-    /// and `resolve_slice_expr_sink` routed through instead of stashing
-    /// `target_escape`/`inner_escape` directly (they stash into a
-    /// `StashedEscape` now, #3293, which round-trips through the same
-    /// classification) -- must classify exactly like
-    /// its `Control`-shaped sibling [`stop_with_escape`]: `Halt` and an
-    /// uncatchable `Error` set [`nonretryable_stop`], an ordinary `Error` or
-    /// `Break` does not. Unit-level rather than an end-to-end jq repro
-    /// because no observable divergence was found for this gap despite a
-    /// live investigation (structural read: both resolvers reconstruct
-    /// `ResolveFlow::Escaped` from `target_escape`/`inner_escape` at their
-    /// own return boundary, which never degrades into a bare
-    /// `Flow::Stopped` the way a driver with only a `Flow`/`Demand` return
-    /// type would -- matching the issue's own "9000-shape fuzz found
-    /// nothing" report) -- this pins the classification contract directly
-    /// rather than leaving it uncovered.
-    ///
-    /// `std`-gated: [`nonretryable_stop`]'s own `#[cfg(not(feature =
-    /// "std"))]` half is a permanent no-op (`set`/`clear` do nothing,
-    /// `is_set` always `false`) -- a documented, pre-existing trade-off
-    /// (no `thread_local!` in `no_std`), not something this PR changes.
-    /// Asserting `is_set()` after `stop_with_eval_escape` would fail under
-    /// `--no-default-features` for that reason alone, regardless of
-    /// whether the classification itself is correct.
-    #[test]
-    #[cfg(feature = "std")]
-    fn stop_with_eval_escape_classifies_like_stop_with_escape() {
-        clear_nonretryable_stop();
-        let mut slot: Option<EvalEscape> = None;
-        assert_eq!(
-            stop_with_eval_escape(&mut slot, EvalEscape::Halt(3)),
-            Demand::Stop
-        );
-        assert!(matches!(slot, Some(EvalEscape::Halt(3))));
-        assert!(nonretryable_stop::is_set());
-
-        clear_nonretryable_stop();
-        let mut slot: Option<EvalEscape> = None;
-        let uncatchable = EvalError::decode_failure("bad");
-        assert!(uncatchable.is_uncatchable_at_value_position());
-        assert_eq!(
-            stop_with_eval_escape(&mut slot, EvalEscape::Error(uncatchable)),
-            Demand::Stop
-        );
-        assert!(nonretryable_stop::is_set());
-
-        clear_nonretryable_stop();
-        let mut slot: Option<EvalEscape> = None;
-        assert_eq!(
-            stop_with_eval_escape(&mut slot, EvalEscape::Error(EvalError::new("boom"))),
-            Demand::Stop
-        );
-        assert!(matches!(slot, Some(EvalEscape::Error(_))));
-        assert!(!nonretryable_stop::is_set());
-
-        // `Break` is retryable too -- not one of `is_retryable_control`'s
-        // two position-independent exclusions -- pinned directly rather
-        // than left to the ordinary-`Error` case's analogy, since a future
-        // change to that classifier could special-case `Break` without
-        // this test noticing otherwise.
-        clear_nonretryable_stop();
-        let mut slot: Option<EvalEscape> = None;
-        assert_eq!(
-            stop_with_eval_escape(&mut slot, EvalEscape::Break("out".to_string())),
-            Demand::Stop
-        );
-        assert!(matches!(slot, Some(EvalEscape::Break(ref label)) if label == "out"));
-        assert!(!nonretryable_stop::is_set());
-        clear_nonretryable_stop();
     }
 
     /// What the per-def nested binding this replaces produced for a def spine
