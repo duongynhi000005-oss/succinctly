@@ -12727,6 +12727,7 @@ fn owned_assign_new_value<S: EvalSemantics>(
     }
     match rhs {
         OwnedAssignRhs::Value(value) => Some(value),
+        OwnedAssignRhs::Filter(_) if super::eval_generic::embed_table_active() => None,
         OwnedAssignRhs::Filter(filter) => {
             match eval_owned_multi_first::<S>(filter, old, Reentry::REBUILT) {
                 Ok(Some(value)) => Some(value),
@@ -12809,21 +12810,32 @@ fn static_step(path: &Expr) -> Option<StepKey<'_>> {
 }
 
 /// The steps of an [`owned_assign_step`] path, outermost first, or `None`
-/// when a step is neither static nor closed.
+/// when a step is neither static nor closed. `at` is the value `path` is
+/// evaluated on: a key that reads `.` (#5263) reads that, so in `(.a | .[K])`
+/// the stage `.[K]` reads `.a`, and in `.a[K]` the key reads the value `.a[K]`
+/// starts from, as jq runs an index key on its target's input.
 fn owned_assign_path_steps<'e, S: EvalSemantics>(
     path: &'e Expr,
     steps: &mut Vec<StepKey<'e>>,
-    state: &OwnedValue,
+    at: &OwnedValue,
 ) -> Option<()> {
     match path {
         Expr::Identity => Some(()),
-        Expr::Paren(inner) => owned_assign_path_steps::<S>(inner, steps, state),
-        Expr::Pipe(stages) => stages
-            .iter()
-            .try_for_each(|stage| owned_assign_path_steps::<S>(stage, steps, state)),
+        Expr::Paren(inner) => owned_assign_path_steps::<S>(inner, steps, at),
+        Expr::Pipe(stages) => {
+            let mut stage_input = at;
+            for stage in stages {
+                let before = steps.len();
+                owned_assign_path_steps::<S>(stage, steps, stage_input)?;
+                for step in &steps[before..] {
+                    stage_input = owned_assign_step_child(step, stage_input)?;
+                }
+            }
+            Some(())
+        }
         Expr::IndexExpr { target, key } => {
-            owned_assign_path_steps::<S>(target, steps, state)?;
-            steps.push(owned_key_step::<S>(key, state)?);
+            owned_assign_path_steps::<S>(target, steps, at)?;
+            steps.push(owned_key_step::<S>(key, at)?);
             Some(())
         }
         _ => {
@@ -97665,8 +97677,8 @@ mod tests {
         // `.missing += 1`, `.a.i += 1` and `.i = 1` are handled since #3138, and
         // `.i += .n` (a right side that reads `.`) since #5263 -- see
         // `owned_assign_step_agrees_with_forced_bridge_3138`.
-        {
-            let src = ".n += \"x\"";
+        // `.i += .n.x` reads `.`, and the read raises: the evaluator's text.
+        for src in [".n += \"x\"", ".i += .n.x"] {
             let expr = parse(src).unwrap();
             assert!(
                 eval_owned_reindex_free::<JqSemantics>(&expr, &object).is_none(),
@@ -97722,8 +97734,19 @@ mod tests {
         // computed bracket on a string, which `owned_key_step` turns into
         // `StepKey::Field` instead.
         let with_empty_array = OwnedValue::object_from([("a".to_string(), OwnedValue::array())]);
+        // #5263: a key that reads `.` reads the value its stage starts from.
+        let pair = OwnedValue::object_from([
+            ("a".to_string(), array.clone()),
+            (
+                "b".to_string(),
+                OwnedValue::from_number_literal::<JqSemantics>("1"),
+            ),
+        ]);
 
         let handled = [
+            (".a[length] = 9", pair.clone()),
+            ("(.a | .[length]) = 9", pair.clone()),
+            (".a[.b] |= . + 10", pair.clone()),
             (".[$r.name] = $r.score", OwnedValue::object_from([])),
             (".[$r.name] = $r.score", object.clone()),
             (".[$r.name] = $r.score", OwnedValue::Null),
@@ -97822,6 +97845,7 @@ mod tests {
             (".[$r.name] = (1, 2)", object.clone()), // two outputs
             (".[$r.name] |= empty", object.clone()), // deletes
             (".[.a] = 1", object.clone()),           // key reads `.`, a boolean
+            ("(.a | .[.b]) = 9", pair.clone()),      // key reads `.a`, an array: raises
             (".[] = 1", object.clone()),             // iterate
             (". = 1", object.clone()),               // no step at all
             (".[$r.name.x] = 1", object.clone()),    // key raises
