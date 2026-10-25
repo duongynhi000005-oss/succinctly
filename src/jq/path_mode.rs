@@ -924,6 +924,15 @@ pub(crate) fn route(program: &Expr) -> Route {
     });
     match (dynamic, declined) {
         (false, _) => Route::Shipped,
+        // The interpreter reads storage identity, which the `unshared-containers`
+        // A/B holdout (#2999) does not have: its by-value `jv_identical` refuses
+        // rows jq answers. Nor does the shipped resolver answer a dynamic target
+        // any more (#5233), so that measurement build refuses one outright
+        // rather than answer it wrongly.
+        (true, _) if cfg!(feature = "unshared-containers") => Route::Refused(EvalError::new(
+            "a path expression that does more than navigate is not supported in the \
+             unshared-containers build",
+        )),
         (true, None) => Route::Interpreter,
         (true, Some(what)) => Route::Refused(EvalError::new(format!(
             "{what} is not supported in a program whose path expression does more than navigate"

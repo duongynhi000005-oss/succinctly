@@ -837,7 +837,9 @@ Three rules make the holdout trustworthy, each learned the hard way (#3000,
 
 Current switch: `unshared-containers` (the #3000 layout for `OwnedValue`'s
 containers). The `share-stats` feature is its companion for the copy audit
-(`SUCCINCTLY_SHARE_STATS=1`).
+(`SUCCINCTLY_SHARE_STATS=1`). Since #5233 the holdout refuses a jq program whose path
+target does more than navigate (the path-mode interpreter needs the storage identity this
+layout lacks), so an A/B corpus for it keeps such rows out.
 
 # what the harness reports for a change that does not exist — run this first, once per machine
 scripts/ab-cli.py --before ./succ-base --control --corpus ~/wrk/bench-scratch/mycorpus
