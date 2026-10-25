@@ -265,8 +265,8 @@ impl Raise {
 /// writing them as they come (#5256).
 const WRITE_LOOKAHEAD: usize = 4096;
 
-/// How deep [`Interp::pure`] follows calls to parameterless `def`s (#5263).
-const MAX_PURE_DEF_DEPTH: u32 = 4;
+/// How many nested `def` bodies [`Interp::pure`] and [`Interp::single`] walk into (#5263).
+const MAX_DEF_WALK_DEPTH: usize = 16;
 
 type R = Result<(), Raise>;
 type Sink<'s> = dyn FnMut(OwnedValue, Reg) -> R + 's;
@@ -822,9 +822,9 @@ pub struct Interp<'e> {
     /// the native-stack floor, as `MAX_EVAL_FRAMES` is for the shipped
     /// evaluator.
     depth: Cell<u32>,
-    /// How many `def` bodies [`Self::pure`] is looking inside right now, which
-    /// bounds its walk through a definition that calls itself (#5263).
-    pure_depth: Cell<u32>,
+    /// The `def` bodies [`Self::pure`] and [`Self::single`] are looking inside right
+    /// now, by address, so a definition that reaches itself is seen as it is (#5263).
+    def_walk: RefCell<Vec<usize>>,
     /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
     /// into the root allocation. Keyed by `(root, offset, size)`, so equal
     /// slices of one array are one value; each view maps back to its root
@@ -1256,7 +1256,7 @@ impl<'e> Interp<'e> {
             consts: RefCell::new(BTreeMap::new()),
             next_label: Cell::new(0),
             depth: Cell::new(0),
-            pure_depth: Cell::new(0),
+            def_walk: RefCell::new(Vec::new()),
             slices: RefCell::new(BTreeMap::new()),
             slice_roots: RefCell::new(BTreeMap::new()),
         }
@@ -2394,7 +2394,7 @@ impl<'e> Interp<'e> {
     /// before its consumer runs costs no laziness: there is no second output
     /// a consumer could have stopped before. Conservative, like
     /// [`Self::pure`]: a generator (`,`, `.[]`, `..`, `range`, ...) or a
-    /// call to a `def` counts as one that may yield more.
+    /// call to a `def` with parameters counts as one that may yield more.
     fn single(&self, expr: &'e Expr, env: &Env<'e>) -> bool {
         use Expr as E;
         match expr {
@@ -2450,7 +2450,16 @@ impl<'e> Interp<'e> {
             E::As { expr, body, .. } => self.single(expr, env) && self.single(body, env),
             E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
                 Some(Callee::Arg { frame, .. }) => self.arg_is_single(&frame),
-                _ => false, // patchcov: coverage tolerate-line reason="unreachable: single() runs only after pure() accepted the same expression, and pure() rejects a def call"
+                // A call to a `def` with no parameters yields what its body does (#5263).
+                Some(Callee::Def {
+                    params: [],
+                    body,
+                    env: def_env,
+                    ..
+                }) => self
+                    .in_def_body(body, || self.single(body, &def_env))
+                    .unwrap_or(false),
+                _ => false,
             },
             E::Builtin(builtin) => {
                 pure_builtin(builtin)
@@ -2464,9 +2473,10 @@ impl<'e> Interp<'e> {
     /// Whether evaluating `expr` in `env` has no side effect and always
     /// terminates, so that collecting its outputs ([`Self::eager`]) cannot
     /// be told from producing them one at a time. Conservative: no call to a
-    /// `def` (which may recurse), no loop, no builtin that writes, reads input
-    /// or halts. A closure parameter is pure when its own argument is, in its
-    /// own environment.
+    /// `def` with parameters or one that reaches itself (a call to any other is
+    /// as pure as its body), no loop, no builtin that writes, reads input or
+    /// halts. A closure parameter is pure when its own argument is, in its own
+    /// environment.
     fn pure(&self, expr: &'e Expr, env: &Env<'e>) -> bool {
         use Expr as E;
         match expr {
@@ -2522,20 +2532,15 @@ impl<'e> Interp<'e> {
             E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
                 Some(Callee::Arg { frame, .. }) => self.arg_is_pure(&frame),
                 // A call to a `def` with no parameters is as pure as its body, in the
-                // definition's own scope (#5263). A body that calls itself, or another
-                // `def`, is followed only so far: past `MAX_PURE_DEF_DEPTH` it is not
-                // pure, so a recursive definition never is.
+                // definition's own scope (#5263); one that reaches itself never is.
                 Some(Callee::Def {
-                    params,
+                    params: [],
                     body,
                     env: def_env,
                     ..
-                }) if params.is_empty() && self.pure_depth.get() < MAX_PURE_DEF_DEPTH => {
-                    self.pure_depth.set(self.pure_depth.get() + 1);
-                    let pure = self.pure(body, &def_env);
-                    self.pure_depth.set(self.pure_depth.get() - 1);
-                    pure
-                }
+                }) => self
+                    .in_def_body(body, || self.pure(body, &def_env))
+                    .unwrap_or(false),
                 _ => false,
             },
             E::Builtin(builtin) => {
@@ -2543,6 +2548,23 @@ impl<'e> Interp<'e> {
             }
             _ => false,
         }
+    }
+
+    /// Run `f` with `body` marked as being walked, or `None` when it already is (a
+    /// definition that reaches itself) or the walk is `MAX_DEF_WALK_DEPTH` definitions
+    /// deep (#5263).
+    fn in_def_body<T>(&self, body: &'e Expr, f: impl FnOnce() -> T) -> Option<T> {
+        let key = body as *const Expr as usize;
+        {
+            let mut walk = self.def_walk.borrow_mut();
+            if walk.contains(&key) || walk.len() >= MAX_DEF_WALK_DEPTH {
+                return None;
+            }
+            walk.push(key);
+        }
+        let result = f();
+        self.def_walk.borrow_mut().pop();
+        Some(result)
     }
 
     /// `until(cond; next)` and `while(cond; update)`:
@@ -4063,18 +4085,15 @@ fn emit_c_builtin(
     // re-serialize the whole input for the shipped evaluator, which makes a `reduce`
     // whose key is `.[length]` quadratic in the size of its state (#5263).
     match (builtin, args, input) {
-        (
-            Builtin::Length,
-            [],
-            OwnedValue::Null | OwnedValue::String(_) | OwnedValue::Array(_) | OwnedValue::Object(_),
-        ) => {
-            let length = match input {
-                OwnedValue::String(text) => text.chars().count(),
-                OwnedValue::Array(items) => items.len(),
-                OwnedValue::Object(map) => map.len(),
-                _ => 0,
-            };
-            return sink(OwnedValue::Int(length as i64), reg.clone());
+        (Builtin::Length, [], OwnedValue::Null) => return sink(OwnedValue::Int(0), reg.clone()),
+        (Builtin::Length, [], OwnedValue::String(text)) => {
+            return sink(OwnedValue::Int(text.chars().count() as i64), reg.clone());
+        }
+        (Builtin::Length, [], OwnedValue::Array(items)) => {
+            return sink(OwnedValue::Int(items.len() as i64), reg.clone());
+        }
+        (Builtin::Length, [], OwnedValue::Object(map)) => {
+            return sink(OwnedValue::Int(map.len() as i64), reg.clone());
         }
         (Builtin::Type, [], _) => {
             return sink(string(super::eval::owned_type_name(input)), reg.clone());

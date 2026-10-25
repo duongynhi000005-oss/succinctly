@@ -12872,42 +12872,45 @@ fn path_has_state_key(path: &Expr) -> bool {
 /// A variable is never one of them: a fold's variable is spliced in as a
 /// literal before the step runs.
 fn owned_state_expr_shape(expr: &Expr) -> bool {
+    owned_state_expr_shape_in(expr, true)
+}
+
+/// [`owned_state_expr_shape`], with `calls` saying whether a call to a `def` is
+/// admitted: not inside a `def`'s own body, so a definition that reaches itself
+/// (or another) is never followed.
+fn owned_state_expr_shape_in(expr: &Expr, calls: bool) -> bool {
+    let shape = |e: &Expr| owned_state_expr_shape_in(e, calls);
     match expr {
         Expr::Identity | Expr::Literal(_) | Expr::Field(_) | Expr::Index { .. } | Expr::Not => true,
-        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => {
-            owned_state_expr_shape(inner)
-        }
+        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => shape(inner),
         Expr::Object(entries) => entries.iter().all(|entry| {
-            owned_state_expr_shape(&entry.value)
+            shape(&entry.value)
                 && match &entry.key {
                     ObjectKey::Literal(_) => true,
-                    ObjectKey::Expr(key) => owned_state_expr_shape(key),
+                    ObjectKey::Expr(key) => shape(key),
                     ObjectKey::Bare => false,
                 }
         }),
-        Expr::Pipe(stages) => stages.iter().all(owned_state_expr_shape),
+        Expr::Pipe(stages) => stages.iter().all(shape),
         Expr::Arithmetic { left, right, .. }
         | Expr::Compare { left, right, .. }
         | Expr::And(left, right)
         | Expr::Or(left, right)
-        | Expr::Alternative(left, right) => {
-            owned_state_expr_shape(left) && owned_state_expr_shape(right)
-        }
+        | Expr::Alternative(left, right) => shape(left) && shape(right),
         Expr::If {
             cond,
             then_branch,
             else_branch,
-        } => {
-            owned_state_expr_shape(cond)
-                && owned_state_expr_shape(then_branch)
-                && owned_state_expr_shape(else_branch)
-        }
+        } => shape(cond) && shape(then_branch) && shape(else_branch),
         Expr::Builtin(Builtin::ToString | Builtin::Type) => true,
-        // A call to a `def` with no parameters, whose body is itself one of these. The body is
-        // the definition as written, where a call to another definition (or to itself) is an
-        // unresolved name this does not admit, so a recursive body is never one of them.
+        // A call to a `def` with no parameters, whose body is itself one of these. Inside a
+        // `def`'s own body a call is not followed, so a definition that reaches itself, or
+        // another, is never one of them, whatever a later pass does to the bodies.
         Expr::DefCall { def, args, .. } => {
-            args.is_empty() && def.params.is_empty() && owned_state_expr_shape(&def.body)
+            calls
+                && args.is_empty()
+                && def.params.is_empty()
+                && owned_state_expr_shape_in(&def.body, false)
         }
         other => is_closed_unary_builtin(other),
     }
@@ -151153,6 +151156,13 @@ mod share_audit_2999 {
             &json,
             "reduce .[] as $r ({}; .[$r.name | label $o | .] = $r.score)",
             &[(Kind::ObjectMakeMut, 1000)],
+        );
+        // A chain of `def`s deeper than a recursion guard by count would allow is still pure.
+        assert_forced(
+            &json,
+            "def a: ascii_downcase; def b: a; def c: b; def d: c; def e: d; def g: e; \
+             reduce .[] as $r ({}; .[$r.name | g] = $r.score)",
+            once,
         );
         // A recursive `def` is never pure: its writes are not held back.
         assert_forced(
