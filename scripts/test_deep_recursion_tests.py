@@ -236,6 +236,9 @@ class CiWiringTests(unittest.TestCase):
                             name,
                         )
                         self.assertIn(" -- $skip", leg, name)
+                        self.assertIn(
+                            "cargo test --all-features --test jq_cli_tests --lib", leg, name
+                        )
                     elif name != "cli-gated":
                         self.assertNotIn("--test jq_cli_tests", leg, name)
 

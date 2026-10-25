@@ -557,9 +557,9 @@ CI works around but this repo's own docs don't all say consistently:
   and takes `ignore = "holdout has no node identity or sharing (#5254)"`.
   The x86_64 `holdout` leg of `.github/workflows/ci.yml` runs
   `cargo test --all-features --test jq_cli_tests --lib`, so a failure there is
-  a real one. `git grep 'holdout refusal (#5246)'` lists the ignored ones; one
-  that stops hitting the refusal (a program the holdout can answer, or the
-  refusal lifted) can drop its attribute. Check that the refusal is the reason
+  a real one. `git grep 'ignore = "holdout'` lists the ignored ones; one
+  that stops hitting its reason (a program the holdout can answer, the refusal
+  lifted, identity added) can drop its attribute. Check that the refusal is the reason
   before adding one: a program the holdout refuses wrongly is a bug in the
   holdout, not a test to skip.
 
