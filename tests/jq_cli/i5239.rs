@@ -44,7 +44,7 @@ const TARGETS: &[&str] = &[
 ];
 
 /// Every spelling of every target, beside every builtin, on both the stdin route and the `-n` literal-document route: refused with
-/// the builtin's name, nothing on stdout, exit 5 -- never a write that lands.
+/// the builtin's name, nothing on stdout, a compile error (exit 3, as jq rejects the extension) -- never a write that lands.
 #[test]
 fn test_fold_in_a_path_target_beside_a_declined_builtin_is_refused_5239() -> Result<()> {
     let input = r#"{"a":{"b":1}}"#;
@@ -64,7 +64,7 @@ fn test_fold_in_a_path_target_beside_a_declined_builtin_is_refused_5239() -> Res
                 ] {
                     let (stdout, stderr, code) = run_jq_full(&args, document)?;
                     assert_eq!(stdout, "", "`{filter}` ({args:?})");
-                    assert_eq!(code, 5, "`{filter}` ({args:?}): {stderr}");
+                    assert_eq!(code, 3, "`{filter}` ({args:?}): {stderr}");
                     assert!(
                         stderr.contains(&format!(
                             "{name} is not supported in a program whose path expression does more than navigate"
@@ -103,9 +103,11 @@ fn test_5226_repro_no_longer_exits_zero_with_a_declined_builtin_5239() -> Result
 
         let filter = format!("(try at_offset(0) catch 0) as $z | {spelling}");
         let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some(input))?;
-        assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
+        assert_eq!((stdout.as_str(), code), ("", 3), "`{filter}`: {stderr}");
         assert!(
-            stderr.contains("is not supported in a program whose path expression does more than navigate"),
+            stderr.contains(
+                "is not supported in a program whose path expression does more than navigate"
+            ),
             "`{filter}`: {stderr}"
         );
     }
@@ -147,7 +149,7 @@ fn test_declined_builtin_beside_other_targets_after_5233() -> Result<()> {
                 "`{filter}`: stderr={stderr:?}"
             ),
             None => {
-                assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
+                assert_eq!((stdout.as_str(), code), ("", 3), "`{filter}`: {stderr}");
                 assert!(stderr.contains(refused), "`{filter}`: {stderr}");
             }
         }
