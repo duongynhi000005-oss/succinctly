@@ -189,34 +189,6 @@ fn test_5156_foreach_update_alternative_with_a_value_alternate_of_a_caught_forei
     ])
 }
 
-/// #5156: still wrong, pinned as it stands (a fix flips it, #5228): the explicit pipe spelling `((FE) // .) | .` refuses the first
-/// step with nothing printed (jq prints `["a"]` first), and a `?` around the path of the plain spelling exits 5 where jq
-/// answers `[["a"]]`: the second step's refusal is a guess nothing catches.
-///
-/// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
-/// refused here now hold jq 1.7.1's answers.
-#[cfg(not(feature = "unshared-containers"))]
-#[test]
-#[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5156_foreach_update_alternative_residuals_pinned_as_they_stand_5228() -> Result<()> {
-    assert_path_rows_both_routes_3749(&[
-        (
-            r#"{"a":null}"#,
-            r"path(. as $x | foreach (.a,.) as $i (.; ((foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .) | .; $i))",
-            "[\"a\"]\n",
-            r#"Invalid path expression with result {"a":null}"#,
-            5,
-        ),
-        (
-            r#"{"a":null}"#,
-            r"[path(. as $x | foreach (.a,.) as $i (.; (foreach (try ($x as {a:$a} | .)) as $y (.; .; .)) // .; $i))?]",
-            "[[\"a\"]]\n",
-            "",
-            0,
-        ),
-    ])
-}
-
 /// #5223 Phase 3: this issue's repro rows, with `path`, `del` and `|=`
 /// wherever the row is a `path(...)`, as jq 1.7.1 answers them (stdout, the
 /// first error message, the exit code). The path-mode interpreter carries
