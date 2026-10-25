@@ -277,8 +277,8 @@ fn resolve_signed(s: &str, bytes: &[u8]) -> ResolvedScalar {
     }
 }
 
-/// The twelve plain spellings [`resolve_dot`]/[`resolve_signed`] read as a
-/// non-finite float, in the order [`nonfinite_literal_index`] numbers them
+/// The twelve plain spellings `resolve_dot`/`resolve_signed` read as a
+/// non-finite float, in the order `nonfinite_literal_index` numbers them
 /// (#1071).
 ///
 /// A document scalar spelled one of these keeps its bytes the way every other
