@@ -1,30 +1,11 @@
-//! Phase 0 spike of #5223: a jq-mode interpreter that **carries** jq 1.7.1's
-//! path register instead of inferring it.
-//!
-//! The resolver in `eval.rs` reconstructs where jq's register would be from the
-//! shape of the syntax (`Frame`, `Snapshot`, `FoldRegister`, ...). jq itself
-//! keeps the register as three fields of `jq_state` -- `path`,
-//! `value_at_path` and `subexp_nest` -- saved into every fork point and
-//! restored on every backtrack, and applies one identity rule
-//! (`jv_identical`) at three sites: the `INDEX`/`EACH` opcodes, `getpath`'s
-//! `_jq_path_append`, and `PATH_END`. This module is that model, written down:
-//!
-//! - `Reg` is the register. Every output of `Interp::eval` carries its
-//!   own, so a generator resumed for its next output continues from the
-//!   register it had, which is what jq's fork-point restore amounts to.
-//! - [`SVal`] is a value with `jv` identity: arrays, objects, strings and
-//!   literal numbers are allocated and compare by pointer, `null`/`true`/
-//!   `false` by kind, and computed numbers by their `f64` bits ([`identical`]).
-//! - Each `Expr` arm follows the bytecode `compile.c` emits for it, cited at
-//!   the arm. The jq-defined builtins run their `builtin.jq` bodies
-//!   ([`PRELUDE`]); the C-coded ones are delegated to the existing evaluator
-//!   and answer a fresh value (the issue's "stubbed to fresh").
-//!
-//! It is a dev-only spike: reachable from `succinctly dev jq-path-spike`
-//! (hidden) and from tests, never from `succinctly jq`. A construct it does
-//! not implement raises [`Raise::Unsupported`], which nothing catches, so a
-//! row the spike cannot run is never mistaken for one it answers. See
-//! `docs/plan/jq-path-mode-interpreter-spike.md` for the go/no-go report.
+//! The Phase 0 interpreter of #5223, verbatim but for its paths: values are
+//! the spike-local `SVal`, whose `jv` identity is exact by construction. It is
+//! kept, test-only, as the reference the `OwnedValue` interpreter in the
+//! parent module is differentially tested against
+//! (`owned_interpreter_matches_the_sval_reference_5223`), and is deleted with
+//! the resolver in Phase 3.
+
+#![allow(dead_code)]
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -35,18 +16,20 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use super::error::{dump_truncated_with, Control, EvalError};
-use super::eval::{
-    apply_compare_op, arith_combine, arith_negate, compare_values, eval_owned_with_file_index,
-    substitute_vars, EvalTag, JqSemantics, QueryResult,
+use crate::jq::error::{dump_truncated_with, Control, EvalError};
+use crate::jq::eval::{
+    apply_compare_op, arith_combine, arith_negate, compare_values, substitute_vars, EvalTag,
+    JqSemantics,
 };
-use super::expr::{
+use crate::jq::expr::{
     Builtin, CompareOp, Expr, FormatType, Literal, NumberKey, ObjectKey, Param, Pattern,
     SliceBoundKey,
 };
-use super::parser::parse;
-use super::value::{NumberRepr, OwnedValue};
-use super::walk::any_subexpr;
+use crate::jq::parser::parse;
+use crate::jq::value::{NumberRepr, OwnedValue};
+use crate::jq::walk::any_subexpr;
+
+use super::delegate_eval;
 
 /// A value with `jv` identity (see the module docs and [`identical`]).
 #[derive(Clone, Debug)]
@@ -79,7 +62,7 @@ enum NumOrigin {
 }
 
 impl SVal {
-    fn computed(value: OwnedValue) -> Self {
+    pub(super) fn computed(value: OwnedValue) -> Self {
         Self::Num(value, None)
     }
 
@@ -632,22 +615,6 @@ pub struct Run {
     pub stubbed: Vec<String>,
 }
 
-/// Parse `filter` and run it on `input` (a parsed input document). `Err` is
-/// a compile error: the filter does not parse, or jq would reject it.
-pub fn run(filter: &str, input: &OwnedValue) -> Result<Run, String> {
-    let program = parse(filter).map_err(|e| format!("{e:?}"))?;
-    // jq's compile-time checks (an unbound `$x`, an undefined function), which
-    // the interpreter alone would only meet if evaluation reached them. The
-    // resolver rewrites what it checks, so it runs on a copy.
-    let diagnostics = super::resolve::resolve_all_jq(&mut program.clone());
-    if !diagnostics.is_empty() {
-        return Err(format!("{diagnostics:?}"));
-    }
-    let prelude = Prelude::new();
-    let interp = Interp::new(&prelude);
-    Ok(interp.run(&program, input))
-}
-
 impl<'e> Interp<'e> {
     /// An interpreter over `prelude`'s definitions.
     pub fn new(prelude: &'e Prelude) -> Self {
@@ -948,11 +915,11 @@ impl<'e> Interp<'e> {
             }
             Expr::CompoundAssign { op, path, value } => {
                 let name = match op {
-                    super::expr::AssignOp::Add => "_sp_upd_add",
-                    super::expr::AssignOp::Sub => "_sp_upd_sub",
-                    super::expr::AssignOp::Mul(_) => "_sp_upd_mul",
-                    super::expr::AssignOp::Div => "_sp_upd_div",
-                    super::expr::AssignOp::Mod => "_sp_upd_mod",
+                    crate::jq::expr::AssignOp::Add => "_sp_upd_add",
+                    crate::jq::expr::AssignOp::Sub => "_sp_upd_sub",
+                    crate::jq::expr::AssignOp::Mul(_) => "_sp_upd_mul",
+                    crate::jq::expr::AssignOp::Div => "_sp_upd_div",
+                    crate::jq::expr::AssignOp::Mod => "_sp_upd_mod",
                 };
                 self.update_with(name, path, value, env, input, reg, sink)
             }
@@ -1493,7 +1460,7 @@ impl<'e> Interp<'e> {
 
     fn match_object(
         &self,
-        entries: &'e [super::expr::PatternEntry],
+        entries: &'e [crate::jq::expr::PatternEntry],
         value: SVal,
         env: Env<'e>,
         reg: Reg,
@@ -2395,41 +2362,6 @@ fn emit_delegated(expr: &Expr, input: &SVal, reg: &Reg, sink: &mut Sink<'_>) -> 
     }
 }
 
-/// Run `expr` on `input` through the existing evaluator: its outputs, and
-/// the escape that ended it.
-fn delegate_eval(expr: &Expr, input: &OwnedValue) -> (Vec<OwnedValue>, Option<Control>) {
-    let result = eval_owned_with_file_index::<Vec<u64>, JqSemantics>(expr, input, &[]);
-    match result {
-        QueryResult::One(v) => match super::eval_generic::to_owned::<JqSemantics, _>(&v) {
-            Ok(o) => (vec![o], None),
-            Err(e) => (vec![], Some(Control::Error(e))),
-        },
-        QueryResult::OneCursor(c) => {
-            match super::eval_generic::to_owned::<JqSemantics, _>(&c.value()) {
-                Ok(o) => (vec![o], None),
-                Err(e) => (vec![], Some(Control::Error(e))),
-            }
-        }
-        QueryResult::Many(vs) => {
-            let mut out = Vec::new();
-            for v in &vs {
-                match super::eval_generic::to_owned::<JqSemantics, _>(v) {
-                    Ok(o) => out.push(o),
-                    Err(e) => return (out, Some(Control::Error(e))),
-                }
-            }
-            (out, None)
-        }
-        QueryResult::None => (vec![], None),
-        QueryResult::Error(e) => (vec![], Some(Control::Error(e))),
-        QueryResult::Owned(v) => (vec![v], None),
-        QueryResult::ManyOwned(vs) => (vs, None),
-        QueryResult::Break(label) => (vec![], Some(Control::Break(label))),
-        QueryResult::Halt(code) => (vec![], Some(Control::Halt(code))),
-        QueryResult::Partial(vs, control) => (vs, Some(control)),
-    }
-}
-
 fn control_raise(control: Control) -> Raise {
     match control {
         Control::Error(e) => raise_eval(e),
@@ -2449,6 +2381,3 @@ fn variant_name(expr: &Expr) -> String {
         .unwrap_or("?")
         .to_string()
 }
-
-#[cfg(test)]
-mod tests;
