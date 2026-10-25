@@ -58,6 +58,12 @@ fn test_array_operand_setpath_and_self_append_answer_as_jq_5271() -> Result<()> 
             "[foreach .[] as $x ({}; setpath([$x.id|tostring]; 1); length)]",
             "[1,2,3,4]",
         ),
+        ("reduce .[] as $x ([]; . |= . + [$x.id])", "[1,2,3,4]"),
+        (
+            "reduce .[] as $x ({}; . |= . + {($x.name): $x.id})",
+            r#"{"a":3,"b":2,"c":4}"#,
+        ),
+        (r#"reduce .[] as $x (""; . |= . + $x.s)"#, r#""pqrs""#),
     ] {
         let (stdout, stderr, code) =
             run_jq_full(&["-n", "-c", &format!("{RECORDS} | {filter}")], None)?;

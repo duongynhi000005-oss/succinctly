@@ -12113,7 +12113,8 @@ pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedVal
 
 /// The assignment half of [`try_eval_owned_step`]: [`owned_assign_step`] over
 /// a consumed state, declining (the untouched state handed back) for anything
-/// that is not one of [`is_owned_assign`]'s shapes.
+/// that is not one of [`is_owned_assign`]'s shapes -- or a `setpath(P; V)`
+/// call, which [`owned_setpath_step`] answers (#5271).
 ///
 /// Split out so a caller that must stay off [`eval_owned_reindex_free`]'s
 /// other arms -- `to_entries`/`from_entries` and the pipes of them, which
@@ -12133,7 +12134,7 @@ pub(crate) fn try_owned_assign_step<S: EvalSemantics>(
     }
     match owned_assign_step::<S>(expr, &mut state) {
         Some(Ok(())) => OwnedStep::Handled(Ok(state)),
-        Some(Err(error)) => OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure: owned_assign_step's single-step arms map every non-allocation error to unreachable_owned_assign_write (provably impossible, see its own doc comment), and its Chain arm's set_path call walks exactly the steps owned_assign_step_child already validated as Field-into-Object/Null or Index-in-[0,len]-into-Array/Null with no mutation in between, so the only way set_path/set_field/set_index/pad_with_nulls can still fail is the same try_reserve-fails-under-OOM branch the codebase already tolerates elsewhere (#2267) (#3138)"
+        Some(Err(error)) => OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure (for the assignment forms; `owned_setpath_step` reports its own write errors without going through this arm): owned_assign_step's single-step arms map every non-allocation error to unreachable_owned_assign_write (provably impossible, see its own doc comment), and its Chain arm's set_path call walks exactly the steps owned_assign_step_child already validated as Field-into-Object/Null or Index-in-[0,len]-into-Array/Null with no mutation in between, so the only way set_path/set_field/set_index/pad_with_nulls can still fail is the same try_reserve-fails-under-OOM branch the codebase already tolerates elsewhere (#2267) (#3138)"
         None => OwnedStep::Declined(state),
     }
 }
@@ -12241,6 +12242,12 @@ fn is_owned_setpath(expr: &Expr) -> bool {
 /// the state moved in rather than a copy of it. Anything else -- a path that is not
 /// an array, an operand that raises or yields other than once, yq mode -- declines
 /// to the evaluator with the state handed back untouched.
+///
+/// The one exception to "every diagnostic comes from the evaluator": a write that
+/// fails (`setpath(["a","b"]; 1)` on `{"a":1}`) is reported from here, because the
+/// state it consumed cannot be handed back. The error is `set_value_at_path`'s own,
+/// the one the evaluator's `setpath` raises, with the same text (pinned against jq
+/// 1.7.1 in `tests/jq_cli/i5271.rs`).
 fn owned_setpath_step<S: EvalSemantics>(path: &Expr, value: &Expr, state: OwnedValue) -> OwnedStep {
     if S::TAG != EvalTag::Jq {
         return OwnedStep::Declined(state);
@@ -12690,15 +12697,11 @@ fn owned_assign_step<S: EvalSemantics>(
         _ => return None, // patchcov: coverage tolerate-line reason="unreachable: both call sites (try_eval_owned_step, gated on is_owned_assign; eval_owned_reindex_free's own Assign|Update|CompoundAssign|AlternativeAssign arm) only ever hand this function one of the same four variants, or an `Alternative` or `As` around one, all of which this match already covers explicitly (#3138, #3944, #3978)"
     };
 
-    // The keys the write names, each settled against the container it lands
-    // in by a read-only walk before anything is written. A single step --
-    // the common fold shape -- borrows its key, keeps no step list, and
-    // writes through `set_field`/`set_index` directly; this path runs once
-    // per fold step, and the general `set_path` walk cost #3025's
-    // `.i += 1` loop ~6% of its instructions.
     // `. += X` and `. |= . + X` (#5271): the whole state is the target. It is combined
     // in place when the operands are of one kind a `+` cannot fail on, so the
-    // accumulator's own spare capacity is reused; any other pairing declines.
+    // accumulator's own spare capacity is reused; any other pairing declines. The state
+    // is moved out for the sum, which fails only as `owned_arith_accumulator_shape`'s
+    // same by-value `+` does, on an allocation failure, after which the fold is over.
     if S::TAG == EvalTag::Jq && matches!(unwrap_paren(path), Expr::Identity) {
         return match rhs {
             OwnedAssignRhs::Combine(ArithOp::Add, right)
@@ -12715,6 +12718,12 @@ fn owned_assign_step<S: EvalSemantics>(
             _ => None,
         };
     }
+    // The keys the write names, each settled against the container it lands
+    // in by a read-only walk before anything is written. A single step --
+    // the common fold shape -- borrows its key, keeps no step list, and
+    // writes through `set_field`/`set_index` directly; this path runs once
+    // per fold step, and the general `set_path` walk cost #3025's
+    // `.i += 1` loop ~6% of its instructions.
     match owned_assign_single_step::<S>(path, state) {
         SingleStep::Unclosed => None,
         SingleStep::Step(key) => {
@@ -98532,6 +98541,18 @@ mod tests {
             assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
         }
 
+        // `setpath(P; V)` is jq mode only; `. += X` too.
+        for src in [r#"setpath(["b"]; 1)"#, ". += {\"c\": 1}"] {
+            let expr = parse(src).unwrap();
+            assert!(
+                matches!(
+                    try_eval_owned_step::<YqSemantics>(&expr, state()),
+                    OwnedStep::Declined(_)
+                ),
+                "yq mode must decline {src}"
+            );
+        }
+
         let bound = OwnedValue::object_from([("a".to_string(), OwnedValue::Int(1))]);
         let origin = BindOrigin::Node {
             node: 1,
@@ -98551,6 +98572,23 @@ mod tests {
         assert!(matches!(
             try_owned_assign_step::<JqSemantics>(&closed, state()),
             OwnedStep::Handled(Ok(_))
+        ));
+        // `setpath(P; V)`: a closed pair is taken under the table (the write copies a
+        // registered container first), one that reads the state is not.
+        let setpath = parse(r#"setpath(["b"]; 1)"#).unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&setpath, state()),
+            OwnedStep::Handled(Ok(_))
+        ));
+        let reading = parse(r#"setpath(["b"]; .a)"#).unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&reading, state()),
+            OwnedStep::Declined(_)
+        ));
+        let by_key = parse("setpath([.k]; 1)").unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&by_key, state()),
+            OwnedStep::Declined(_)
         ));
     }
 
