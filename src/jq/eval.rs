@@ -12238,8 +12238,9 @@ fn is_plain_owned_assign(expr: &Expr) -> bool {
 }
 
 /// The structural half of [`owned_assign_step`]'s eligibility, with nothing
-/// evaluated: a path of static and closed-key steps, and a right side
-/// [`closed_expr_to_owned`] can answer. What the state and the keys turn out
+/// evaluated: a path of static steps and keys that are closed or read `.`
+/// ([`owned_state_expr_shape`], #5263), and a right side or filter that is
+/// either ([`closed_expr_to_owned`] answers the closed ones). What the state and the keys turn out
 /// to hold is still [`owned_assign_step`]'s to decide, so this only saves a
 /// pipe whose stage can never qualify from starting at all.
 fn owned_assign_shape(expr: &Expr) -> bool {
@@ -12823,12 +12824,17 @@ fn owned_assign_path_steps<'e, S: EvalSemantics>(
         Expr::Identity => Some(()),
         Expr::Paren(inner) => owned_assign_path_steps::<S>(inner, steps, at),
         Expr::Pipe(stages) => {
+            // Each stage starts from the value the steps so far reach; that is
+            // only worth walking down to when a key reads it.
+            let descend = stages.iter().any(path_has_state_key);
             let mut stage_input = at;
             for stage in stages {
                 let before = steps.len();
                 owned_assign_path_steps::<S>(stage, steps, stage_input)?;
-                for step in &steps[before..] {
-                    stage_input = owned_assign_step_child(step, stage_input)?;
+                if descend {
+                    for step in &steps[before..] {
+                        stage_input = owned_assign_step_child(step, stage_input)?;
+                    }
                 }
             }
             Some(())
@@ -12842,6 +12848,17 @@ fn owned_assign_path_steps<'e, S: EvalSemantics>(
             steps.push(static_step(path)?);
             Some(())
         }
+    }
+}
+
+/// Whether a path holds an index key that reads `.` rather than being closed
+/// (#5263): the keys [`owned_assign_path_steps`] evaluates on a stage's input.
+fn path_has_state_key(path: &Expr) -> bool {
+    match path {
+        Expr::Paren(inner) => path_has_state_key(inner),
+        Expr::Pipe(stages) => stages.iter().any(path_has_state_key),
+        Expr::IndexExpr { target, key } => !closed_expr_shape(key) || path_has_state_key(target),
+        _ => false,
     }
 }
 
@@ -12910,11 +12927,12 @@ fn owned_assign_operand<S: EvalSemantics>(expr: &Expr, state: &OwnedValue) -> Op
     }
 }
 
-/// The step a `.[K]` key names: [`owned_key_step`]'s, or else the one `K`
-/// evaluates to on the whole `state` ([`owned_assign_operand`], #5263): jq
-/// runs an index key as a subexpression on the target's input.
-fn owned_key_step<S: EvalSemantics>(key: &Expr, state: &OwnedValue) -> Option<StepKey<'static>> {
-    match owned_assign_operand::<S>(key, state)? {
+/// The step a `.[K]` key names: the string or integer-spelled number `K` is
+/// when it is closed, or else the one it evaluates to on `at`, the value the
+/// key's stage starts from ([`owned_assign_operand`], #5263): jq runs an index
+/// key as a subexpression on its target's input.
+fn owned_key_step<S: EvalSemantics>(key: &Expr, at: &OwnedValue) -> Option<StepKey<'static>> {
+    match owned_assign_operand::<S>(key, at)? {
         OwnedValue::String(name) => Some(StepKey::Field(Cow::Owned(name.into_string()))),
         key => Some(StepKey::Index(integral_key(&key)?)),
     }
@@ -98409,6 +98427,70 @@ mod tests {
         ] {
             assert_eq!(outputs(records, filter), [expected], "{filter}");
         }
+    }
+
+    /// #5263: an operand that reads `.` is evaluated on the state, which a binding the
+    /// #2889 embed table holds could reach, and yq mode's `//`, null and presentation
+    /// rules are not the jq model's. In yq mode, and under the table, each of these
+    /// declines to the evaluator with the state handed back untouched; a closed right
+    /// side beside them is still taken under the table, so the guard is the operand
+    /// and not the step.
+    #[test]
+    #[cfg(all(feature = "std", not(feature = "unshared-containers")))]
+    fn state_reading_operands_decline_under_the_embed_table_and_in_yq_5263() {
+        use crate::jq::eval_generic::embed_table_push;
+
+        let state = || {
+            OwnedValue::object_from([
+                ("a".to_string(), OwnedValue::Int(1)),
+                ("k".to_string(), OwnedValue::string("a")),
+            ])
+        };
+        let reading = [
+            ".b = .a",            // right side reads `.`
+            ".b |= (. // 0) + 1", // filter reads the old value
+            ".[.k] = 5",          // key reads `.`
+            ".b += (.a // 3)",
+            ".b //= .a",
+        ];
+        for src in reading {
+            let expr = parse(src).unwrap();
+            // Taken outside the table in jq mode ...
+            assert!(
+                matches!(
+                    try_eval_owned_step::<JqSemantics>(&expr, state()),
+                    OwnedStep::Handled(Ok(_))
+                ),
+                "{src}"
+            );
+            // ... and not in yq mode.
+            let OwnedStep::Declined(returned) = try_eval_owned_step::<YqSemantics>(&expr, state())
+            else {
+                panic!("yq mode must decline {src}"); // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this panic only fires if yq mode took a state-reading operand, which owned_assign_operand and owned_assign_new_value both refuse (#5263)"
+            };
+            assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
+        }
+
+        let bound = OwnedValue::object_from([("a".to_string(), OwnedValue::Int(1))]);
+        let origin = BindOrigin::Node {
+            node: 1,
+            document: 1,
+        };
+        let _guard = embed_table_push::<JqSemantics>(Some(&origin), &mut bound.clone());
+        for src in reading {
+            let expr = parse(src).unwrap();
+            let OwnedStep::Declined(returned) =
+                try_owned_assign_step::<JqSemantics>(&expr, state())
+            else {
+                panic!("the embed table must decline {src}"); // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this panic only fires if a state-reading operand was taken while the embed table is live, which both embed_table_active guards refuse (#5263)"
+            };
+            assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
+        }
+        let closed = parse(".b = 1").unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&closed, state()),
+            OwnedStep::Handled(Ok(_))
+        ));
     }
 
     /// #3241: a fold step takes the owned assignment while the #2889 embed
