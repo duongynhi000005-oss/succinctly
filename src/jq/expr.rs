@@ -388,7 +388,12 @@ pub enum Expr {
     /// update field at array index of array`, deleting `Cannot delete array
     /// element of array`.
     ///
-    /// Only ever built from a resolved key over an array target
+    /// A NaN index is the other key it carries (#5245): `nan as $v |
+    /// path(.[$v])` is `[null]`, reading through it answers `null`, and a
+    /// write raises `Cannot set array element at NaN index`, since jq refuses
+    /// the NaN at `jv_array_set` rather than in the path.
+    ///
+    /// Only ever built from a resolved key over an array (or `null`) target
     /// (`key_to_path_component`); the parser never produces it, because a
     /// constant array key is an [`Expr::IndexExpr`] like any other computed
     /// one. `Box`ed to keep [`Expr`] at its pinned size (#1401).

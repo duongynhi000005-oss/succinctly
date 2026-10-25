@@ -34824,7 +34824,10 @@ fn set_path<S: EvalSemantics>(
         )),
         // #3506: jq's `setpath` finds a subarray-search key where it wanted an
         // index, whatever the value or the rest of the path.
-        Expr::ArrayKey(_) => Err(EvalError::cannot_update_field_at_array_index_of_array()),
+        Expr::ArrayKey(key) => Err(array_key_write_error(
+            key,
+            EvalError::cannot_update_field_at_array_index_of_array(),
+        )),
         _ => Err(EvalError::new(
             "cannot use expression as assignment target".to_string(),
         )),
@@ -34865,25 +34868,43 @@ fn is_atomic_path_component(expr: &Expr) -> bool {
     )
 }
 
-/// Whether a path component's *last* step is a subarray-search key (#3506),
-/// looking through the `?` and `()` wrappers and the `Pipe` group a resolved
-/// `?` over several components leaves as one opaque element
-/// ([`is_atomic_path_component`]'s doc), skipping a trailing `.`.
+/// Whether `key`, carried by an [`Expr::ArrayKey`], is a NaN index (#5245): a number that names
+/// no element, where every other key is jq's subarray search.
+fn is_nan_index_key(key: &OwnedValue) -> bool {
+    matches!(
+        key,
+        OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
+    ) && numeric_key_to_index(key).is_none()
+}
+
+/// What a write meets at an [`Expr::ArrayKey`] component: jq's NaN complaint for a NaN index,
+/// `otherwise` for a subarray-search key (#3506).
+fn array_key_write_error(key: &OwnedValue, otherwise: EvalError) -> EvalError {
+    if is_nan_index_key(key) {
+        EvalError::nan_index()
+    } else {
+        otherwise
+    }
+}
+
+/// The key of a path component's *last* step when that step is an array key (#3506), looking
+/// through the `?` and `()` wrappers and the `Pipe` group a resolved `?` over several components
+/// leaves as one opaque element ([`is_atomic_path_component`]'s doc), skipping a trailing `.`.
 ///
 /// jq's `delpaths` deletes a path's last component from its parent first, so
 /// a key that *ends* the path is refused as `Cannot delete array element of
 /// array`, where one earlier in it is the `setpath` that rewrites the parent
 /// (`Cannot update field at array index of array`). Every delete walker asks
 /// this one question, so the wording cannot drift between them.
-fn ends_in_array_key(component: &Expr) -> bool {
+fn trailing_array_key(component: &Expr) -> Option<&OwnedValue> {
     match unwrap_path_component(component).0 {
-        Expr::ArrayKey(_) => true,
+        Expr::ArrayKey(key) => Some(key),
         Expr::Pipe(exprs) => exprs
             .iter()
             .rev()
             .find(|e| !matches!(unwrap_path_component(e).0, Expr::Identity))
-            .is_some_and(ends_in_array_key),
-        _ => false,
+            .and_then(trailing_array_key),
+        _ => None,
     }
 }
 
@@ -35332,7 +35353,10 @@ fn set_path_steps<S: EvalSemantics>(
         )),
         // #3506: jq's `setpath` meets a subarray-search key where it wanted an
         // index, however much path follows it -- see `set_path`'s own arm.
-        Expr::ArrayKey(_) => Err(EvalError::cannot_update_field_at_array_index_of_array()),
+        Expr::ArrayKey(key) => Err(array_key_write_error(
+            key,
+            EvalError::cannot_update_field_at_array_index_of_array(),
+        )),
         _ => Err(EvalError::new("invalid path component")),
     }
 }
@@ -36897,11 +36921,14 @@ fn update_path_with_deletes<S: EvalSemantics>(
                 .expect("non-optional index yields a value or errors");
             let wrote =
                 update_root_with_filter::<S>(&mut read, filter_expr, None, Reentry::REBUILT, None)?;
-            Err(if wrote {
-                EvalError::cannot_update_field_at_array_index_of_array()
-            } else {
-                EvalError::cannot_delete_element_of_array("array")
-            }
+            Err(array_key_write_error(
+                key,
+                if wrote {
+                    EvalError::cannot_update_field_at_array_index_of_array()
+                } else {
+                    EvalError::cannot_delete_element_of_array("array")
+                },
+            )
             .into())
         }
         _ => Err(EvalError::new("cannot use expression as update target").into()),
@@ -37398,7 +37425,11 @@ fn update_path_steps<S: EvalSemantics>(
                 if let Some(deletes) = deletes.as_deref_mut() {
                     deletes.at.truncate(entry_depth);
                 }
-                return Err(EvalError::cannot_update_field_at_array_index_of_array().into());
+                return Err(array_key_write_error(
+                    key,
+                    EvalError::cannot_update_field_at_array_index_of_array(),
+                )
+                .into());
             }
             _ => {
                 let result = update_path_with_deletes::<S>(
@@ -39835,9 +39866,15 @@ fn key_to_path_component<S: EvalSemantics>(
             if !matches!(container, OwnedValue::Array(_) | OwnedValue::Null) {
                 return Err(EvalError::cannot_index(owned_type_name(container), key));
             }
-            numeric_key_to_index(key)
-                .map(|idx| numeric_path_component(idx, key))
-                .ok_or_else(|| EvalError::new("Cannot set array element at NaN index"))
+            match numeric_key_to_index(key) {
+                Some(idx) => Ok(numeric_path_component(idx, key)),
+                // #5245: jq names the NaN element in a path (`path(.[nan])` is `[null]`) and
+                // refuses only the write that reaches it, so the component carries the key as
+                // it is and each write step raises `Cannot set array element at NaN index`.
+                // yq has no such path: its write refuses here.
+                None if S::TAG != EvalTag::Yq => Ok(Expr::ArrayKey(Box::new(key.clone()))),
+                None => Err(EvalError::nan_index()),
+            }
         }
         _ => Err(EvalError::cannot_index(owned_type_name(container), key)),
     }
@@ -69469,23 +69506,26 @@ fn resolve_index_expr_sink<'a, S: EvalSemantics>(
                     NavKind::of(k),
                 ));
             }
-            // A NaN key names no element for a write to land on, so `?` does not
+            // yq's NaN key names no element for a write to land on, so `?` does not
             // save it — but only where a number addresses an element at all. On
             // an object the failure is the ordinary `Cannot index object with
             // number`, which is precisely the failure to index that `?` covers,
             // so it falls through to `key_to_path_component` below and is pruned
             // or propagated with every other mismatch: `{"a":1} | .[nan]? = 5` is
-            // `{"a":1}` in jq while `[1,2,3] | .[nan]? = 5` raises.
-            if matches!(
-                k,
-                OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
-            ) && numeric_key_to_index(k).is_none()
+            // `{"a":1}` in jq while `[1,2,3] | .[nan]? = 5` raises. jq's NaN key is a
+            // path component (#5245), refused where a write reaches it instead.
+            if S::TAG == EvalTag::Yq
+                && matches!(
+                    k,
+                    OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
+                )
+                && numeric_key_to_index(k).is_none()
                 && matches!(
                     target_value.as_ref(),
                     OwnedValue::Array(_) | OwnedValue::Null
                 )
             {
-                escape!(EvalError::new("Cannot set array element at NaN index").into());
+                escape!(EvalError::nan_index().into());
             }
             let scalar_noop = S::TAG == EvalTag::Yq && is_yq_field_index_noop_scalar(target_value);
             let component = match key_to_path_component::<S>(k, target_value, scalar_noop) {
@@ -82709,13 +82749,11 @@ fn builtin_leaf_paths<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 fn resolve_setpath_index(key: &OwnedValue, len: usize, yq_mode: bool) -> Result<usize, EvalError> {
     let index = match key {
         OwnedValue::Int(i) => *i,
-        OwnedValue::Float(f) if f.is_nan() => {
-            return Err(EvalError::new("Cannot set array element at NaN index"))
-        }
+        OwnedValue::Float(f) if f.is_nan() => return Err(EvalError::nan_index()),
         OwnedValue::Float(f) => f.trunc() as i64,
         OwnedValue::NumberLiteral(NumberRepr::Int(i), _) => *i,
         OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() => {
-            return Err(EvalError::new("Cannot set array element at NaN index"))
+            return Err(EvalError::nan_index())
         }
         OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => f.trunc() as i64,
         // Not reachable from `set_value_at_path`, which matches the numeric
@@ -84074,8 +84112,11 @@ impl DeleteTrieBuilder {
             // terminal one is refused before the walk, in `insert_branch`,
             // with the delete wording. (`insert_expr`'s rewritten paths are
             // yq's, which has no such key.)
-            Expr::ArrayKey(_) => {
-                return Err(EvalError::cannot_update_field_at_array_index_of_array())
+            Expr::ArrayKey(key) => {
+                return Err(array_key_write_error(
+                    key,
+                    EvalError::cannot_update_field_at_array_index_of_array(),
+                ))
             }
             _ => return Err(EvalError::new("cannot use expression as delete target")),
         };
@@ -84223,8 +84264,11 @@ impl DeleteTrieBuilder {
         // `delpaths` cannot delete; one with more path after it is refused
         // by `child_of` with the update wording.
         if let PathPrefix::Node { component, .. } = &**path {
-            if ends_in_array_key(component) {
-                return Err(EvalError::cannot_delete_element_of_array("array"));
+            if let Some(key) = trailing_array_key(component) {
+                return Err(array_key_write_error(
+                    key,
+                    EvalError::cannot_delete_element_of_array("array"),
+                ));
             }
         }
         let id = self.intern(path)?;
@@ -86503,7 +86547,10 @@ fn delete_at_path(
             "internal error: unresolved computed slice in delete path",
         )),
         // #3506: jq will not delete through a subarray-search key.
-        Expr::ArrayKey(_) => Err(EvalError::cannot_delete_element_of_array("array")),
+        Expr::ArrayKey(key) => Err(array_key_write_error(
+            key,
+            EvalError::cannot_delete_element_of_array("array"),
+        )),
         _ => Err(EvalError::new("cannot use expression as delete target")),
     }
 }
@@ -87083,15 +87130,23 @@ fn delete_path_steps(
             // arm), and jq's `delpaths` rewrites the parent of the last
             // component with `setpath`, so this is the update wording --
             // `delete_at_path`'s own `ArrayKey` arm is the terminal one.
-            Expr::ArrayKey(_) => {
+            Expr::ArrayKey(key) => {
                 // ...unless the path *ends* in a subarray-search key too: the
                 // terminal key is deleted from its parent first, and that is
                 // where jq refuses (`del(.[[1]][[0]])`).
-                let ends_in_key = rest.last().is_some_and(ends_in_array_key);
-                return Err(if ends_in_key {
-                    EvalError::cannot_delete_element_of_array("array")
-                } else {
-                    EvalError::cannot_update_field_at_array_index_of_array()
+                let ending = rest.last().and_then(trailing_array_key);
+                return Err(match ending {
+                    Some(last) => array_key_write_error(
+                        last,
+                        array_key_write_error(
+                            key,
+                            EvalError::cannot_delete_element_of_array("array"),
+                        ),
+                    ),
+                    None => array_key_write_error(
+                        key,
+                        EvalError::cannot_update_field_at_array_index_of_array(),
+                    ),
                 });
             }
             _ => return delete_at_path(root, first, here, yq_mode, real_slot),
@@ -142706,20 +142761,22 @@ mod tests {
     /// step end in a subarray-search key -- looks through `?`, `()`, a
     /// `Pipe` group and a trailing `.`, and answers no for everything else.
     #[test]
-    fn ends_in_array_key_looks_through_wrappers_3506() {
+    fn trailing_array_key_looks_through_wrappers_3506() {
         let key = || Expr::ArrayKey(Box::new(OwnedValue::array()));
-        assert!(ends_in_array_key(&key()));
-        assert!(ends_in_array_key(&Expr::Optional(Box::new(key()))));
-        assert!(ends_in_array_key(&Expr::Paren(Box::new(key()))));
-        assert!(ends_in_array_key(&Expr::Pipe(
+        assert!(trailing_array_key(&key()).is_some());
+        assert!(trailing_array_key(&Expr::Optional(Box::new(key()))).is_some());
+        assert!(trailing_array_key(&Expr::Paren(Box::new(key()))).is_some());
+        assert!(trailing_array_key(&Expr::Pipe(
             vec![Expr::Index { idx: 0, key: None }, key(), Expr::Identity,].into()
-        )));
-        assert!(!ends_in_array_key(&Expr::Pipe(
+        ))
+        .is_some());
+        assert!(trailing_array_key(&Expr::Pipe(
             vec![key(), Expr::Index { idx: 0, key: None },].into()
-        )));
-        assert!(!ends_in_array_key(&Expr::Pipe(Vec::new().into())));
-        assert!(!ends_in_array_key(&Expr::Index { idx: 0, key: None }));
-        assert!(!ends_in_array_key(&Expr::Identity));
+        ))
+        .is_none());
+        assert!(trailing_array_key(&Expr::Pipe(Vec::new().into())).is_none());
+        assert!(trailing_array_key(&Expr::Index { idx: 0, key: None }).is_none());
+        assert!(trailing_array_key(&Expr::Identity).is_none());
     }
 
     /// #1025: `owned_to_expr` had no depth guard -- splices a
