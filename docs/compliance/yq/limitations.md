@@ -1083,9 +1083,12 @@ it landed (a fourth, [#1342](https://github.com/rust-works/succinctly/issues/134
 runs `f` on the node each path names whenever the format keeps duplicates, as `paths` does;
 jq mode, which collapses them anyway, keeps the owned producer):
 
-- [#1343](https://github.com/rust-works/succinctly/issues/1343) — `-s`/`--eval-all`/`-i`'s DOM
-  fallback still routes through `parse_input`/`OwnedValue` for *both* formats (a pre-existing,
-  format-symmetric bug, not a new one #1398 introduced).
+- [#1343](https://github.com/rust-works/succinctly/issues/1343) — `-s` with a non-identity filter
+  and `--eval-all` still route through `parse_input`/`OwnedValue` for *both* formats (a
+  pre-existing, format-symmetric bug, not a new one #1398 introduced).
+  `-i` no longer belongs to this bullet: since [#1349](https://github.com/rust-works/succinctly/issues/1349)
+  a read-only `-i` filter (`paths`, `keys`, `to_entries`) evaluates on cursors and keeps the repeated key.
+  A write under `-i` still collapses, with the writes below.
 - [#1344](https://github.com/rust-works/succinctly/issues/1344) — `del`/`with_entries`/
   `map_values`/`walk` (and `recurse(f)`/`recurse(f; cond)` with a general `f`) fall through
   `eval_generic.rs`'s wildcard bridge (`eval_on_owned`), which still materializes via an
@@ -1101,6 +1104,29 @@ jq mode, which collapses them anyway, keeps the owned producer):
   before slicing it, with no cursor-preserving alternative available (the operation inherently
   needs to reorder/slice entries, not just stream them) — a real representation limit, not a
   missed wiring like the three above.
+
+**[#2186](https://github.com/rust-works/succinctly/issues/2186) records the routes that collapse
+by construction, which is a wider set than the issue's own `LazySeq` arm.**
+The DOM route's result type is `ResultWithComments = (OwnedValue, CommentTree)` (`yq_runner.rs`).
+It has no cursor variant, and `OwnedValue::Object` is an `IndexMap`, so whatever reaches the route has merged a repeated key before it is printed.
+That includes a `LazySeq` of cursors, which is why the issue's own fix (`drain_atomic`, as on the jq side) does not transfer: `jq_runner.rs` has a cursor-carrying `JqValue` to hand each element to, and the yq route has nothing equivalent.
+Real yq v4.53.3 keeps both entries on every row below, run on `a: 1 / a: 2 / b: 3`:
+
+| Invocation                          | succinctly yq | yq v4.53.3           |
+|-------------------------------------|---------------|----------------------|
+| `-P '.'`                            | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
+| `--eval-all '.'` (yq: `ea '.'`)     | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
+| `'., .'`                            | `a: 2 / b: 3` | `a: 1 / a: 2 / b: 3` |
+| `'.b = 5'`, on stdout or under `-i` | `a: 2 / b: 5` | `a: 1 / a: 2 / b: 5` |
+| `-i 'del(.b)'`                      | `a: 2`        | `a: 1 / a: 2`        |
+
+`-P` and `--arg` send every filter down the route, so `.` itself collapses under them.
+`--arg` has no yq twin to compare against, since yq v4.53.3 rejects the flag.
+`-s` with a non-identity filter (`-s '.[0]'`) has none either, because yq's `-s` is `--split-exp`, but it takes the same route and collapses.
+The two write rows are the "every assignment" half of [#1344](https://github.com/rust-works/succinctly/issues/1344)'s (b) decision.
+`[...]` around a cursor result (`[.[0]]`, [#2063](https://github.com/rust-works/succinctly/issues/2063)) is a further member that stays collapsed on stdout.
+All of them close together once `OwnedValue::Object` can hold a repeated key, or the route can carry a cursor.
+The wiring fault the issue's triage also named no longer reproduces: `-P 'map(.)'`, `-P 'sort'` and `-P 'reverse'` print `99999999999999999999` as yq does, where the triage saw `1e+20` (`the_dom_route_keeps_a_large_integers_spelling_through_a_lazy_seq_2186` pins it).
 
 **[#2626](https://github.com/rust-works/succinctly/issues/2626) closed one member that was
 missing from that list: arithmetic.** `eval_single`'s `Expr::Arithmetic`/`Expr::Negate` arms
