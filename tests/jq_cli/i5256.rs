@@ -131,3 +131,47 @@ fn test_write_error_comes_before_a_later_path_error_5256() -> Result<()> {
     assert_eq!((stdout.trim_end(), code), (r#""x""#, 0), "{stderr}");
     Ok(())
 }
+
+/// The writes are held back for at most `WRITE_LOOKAHEAD` (4,096) paths; around that bound the
+/// answer and the first error are still jq's (captured live): the paths on either side of it, a
+/// write that fails inside the flush or after it, and a path error after the flush.
+#[test]
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
+fn test_write_lookahead_bound_answers_as_jq_5256() -> Result<()> {
+    for (n, want) in [
+        (4095, "8386560"),
+        (4096, "8390656"),
+        (4097, "8394753"),
+        (5000, "12502500"),
+    ] {
+        let filter = format!("[range({n})] | ((if true then .[] else empty end) |= . + 1) | add");
+        let (stdout, stderr, code) = run_jq_full(&["-n", "-c", &filter], None)?;
+        assert_eq!((stdout.trim_end(), code), (want, 0), "`{filter}`: {stderr}");
+    }
+    for (filter, want_stderr) in [
+        (
+            r#"[range(5000)] | ((.[-10000], (if true then .[] else empty end), error("x")) = 1)"#,
+            "Out of bounds negative array index",
+        ),
+        (
+            r#"[range(5000)] | (((if true then .[] else empty end), error("x")) = 1)"#,
+            "x",
+        ),
+        (
+            r#"[range(5000)] | (((if true then .[] else empty end), .[-10000]) = 1)"#,
+            "Out of bounds negative array index",
+        ),
+        (
+            r#"[range(5000)] | (((if true then .[] else empty end), .[-10000], error("x")) |= 1)"#,
+            "Out of bounds negative array index",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-n", "-c", filter], None)?;
+        assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
+        assert!(
+            stderr.trim_end().ends_with(want_stderr),
+            "`{filter}`: {stderr}"
+        );
+    }
+    Ok(())
+}
