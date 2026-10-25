@@ -1862,6 +1862,11 @@ fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
         "del(.[] | select(path(if . then .a else .b end) == [\"a\"]))",
         // A handler that does more than drop the error.
         "path(try .a catch .b)",
+        // An index key that can retry, calls a function, or holds a dynamic
+        // target of its own (#5243).
+        ".[. as [$a] ?// $a | $a] = 1",
+        "def k: \"a\"; .[k] = 1",
+        ".[path(if . then .a else .b end) | length] = 1",
     ] {
         assert!(takes(filter), "{filter}");
     }
@@ -1882,6 +1887,16 @@ fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
         "path(.a // .b)",
         "[path(.[$k])]",
         "path(recurse(.[]?))",
+        // A value-only index key, which jq runs as a subexpression (#5243).
+        "reduce .[] as $r ({}; .[$r.name] = $r.score)",
+        "reduce .[] as $r ({}; .x[$r.name | tostring] += 1)",
+        ".[.k] = 1",
+        "del(.[(0, 1)])",
+        "path(.a[$i + 1][length - 1])",
+        "(.[$x // \"z\"] | select(. > 1)) |= . + 1",
+        // A NaN key, which the walker carries as jq does (#5245).
+        "path(.[nan])",
+        "path(.a[$x | . / nan])",
     ] {
         assert!(!takes(filter), "{filter}");
         assert!(
@@ -2151,4 +2166,67 @@ fn path_context_builtins_are_named_5233() {
         Some("parent")
     );
     assert_eq!(path_context_name(&Builtin::Length), None);
+}
+
+/// An index key that reads a succinctly extension (`line`, `key`, ...) keeps the
+/// target dynamic, so the program is refused as before #5243: the walker would
+/// evaluate the key off the cursor and read the wrong node.
+#[test]
+fn an_extension_in_an_index_key_keeps_the_target_dynamic_5243() {
+    for filter in [
+        ".a[line | tostring] = 9",
+        "[path(.a[line | tostring])]",
+        "del(.[key])",
+        ".x[$v + column] |= 1",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Refused(_)),
+            "{filter}"
+        );
+    }
+}
+
+/// Routing a key that nests path targets inside index keys inside path targets
+/// is linear in the nesting: `is_value_only_condition` does not re-walk a
+/// nested target `is_static_target` already judged (it was exponential, about
+/// 4x per two levels, before the #5243 review).
+#[test]
+fn nested_index_keys_route_in_linear_time_5243() {
+    on_big_stack(|| {
+        let mut target = ".a".to_string();
+        for _ in 0..64 {
+            target = format!(".[path({target}) | length]");
+        }
+        let program = parse(&format!("{target} = 1")).expect("parses");
+        assert!(matches!(route(&program), Route::Shipped));
+    });
+}
+
+/// A key or condition holding a path construct of its own is judged by that
+/// construct's parts: static when its target is static and an assignment's
+/// right side only computes a value, dynamic otherwise (#5243).
+#[test]
+fn an_index_key_holding_an_assignment_is_judged_by_its_parts_5243() {
+    for filter in [
+        ".[(.a = 7) | .a | tostring] = 2",
+        ".[(.a |= . + 1) | .a | tostring] = 2",
+        ".[(.a += 3) | .a | tostring] = 2",
+        ".[(.z //= \"q\") | .z] = 2",
+        "[path(.[(.b = \"a\") | .b])]",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Shipped),
+            "{filter}"
+        );
+    }
+    for filter in [
+        "def f: 9; .[(.a = f) | .a | tostring] = 2",
+        ".[(path(if . then .a else .b end) | length)] = 2",
+        ".[(del(.a as $x | $x)) | length] = 2",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Interpreter),
+            "{filter}"
+        );
+    }
 }

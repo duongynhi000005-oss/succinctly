@@ -22,9 +22,7 @@ use crate::run_jq_full;
 fn a_dynamic_path_target_beside_an_extension_builtin_is_refused_5233() -> Result<()> {
     for (filter, input, name) in [
         (r#".a | (try path(1) catch "x"), key"#, r#"{"a":1}"#, "key"),
-        (".a[(0,1)] |= key", r#"{"a":[1,2,3]}"#, "key"),
         (r#"path(@base64 "\(key)")"#, r#"{"foo":1}"#, "key"),
-        (".a[(0,1)] |= parent", r#"{"a":[1,2,3]}"#, "parent"),
         (
             ".foo | . as $x | (parent, ($x.a = 9))",
             r#"{"foo":{"a":1},"b":2}"#,
@@ -83,6 +81,14 @@ fn an_extension_builtin_beside_a_static_path_target_still_answers_5233() -> Resu
         ),
         (".a | path(.b), key", r#"{"a":{"b":1}}"#, "[\"b\"]\n\"a\"\n"),
         ("del(.a), line", r#"{"a":1}"#, "{}\n1\n"),
+        // #5243: a comma-valued index key only computes a value, so the target is
+        // static (the answers `main` pinned before #5223).
+        (".a[(0,1)] |= key", r#"{"a":[1,2,3]}"#, "{\"a\":[0,1,3]}\n"),
+        (
+            ".a[(0,1)] |= parent",
+            r#"{"a":[1,2,3]}"#,
+            "{\"a\":[[1,2,3],[1,2,3],3]}\n",
+        ),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
         assert_eq!((stdout.as_str(), code), (want, 0), "`{filter}`: {stderr}");

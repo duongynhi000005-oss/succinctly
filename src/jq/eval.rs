@@ -150799,14 +150799,12 @@ mod share_audit_2999 {
     /// the state to [`owned_assign_step`] unshared, so 1,000 steps force no
     /// copy on write at all.
     ///
-    /// Each of these has a computed-key target, so since #5223 it runs on the
-    /// path-mode interpreter, which copies the accumulator on every step: the
-    /// fold is quadratic there (20,000 steps take 3.5 s on an M-series Mac
-    /// where jq 1.7.1 takes 0.02 s). The audit ran through `eval_full`, which
-    /// was not routed until #5233, so it did not see the change; ignored until
-    /// the interpreter writes in place.
+    /// Each of these has a computed-key target. From #5223 to #5243 a key that
+    /// was not a bare variable made the target dynamic, so it ran on the
+    /// path-mode interpreter, which copies the accumulator on every step (the
+    /// fold went quadratic). A key that only computes a value is static again,
+    /// and this pins that it stays on the in-place route.
     #[test]
-    #[ignore = "the path-mode interpreter copies the accumulator per step (#5223); see #5233's PR"]
     fn fold_assign_step_copies_nothing_3138() {
         let body: Vec<String> = (0..1000)
             .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
@@ -151007,16 +151005,13 @@ mod share_audit_2999 {
         assert_forced(&ints(1000), ".[(0,1)] |= 0", &[(Kind::ArrayMakeMut, 1)]);
     }
 
-    /// A computed-key `del` runs on the path-mode interpreter since #5223, which
-    /// copies the array twice where the shipped evaluator copied nothing. The
-    /// audit ran through `eval_full`, which was not routed until #5233, so it
-    /// did not see the change; ignored until the interpreter writes in place.
+    /// A computed-key `del` copies nothing: its key only computes a value, so the
+    /// target is static and stays on the shipped walker (#5243; from #5223 it
+    /// ran on the path-mode interpreter, which copied the array twice).
     #[test]
-    #[ignore = "the path-mode interpreter copies where the shipped evaluator did not (#5223); see #5233's PR"]
-    // patchcov: coverage tolerate reason="the test is #[ignore]d, so it never runs (#5233)"
     fn computed_key_delete_copies_nothing() {
         assert_forced(&ints(1000), "del(.[(0,1)])", &[]);
-    } // patchcov: coverage end
+    }
 
     /// Reads share and never copy: binding the document to a variable and
     /// reading it back through the binding is free.
