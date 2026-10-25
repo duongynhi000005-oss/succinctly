@@ -266,6 +266,27 @@ fn test_nan_variable_key_is_a_path_component_and_a_write_refusal_5245() -> Resul
             "",
             0,
         ),
+        (
+            r#"{"k":NaN,"a":[1,2]}"#,
+            ".k as $v | .a | setpath([$v]; 9)",
+            "",
+            "jq: error (at <stdin>:0): Cannot set array element at NaN index",
+            5,
+        ),
+        (
+            r#"{"k":NaN,"a":[1,2]}"#,
+            ".k as $v | .a | path(.[$v])",
+            "[null]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"k":NaN,"a":[1,2]}"#,
+            ".k as $v | .a | .[$v] = 5",
+            "",
+            "jq: error (at <stdin>:0): Cannot set array element at NaN index",
+            5,
+        ),
     ];
     for (input, filter, stdout, error, code) in rows {
         let (out, err, status) = run_jq_full(&["-c", filter], Some(input))?;
