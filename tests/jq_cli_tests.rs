@@ -20571,11 +20571,10 @@ fn update_streaming_interleaves_input_reads_2974() -> Result<()> {
 /// - A multi-output right side re-resolves the target per output, as jq does
 ///   (#3448 closed #2267's re-resolution half): jq fires the target three
 ///   times here, and so does this.
-/// - `key`/`parent` are succinctly extensions (no oracle), pinned to
-///   succinctly's own output so a change trips here. A filter that reads
-///   `parent` keeps the eager route, because its view of the document has
-///   every target vivified before any filter runs; one that only reads `key`
-///   streams. Both answer what they did before #2974.
+/// - `parent` is a succinctly extension (no oracle), pinned to succinctly's
+///   own output so a change trips here. A filter that reads it keeps the
+///   eager route, because its view of the document has every target vivified
+///   before any filter runs; it answers what it did before #2974.
 #[test]
 fn update_streaming_holdouts_2974() -> Result<()> {
     let (stdout, stderr, code) =
@@ -20587,14 +20586,12 @@ fn update_streaming_holdouts_2974() -> Result<()> {
         "three fires, as in jq: {stderr:?}"
     );
 
-    for (filter, want) in [
-        (".a[(0,1)] |= key", "{\"a\":[0,1,3]}\n"),
-        (".a[(0,1)] |= parent", "{\"a\":[[1,2,3],[1,2,3],3]}\n"),
-        (
-            "(.a[] | select(. > 1)) |= (parent | length)",
-            "{\"a\":[1,3,3]}\n",
-        ),
-    ] {
+    // (#5233: `.a[(0,1)] |= key` and `|= parent`, whose target is dynamic, are
+    // refused now; `tests/jq_cli/i5233.rs`.)
+    for (filter, want) in [(
+        "(.a[] | select(. > 1)) |= (parent | length)",
+        "{\"a\":[1,3,3]}\n",
+    )] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("{\"a\":[1,2,3]}"))?;
         assert_eq!((stdout.as_str(), code), (want, 0), "{filter}: {stderr:?}");
     }
@@ -102818,36 +102815,6 @@ fn test_tracked_var_rebuilt_root_fix_does_not_over_demote_2642() -> Result<()> {
     Ok(())
 }
 
-/// A pre-existing, still-open gap: `key`/`parent`/`path`/`file_index`-driven
-/// stages route through `eval_owned_identity_stages`'s own `OwnedIdentity`-
-/// tracked position (#2072), which can carry a genuine, unrebuilt document
-/// node -- but this fix's own `RootWitness` doesn't consult it, so a
-/// blanket `Owned` demotion there was tried and reverted during code
-/// review (it wrongly refused a write that a sibling `key`/`parent`/`path`
-/// read had no business affecting). `parent` is a succinctly-only
-/// extension (real jq has no such builtin, "parent/0 is not defined"), so
-/// this pins succinctly's own behavior -- unchanged from `main`, both
-/// before and after this fix -- rather than comparing against the oracle.
-#[test]
-fn test_tracked_var_owned_identity_sibling_gap_unaffected_2642() -> Result<()> {
-    for (input, filter, want) in [
-        (
-            r#"{"foo":{"a":1},"b":2}"#,
-            ".foo | . as $x | (parent, ($x.a = 9))",
-            "{\"foo\":{\"a\":1},\"b\":2}\n{\"a\":9}\n",
-        ),
-        (
-            r#"{"foo":{"a":1},"b":2}"#,
-            ".foo | . as $x | (parent, ($x.a |= 9))",
-            "{\"foo\":{\"a\":1},\"b\":2}\n{\"a\":9}\n",
-        ),
-    ] {
-        let (stdout, code) = run_jq_stdin(filter, input, &["-c"])?;
-        assert_eq!((stdout.as_str(), code), (want, 0), "`{filter}`");
-    }
-    Ok(())
-}
-
 /// What is left of #2642's "owned embed map" residual once the embed table
 /// (#2889) closed the rest of it.
 ///
@@ -105861,21 +105828,6 @@ fn test_tracked_var_rebuilt_root_in_evaluator_routes_refuse_3036() -> Result<()>
             r#"{"a":1}"#,
             ". as $x | any({a:1}; ($x.a = 9))",
         ),
-        // A rebuilt value at a tracked position on the owned identity
-        // route (`OwnedIdentity::exact` cleared by `sort`).
-        (
-            &["-c"][..],
-            r#"{"foo":[2,1]}"#,
-            ".foo | . as $x | sort | (path | empty), ($x[0] = 9)",
-        ),
-        // The detached-root twin: a rebuild at a detached position gets a
-        // fresh root token, so the marker bound at the previous one no
-        // longer names it.
-        (
-            &["-n", "-c"][..],
-            r#"{"a":1}"#,
-            "input | . as $x | ((path | empty), ({a:1} | ($x.a = 9)))",
-        ),
         // A second path of the same `|=` sees a root jq's `setpath` has
         // already copied (`main` wrote `{"a":9,"b":2}` here); a later
         // `until`/`recurse` round sees a value `update`/`f` computed; a
@@ -105911,11 +105863,6 @@ fn test_tracked_var_rebuilt_root_in_evaluator_routes_refuse_3036() -> Result<()>
         // own allocation, and jq answers `[]` -- as succinctly does since
         // #3069's bridge provenance. See
         // `test_bridge_provenance_keeps_path_identity_3069`.)
-        (
-            &["-c"][..],
-            r#"{"foo":[2,1]}"#,
-            ".foo | . as $x | sort | (parent | empty), ($x[0] = 9)",
-        ),
         // Off the register inside a resolver, the ambient may be a copy.
         (
             &["-c"][..],
@@ -105928,16 +105875,6 @@ fn test_tracked_var_rebuilt_root_in_evaluator_routes_refuse_3036() -> Result<()>
             ". as $x | path([.a] | .[($x.a = 9 | 0)])",
         ),
         (&["-c"][..], r#"{"a":1}"#, ". as $x | (.a, .) |= ($x.a = 9)"),
-        (
-            &["-c"][..],
-            r#"{"foo":[{"a":1},{"a":1}]}"#,
-            ".foo | sort | .[0] | ((path | empty), (. as $y | {a:1} | ($y.a = 9)))",
-        ),
-        (
-            &["-c"][..],
-            r#"{"foo":[{"a":1},{"a":1}]}"#,
-            ".foo | sort | ((path | empty), (.[0] as $y | .[1] | ($y.a = 9)))",
-        ),
         // A marker inside a resolved `def` body (`map_subexprs` does not
         // walk one; the demotion does), reached through a rebuild.
         (
@@ -106089,29 +106026,6 @@ fn test_tracked_var_in_evaluator_routes_keep_accepting_3036() -> Result<()> {
             ". as $x | try ($x | error) catch ($x.a = 9)",
             r#"{"a":9}"#,
         ),
-        // A bind at a *detached* owned root on the identity route (a
-        // sibling `path`/`key` read forces it): the root's own token
-        // (`OwnedIdentity::root`) certifies the marker, since nothing was
-        // rebuilt between the bind and the write. Extension builtins, so
-        // pinned against `main`'s own answer rather than jq.
-        (
-            &["-n", "-c"][..],
-            r#"{"a":1}"#,
-            "input | . as $x | ((path | empty), ($x.a = 9))",
-            r#"{"a":9}"#,
-        ),
-        (
-            &["-n", "-c"][..],
-            r#"{"a":1}"#,
-            "input | . as $x | ((key | empty), path($x))",
-            "[]",
-        ),
-        (
-            &["-n", "-c"][..],
-            r#"{"a":1}"#,
-            "input | . as $x | ((path | empty), (. as $y | ($x.a = 9)))",
-            r#"{"a":9}"#,
-        ),
         // `eval.rs` consumers that hand their own ambient input to the
         // owned bridge unrebuilt (`any`/`all`/`IN`'s generator, `until`/
         // `while`/`repeat`'s first round, `recurse(f)`'s level 0, `debug`'s
@@ -106194,26 +106108,6 @@ fn test_tracked_var_in_evaluator_routes_keep_accepting_3036() -> Result<()> {
             ". as $x | try (if .a then error($x) else . end) catch path($x)",
             "[]",
         ),
-        (
-            &["-c"][..],
-            r#"{"a":1}"#,
-            ". as $x | try error($x) catch ((parent | empty), ($x.a = 9))",
-            r#"{"a":9}"#,
-        ),
-        // `select`/`debug` hand their input on as the same node in jq, so a
-        // sibling `parent` read must not cost the write.
-        (
-            &["-c"][..],
-            r#"{"foo":{"a":1}}"#,
-            ".foo | . as $x | select(true) | (parent | empty), ($x.a = 9)",
-            r#"{"a":9}"#,
-        ),
-        (
-            &["-c"][..],
-            r#"{"a":1}"#,
-            ". as $x | objects | ((path | empty), ($x.a = 9))",
-            r#"{"a":9}"#,
-        ),
         // Inside a resolver, a leaf, condition, computed key or bind source
         // evaluated at a tracked node keeps the invocation's own markers.
         (
@@ -106270,14 +106164,6 @@ fn test_tracked_var_in_evaluator_routes_keep_accepting_3036() -> Result<()> {
             &["-c"][..],
             r#"{"a":1}"#,
             ". as $x | . |= (try error($x) catch ($x.a = 9))",
-            r#"{"a":9}"#,
-        ),
-        // A bind at a position inside an owned tree names that position
-        // (`OwnedIdentity::root` derived per child).
-        (
-            &["-c"][..],
-            r#"{"foo":[{"a":1},{"a":1}]}"#,
-            ".foo | sort | .[0] | ((path | empty), (. as $y | ($y.a = 9)))",
             r#"{"a":9}"#,
         ),
         // A marker inside a resolved `def` body, used without a rebuild.
@@ -108034,14 +107920,20 @@ fn test_embed_nested_reuse_keeps_the_depth_limit_3179() -> Result<()> {
         ("[]", 0),
         "n=255: stderr={stderr:?}"
     );
-    // #4044: `{k:.}` holds the root as a node and never walks it, so nothing
-    // checks its depth and the filter answers (as jq, with no such limit, does).
-    // A literal member makes the object ineligible: it is built owned and the
-    // walk raises the depth error.
+    // #5233: a dynamic path target runs on the path-mode interpreter, which
+    // materializes the whole document, so at `n = 256` the held node (#4044)
+    // raises the depth error too: as jq 1.7.1 does, whose parser rejects a
+    // document nested past 256 levels. A literal member makes the object
+    // ineligible for holding the node: it is built owned and the walk raises
+    // the depth error.
     let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(&nested(256)))?;
     assert_eq!(
-        (stdout.trim_end(), code),
-        ("[]", 0),
+        (stdout.as_str(), code),
+        ("", 5),
+        "n=256 (held node): stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("nesting depth"),
         "n=256 (held node): stderr={stderr:?}"
     );
     let owned_filter = r".a as $y | {k:., j:1} | .k.a | path($y)";
@@ -108483,41 +108375,6 @@ fn test_navigated_bind_positional_controls_refuse_3134() -> Result<()> {
         assert!(
             stderr.contains("Invalid path expression with result"),
             "`{filter}` on {input}: stderr={stderr:?}"
-        );
-    }
-    Ok(())
-}
-
-/// #3134 review: `at_offset` (a succinctly extension) can bind the *first*
-/// of two duplicate keys, a member jq's parser discards and that `.a` never
-/// reaches -- `.a` is the last member, in jq and in the owned tree the
-/// resolver walks. A position for the shadowed member would certify `.a`
-/// by value on `{"a":1,"a":1}` and let `del` delete through it, so it gets
-/// none and refuses; the last member, which `.a` is, answers.
-#[test]
-fn test_navigated_bind_positional_shadowed_duplicate_key_refuses_3134() -> Result<()> {
-    let input = r#"{"a":1,"a":1}"#;
-    for filter in [
-        r"at_offset(5) as $x | path(.a | $x)",
-        r"at_offset(5) as $x | del(.a | $x)",
-        r"at_offset(5) as $x | (.a | $x) = 9",
-    ] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(code, 5, "`{filter}`: stdout={stdout:?}");
-        assert!(
-            stderr.contains("Invalid path expression with result"),
-            "`{filter}`: stderr={stderr:?}"
-        );
-    }
-    for (filter, expected) in [
-        (r"at_offset(11) as $x | path(.a | $x)", r#"["a"]"#),
-        (r"at_offset(11) as $x | del(.a | $x)", "{}"),
-    ] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(
-            (stdout.trim_end(), code),
-            (expected, 0),
-            "`{filter}`: stderr={stderr:?}"
         );
     }
     Ok(())
@@ -115601,21 +115458,10 @@ fn test_format_prefixed_string_succinctly_extensions_3316() -> Result<()> {
 /// 1.7.1 via `length|tostring` as a control, same error family).
 #[test]
 fn test_format_prefixed_key_parent_pipe_slot_raises_3369() -> Result<()> {
-    for (filter, input) in [
-        (r#"path(@base64 "\(key)")"#, r#"{"foo":1}"#),
-        (r#"path(@base64 "\(key|tostring)")"#, r#"{"foo":1}"#),
-        (
-            r#".[] | path(@base64 "\(parent|tostring)")"#,
-            r#"{"foo":1}"#,
-        ),
-        (
-            r#".a[] | path(@base64 "\(parent(1)|tostring)")"#,
-            r#"{"a":{"foo":1}}"#,
-        ),
-        (r#".[] | path(@base64 "\((key)|tostring)")"#, r#"{"foo":1}"#),
-        (r#".[] | path(@base64 "\(key?|tostring)")"#, r#"{"foo":1}"#),
-        (r#"path(@base64 "\(length|tostring)")"#, r#"{"foo":1}"#),
-    ] {
+    // #5233: the `key`/`parent` rows (a dynamic target beside a path-context
+    // builtin) are refused now, before any of this runs (`tests/jq_cli/i5233.rs`);
+    // the `length` row is jq's own answer.
+    for (filter, input) in [(r#"path(@base64 "\(length|tostring)")"#, r#"{"foo":1}"#)] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
         assert_eq!(stdout, "", "{input} | {filter}");
         assert_eq!(code, 5, "{input} | {filter}: {stderr}");

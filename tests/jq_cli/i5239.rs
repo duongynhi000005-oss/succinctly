@@ -1,7 +1,8 @@
 //! #5239: a `foreach` or `reduce` in a dynamic path target, beside a builtin the path-mode interpreter declines (it reads the cursor
 //! or the evaluator's path context, which a materialized document does not have), is refused. It stayed on the shipped resolver,
 //! which answered the shapes of #5225, #5226 and #5228 with a refusal for a program jq answers and, for #5226's, a write that
-//! lands where jq exits 5.
+//! lands where jq exits 5. Since #5233 every dynamic path target beside such a builtin is refused, fold or no fold
+//! (`tests/jq_cli/i5233.rs`).
 //!
 //! The interpreter reads storage identity, which the `unshared-containers` holdout does not have, so these pin the shipped shape
 //! only.
@@ -11,22 +12,22 @@ use anyhow::Result;
 
 use crate::run_jq_full;
 
-/// The builtins `path_mode::cursor_dependent_builtin` names, each as an expression that yields exactly one value.
+/// The builtins `path_mode::declined_builtin` names (as its refusal spells them), each as an expression that yields exactly one value.
 const BUILTINS: &[(&str, &str)] = &[
-    ("at_offset(0)", "at_offset"),
-    ("at_position(1; 1)", "at_position"),
-    ("line", "line"),
-    ("column", "column"),
-    ("document_index", "document_index"),
-    ("anchor", "anchor"),
-    ("style", "style"),
-    ("line_comment", "line_comment"),
-    ("head_comment", "head_comment"),
-    ("foot_comment", "foot_comment"),
-    ("first(key, 0)", "key"),
-    ("file_index", "file_index"),
-    ("path", "path"),
-    ("first(parent, 0)", "parent"),
+    ("at_offset(0)", "`at_offset`"),
+    ("at_position(1; 1)", "`at_position`"),
+    ("line", "`line`"),
+    ("column", "`column`"),
+    ("document_index", "`document_index`"),
+    ("anchor", "`anchor`"),
+    ("style", "`style`"),
+    ("line_comment", "`line_comment`"),
+    ("head_comment", "`head_comment`"),
+    ("foot_comment", "`foot_comment`"),
+    ("first(key, 0)", "`key`"),
+    ("file_index", "`file_index`"),
+    ("path", "`path` with no argument"),
+    ("first(parent, 0)", "`parent`"),
 ];
 
 /// One target from each of the three issues' files, with a `path`, `del` and `|=` spelling of each.
@@ -64,7 +65,7 @@ fn test_fold_in_a_path_target_beside_a_declined_builtin_is_refused_5239() -> Res
                     assert_eq!(code, 5, "`{filter}` ({args:?}): {stderr}");
                     assert!(
                         stderr.contains(&format!(
-                            "{name} cannot be combined with a foreach or reduce in a path target"
+                            "{name} cannot be used in a program whose path expression is more than navigation"
                         )),
                         "`{filter}` ({args:?}): {stderr}"
                     );
@@ -102,45 +103,51 @@ fn test_5226_repro_no_longer_exits_zero_with_a_declined_builtin_5239() -> Result
         let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some(input))?;
         assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
         assert!(
-            stderr.contains("cannot be combined with a foreach or reduce in a path target"),
+            stderr.contains(
+                "cannot be used in a program whose path expression is more than navigation"
+            ),
             "`{filter}`: {stderr}"
         );
     }
     Ok(())
 }
 
-/// What stays on the shipped resolver: a declined builtin beside a dynamic target with no fold in it, beside a fold that is not
-/// in a target, and beside a fold whose target is static. The refusal is scoped to where the resolver was shown wrong.
+/// A declined builtin beside a dynamic target with no fold in it is refused too since #5233, beside a fold outside every target
+/// as well; beside a static target it stays on the shipped route and answers.
 #[test]
 fn test_declined_builtin_beside_other_dynamic_targets_stays_shipped_5239() -> Result<()> {
-    for (input, filter, want) in [
+    for (input, filter, name) in [
         // A bind in the target, no fold.
         (
             r#"{"a":{"b":1}}"#,
             r"(try line catch 0) as $z | path(.a | . as $x | .b)",
-            "[\"a\",\"b\"]\n",
+            "`line`",
         ),
         // A fold outside every path target.
         (
             r#"{"a":{"b":1}}"#,
             r"(reduce (1,2) as $i (0; . + $i)) as $s | (try line catch 0) as $z | path(.a | . as $x | .b)",
-            "[\"a\",\"b\"]\n",
+            "`line`",
         ),
-        // A comma-valued index: `key` reads the path, and the write lands.
-        (r#"{"a":[1,2,3]}"#, r".a[(0,1)] |= key", "{\"a\":[0,1,3]}\n"),
-        // A static target holding no fold at all.
-        (
-            r#"{"a":{"b":1}}"#,
-            r"(try at_offset(0) catch 0) as $z | path(.a.b)",
-            "[\"a\",\"b\"]\n",
-        ),
+        // A comma-valued index beside `key`.
+        (r#"{"a":[1,2,3]}"#, r".a[(0,1)] |= key", "`key`"),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(
-            (stdout.as_str(), code),
-            (want, 0),
-            "`{filter}`: stderr={stderr:?}"
+        assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "{name} cannot be used in a program whose path expression is more than navigation"
+            )),
+            "`{filter}`: {stderr}"
         );
     }
+    // A static target holding no fold at all.
+    let filter = r"(try at_offset(0) catch 0) as $z | path(.a.b)";
+    let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(r#"{"a":{"b":1}}"#))?;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("[\"a\",\"b\"]\n", 0),
+        "`{filter}`: stderr={stderr:?}"
+    );
     Ok(())
 }

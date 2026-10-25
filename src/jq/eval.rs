@@ -47,6 +47,7 @@ use super::document::{
 use super::glob::yq_match_key;
 use super::local_zone::{self, LocalZone};
 use super::math;
+use super::path_mode::Route;
 use super::slice::{self, SliceBounds};
 use super::walk::{
     any_pattern_key, any_subexpr, map_builtin_subexprs, map_pattern_subexprs, map_subexprs,
@@ -31286,12 +31287,9 @@ pub fn eval_owned_with_file_index<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>
     // natively runs whole through the path-mode interpreter.
     if S::TAG == EvalTag::Jq {
         match super::path_mode::route(expr) {
-            super::path_mode::Route::Interpreter => return path_mode_query(expr, input.clone()),
-            // #5239: the cursor builtin beside a dynamic target has no route.
-            super::path_mode::Route::Refused(builtin) => {
-                return QueryResult::Error(super::path_mode::refusal(builtin));
-            }
-            super::path_mode::Route::Shipped => {}
+            Route::Shipped => {}
+            Route::Interpreter => return path_mode_query(expr, input.clone()),
+            Route::Refuse(what) => return QueryResult::Error(super::path_mode::refusal(what)),
         }
     }
     eval_owned_unrouted::<W, S>(expr, input, file_origin)

@@ -878,22 +878,19 @@ pub fn run_compiled(program: &Expr, input: OwnedValue) -> Run {
     with_prelude(|prelude| Interp::new(prelude).run(program, input))
 }
 
-/// Where `succinctly jq` runs a program (#5223, #5239).
+/// Where `succinctly jq` runs a program (#5223, #5233).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// The streaming walkers and the shipped resolver.
+    /// Every path target is static: the shipped evaluator, which streams.
     Shipped,
-    /// This interpreter.
+    /// A path target is dynamic: this interpreter, which carries jq's register.
     Interpreter,
-    /// Nowhere: a `foreach` or `reduce` in a dynamic path target, beside a
-    /// builtin that reads the cursor or the evaluator's path context. This
-    /// interpreter (on a materialized value) has neither, and the shipped
-    /// resolver answers the fold wrongly. Carries the builtin's name for the
-    /// error.
-    Refused(&'static str),
+    /// A path target is dynamic, and the program also holds a construct this
+    /// interpreter declines (named here): refused, see [`refusal`].
+    Refuse(&'static str),
 }
 
-/// Where `succinctly jq` runs `program`.
+/// Where `succinctly jq` runs `program` (#5223, #5233).
 ///
 /// A program goes to the interpreter (#5223) when it holds a path target the
 /// shipped walkers cannot take natively, and nothing the interpreter declines.
@@ -902,87 +899,73 @@ pub(crate) enum Route {
 /// static one natively -- `.k`, `.[n]`, `.[$k]`, `.[i:j]`, `.[]`, `..`, and
 /// pipes, commas and `?` of those, and the value filters over them in
 /// [`is_static_target`] -- with no register to carry, and exactly; every other
-/// target asks where jq's register is, which this interpreter answers by
-/// carrying it.
+/// target asks where jq's register is, which only this interpreter answers.
 ///
-/// A program that reads cursor metadata (`line`, `at_offset`, ...), or the
-/// path context (`key`, `file_index`, ...), needs what a materialized value
-/// lacks, so it stays on the shipped route, which holds the cursor. There the
-/// resolver infers the register where this interpreter carries it, and a
-/// `foreach` or `reduce` in the dynamic target is where it is wrong: the shapes
-/// of #5225, #5226 and #5228 give a refusal for a program jq answers, and a
-/// write that lands where jq exits 5. That combination is [`Route::Refused`]
-/// (#5239). Every other dynamic target beside such a builtin stays shipped.
+/// So a program with a dynamic target runs here or nowhere. One that also
+/// holds a construct the interpreter declines is refused: every such construct
+/// in jq mode is a succinctly extension jq rejects at compile time (`key`,
+/// `file_index`, bare `path`, `parent`, and the cursor-metadata builtins
+/// `line`, `at_offset`, ...), which read the shipped evaluator's cursor or
+/// path context, or a product of the shipped evaluator's own run.
 pub(crate) fn route(program: &Expr) -> Route {
-    // The interpreter reads storage identity, which the `unshared-containers`
-    // A/B holdout (#2999) does not have: that build keeps the shipped routing.
-    if cfg!(feature = "unshared-containers") {
-        return Route::Shipped;
-    }
-    // One walk of the program: the entries ask once per document. It never
-    // stops early, so a declined construct before the dynamic target is seen.
+    // One walk of the program: the entries ask once per document.
     let mut dynamic = false;
-    let mut fold_target = false;
-    let mut declined = false;
-    let mut cursor_builtin = None;
+    let mut declined = None;
     any_subexpr(program, &mut |e| {
-        if let Some(target) = dynamic_target(e) {
-            dynamic = true;
-            fold_target = fold_target
-                || any_subexpr(target, &mut |t| {
-                    matches!(t, Expr::Foreach { .. } | Expr::Reduce { .. })
-                });
-        }
-        declined |=
-            !runs(e) || matches!(e, Expr::Builtin(b) if super::walk::is_cursor_metadata_builtin(b));
-        if let Expr::Builtin(b) = e {
-            cursor_builtin = cursor_builtin.or_else(|| cursor_dependent_builtin(b));
-        }
-        false
+        dynamic |= is_dynamic_path_target(e);
+        declined = declined.or_else(|| declined_construct(e));
+        dynamic && declined.is_some()
     });
-    match (dynamic, cursor_builtin) {
+    match (dynamic, declined) {
         (false, _) => Route::Shipped,
-        (true, Some(name)) if fold_target => Route::Refused(name),
-        (true, _) if declined => Route::Shipped,
-        (true, _) => Route::Interpreter,
+        (true, None) => Route::Interpreter,
+        (true, Some(what)) => Route::Refuse(what),
     }
 }
 
-/// Whether the interpreter takes `program`: [`route`] is [`Route::Interpreter`].
-#[cfg(test)]
-#[cfg_attr(feature = "unshared-containers", allow(dead_code))]
-pub(crate) fn takes_program(program: &Expr) -> bool {
-    route(program) == Route::Interpreter
+/// The error a [`Route::Refuse`] program raises.
+pub(crate) fn refusal(what: &str) -> EvalError {
+    EvalError::new(format!(
+        "{what} cannot be used in a program whose path expression is more than \
+         navigation (the left side of `|=`, or the argument of `path`, `del` or \
+         `pick`): it is a succinctly extension, which jq does not have"
+    ))
 }
 
-/// The name of a builtin that answers from the cursor or the evaluator's path
-/// context, which a program run on a materialized value does not have.
-fn cursor_dependent_builtin(builtin: &Builtin) -> Option<&'static str> {
+/// The construct `expr` is, when this interpreter does not run it: a builtin
+/// it declines, or a node it never sees ([`runs`]).
+fn declined_construct(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Builtin(builtin) => declined_builtin(builtin),
+        _ if !runs(expr) => Some("a construct of the shipped evaluator's own run"),
+        _ => None,
+    }
+}
+
+/// The jq-mode spelling of a builtin this interpreter declines: one that
+/// reads the shipped evaluator's cursor (`line`, `at_offset`, ...) or path
+/// context (`key`, `parent`, ...).
+fn declined_builtin(builtin: &Builtin) -> Option<&'static str> {
     use Builtin as B;
     Some(match builtin {
-        B::Line => "line",
-        B::Column => "column",
-        B::DocumentIndex => "document_index",
-        B::Anchor => "anchor",
-        B::Style => "style",
-        B::LineComment => "line_comment",
-        B::HeadComment => "head_comment",
-        B::FootComment => "foot_comment",
-        B::AtOffset(_) => "at_offset",
-        B::AtPosition(..) => "at_position",
-        B::Key => "key",
-        B::FileIndex => "file_index",
-        B::PathNoArg => "path",
-        B::Parent | B::ParentN(_) => "parent",
+        B::Line => "`line`",
+        B::Column => "`column`",
+        B::DocumentIndex => "`document_index`",
+        B::Anchor => "`anchor`",
+        B::Style => "`style`",
+        B::LineComment => "`line_comment`",
+        B::HeadComment => "`head_comment`",
+        B::FootComment => "`foot_comment`",
+        B::AtOffset(_) => "`at_offset`",
+        B::AtPosition(..) => "`at_position`",
+        B::Key => "`key`",
+        B::FileIndex => "`file_index`",
+        B::Filename => "`filename`",
+        B::PathNoArg => "`path` with no argument",
+        B::Parent | B::ParentN(_) => "`parent`",
+        B::AnyC(..) | B::AllC(..) => "`any_c`/`all_c`",
         _ => return None,
     })
-}
-
-/// The error a [`Route::Refused`] program raises.
-pub(crate) fn refusal(builtin: &str) -> EvalError {
-    EvalError::new(format!(
-        "{builtin} cannot be combined with a foreach or reduce in a path target: the path register is carried on a materialized document, which has no cursor"
-    ))
 }
 
 /// Whether `expr` is a path construct whose target is not static.
@@ -1115,7 +1098,7 @@ pub(crate) fn run_program(
                 Outcome::Done => None, // patchcov: coverage tolerate-line reason="unreachable: an error outcome is never Done"
                 Outcome::Error(e) => Some(Control::Error(e)),
                 Outcome::Halt(code) => Some(Control::Halt(code)),
-                // patchcov: coverage tolerate reason="unreachable: route declines every program holding a construct the interpreter does not run"
+                // patchcov: coverage tolerate reason="unreachable: route refuses every program holding a construct the interpreter does not run"
                 Outcome::Unsupported(what) => Some(Control::Error(EvalError::new(format!(
                     "internal error: the path-mode interpreter cannot run {what}"
                 )))),

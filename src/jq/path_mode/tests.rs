@@ -1598,22 +1598,39 @@ fn the_routed_library_entries_run_the_interpreter_5223() {
         );
 
         // A document the interpreter cannot materialize whole (a lone surrogate)
-        // falls back to the shipped route, which reads only what the program does
-        // and answers (#4412); without the fallback both entries raise the decode
-        // error.
+        // raises the decode error, on every entry, as jq rejects the document
+        // when it parses it (#5233: no fallback to the shipped route).
         let lone = br#"{"a":"\ud800","d":5}"#;
         let index = JsonIndex::build(lone);
         let expr = parse("[.d | path(if . then . else empty end)]").expect("parses");
-        assert!(takes_program(&expr));
-        let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone))
-            .collect_owned::<JqSemantics>()
-            .expect("materializes");
-        assert_eq!(json(&collected), ["[[]]"], "eval_with_cursor");
-        let using =
-            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(lone).value())
-                .collect_owned::<JqSemantics>()
-                .expect("materializes");
-        assert_eq!(json(&using), ["[[]]"], "eval_using");
+        assert_eq!(route(&expr), Route::Interpreter);
+        let decode_error =
+            |result: crate::jq::eval_generic::GenericResult<_>, entry: &str| match result {
+                crate::jq::eval_generic::GenericResult::Error(e) => assert!(
+                    e.message.contains("invalid unicode escape"),
+                    "{entry}: {e:?}"
+                ),
+                other => panic!("{entry}: expected the decode error, got {other:?}"),
+            };
+        decode_error(
+            crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone)),
+            "eval_with_cursor",
+        );
+        decode_error(
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(lone).value()),
+            "eval_using",
+        );
+        let mut streamed = 0;
+        match crate::jq::eval_generic::eval_each_with_cursor(&expr, index.root(lone), &mut |_| {
+            streamed += 1;
+            true
+        }) {
+            Some(Control::Error(e)) => {
+                assert!(e.message.contains("invalid unicode escape"), "{e:?}")
+            }
+            other => panic!("eval_each_with_cursor: expected the decode error, got {other:?}"),
+        }
+        assert_eq!(streamed, 0);
 
         // A taken program that raises ends the owned entry's run with the error,
         // after what it emitted.
@@ -1778,12 +1795,13 @@ fn an_unresolved_program_raises_the_shipped_errors_5223() {
     });
 }
 
-/// `takes_program` routes a program to the interpreter exactly when it holds
-/// a path target that is neither navigation nor a value filter over it, and
-/// nothing the interpreter declines.
+/// `route` sends a program to the interpreter exactly when it holds a path
+/// target that is neither navigation nor a value filter over it, and nothing
+/// the interpreter declines; one that holds both is refused (#5233).
 #[test]
-fn takes_program_routes_dynamic_path_targets_only_5223() {
-    let takes = |filter: &str| takes_program(&parse(filter).expect(filter));
+fn route_sends_dynamic_path_targets_to_the_interpreter_5223() {
+    let route_of = |filter: &str| route(&parse(filter).expect(filter));
+    let takes = |filter: &str| route_of(filter) == Route::Interpreter;
     for filter in [
         "del(.users[] | .score as $y | select($y < 100))",
         "path(.a as $x | $x)",
@@ -1811,6 +1829,7 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
         "[paths]",
         "to_entries",
         "path(.a | select(.)) | line",
+        "[path(..)] | map(key)",
         // Value filters over navigation.
         "del(.users[] | select(.score < 100))",
         "pick(first(.[]))",
@@ -1821,26 +1840,45 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
     ] {
         assert!(!takes(filter), "{filter}");
     }
+    // A dynamic target beside a construct the interpreter declines: refused,
+    // naming the construct, wherever in the program each one is.
+    for (filter, what) in [
+        ("path(.a as $x | $x) | line", "`line`"),
+        ("[.[] | key] as $k | del(.a as $x | $x)", "`key`"),
+        (
+            "at_offset(0) | path(if . then .a else .b end)",
+            "`at_offset`",
+        ),
+        ("path(getpath([\"a\"])) | file_index", "`file_index`"),
+        (
+            "def f: parent; f | path(first(.[] | . as $x | $x))",
+            "`parent`",
+        ),
+        ("(.a as $x | .b) |= document_index", "`document_index`"),
+    ] {
+        assert_eq!(route_of(filter), Route::Refuse(what), "{filter}");
+    }
 }
 
 /// `route` refuses a fold in a dynamic path target beside a builtin the
-/// interpreter declines, naming the builtin (#5239), and leaves every other
-/// program with such a builtin on the shipped route.
+/// interpreter declines, naming the builtin (#5239), and since #5233 every
+/// other dynamic target beside one too; a static target, or a fold outside
+/// every target, keeps the shipped route.
 #[test]
 fn route_refuses_a_fold_target_beside_a_declined_builtin_5239() {
     let route_of = |filter: &str| route(&parse(filter).expect(filter));
     let fold = "foreach (1,2) as $i (null; $i)";
     for (builtin, name) in [
-        ("line", "line"),
-        ("at_offset(0)", "at_offset"),
-        ("at_position(1; 1)", "at_position"),
-        ("key", "key"),
-        ("file_index", "file_index"),
-        ("path", "path"),
-        ("parent", "parent"),
-        ("parent(2)", "parent"),
-        ("anchor", "anchor"),
-        ("head_comment", "head_comment"),
+        ("line", "`line`"),
+        ("at_offset(0)", "`at_offset`"),
+        ("at_position(1; 1)", "`at_position`"),
+        ("key", "`key`"),
+        ("file_index", "`file_index`"),
+        ("path", "`path` with no argument"),
+        ("parent", "`parent`"),
+        ("parent(2)", "`parent`"),
+        ("anchor", "`anchor`"),
+        ("head_comment", "`head_comment`"),
     ] {
         // Either side of the target, and every construct that takes one.
         for filter in [
@@ -1850,29 +1888,24 @@ fn route_refuses_a_fold_target_beside_a_declined_builtin_5239() {
             format!("(. as $x | {fold}) |= {builtin}"),
             format!("(. as $x | {fold}) //= 1 | {builtin}"),
             format!("(. as $x | reduce (1,2) as $i (null; $i)) += 1 | {builtin}"),
+            // #5233: a dynamic target with no fold in it is refused as well.
+            format!("{builtin} as $z | path(. as $x | .a)"),
+            format!("({fold}) as $s | {builtin} as $z | path(. as $x | .a)"),
         ] {
-            assert_eq!(route_of(&filter), Route::Refused(name), "{filter}");
+            assert_eq!(route_of(&filter), Route::Refuse(name), "{filter}");
         }
     }
     for (filter, want) in [
         // The same program without the builtin goes to the interpreter.
         (format!("path(. as $x | {fold})"), Route::Interpreter),
-        // A dynamic target with no fold in it, a fold outside every target, and a
-        // static target stay shipped beside the builtin.
-        (
-            "line as $z | path(. as $x | .a)".to_string(),
-            Route::Shipped,
-        ),
-        (
-            format!("({fold}) as $s | line as $z | path(. as $x | .a)"),
-            Route::Shipped,
-        ),
+        // A static target keeps the shipped route beside the builtin, and so
+        // does a fold outside every target.
         (format!("line as $z | path(.a), ({fold})"), Route::Shipped),
-        // A builtin with no cursor dependence the interpreter declines (a module
-        // call) is not named, so it keeps the shipped route.
+        // A module call is rewritten before evaluation; left in place it is a
+        // construct the interpreter never runs.
         (
             "m::f as $z | path(. as $x | foreach (1,2) as $i (null; $i))".to_string(),
-            Route::Shipped,
+            Route::Refuse("a construct of the shipped evaluator's own run"),
         ),
     ] {
         assert_eq!(route_of(&filter), want, "{filter}");
