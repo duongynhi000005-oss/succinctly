@@ -1841,8 +1841,8 @@ fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
     }
 }
 
-/// A program with a dynamic path target that also holds a construct the
-/// interpreter does not run is refused, naming it, wherever the construct is
+/// A program with a dynamic path target that also uses an extension builtin
+/// the interpreter does not run is refused, naming it, wherever the builtin is
 /// (#5233). Every one is a succinctly extension jq 1.7.1 does not define
 /// (`key/0 is not defined`, ...), so jq rejects each program whole; the same
 /// construct beside static targets only stays on the shipped route.
@@ -1892,13 +1892,18 @@ fn route_refuses_a_dynamic_path_target_beside_a_declined_construct_5233() {
         ]
         .into(),
     );
-    let Route::Refused(error) = route(&namespaced) else {
-        panic!("a module call: not refused");
-    };
-    assert!(
-        error.message.starts_with("a module call is not supported"),
-        "{error:?}"
+    // A module call (rewritten away by the CLI) and the shipped evaluator's own
+    // rewrites keep the shipped route, as before #5233: a `Shared` argument
+    // under a target that only its substitution made dynamic is one.
+    assert!(matches!(route(&namespaced), Route::Shipped));
+    let rewritten = Expr::Pipe(
+        vec![
+            Expr::Builtin(Builtin::Key),
+            Expr::Builtin(Builtin::Path(Box::new(Expr::shared(Expr::Identity)))),
+        ]
+        .into(),
     );
+    assert!(matches!(route(&rewritten), Route::Shipped));
     for filter in ["path(.a) | key", "del(.a), line", "[paths] | at_offset(0)"] {
         assert!(
             matches!(route(&parse(filter).expect(filter)), Route::Shipped),

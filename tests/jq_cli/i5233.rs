@@ -6,8 +6,8 @@
 //! of these programs at compile time (`key/0 is not defined`, ...), and both documents when
 //! it parses them.
 //!
-//! The `unshared-containers` holdout keeps the shipped routing, so these pin the shipped shape
-//! only.
+//! The `unshared-containers` holdout refuses every such program with its own message, so these
+//! pin the shipped shape only.
 #![cfg(not(feature = "unshared-containers"))]
 
 use anyhow::Result;
@@ -15,8 +15,9 @@ use anyhow::Result;
 use crate::run_jq_full;
 
 /// A dynamic path target beside an extension builtin, anywhere in the program, is refused
-/// with the builtin's name and jq's runtime-error status. These rows used to reach the
-/// shipped route's path-context evaluator (#2289, #2642, #2974, #3036, #3134, #3369).
+/// with the builtin's name, once, at jq's compile-error status (3), before any input is read:
+/// jq rejects the extension at compile time too. These rows used to reach the shipped route's
+/// path-context evaluator (#2289, #2642, #2974, #3036, #3134, #3369).
 #[test]
 fn a_dynamic_path_target_beside_an_extension_builtin_is_refused_5233() -> Result<()> {
     for (filter, input, name) in [
@@ -51,15 +52,22 @@ fn a_dynamic_path_target_beside_an_extension_builtin_is_refused_5233() -> Result
         ),
         ("line, path(.a as $x | .b)", r#"{"a":1}"#, "line"),
     ] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
-        assert!(
-            stderr.contains(&format!(
-                "{name} is not supported in a program whose path expression does more than navigate"
-            )),
-            "`{filter}`: {stderr}"
+        // Two documents: the refusal is the program's, so it is reported once.
+        let (stdout, stderr, code) =
+            run_jq_full(&["-c", filter], Some(&format!("{input} {input}")))?;
+        assert_eq!((stdout.as_str(), code), ("", 3), "`{filter}`: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "jq: error: {name} is not supported in a program whose path expression does more \
+                 than navigate\njq: 1 compile error\n"
+            ),
+            "`{filter}`"
         );
     }
+    // With no input at all, as jq's compile error does.
+    let (stdout, _, code) = run_jq_full(&["-c", "key, path(.a as $x | .b)"], Some(""))?;
+    assert_eq!((stdout.as_str(), code), ("", 3));
     Ok(())
 }
 
@@ -108,5 +116,40 @@ fn a_dynamic_path_program_over_an_undecodable_document_raises_5233() -> Result<(
     }
     let (stdout, stderr, code) = run_jq_full(&["-c", "[.d | path(.)]"], Some(lone))?;
     assert_eq!((stdout.as_str(), code), ("[[]]\n", 0), "{stderr}");
+    Ok(())
+}
+
+/// A static target the shipped evaluator rewrites as it runs (a `$v` substituted into
+/// `.a[$v]`, a bound `def`) and hands to its own bridges stays on that evaluator: the bridges
+/// re-enter it unrouted. Routing them read the rewritten target as dynamic and refused these
+/// plain jq programs (review of #5233). Expected outputs are jq 1.7.1's.
+#[test]
+fn a_rewritten_static_target_stays_on_the_shipped_route_5233() -> Result<()> {
+    let input = r#"{"a":{"x":1,"y":2},"k":"x"}"#;
+    for (filter, want) in [
+        (
+            r#"def f($v): .a[$v] |= 9; [limit(1; f("x"))]"#,
+            "[{\"a\":{\"x\":9,\"y\":2},\"k\":\"x\"}]\n",
+        ),
+        (
+            r#"def h: "x"; .k as $k | [limit(1; .a[$k] |= h)]"#,
+            "[{\"a\":{\"x\":\"x\",\"y\":2},\"k\":\"x\"}]\n",
+        ),
+        (
+            "def f: .; .k as $k | [limit(1; .a[$k] |= f)]",
+            "[{\"a\":{\"x\":1,\"y\":2},\"k\":\"x\"}]\n",
+        ),
+        (
+            r#"def f($v): .a[$v] |= 9; first(f("x"))"#,
+            "{\"a\":{\"x\":9,\"y\":2},\"k\":\"x\"}\n",
+        ),
+        (
+            r#"def g($v): .a[$v] |= 9; [has("a"), (g("x")|has("a"))]"#,
+            "[true,true]\n",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
+        assert_eq!((stdout.as_str(), code), (want, 0), "`{filter}`: {stderr}");
+    }
     Ok(())
 }

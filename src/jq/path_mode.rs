@@ -904,56 +904,85 @@ pub(crate) enum Route {
 /// target asks where jq's register is, which this interpreter answers by
 /// carrying it, and which the shipped evaluator no longer answers at all.
 ///
-/// So a program with a dynamic target that also holds a construct the
-/// interpreter declines is refused. Every such construct is a succinctly
-/// extension jq does not define (`key`, `file_index`, `parent`, bare `path`,
-/// the cursor-metadata builtins `line`, `at_offset`, ...), so jq rejects the
-/// whole program at compile time anyway; the shipped evaluator's own
-/// rewrites (`DefCall`, ...) never reach a routed entry holding a dynamic
-/// target, because a program holding one never runs on that evaluator.
+/// So a program with a dynamic target that also uses a succinctly extension
+/// the interpreter does not run (`key`, `file_index`, `parent`, bare `path`,
+/// the cursor-metadata builtins `line`, `at_offset`, ...) is refused, naming
+/// it: jq rejects the whole program at compile time anyway.
+///
+/// A program holding one of the shipped evaluator's own rewrites (`DefCall`,
+/// `Shared`, `DeferredVar`), a module call or yq syntax stays on the shipped
+/// route, as before #5233: only that evaluator makes the rewrites, when it
+/// re-enters a part of a program already routed to it, whose targets were
+/// static before a `$x` was substituted or a `def` bound into them.
 pub(crate) fn route(program: &Expr) -> Route {
-    // One walk of the program: the entries ask once per document.
+    // One walk of the program: the entries ask once per document. It ends at
+    // the first node the shipped route keeps, whatever else the program holds.
     let mut dynamic = false;
-    let mut declined = None;
-    any_subexpr(program, &mut |e| {
+    let mut extension = None;
+    let shipped_only = any_subexpr(program, &mut |e| {
         dynamic |= is_dynamic_path_target(e);
-        if declined.is_none() {
-            declined = declined_construct(e);
+        match declined_construct(e) {
+            Some(Declined::Extension(name)) => {
+                extension.get_or_insert(name);
+                false
+            }
+            Some(Declined::ShippedOnly) => true,
+            None => false,
         }
-        dynamic && declined.is_some()
     });
-    match (dynamic, declined) {
-        (false, _) => Route::Shipped,
-        // The interpreter reads storage identity, which the `unshared-containers`
-        // A/B holdout (#2999) does not have: its by-value `jv_identical` refuses
-        // rows jq answers. Nor does the shipped resolver answer a dynamic target
-        // any more (#5233), so that measurement build refuses one outright
-        // rather than answer it wrongly.
-        (true, _) if cfg!(feature = "unshared-containers") => Route::Refused(EvalError::new(
+    if !dynamic || shipped_only {
+        return Route::Shipped;
+    }
+    // The interpreter reads storage identity, which the `unshared-containers`
+    // A/B holdout (#2999) does not have: its by-value `jv_identical` refuses
+    // rows jq answers. Nor does the shipped resolver answer a dynamic target any
+    // more (#5233), so that measurement build refuses one outright rather than
+    // answer it wrongly.
+    if cfg!(feature = "unshared-containers") {
+        return Route::Refused(EvalError::new(
             "a path expression that does more than navigate is not supported in the \
              unshared-containers build",
-        )),
-        (true, None) => Route::Interpreter,
-        (true, Some(what)) => Route::Refused(EvalError::new(format!(
-            "{what} is not supported in a program whose path expression does more than navigate"
+        ));
+    }
+    match extension {
+        None => Route::Interpreter,
+        Some(name) => Route::Refused(EvalError::new(format!(
+            "{name} is not supported in a program whose path expression does more than navigate"
         ))),
     }
 }
 
-/// The construct `expr` is, when it is one this interpreter does not run: a
-/// node [`runs`] rejects, or a builtin that reads cursor metadata, which a
-/// materialized document does not hold.
-fn declined_construct(expr: &Expr) -> Option<&'static str> {
+/// Why `succinctly jq` refuses `program`, if it does (#5233).
+///
+/// A dynamic path target beside an extension builtin the path-mode interpreter
+/// does not run is refused: the CLI reports this message once, as a compile
+/// error, before any input is read.
+pub fn refusal(program: &Expr) -> Option<String> {
+    match route(program) {
+        Route::Refused(error) => Some(error.message),
+        Route::Interpreter | Route::Shipped => None,
+    }
+}
+
+/// A node the interpreter does not run ([`declined_construct`]).
+enum Declined {
+    /// A succinctly extension builtin, by its name.
+    Extension(&'static str),
+    /// A node only the shipped evaluator's own rewrites, a module call or yq
+    /// syntax make.
+    ShippedOnly,
+}
+
+/// Whether the interpreter declines `expr`: a node [`runs`] rejects, or a
+/// builtin that reads cursor metadata, which a materialized document does not
+/// hold.
+fn declined_construct(expr: &Expr) -> Option<Declined> {
     if let Expr::Builtin(builtin) = expr {
-        if let Some(name) = cursor_metadata_name(builtin) {
-            return Some(name);
+        if let Some(name) = cursor_metadata_name(builtin).or_else(|| path_context_name(builtin)) {
+            return Some(Declined::Extension(name));
         }
     }
-    (!runs(expr)).then(|| match expr {
-        Expr::Builtin(builtin) => path_context_name(builtin).unwrap_or("this builtin"), // patchcov: coverage tolerate-line reason="unreachable in jq mode: the declined builtins with no jq-mode spelling (any_c/all_c) are yq syntax"
-        Expr::NamespacedCall { .. } => "a module call",
-        _ => "this construct", // patchcov: coverage tolerate-line reason="unreachable from a jq program: the remaining declined nodes are the shipped evaluator's rewrites or yq syntax"
-    })
+    (!runs(expr)).then_some(Declined::ShippedOnly)
 }
 
 /// A cursor-metadata builtin's name ([`super::walk::is_cursor_metadata_builtin`]).

@@ -4063,6 +4063,15 @@ pub fn run_jq(mut args: JqCommand) -> Result<i32> {
         report_compile_errors(&compile_errors, &filter_str, &module_loader);
         return Ok(exit_codes::COMPILE_ERROR);
     }
+    // #5233: a dynamic path target beside a succinctly extension the path-mode
+    // interpreter does not run is refused once, at jq's compile-error status
+    // (jq rejects the extension itself, `key/0 is not defined`), not once per
+    // document by the evaluator entries, which refuse it too for the library.
+    if let Some(message) = jq::path_mode::refusal(&expr) {
+        eprintln!("jq: error: {message}");
+        eprintln!("jq: 1 compile error");
+        return Ok(exit_codes::COMPILE_ERROR);
+    }
 
     // Whether the filter references `input`/`inputs`/`input_line_number`
     // (#723), which decides below whether the shared input queue gets seeded

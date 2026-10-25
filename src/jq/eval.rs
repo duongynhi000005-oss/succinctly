@@ -31147,18 +31147,16 @@ fn contain_depth_panic<'a, W>(f: impl FnOnce() -> QueryResult<'a, W>) -> QueryRe
 ///
 /// A jq program with a dynamic path target is routed as every other entry
 /// routes it ([`super::path_mode::route`], #5233): this evaluator's resolver
-/// no longer infers jq's register, so it is never handed one.
+/// no longer infers jq's register, so it is never handed one. The bridges
+/// call [`eval_full_unrouted`] instead: what they hand over is a part of a
+/// program already routed, rewritten (a substituted `$x`, a bound `def`) in
+/// ways the routing would misread.
 #[doc(hidden)]
 pub fn eval_full<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     expr: &Expr,
     cursor: JsonCursor<'a, W>,
 ) -> QueryResult<'a, W> {
-    // Special case: Identity returns the cursor directly for efficient output
-    // This avoids decomposing arrays/objects into individual cursors
-    if matches!(expr, Expr::Identity) {
-        return QueryResult::OneCursor(cursor);
-    }
-    if S::TAG == EvalTag::Jq {
+    if S::TAG == EvalTag::Jq && !matches!(expr, Expr::Identity) {
         match super::path_mode::route(expr) {
             super::path_mode::Route::Interpreter => {
                 return match super::eval_generic::to_owned_cursor::<S, _>(&cursor) {
@@ -31169,6 +31167,21 @@ pub fn eval_full<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             super::path_mode::Route::Refused(e) => return QueryResult::Error(e),
             super::path_mode::Route::Shipped => {}
         }
+    }
+    eval_full_unrouted::<W, S>(expr, cursor)
+}
+
+/// [`eval_full`] without the path-mode routing: the entry the generic
+/// evaluator's bridges use (`eval_generic::eval_on_owned`,
+/// `bridge_to_full_evaluator`).
+pub(crate) fn eval_full_unrouted<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    expr: &Expr,
+    cursor: JsonCursor<'a, W>,
+) -> QueryResult<'a, W> {
+    // Special case: Identity returns the cursor directly for efficient output
+    // This avoids decomposing arrays/objects into individual cursors
+    if matches!(expr, Expr::Identity) {
+        return QueryResult::OneCursor(cursor);
     }
     eval_single::<W, S>(expr, cursor.value(), false)
 }
@@ -100034,9 +100047,7 @@ mod tests {
 
         // A `DefCall` refuses before its body can read an argument, so an
         // argument read is reached here directly: `g` stands for an argument
-        // already bound into the query, as `bind_def_call` leaves it. (A jq
-        // path target holding one is refused before evaluation since #5233:
-        // only the shipped evaluator's own rewrites make such a node.)
+        // already bound into the query, as `bind_def_call` leaves it.
         for filter in [
             "g",
             "first(g)",
@@ -100044,6 +100055,8 @@ mod tests {
             "g | key",
             "[g | parent]",
             "g | .b",
+            "[path(g)]",
+            "g |= 2",
             ".a | to_entries | g | key",
             ".a | to_entries | g | parent",
         ] {
