@@ -12,6 +12,7 @@ use crate::assert_path_rows_both_routes_3749;
 
 /// #5170: the issue's row (a literal sibling after the bind), the sibling ahead of it, a `null` sibling, a comma inside
 /// the `//`'s left operand, and the writes through it. Every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5170_three_argument_foreach_alternative_over_a_comma_beside_a_bind() -> Result<()> {
@@ -71,6 +72,7 @@ fn test_5170_three_argument_foreach_alternative_over_a_comma_beside_a_bind() -> 
 
 /// #5170: the rows that stay as they were. A document whose `$x` is not the register raises on the bind, and a sibling
 /// that navigates moves the register, so neither is read.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5170_rows_that_keep_their_reading() -> Result<()> {

@@ -12,6 +12,7 @@ use anyhow::Result;
 /// so `$i` was refused as a guess: `path`, `|=` and `del` raised `with result <doc>` and `[path(..)?]` dropped jq's
 /// `[]`. For a `null` landing and a container landing, an emitting handler of either kind. Rows captured from jq 1.7.1
 /// (stdout, first stderr line, exit code), both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_output_sits_at_the_try_entry_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -133,6 +134,7 @@ fn test_foreach_update_try_handler_output_sits_at_the_try_entry_5004() -> Result
 /// #5004: the `try` may sit behind a value head or a `select(true)` stage (`null | (try (FE) catch 7)`), whose pipe
 /// hands it on copied and carries the register on its frame: the handler is still seeded with the register the step
 /// entered its UPDATE with, and its statement is read back. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_behind_a_value_head_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -232,6 +234,7 @@ fn test_foreach_update_try_handler_where_the_nested_foreach_is_not_modelled_stay
 /// #5004: a step that destructures (`as {a:$i}`) is not read: its walk moves the register in ways the step does not
 /// report, and #4978's refusal of a container landing behind a handler that emits stands there. Reading it answered
 /// `{"a":[null]}` for jq's error from `|= 9` and changed two messages. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_behind_a_destructuring_step_is_not_read_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -262,6 +265,7 @@ fn test_foreach_update_try_handler_behind_a_destructuring_step_is_not_read_5004(
 /// #5004: a `break` to a label outside the `foreach` is caught by the `try` too (its handler gets jq's label object),
 /// and jq runs that handler from the same restored register: the `$i` EXTRACT is the root, `[]`. Rows captured from
 /// jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_of_a_caught_break_sits_at_the_try_entry_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -398,6 +402,7 @@ fn test_foreach_update_try_handler_of_a_caught_break_sits_at_the_try_entry_5004(
 /// `foreach`'s own state, not at the outer `try`'s entry, so it does not keep #4978's refusal of a container landing
 /// behind a handler that emits: only a handler around the `foreach` does, and that one is placed. It was refused where
 /// jq answers. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_beside_a_handler_inside_the_nested_foreach_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -463,6 +468,7 @@ fn test_foreach_update_try_handler_beside_a_handler_inside_the_nested_foreach_50
 /// #5004: the handler is placed on the run's last step, which a source whose shape bounds its output count names
 /// before the next item is asked for: `(.a,$x)`, `((.a,.a),.)` and `(.a?,.)` emit at most two, three and two items,
 /// and their step on the root is the last one (`source_output_bound`). Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_try_handler_on_the_last_step_of_a_bounded_source_5004() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

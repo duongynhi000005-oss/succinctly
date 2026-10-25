@@ -544,6 +544,16 @@ CI works around but this repo's own docs don't all say consistently:
   [docs/guides/benchmarking.md](docs/guides/benchmarking.md#ab-benchmarking-method)
   documents its own rules for; this is the general case that pattern is one
   instance of.
+- **`unshared-containers` refuses a dynamic path target** (#5233): a jq program
+  whose `path`/`del`/`=`/`|=` target does more than navigate gets `a path
+  expression that does more than navigate is not supported in the
+  unshared-containers build`, so a test that runs one fails under
+  `--all-features`. Mark it
+  `#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]`
+  above its `#[test]` — an ignore, not a `cfg`, so it still compiles and
+  the helpers it calls do not turn into dead code. `cargo test --all-features
+  --test jq_cli_tests --lib` then fails only the tests that failed before #5233,
+  and a new failure there is a real one (CI does not run that build's tests).
 
 If you're deciding what `cargo test`/`cargo clippy` invocation "covers
 everything": it's the CI legs matching the **default** feature set

@@ -82,6 +82,7 @@ fn test_5180_iterating_a_marker_places_the_register_among_its_outputs() -> Resul
 }
 
 /// #5180: a head that reaches another node than the register's still refuses, or is caught, as before.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5180_a_head_reaching_another_node_is_still_refused() -> Result<()> {
