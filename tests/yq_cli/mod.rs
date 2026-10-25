@@ -25,6 +25,7 @@ mod i1129;
 mod i1325;
 mod i1998;
 mod i2126;
+mod i2186;
 mod i2505;
 mod i2513;
 mod i2835;
