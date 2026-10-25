@@ -5592,8 +5592,8 @@ building them again (#4591, for #1412's no-op and zero-target cases). `eval_upda
 
 Before is the first parent of the #4591 merge (`2d5449dc7`), after is the merge (`9af9594b7`),
 both built `--release --features cli` with the pinned one-codegen-unit fat-LTO profile. `users`
-documents of 1, 10 and 50 MB. The `+=` and `//=` rows are the changed path (`//=` on a non-null
-age is the no-op `Skip` answer); `|=` is the unchanged control.
+documents of 1, 10 and 50 MB. The `+=` and `//=` rows are the changed path (`//= 0` on an age that
+is already set still runs the write, with the value left as it was); `|=` is the unchanged control.
 
 | row (min of 9, delta of min)            | M4 Pro 1 MB | 10 MB  | 50 MB  | 7950X 1 MB | 10 MB  | 50 MB  |
 |-----------------------------------------|-------------|--------|--------|------------|--------|--------|
