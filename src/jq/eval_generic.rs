@@ -3342,11 +3342,9 @@ fn source_spelling<C: DocumentCursor>(
                 && source.parse::<i64>() == Ok(*n)
         }
         OwnedValue::NumberLiteral(_, literal) => source == **literal,
-        // A document `.nan` is a `NumberLiteral` since #1071 (matched above), so no plain
-        // scalar reaches here as a bare NaN; an infinity still can (a 400-digit integer).
-        OwnedValue::Float(f) if f.is_infinite() => {
-            source == if *f > 0.0 { ".inf" } else { "-.inf" }
-        }
+        // A document `.inf`/`.nan` is a `NumberLiteral` since #1071 (matched above), so a bare
+        // non-finite here (a 400-digit integer) never spells as its source does: it falls to
+        // the generic arm, which keeps the source text.
         OwnedValue::Float(f) => source == crate::yaml::format_float_yq_yaml(*f),
         _ => true,
     };
