@@ -119,6 +119,31 @@ const ROWS: &[(&str, &str, &str)] = &[
         ".c = .b | .c = 7",
         "a: &x 1\nb: *x\nc: 7\n",
     ),
+    (
+        "a: &x 1\nb: [*x, 0]\n",
+        ".b[4] = .b[-2]",
+        "a: &x 1\nb: [*x, 0, null, null, null]\n",
+    ),
+    (
+        "a: &x 1\nb: [0, *x]\n",
+        ".b[2] = .b[-1] | .b[3] = .b[-1]",
+        "a: &x 1\nb: [0, *x, null, null]\n",
+    ),
+    (
+        "a: &x 1\nc: &y 2\nb: [*x, *y]\n",
+        ".b[3] = .b[-2]",
+        "a: &x 1\nc: &y 2\nb: [*x, *y, null, null]\n",
+    ),
+    (
+        "a: &x 1\nc: &y 2\nb: [*x, *y]\n",
+        ".b[2] = .b[-1]",
+        "a: &x 1\nc: &y 2\nb: [*x, *y, null]\n",
+    ),
+    (
+        "a: &x 1\nb: [*x, 2]\n",
+        ".b[2] = .b[-2]",
+        "a: &x 1\nb: [*x, 2, 2]\n",
+    ),
 ];
 
 #[test]
@@ -155,5 +180,20 @@ fn test_alias_mark_dropped_when_the_write_destroys_the_anchor_2505() -> Result<(
     let (output, exit_code) = run_yq_stdin("(.a, .c) = .b", "a: &x 1\nb: *x\n", &[])?;
     assert_eq!(exit_code, 0);
     assert_eq!(output, "a: 1\nb: 1\nc: 1\n");
+    Ok(())
+}
+
+/// A negative index is read from the finished tree, so a later stage that changes the length of
+/// that array leaves the copy plain where yq aliases the element it read at the time. The value
+/// is right; only the spelling is not (recorded in `limitations.md`).
+#[test]
+fn test_negative_index_source_stays_plain_when_a_later_stage_grows_the_array_2505() -> Result<()> {
+    let (output, exit_code) = run_yq_stdin(
+        ".d = .b[-1] | .b[2] = 1",
+        "a: &x 1\nc: &y 2\nb: [*x, *y]\n",
+        &[],
+    )?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "a: &x 1\nc: &y 2\nb: [*x, *y, 1]\nd: 2\n");
     Ok(())
 }

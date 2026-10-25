@@ -175,6 +175,7 @@ alias against.
 Since [#2505](https://github.com/rust-works/succinctly/issues/2505) the same pass also reaches the plain shapes #2497 left out:
 a target under a parent the write created (`.c.d = .b`, `.c[0] = .b`), a comma of targets (`(.c, .d) = .b`), a negative index on the source (`.c = .b[-1]`, read from the comment tree, which knows the array's length) and a source container that holds an alias (`.c = .b` on a block `b:\n  - *x`, each alias inside it stays one in the copy).
 Pinned by `tests/yq_cli/i2505.rs`.
+A negative index is read from the finished tree, so a later stage that changes the length of that array (`.d = .b[-1] | .b[2] = 1`) leaves the copy plain where yq aliases the element it read at the time; the value is right.
 Still plain where yq prints `*x`, each listed on #2505: a constructed right side (`.c = [.b]`, `.c = {"z": .b}`), a right side that is not syntactic navigation although the path register knows its source (`.c = (.b // 0)`, `.c = (.b | select(true))`, `.c = (.a, .b)`; rule 4(b) below for the shapes that change the value), a compound assignment (`.c += .b`), the source's trailing comment (`.c = .b` on `b: *x # bc` is `c: *x # bc` in yq), a copied container's flow style (`b: [*x]` copies to `c: [*x]` in yq, to a block here), and the alias group a copy joins (`.c = .b | .a = 5` leaves `c` an alias of the rewritten anchor in yq).
 
 **Rule 4(b)**, on the same `propagate_assign_alias_marks` pass: a computed `value` side
