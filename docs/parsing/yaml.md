@@ -5569,6 +5569,54 @@ with `to_entries`; `test_yaml_key_and_path_of_the_members_a_fan_out_keeps_3846`
 - `src/jq/document.rs` — `DocumentCursor::element_depth`
 - `src/yaml/light.rs` — `YamlCursor::element_depth`
 
+## O11: One Document Build per yq Compound Assignment — Accepted ✅
+
+**Issue**: #1414 (the measurement; the change is #1412's PR #4591).
+
+### What was slow
+
+In yq mode a compound (`+=`, `-=`, ...) or alternative (`//=`) assignment first asks
+`yq_assign_noop_check` whether the write can be skipped, which materialises the document
+(`to_owned`) and resolves the left side's dynamic indexes, then threw the result away.
+`eval_update_multi` then built the same pair again to do the write. Two full document builds
+per static-path `.users[0].age += 1`, on a path that is dominated by the build.
+
+### The change
+
+`yq_resolve_assign_targets` keeps the check's `Continue { pristine, paths }` and hands it to
+`yq_prepare_assign_targets`, so the write reuses the document and the resolved paths instead of
+building them again (#4591, for #1412's no-op and zero-target cases). `eval_update` and plain
+`|=` are untouched; `|=` has no pre-check and is the control below.
+
+### Measured (interleaved A/B, min of 9, `yq -o yaml`, output identical on all 12 rows per machine)
+
+Before is the first parent of the #4591 merge (`2d5449dc7`), after is the merge (`9af9594b7`),
+both built `--release --features cli` with the pinned one-codegen-unit fat-LTO profile. `users`
+documents of 1, 10 and 50 MB. The `+=` and `//=` rows are the changed path (`//= 0` on an age that
+is already set still runs the write, with the value left as it was); `|=` is the unchanged control.
+
+| row (min of 9, delta of min)            | M4 Pro 1 MB | 10 MB  | 50 MB  | 7950X 1 MB | 10 MB  | 50 MB  |
+|-----------------------------------------|-------------|--------|--------|------------|--------|--------|
+| `.users[0].age += 1`                    | -7.5%       | -8.1%  | -8.7%  | -6.3%      | -7.3%  | -8.1%  |
+| `.users[].age += 1`                     | -7.9%       | -8.0%  | -8.8%  | -6.7%      | -6.6%  | -7.9%  |
+| `.users[0].age //= 0`                   | -8.3%       | -8.5%  | -9.1%  | -7.9%      | -6.9%  | -7.8%  |
+| `.users[0].age \|= . + 1` (control)     | +0.6%       | -0.1%  | -0.3%  | -2.5%      | +0.1%  | -1.0%  |
+
+Absolute, 10 MB `.users[0].age += 1`: 795.9 ms -> 731.4 ms on the M4 Pro, 1421.5 ms -> 1317.3 ms on
+the 7950X. The saving is a constant 6-9% at every size rather than growing with the input: it is
+one document build out of the several linear passes a write makes, not an asymptotic change.
+Noise floor from `ab-cli.py --control` on the same corpus: -0.9%..+0.7% (M4 Pro), -1.1%..+0.7%
+(7950X). The one control row outside it, 7950X `|=` at 1 MB (-2.5% min, -1.2% median), is not
+attributed: `|=` does not reach the changed code and the 10 and 50 MB rows of the same query read
++0.1% and -1.0%.
+
+The delta is the whole #4591 diff, not the plumbing alone: it also carries #1412's no-op and
+zero-target answers, which these static paths with a literal right side do not exercise.
+
+### Files Modified
+
+- `src/jq/eval.rs` — `yq_resolve_assign_targets`, `yq_prepare_assign_targets` (landed in #4591)
+
 ---
 
 ## See Also
