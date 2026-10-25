@@ -61067,6 +61067,8 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
     // walk is read at most once, and only for a bind whose variable reaches path position.
     let marker_walk: core::cell::OnceCell<Option<Vec<OwnedValue>>> = core::cell::OnceCell::new();
     let bound_at = core::cell::Cell::new(0_usize);
+    // Shared by the retry below: it reads `source` only to ask what the user wrote (aliasing, identity
+    // position), never the shape of what produced `bound`, so a rewritten source can reuse it.
     let mut on_bound = |bound: OwnedValue, origin: Option<Origin>, witnessed: bool| {
         bound_any.set(true);
         let at = bound_at.replace(bound_at.get() + 1);
