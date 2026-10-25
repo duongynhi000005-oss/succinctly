@@ -832,8 +832,8 @@ impl EvalError {
     ///
     /// jq's `jv_array_set` refuses a NaN index when a write reaches it; the
     /// path naming it is fine (`path(.[nan])` is `[null]`), so this is raised
-    /// by the write, not by resolving the path (#5245). A write-time
-    /// application error, so an inline `?` does not hide it.
+    /// by the write, not by resolving the path (#5245). An inline `?` does not
+    /// hide it: that covers reaching the target, not writing there.
     pub fn nan_index() -> Self {
         Self::new(Self::NAN_INDEX)
     }
@@ -875,7 +875,6 @@ impl EvalError {
             || self.message == Self::SLICE_ASSIGN_NON_ARRAY
             || self.message == Self::CANNOT_UPDATE_STRING_SLICES
             || self.message == Self::CANNOT_UPDATE_ARRAY_INDEX_OF_ARRAY
-            || self.message == Self::NAN_INDEX
     }
 
     /// `Array/string slice indices must be integers`.

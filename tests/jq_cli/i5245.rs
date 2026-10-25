@@ -149,6 +149,27 @@ fn test_nan_variable_key_is_a_path_component_and_a_write_refusal_5245() -> Resul
             5,
         ),
         (
+            "[[1],[2]]",
+            "nan as $v | .[$v].x |= 1",
+            "",
+            "Cannot set array element at NaN index",
+            5,
+        ),
+        (
+            "[[1],[2]]",
+            "nan as $v | .[$v][0] |= 1",
+            "",
+            "Cannot set array element at NaN index",
+            5,
+        ),
+        (
+            "[[1],[2]]",
+            "nan as $v | (.[$v].x, .[0]) |= 1",
+            "",
+            "Cannot set array element at NaN index",
+            5,
+        ),
+        (
             "[1,2]",
             r#"nan as $v | try (.[$v] = 5) catch "c""#,
             "\"c\"\n",
@@ -176,6 +197,9 @@ fn test_nan_variable_key_delete_keeps_the_write_refusal_5245() -> Result<()> {
         ("[1,2]", "nan as $v | del(.[$v])"),
         ("[1,2]", "nan as $v | del(.[0], .[$v])"),
         ("[1,2]", "nan as $v | del(.[$v].x)"),
+        ("[[1],[2]]", "nan as $v | del(.[$v].x, .[0])"),
+        ("[[1],[2]]", "nan as $v | del(.[$v].x, .[$v].y)"),
+        ("[[1],[2]]", "nan as $v | del(.[$v][$v])"),
         ("[[1],[2]]", "nan as $v | del(.[$v][0])"),
         ("[1,2]", "nan as $v | .[$v] |= empty"),
     ] {
