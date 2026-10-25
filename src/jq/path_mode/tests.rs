@@ -1823,6 +1823,62 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
     }
 }
 
+/// `route` refuses a fold in a dynamic path target beside a builtin the
+/// interpreter declines, naming the builtin (#5239), and leaves every other
+/// program with such a builtin on the shipped route.
+#[test]
+fn route_refuses_a_fold_target_beside_a_declined_builtin_5239() {
+    let route_of = |filter: &str| route(&parse(filter).expect(filter));
+    let fold = "foreach (1,2) as $i (null; $i)";
+    for (builtin, name) in [
+        ("line", "line"),
+        ("at_offset(0)", "at_offset"),
+        ("at_position(1; 1)", "at_position"),
+        ("key", "key"),
+        ("file_index", "file_index"),
+        ("path", "path"),
+        ("parent", "parent"),
+        ("parent(2)", "parent"),
+        ("anchor", "anchor"),
+        ("head_comment", "head_comment"),
+    ] {
+        // Either side of the target, and every construct that takes one.
+        for filter in [
+            format!("{builtin} as $z | path(. as $x | {fold})"),
+            format!("path(. as $x | {fold}) | {builtin}"),
+            format!("del(. as $x | {fold}), {builtin}"),
+            format!("(. as $x | {fold}) |= {builtin}"),
+            format!("(. as $x | {fold}) //= 1 | {builtin}"),
+            format!("(. as $x | reduce (1,2) as $i (null; $i)) += 1 | {builtin}"),
+        ] {
+            assert_eq!(route_of(&filter), Route::Refused(name), "{filter}");
+        }
+    }
+    for (filter, want) in [
+        // The same program without the builtin goes to the interpreter.
+        (format!("path(. as $x | {fold})"), Route::Interpreter),
+        // A dynamic target with no fold in it, a fold outside every target, and a
+        // static target stay shipped beside the builtin.
+        (
+            "line as $z | path(. as $x | .a)".to_string(),
+            Route::Shipped,
+        ),
+        (
+            format!("({fold}) as $s | line as $z | path(. as $x | .a)"),
+            Route::Shipped,
+        ),
+        (format!("line as $z | path(.a), ({fold})"), Route::Shipped),
+        // A builtin with no cursor dependence the interpreter declines (a module
+        // call) is not named, so it keeps the shipped route.
+        (
+            "m::f as $z | path(. as $x | foreach (1,2) as $i (null; $i))".to_string(),
+            Route::Shipped,
+        ),
+    ] {
+        assert_eq!(route_of(&filter), want, "{filter}");
+    }
+}
+
 /// `skip`, `isvalid` and `recurse_down` (succinctly extensions) answer what
 /// the shipped evaluator answers, in path mode too.
 #[test]

@@ -128,3 +128,4 @@ mod i5225;
 mod i5226;
 mod i5228;
 mod i5231;
+mod i5239;
