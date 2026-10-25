@@ -3342,7 +3342,8 @@ fn source_spelling<C: DocumentCursor>(
                 && source.parse::<i64>() == Ok(*n)
         }
         OwnedValue::NumberLiteral(_, literal) => source == **literal,
-        OwnedValue::Float(f) if f.is_nan() => source == ".nan",
+        // A document `.nan` is a `NumberLiteral` since #1071 (matched above), so no plain
+        // scalar reaches here as a bare NaN; an infinity still can (a 400-digit integer).
         OwnedValue::Float(f) if f.is_infinite() => {
             source == if *f > 0.0 { ".inf" } else { "-.inf" }
         }

@@ -822,11 +822,10 @@ mod tests {
         for (i, s) in NONFINITE_LITERALS.iter().enumerate() {
             assert_eq!(nonfinite_literal_index(s), Some(i));
             let want = nonfinite_literal_value(s).expect("a table spelling has a value");
-            match resolve_plain(s) {
-                Float(f) if want.is_nan() => assert!(f.is_nan(), "{s}"),
-                Float(f) => assert_eq!(f, want, "{s}"),
-                other => assert!(matches!(other, Float(_)), "{s} resolved to {other:?}"),
-            }
+            assert!(
+                matches!(resolve_plain(s), Float(f) if f == want || (f.is_nan() && want.is_nan())),
+                "{s}"
+            );
         }
         for s in [".INf", "inf", "-.nan", "+.nan", ".5", "", "1e400"] {
             assert_eq!(nonfinite_literal_index(s), None, "{s}");
