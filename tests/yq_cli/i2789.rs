@@ -85,12 +85,20 @@ fn test_key_tostring_keeps_the_typed_key_route_2789() -> Result<()> {
     Ok(())
 }
 
-/// The value half of the same arm: a mapping's string values reach `tostring` as
-/// `OneCursorValue` items too, and a number-spelled string value must stay a string.
+/// `keys[]` reaches the same arm through the lazy-keys producer, which does not check a key's
+/// explicit tag: a `!!null`/`!!bool` key must still come back typed (this is the cursor route's
+/// answer, unchanged; real yq prints the raw text for `tostring`, a gap that is not this issue's),
+/// while a plain string key and a quoted number-spelled one stay strings.
 #[test]
-fn test_value_tostring_over_a_mapping_of_strings_2789() -> Result<()> {
-    let input = "a: foo\nb: \"12\"\nc: 12\n";
-    assert_eq!(lines(".[] | tostring", input)?, ["foo", "12", "12"]);
-    assert_eq!(lines(".[] | @json", input)?, ["\"foo\"", "\"12\"", "12"]);
+fn test_keys_iteration_tostring_keeps_tagged_keys_typed_2789() -> Result<()> {
+    let input = "plain: 1\n\"12\": 2\n!!null abc: 3\n!!bool xyz: 4\n";
+    assert_eq!(
+        lines("keys[] | tostring", input)?,
+        ["plain", "12", "null", "false"]
+    );
+    assert_eq!(
+        lines("keys[] | @json", input)?,
+        ["\"plain\"", "\"12\"", "null", "false"]
+    );
     Ok(())
 }

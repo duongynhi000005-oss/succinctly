@@ -5665,8 +5665,9 @@ Absolute, 1.6M keys `[.[] | key | tostring] | length`: 763.9 ms -> 483.7 ms on t
 
 `tests/yq_cli/i2789.rs`: `key | tostring`, `@json`, `@base64` and `@sh` over plain, quoted, spaced, non-ASCII
 and empty keys (each a live yq v4.53.3 capture); the typed-key guard (`~`, `01`, `true`, `null` keep their
-route, which is not yq's answer for `~`/`01` and is not this issue's gap); and the value half of the same
-arm (`.[] | tostring` over string, quoted-number and number values). The bypass is a speed-only route, so
+route, which is not yq's answer for `~`/`01` and is not this issue's gap); and `keys[] | tostring` / `@json`,
+the lazy-keys producer of the same arm, which does not check a key's explicit tag (`!!null abc` and `!!bool xyz`
+stay `null` and `false`). The bypass is a speed-only route, so
 no output separates taking it from declining it: the A/B above is its evidence.
 
 ### Files Modified
