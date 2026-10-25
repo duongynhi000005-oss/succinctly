@@ -142800,6 +142800,29 @@ mod tests {
         assert!(trailing_array_key(&Expr::Identity).is_none());
     }
 
+    /// #5245: a NaN index is found wherever the component holds it -- bare, under `?` or `()`, or
+    /// anywhere in a `?`-scoped group -- and nothing else is taken for one.
+    #[test]
+    fn names_nan_index_looks_through_wrappers_and_groups_5245() {
+        let nan = || Expr::ArrayKey(Box::new(OwnedValue::Float(f64::NAN)));
+        let search = || Expr::ArrayKey(Box::new(OwnedValue::array()));
+        assert!(names_nan_index(&nan()));
+        assert!(names_nan_index(&Expr::Optional(Box::new(nan()))));
+        assert!(names_nan_index(&Expr::Paren(Box::new(nan()))));
+        assert!(names_nan_index(&Expr::Pipe(
+            vec![nan(), Expr::Index { idx: 0, key: None }].into()
+        )));
+        assert!(names_nan_index(&Expr::Pipe(
+            vec![Expr::Index { idx: 0, key: None }, nan()].into()
+        )));
+        assert!(!names_nan_index(&search()));
+        assert!(!names_nan_index(&Expr::Pipe(
+            vec![search(), Expr::Index { idx: 0, key: None }].into()
+        )));
+        assert!(!names_nan_index(&Expr::Index { idx: 0, key: None }));
+        assert!(!names_nan_index(&Expr::Identity));
+    }
+
     /// #1025: `owned_to_expr` had no depth guard -- splices a
     /// compound-assignment RHS or pattern-substitution value back into the
     /// AST as literals, reachable from `.a += rhs_expr`/`.a //= rhs_expr`
