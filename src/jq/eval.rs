@@ -75437,6 +75437,35 @@ fn owned_arith_accumulator_shape<S: EvalSemantics>(expr: &Expr) -> Option<(Arith
     Some((*op, closed_expr_to_owned::<S>(right.as_ref())?))
 }
 
+/// `. + a + b - c`: a left-associated chain of arithmetic on the accumulator, each right
+/// operand closed (#5279). The first link is [`owned_arith_accumulator_shape`]'s; this is
+/// the chain, applied to the moved state one link at a time, so `. + $x.name + ","`
+/// extends the accumulator's string in place twice instead of re-evaluating it whole.
+/// Two links at least: one is the shape above.
+fn owned_arith_chain_shape<S: EvalSemantics>(expr: &Expr) -> Option<Vec<(ArithOp, OwnedValue)>> {
+    let mut links = Vec::new();
+    let mut at = expr;
+    loop {
+        let Expr::Arithmetic {
+            op, left, right, ..
+        } = at
+        else {
+            return None;
+        };
+        links.push((*op, closed_expr_to_owned::<S>(right.as_ref())?));
+        match left.as_ref() {
+            Expr::Identity => break,
+            next @ Expr::Arithmetic { .. } => at = next,
+            _ => return None,
+        }
+    }
+    if links.len() < 2 {
+        return None;
+    }
+    links.reverse();
+    Some(links)
+}
+
 /// A fold's UPDATE or EXTRACT, as the per-step loop sees it (#3181): the
 /// copy [`demote_for_reentry`] hoisted against [`RootWitness::Owned`] once
 /// per fold (#3036), plus the operand as written when a reroot against a
@@ -75625,12 +75654,41 @@ fn fold_step_each<S: EvalSemantics>(
 /// the table, so this gate is a no-op there.
 #[inline(always)]
 pub(crate) fn owned_update_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
+    // `if C then A else B end` whose `C` is one value the step can settle (closed, or reading
+    // the state, #5279): the UPDATE is whichever branch `C` chooses, and that is a step of its
+    // own. A branch that is no step hands the state back, and the whole `if` is the
+    // evaluator's.
+    if let (
+        EvalTag::Jq,
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        },
+    ) = (S::TAG, unwrap_paren(expr))
+    {
+        if let Some(chosen) = owned_assign_operand::<S>(cond, &state) {
+            let branch = if chosen.is_truthy() {
+                then_branch
+            } else {
+                else_branch
+            };
+            return owned_update_step::<S>(branch, state);
+        }
+    }
     match owned_arith_accumulator_shape::<S>(expr) {
         Some((op, rhs)) => OwnedStep::Handled(arith_combine::<S>(op, state, rhs)),
         None if super::eval_generic::embed_table_active() => {
             try_owned_assign_step::<S>(expr, state)
         }
-        None => try_eval_owned_step::<S>(expr, state),
+        None => match owned_arith_chain_shape::<S>(expr) {
+            Some(links) => OwnedStep::Handled(
+                links
+                    .into_iter()
+                    .try_fold(state, |acc, (op, rhs)| arith_combine::<S>(op, acc, rhs)),
+            ),
+            None => try_eval_owned_step::<S>(expr, state),
+        },
     }
 }
 
@@ -151582,6 +151640,11 @@ mod share_audit_2999 {
             "reduce .[] as $r ({}; setpath([$r.name]; $r.score))",
             "reduce .[] as $r ({}; setpath([$r.name, \"n\"]; $r.score))",
             "reduce .[] as $r ([]; setpath([length]; $r.score))",
+            // #5279: a branch of an `if` is a step of its own, a chain of `+` is applied link by
+            // link to the moved state, and a field is extended where it lies.
+            "reduce .[] as $r ([]; if $r.score % 3 == 0 then .[:-1] else . + [$r.score] end)",
+            "reduce .[] as $r ([]; if length > 100 then .[1:] else . + [$r.score] end)",
+            "reduce .[] as $r (\"\"; . + $r.name + \",\")",
             // `. += X`: the whole state is the target.
             "reduce .[] as $r ([]; . += [$r.score])",
             "reduce .[] as $r ({}; . += {($r.name): $r.score})",
@@ -151589,6 +151652,19 @@ mod share_audit_2999 {
         ] {
             assert_forced(&json, filter, &[]);
         }
+        // #5279: a field extended where it lies. The one copy is step one, where the field is
+        // still the program's own literal; none of the 1,000 steps copies the field.
+        assert_forced(
+            &json,
+            "reduce .[] as $r ({a: []}; .a += [$r.score])",
+            &[(Kind::ArrayMakeMut, 1)],
+        );
+        assert_forced(&json, "reduce .[] as $r ([[]]; .[0] += [$r.score])", &[]);
+        assert_forced(
+            &json,
+            "reduce .[] as $r ({a: {}}; .a += {($r.name): $r.score})",
+            &[(Kind::ObjectMakeMut, 1)],
+        );
         // #5271: an array operand (`[]`, `[a, b]`) is one value, so the step is taken. What
         // each step still copies is the one array it extends (a group, here of one
         // element), not the accumulator: 1,000 small copies, none of the 1,000-key state.
