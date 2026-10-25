@@ -939,10 +939,11 @@ pub(crate) fn route(program: &Expr) -> Route {
     // more (#5233), so that measurement build refuses one outright rather than
     // answer it wrongly.
     if cfg!(feature = "unshared-containers") {
+        // patchcov: coverage tolerate reason="unreachable in the shipped build: only the non-default `unshared-containers` A/B holdout (#2999) takes this branch, and that build is not a coverage leg (#5233)"
         return Route::Refused(EvalError::new(
             "a path expression that does more than navigate is not supported in the \
              unshared-containers build",
-        ));
+        )); // patchcov: coverage end
     }
     match extension {
         None => Route::Interpreter,
