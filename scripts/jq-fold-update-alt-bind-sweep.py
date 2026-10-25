@@ -117,7 +117,8 @@ WRAPPERS = [
     "try (({S}) // ($x.a.b as {c:$c} | .))",
     "try (({S}) // ($x.a as $q | $x.a as $r | 1))",
     "try (({S}) // (($x.a, .) as $q | 1))",
-    # a navigated loop variable can be the register's node and stays refused (a known residual, listed not failed)
+    # a navigated loop variable can be the register's node: the shipped resolver kept refusing it (#5226), the path-mode
+    # interpreter (#5223) answers it as jq does
     "try (({S}) // ($i.a as $q | $q))",
     # controls: no `//`, so a change to the `//` code must not move them
     "{S}",
