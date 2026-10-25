@@ -12102,7 +12102,7 @@ pub(crate) enum OwnedStep {
 /// copy-on-write container. A decline returns the untouched original so the
 /// caller can take its existing evaluator route exactly once.
 pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
-    if is_owned_assign(expr) {
+    if is_owned_assign(expr) || is_owned_setpath(expr) {
         return try_owned_assign_step::<S>(expr, state);
     }
     match eval_owned_reindex_free::<S>(expr, &state) {
@@ -12113,7 +12113,8 @@ pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedVal
 
 /// The assignment half of [`try_eval_owned_step`]: [`owned_assign_step`] over
 /// a consumed state, declining (the untouched state handed back) for anything
-/// that is not one of [`is_owned_assign`]'s shapes.
+/// that is not one of [`is_owned_assign`]'s shapes -- or a `setpath(P; V)`
+/// call, which [`owned_setpath_step`] answers (#5271).
 ///
 /// Split out so a caller that must stay off [`eval_owned_reindex_free`]'s
 /// other arms -- `to_entries`/`from_entries` and the pipes of them, which
@@ -12125,12 +12126,15 @@ pub(crate) fn try_owned_assign_step<S: EvalSemantics>(
     expr: &Expr,
     mut state: OwnedValue,
 ) -> OwnedStep {
+    if let Expr::Builtin(Builtin::SetPath(path, value)) = unwrap_paren(expr) {
+        return owned_setpath_step::<S>(path, value, state);
+    }
     if !is_owned_assign(expr) {
         return OwnedStep::Declined(state);
     }
     match owned_assign_step::<S>(expr, &mut state) {
         Some(Ok(())) => OwnedStep::Handled(Ok(state)),
-        Some(Err(error)) => OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure: owned_assign_step's single-step arms map every non-allocation error to unreachable_owned_assign_write (provably impossible, see its own doc comment), and its Chain arm's set_path call walks exactly the steps owned_assign_step_child already validated as Field-into-Object/Null or Index-in-[0,len]-into-Array/Null with no mutation in between, so the only way set_path/set_field/set_index/pad_with_nulls can still fail is the same try_reserve-fails-under-OOM branch the codebase already tolerates elsewhere (#2267) (#3138)"
+        Some(Err(error)) => OwnedStep::Handled(Err(error)), // patchcov: coverage tolerate-line reason="reachable only on a genuine allocation failure (for the assignment forms; `owned_setpath_step` reports its own write errors without going through this arm): owned_assign_step's single-step arms map every non-allocation error to unreachable_owned_assign_write (provably impossible, see its own doc comment), and its Chain arm's set_path call walks exactly the steps owned_assign_step_child already validated as Field-into-Object/Null or Index-in-[0,len]-into-Array/Null with no mutation in between, so the only way set_path/set_field/set_index/pad_with_nulls can still fail is the same try_reserve-fails-under-OOM branch the codebase already tolerates elsewhere (#2267) (#3138)"
         None => OwnedStep::Declined(state),
     }
 }
@@ -12225,6 +12229,36 @@ fn is_owned_assign(expr: &Expr) -> bool {
         Expr::As { body, .. } => is_owned_assign(unwrap_paren(body)),
         _ => is_plain_owned_assign(expr),
     }
+}
+
+/// Whether `expr` is a `setpath(P; V)` call, which [`owned_setpath_step`] may answer (#5271).
+fn is_owned_setpath(expr: &Expr) -> bool {
+    matches!(unwrap_paren(expr), Expr::Builtin(Builtin::SetPath(..)))
+}
+
+/// `setpath(P; V)` against an owned state (#5271): `P` and `V` are each one value
+/// that is closed or read the state ([`owned_assign_operand`]), and the write is
+/// [`set_value_at_path`]'s, which is what the evaluator's own `setpath` does, on
+/// the state moved in rather than a copy of it. Anything else -- a path that is not
+/// an array, an operand that raises or yields other than once, yq mode -- declines
+/// to the evaluator with the state handed back untouched.
+///
+/// The one exception to "every diagnostic comes from the evaluator": a write that
+/// fails (`setpath(["a","b"]; 1)` on `{"a":1}`) is reported from here, because the
+/// state it consumed cannot be handed back. The error is `set_value_at_path`'s own,
+/// the one the evaluator's `setpath` raises, with the same text (pinned against jq
+/// 1.7.1 in `tests/jq_cli/i5271.rs`).
+fn owned_setpath_step<S: EvalSemantics>(path: &Expr, value: &Expr, state: OwnedValue) -> OwnedStep {
+    if S::TAG != EvalTag::Jq {
+        return OwnedStep::Declined(state);
+    }
+    let Some(OwnedValue::Array(keys)) = owned_assign_operand::<S>(path, &state) else {
+        return OwnedStep::Declined(state);
+    };
+    let Some(value) = owned_assign_operand::<S>(value, &state) else {
+        return OwnedStep::Declined(state);
+    };
+    OwnedStep::Handled(set_value_at_path::<S>(state, &keys, value))
 }
 
 fn is_plain_owned_assign(expr: &Expr) -> bool {
@@ -12663,6 +12697,27 @@ fn owned_assign_step<S: EvalSemantics>(
         _ => return None, // patchcov: coverage tolerate-line reason="unreachable: both call sites (try_eval_owned_step, gated on is_owned_assign; eval_owned_reindex_free's own Assign|Update|CompoundAssign|AlternativeAssign arm) only ever hand this function one of the same four variants, or an `Alternative` or `As` around one, all of which this match already covers explicitly (#3138, #3944, #3978)"
     };
 
+    // `. += X` and `. |= . + X` (#5271): the whole state is the target. It is combined
+    // in place when the operands are of one kind a `+` cannot fail on, so the
+    // accumulator's own spare capacity is reused; any other pairing declines. The state
+    // is moved out for the sum, which fails only as `owned_arith_accumulator_shape`'s
+    // same by-value `+` does, on an allocation failure, after which the fold is over.
+    if S::TAG == EvalTag::Jq && matches!(unwrap_paren(path), Expr::Identity) {
+        return match rhs {
+            OwnedAssignRhs::Combine(ArithOp::Add, right)
+                if matches!(
+                    (&*state, &right),
+                    (OwnedValue::Array(_), OwnedValue::Array(_))
+                        | (OwnedValue::Object(_), OwnedValue::Object(_))
+                        | (OwnedValue::String(_), OwnedValue::String(_))
+                ) =>
+            {
+                let old = core::mem::replace(state, OwnedValue::Null);
+                Some(arith_combine::<S>(ArithOp::Add, old, right).map(|sum| *state = sum))
+            }
+            _ => None,
+        };
+    }
     // The keys the write names, each settled against the container it lands
     // in by a read-only walk before anything is written. A single step --
     // the common fold shape -- borrows its key, keeps no step list, and
@@ -12882,7 +12937,13 @@ fn owned_state_expr_shape_in(expr: &Expr, calls: bool) -> bool {
     let shape = |e: &Expr| owned_state_expr_shape_in(e, calls);
     match expr {
         Expr::Identity | Expr::Literal(_) | Expr::Field(_) | Expr::Index { .. } | Expr::Not => true,
-        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => shape(inner),
+        Expr::Paren(inner) | Expr::Negate(inner) => shape(inner),
+        // `[]`, `[a, b]` and `[a]`: each element is one value, so the array is one.
+        Expr::Array(inner) => match inner.as_ref() {
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Comma(items) => items.iter().all(shape),
+            single => shape(single),
+        },
         Expr::Object(entries) => entries.iter().all(|entry| {
             shape(&entry.value)
                 && match &entry.key {
@@ -98480,6 +98541,18 @@ mod tests {
             assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
         }
 
+        // `setpath(P; V)` is jq mode only; `. += X` too.
+        for src in [r#"setpath(["b"]; 1)"#, ". += {\"c\": 1}"] {
+            let expr = parse(src).unwrap();
+            assert!(
+                matches!(
+                    try_eval_owned_step::<YqSemantics>(&expr, state()),
+                    OwnedStep::Declined(_)
+                ),
+                "yq mode must decline {src}"
+            );
+        }
+
         let bound = OwnedValue::object_from([("a".to_string(), OwnedValue::Int(1))]);
         let origin = BindOrigin::Node {
             node: 1,
@@ -98499,6 +98572,23 @@ mod tests {
         assert!(matches!(
             try_owned_assign_step::<JqSemantics>(&closed, state()),
             OwnedStep::Handled(Ok(_))
+        ));
+        // `setpath(P; V)`: a closed pair is taken under the table (the write copies a
+        // registered container first), one that reads the state is not.
+        let setpath = parse(r#"setpath(["b"]; 1)"#).unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&setpath, state()),
+            OwnedStep::Handled(Ok(_))
+        ));
+        let reading = parse(r#"setpath(["b"]; .a)"#).unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&reading, state()),
+            OwnedStep::Declined(_)
+        ));
+        let by_key = parse("setpath([.k]; 1)").unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&by_key, state()),
+            OwnedStep::Declined(_)
         ));
     }
 
@@ -151111,8 +151201,25 @@ mod share_audit_2999 {
             "[foreach .[] as $r ([]; .[length] = $r.score; length)] | length",
             // A call to a parameterless `def` whose body is such a shape.
             "def inc: (. // 0) + 1; reduce .[] as $r ({}; .[$r.name] |= inc)",
+            // `setpath(P; V)` writes in place like `.[P] = V`.
+            "reduce .[] as $r ({}; setpath([$r.name]; $r.score))",
+            "reduce .[] as $r ({}; setpath([$r.name, \"n\"]; $r.score))",
+            "reduce .[] as $r ([]; setpath([length]; $r.score))",
+            // `. += X`: the whole state is the target.
+            "reduce .[] as $r ([]; . += [$r.score])",
+            "reduce .[] as $r ({}; . += {($r.name): $r.score})",
+            "reduce .[] as $r (\"\"; . += $r.name)",
         ] {
             assert_forced(&json, filter, &[]);
+        }
+        // #5271: an array operand (`[]`, `[a, b]`) is one value, so the step is taken. What
+        // each step still copies is the one array it extends (a group, here of one
+        // element), not the accumulator: 1,000 small copies, none of the 1,000-key state.
+        for filter in [
+            "reduce .[] as $r ({}; .[$r.name] |= (. // []) + [$r.score, $r])",
+            "reduce .[] as $r ({}; .[$r.name] |= [.] + [$r.score])",
+        ] {
+            assert_forced(&json, filter, &[(Kind::ArrayUnwrap, 1000)]);
         }
     }
 
