@@ -3,6 +3,9 @@
 //! which answered the shapes of #5225, #5226 and #5228 with a refusal for a program jq answers and, for #5226's, a write that
 //! lands where jq exits 5.
 //!
+//! #5233 widened the refusal to every dynamic target beside such a builtin (the shipped resolver no longer answers a dynamic target
+//! at all), so these rows now read the #5233 message.
+//!
 //! The interpreter reads storage identity, which the `unshared-containers` holdout does not have, so these pin the shipped shape
 //! only.
 #![cfg(not(feature = "unshared-containers"))]
@@ -11,7 +14,7 @@ use anyhow::Result;
 
 use crate::run_jq_full;
 
-/// The builtins `path_mode::cursor_dependent_builtin` names, each as an expression that yields exactly one value.
+/// The builtins `path_mode::declined_construct` names, each as an expression that yields exactly one value.
 const BUILTINS: &[(&str, &str)] = &[
     ("at_offset(0)", "at_offset"),
     ("at_position(1; 1)", "at_position"),
@@ -64,7 +67,7 @@ fn test_fold_in_a_path_target_beside_a_declined_builtin_is_refused_5239() -> Res
                     assert_eq!(code, 5, "`{filter}` ({args:?}): {stderr}");
                     assert!(
                         stderr.contains(&format!(
-                            "{name} cannot be combined with a foreach or reduce in a path target"
+                            "{name} is not supported in a program whose path expression does more than navigate"
                         )),
                         "`{filter}` ({args:?}): {stderr}"
                     );
@@ -102,45 +105,52 @@ fn test_5226_repro_no_longer_exits_zero_with_a_declined_builtin_5239() -> Result
         let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some(input))?;
         assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
         assert!(
-            stderr.contains("cannot be combined with a foreach or reduce in a path target"),
+            stderr.contains("is not supported in a program whose path expression does more than navigate"),
             "`{filter}`: {stderr}"
         );
     }
     Ok(())
 }
 
-/// What stays on the shipped resolver: a declined builtin beside a dynamic target with no fold in it, beside a fold that is not
-/// in a target, and beside a fold whose target is static. The refusal is scoped to where the resolver was shown wrong.
+/// What #5239 left on the shipped resolver is refused too since #5233 -- a declined builtin beside a dynamic target with no fold in
+/// it, or beside a fold that is not in a target -- while a static target beside the builtin still answers.
 #[test]
-fn test_declined_builtin_beside_other_dynamic_targets_stays_shipped_5239() -> Result<()> {
+fn test_declined_builtin_beside_other_targets_after_5233() -> Result<()> {
+    let refused = "is not supported in a program whose path expression does more than navigate";
     for (input, filter, want) in [
         // A bind in the target, no fold.
         (
             r#"{"a":{"b":1}}"#,
             r"(try line catch 0) as $z | path(.a | . as $x | .b)",
-            "[\"a\",\"b\"]\n",
+            None,
         ),
         // A fold outside every path target.
         (
             r#"{"a":{"b":1}}"#,
             r"(reduce (1,2) as $i (0; . + $i)) as $s | (try line catch 0) as $z | path(.a | . as $x | .b)",
-            "[\"a\",\"b\"]\n",
+            None,
         ),
-        // A comma-valued index: `key` reads the path, and the write lands.
-        (r#"{"a":[1,2,3]}"#, r".a[(0,1)] |= key", "{\"a\":[0,1,3]}\n"),
+        // A comma-valued index: `key` reads the path.
+        (r#"{"a":[1,2,3]}"#, r".a[(0,1)] |= key", None),
         // A static target holding no fold at all.
         (
             r#"{"a":{"b":1}}"#,
             r"(try at_offset(0) catch 0) as $z | path(.a.b)",
-            "[\"a\",\"b\"]\n",
+            Some("[\"a\",\"b\"]\n"),
         ),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(
-            (stdout.as_str(), code),
-            (want, 0),
-            "`{filter}`: stderr={stderr:?}"
-        );
+        match want {
+            Some(want) => assert_eq!(
+                (stdout.as_str(), code),
+                (want, 0),
+                "`{filter}`: stderr={stderr:?}"
+            ),
+            None => {
+                assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
+                assert!(stderr.contains(refused), "`{filter}`: {stderr}");
+            }
+        }
     }
     Ok(())
 }
