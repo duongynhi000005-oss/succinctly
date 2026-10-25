@@ -554,7 +554,8 @@ The interpreter's own recorded divergences:
   Now every one of the 67 rows is refused, so none is a wrong accept: 28 are programs jq answers (the divergence this entry records), 4 are programs where jq prints output before its error, and 35 are programs where jq errors, here with this message in place of jq's.
   The same rows without the builtin match jq through the interpreter, so the builtin is the only difference (`tests/jq_cli/i5239.rs`).
   Refusing was chosen over implementing the builtins in the interpreter: it works on a materialized value, which has no cursor to read a line, an anchor, a comment or a byte offset from.
-  [#5233](https://github.com/rust-works/succinctly/issues/5233) removed the shipped resolver from jq mode's dynamic targets, so the other dynamic targets beside those builtins (a bind or comma in the target with no fold: `.a[(0,1)] |= key`, `at_offset(5) as $x | del(.a | $x)`; a fold outside every path target) are refused the same way instead of answered from the inferred register.
+  [#5233](https://github.com/rust-works/succinctly/issues/5233) removed the shipped resolver from jq mode's dynamic targets, so the other dynamic targets beside those builtins (a bind in the target with no fold: `at_offset(5) as $x | del(.a | $x)`; a fold outside every path target) are refused the same way instead of answered from the inferred register.
+  Since [#5243](https://github.com/rust-works/succinctly/issues/5243) an index key that only computes a value is navigation, so `.a[(0,1)] |= key` has a static target and answers again (`{"a":[0,1,3]}`).
   A document the interpreter cannot materialize (a lone surrogate, nesting past 256 levels) still runs on the shipped route for every program, as above.
   The `unshared-containers` holdout keeps the shipped routing and refuses nothing.
 

@@ -132,8 +132,13 @@ fn test_declined_builtin_beside_other_targets_after_5233() -> Result<()> {
             r"(reduce (1,2) as $i (0; . + $i)) as $s | (try line catch 0) as $z | path(.a | . as $x | .b)",
             None,
         ),
-        // A comma-valued index: `key` reads the path.
-        (r#"{"a":[1,2,3]}"#, r".a[(0,1)] |= key", None),
+        // A comma-valued index: `key` reads the path. The key only computes a value,
+        // so the target is static and answers (#5243).
+        (
+            r#"{"a":[1,2,3]}"#,
+            r".a[(0,1)] |= key",
+            Some("{\"a\":[0,1,3]}\n"),
+        ),
         // A static target holding no fold at all.
         (
             r#"{"a":{"b":1}}"#,
