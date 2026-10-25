@@ -4763,6 +4763,7 @@ $ yq '.c | .a | path'                # ["c","a"]   <- unbound, both tools agree
 
 Only the *source* is read-only: the body keeps the scope it had, so `.zz as $x | .zz = 3` still creates `zz`.
 A numeric index on a mapping (`.[0] as $x | [$x]`) is not covered, since the read-only rule is keyed on a key lookup, not on an index.
+A stage after the absent key that raises (`(.zz | error("x")) as $x | 1`) no longer raises: yq runs the stage on the `null` node it creates and then binds nothing, where the read-only source here yields no node for the stage to run on.
 
 **An anchor's flow style read through an alias binding.** Captured on
 `a: "1" # keep` / `b: &anc [1, 2]` / `c: *anc` (YAML output):
