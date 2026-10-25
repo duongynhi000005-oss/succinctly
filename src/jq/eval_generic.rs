@@ -12316,12 +12316,23 @@ fn try_owned_format_or_tostring_bypass<S: EvalSemantics, V: DocumentValue>(
     sink: &mut dyn Sink<V>,
 ) -> Result<Flow, OwnedValue> {
     match remaining {
-        [stage @ (Expr::Format(_) | Expr::Builtin(Builtin::ToString))] => Ok(drain_result_generic(
+        [stage] if is_owned_format_or_tostring_tail(remaining) => Ok(drain_result_generic(
             eval_on_owned::<S, V>(stage, o, optional, Reentry::REBUILT),
             sink,
         )),
         _ => Err(o),
     }
+}
+
+/// Whether `remaining` is exactly the one stage [`try_owned_format_or_tostring_bypass`]
+/// takes (`tostring` or an `@format`), so a caller that would have to build an
+/// owned value to offer it can first ask whether the offer can be accepted (#2789).
+/// The single definition of the shape: the bypass matches on it too.
+fn is_owned_format_or_tostring_tail(remaining: &[Expr]) -> bool {
+    matches!(
+        remaining,
+        [Expr::Format(_) | Expr::Builtin(Builtin::ToString)]
+    )
 }
 
 /// Whether an owned item's remaining pipe holds a *navigated* `as` bind
@@ -15991,7 +16002,32 @@ fn continue_pipe_element_generic<S: EvalSemantics, V: DocumentValue>(
         // Same as the `OneCursor` arm above, minus the `c.value()` resolve
         // -- `v` was already decoded by whoever built this item (#1609), so
         // re-deriving it here would just repeat that work.
+        //
+        // #2789: `key | tostring` / `key | @format` over a string-spelled key is
+        // the owned-string shape the arm below shortcuts, and `key` emits the key
+        // *node* (#2763) so that it reaches here instead: the node is not read by
+        // a one-stage `tostring`/`@format`, so hand the string to the same bypass
+        // rather than re-materializing it through the cursor (+49-58% on
+        // `[.[] | key | tostring]`). Only a value that decodes as a string is
+        // offered; a key or value spelled like a null, bool or number (`~`, `1:`,
+        // `true:`) and anything else keep the cursor route.
         GenericItem::OneCursorValue(c, v) => {
+            if is_owned_format_or_tostring_tail(rest.stages()) {
+                // `as_str` is the scalar's text, not its type: `~` is a null, and
+                // `key_spelling_may_retype` is the same prefilter that keeps the
+                // type ladder off a key that could not be one.
+                if let Some(s) = v.as_str().filter(|s| !key_spelling_may_retype(s)) {
+                    let o = OwnedValue::String(s.into_owned().into());
+                    if let Ok(flow) = try_owned_format_or_tostring_bypass::<S, V>(
+                        rest.stages(),
+                        o,
+                        optional,
+                        sink,
+                    ) {
+                        return flow;
+                    }
+                }
+            }
             eval_each_pipe_generic::<S, V>(rest.stages(), None, v, optional, Some(c), sink)
         }
         // #2543: this is the call site a plain top-level pipe

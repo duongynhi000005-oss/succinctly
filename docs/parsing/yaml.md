@@ -5617,6 +5617,63 @@ zero-target answers, which these static paths with a literal right side do not e
 
 - `src/jq/eval.rs` — `yq_resolve_assign_targets`, `yq_prepare_assign_targets` (landed in #4591)
 
+## O12: The Owned `tostring`/`@format` Bypass for a Key Node — Accepted ✅
+
+**Issue**: #2789 (the first of its two costs; the second is still open).
+
+### What was slow
+
+`key` emits the key *node* since #2763, so the metadata getters after it read the key's own
+comment, style and position. A pipe that only wants the key's *text* paid for the node and got
+nothing for it: `[.[] | key | tostring]` measured +49% (M4 Pro) and +58% (7950X) against the
+merge-base. `continue_pipe_element_generic` runs `try_owned_format_or_tostring_bypass` (#2543),
+the `EXPR | tostring` / `EXPR | @format` shortcut, only for a `GenericItem::Owned`; the key node is a
+`OneCursorValue`, which took the general arm and re-materialized the string through the cursor.
+
+### The change
+
+The `OneCursorValue` arm offers the bypass its already-decoded value when the rest of the pipe is
+exactly one `tostring` or `@format` stage (`is_owned_format_or_tostring_tail`, the one definition
+of that shape, which the bypass matches on too) and the value decodes as a string. `as_str` is the
+scalar's *text*, not its type, so a value spelled like a null, bool or number keeps the cursor route
+(`~`, `01`, `true`): `key_spelling_may_retype`, the prefilter key emission already uses. Any other
+rest, and any value `as_str` rejects, runs exactly as before.
+
+The second cost, the sibling hop and decode per emitted node (`[.[] | key] | length` +23-30%), is
+not touched: it needs the key cursor recorded during navigation, which widens `PathContextPos` and
+`path_step_generic`'s shared signature.
+
+### Measured (interleaved A/B, min of 9, `yq -o json`, flat `kN: N` mappings, output identical on 18 of 18 rows per machine)
+
+Before is `2e6ed51dd`, after is the change on top of it, both `--release --features cli` with the pinned
+one-codegen-unit fat-LTO profile. 100,000 / 400,000 / 1,600,000 keys (1.4 / 6.2 / 26.6 MB).
+
+| row (delta of min)                         | M4 Pro 100k | 400k   | 1.6M   | 7950X 100k | 400k   | 1.6M   |
+|--------------------------------------------|-------------|--------|--------|------------|--------|--------|
+| `[.[] \| key \| tostring] \| length`       | -32.7%      | -36.7% | -36.7% | -27.1%     | -29.0% | -29.8% |
+| `[.[] \| key \| @json] \| length`          | -24.9%      | -25.8% | -25.8% | -22.7%     | -25.8% | -25.0% |
+| `[.[] \| key] \| length` (control)         | +0.8%       | -0.1%  | +1.1%  | +0.0%      | -0.1%  | -0.2%  |
+| `[.[] \| key \| line] \| length` (control) | +0.1%       | +0.4%  | -0.1%  | -0.4%      | -0.7%  | -0.1%  |
+| `[.[] \| path] \| length` (control)        | -1.4%       | -0.1%  | -0.3%  | -0.5%      | -1.4%  | -2.0%  |
+| `.` (control)                              | -1.3%       | -0.9%  | -0.8%  | +1.0%      | -0.3%  | -1.0%  |
+
+Absolute, 1.6M keys `[.[] | key | tostring] | length`: 763.9 ms -> 483.7 ms on the M4 Pro, 1137.4 ms ->
+798.8 ms on the 7950X. Noise floor from `ab-cli.py --control` on the same corpus: -1.8%..+1.6% (M4 Pro),
+-2.6%..+0.5% (7950X); every control row sits inside it.
+
+### Tests
+
+`tests/yq_cli/i2789.rs`: `key | tostring`, `@json`, `@base64` and `@sh` over plain, quoted, spaced, non-ASCII
+and empty keys (each a live yq v4.53.3 capture); the typed-key guard (`~`, `01`, `true`, `null` keep their
+route, which is not yq's answer for `~`/`01` and is not this issue's gap); and `keys[] | tostring` / `@json`,
+the lazy-keys producer of the same arm, which does not check a key's explicit tag (`!!null abc` and `!!bool xyz`
+stay `null` and `false`). The bypass is a speed-only route, so
+no output separates taking it from declining it: the A/B above is its evidence.
+
+### Files Modified
+
+- `src/jq/eval_generic.rs` — `continue_pipe_element_generic` (`OneCursorValue` arm), `is_owned_format_or_tostring_tail`
+
 ---
 
 ## See Also
