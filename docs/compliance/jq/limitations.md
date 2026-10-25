@@ -535,7 +535,8 @@ The interpreter's own recorded divergences:
   `until`/`while`, `range` and `repeat` keep their caps the same way (see the sections on each below).
 - **`del(.[nan])`** loops forever in jq 1.7.1; here the NaN path names no element and the document comes back unchanged.
   `path(.[nan])` is jq's `[null]`.
-- **A `?` around a function call** (`def opt(f): f?; path(opt(.a))`) formats the index error the `?` then drops: the same answer as jq, at two allocator calls per member that the shipped walker's settled lookup avoids.- **A fold in a dynamic path target, beside a builtin the interpreter declines, is refused** ([#5239](https://github.com/rust-works/succinctly/issues/5239)).
+- **A `?` around a function call** (`def opt(f): f?; path(opt(.a))`) formats the index error the `?` then drops: the same answer as jq, at two allocator calls per member that the shipped walker's settled lookup avoids.
+- **A fold in a dynamic path target, beside a builtin the interpreter declines, is refused** ([#5239](https://github.com/rust-works/succinctly/issues/5239)).
   The builtins are the cursor-metadata ones (`line`, `column`, `document_index`, `anchor`, `style`, `line_comment`, `head_comment`, `foot_comment`, `at_offset`, `at_position`) and the path-context ones (`key`, `file_index`, `path`, `parent`); none of them is a jq 1.7.1 builtin, so there is no jq answer for the builtin itself.
   `filename` is not defined in jq mode, so it never reaches this check.
   A program with a `foreach` or `reduce` inside a `path`/`del`/`pick` argument or an assignment target, and one of those builtins anywhere, raises `<builtin> cannot be combined with a foreach or reduce in a path target: ...` (exit 5) at the first document, before any output.

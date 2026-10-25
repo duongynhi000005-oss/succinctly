@@ -101,7 +101,10 @@ fn test_5226_repro_no_longer_exits_zero_with_a_declined_builtin_5239() -> Result
         let filter = format!("(try at_offset(0) catch 0) as $z | {spelling}");
         let (stdout, stderr, code) = run_jq_full(&["-c", &filter], Some(input))?;
         assert_eq!((stdout.as_str(), code), ("", 5), "`{filter}`: {stderr}");
-        assert!(stderr.contains("(#5239)"), "`{filter}`: {stderr}");
+        assert!(
+            stderr.contains("cannot be combined with a foreach or reduce in a path target"),
+            "`{filter}`: {stderr}"
+        );
     }
     Ok(())
 }

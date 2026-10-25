@@ -928,9 +928,10 @@ pub(crate) fn route(program: &Expr) -> Route {
     any_subexpr(program, &mut |e| {
         if let Some(target) = dynamic_target(e) {
             dynamic = true;
-            fold_target |= any_subexpr(target, &mut |t| {
-                matches!(t, Expr::Foreach { .. } | Expr::Reduce { .. })
-            });
+            fold_target = fold_target
+                || any_subexpr(target, &mut |t| {
+                    matches!(t, Expr::Foreach { .. } | Expr::Reduce { .. })
+                });
         }
         declined |=
             !runs(e) || matches!(e, Expr::Builtin(b) if super::walk::is_cursor_metadata_builtin(b));
@@ -980,7 +981,7 @@ fn cursor_dependent_builtin(builtin: &Builtin) -> Option<&'static str> {
 /// The error a [`Route::Refused`] program raises.
 pub(crate) fn refusal(builtin: &str) -> EvalError {
     EvalError::new(format!(
-        "{builtin} cannot be combined with a foreach or reduce in a path target: jq's path register is only carried on a materialized document, which has no cursor (#5239)"
+        "{builtin} cannot be combined with a foreach or reduce in a path target: the path register is carried on a materialized document, which has no cursor"
     ))
 }
 
@@ -1114,7 +1115,7 @@ pub(crate) fn run_program(
                 Outcome::Done => None, // patchcov: coverage tolerate-line reason="unreachable: an error outcome is never Done"
                 Outcome::Error(e) => Some(Control::Error(e)),
                 Outcome::Halt(code) => Some(Control::Halt(code)),
-                // patchcov: coverage tolerate reason="unreachable: takes_program declines every program holding a construct the interpreter does not run"
+                // patchcov: coverage tolerate reason="unreachable: route declines every program holding a construct the interpreter does not run"
                 Outcome::Unsupported(what) => Some(Control::Error(EvalError::new(format!(
                     "internal error: the path-mode interpreter cannot run {what}"
                 )))),
@@ -3187,7 +3188,7 @@ impl<'e> Interp<'e> {
                 }
                 None => false,
             },
-            Expr::DefCall { .. } | Expr::Shared(_) | Expr::NamespacedCall { .. } => true, // patchcov: coverage tolerate-line reason="unreachable: runs() declines these, so takes_program never hands the interpreter one"
+            Expr::DefCall { .. } | Expr::Shared(_) | Expr::NamespacedCall { .. } => true, // patchcov: coverage tolerate-line reason="unreachable: runs() declines these, so route never hands the interpreter one"
             _ => false,
         })
     }
