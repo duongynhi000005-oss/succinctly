@@ -144,6 +144,49 @@ const ROWS: &[(&str, &str, &str)] = &[
         ".b[2] = .b[-2]",
         "a: &x 1\nb: [*x, 2, 2]\n",
     ),
+    // A target that already holds aliases loses them when a container replaces it.
+    (
+        "a: &x 1\nc: *x\nb:\n  - *x\n",
+        ".c = .b",
+        "a: &x 1\nc:\n  - *x\nb:\n  - *x\n",
+    ),
+    (
+        "a: &x 1\nc:\n  - *x\n  - 1\nb:\n  - *x\n  - 2\n",
+        ".c = .b",
+        "a: &x 1\nc:\n  - *x\n  - 2\nb:\n  - *x\n  - 2\n",
+    ),
+    (
+        "a: &x 1\nc:\n  p: *x\nb:\n  q: *x\n",
+        ".c = .b",
+        "a: &x 1\nc:\n  q: *x\nb:\n  q: *x\n",
+    ),
+    // A bracketed key reads the same node as the dotted one, at the root or after a step.
+    (
+        "a: &x 1\nb:\n  p: *x\n",
+        ".c = .[\"b\"]",
+        "a: &x 1\nb:\n  p: *x\nc:\n  p: *x\n",
+    ),
+    (
+        "a: &x 1\nb:\n  p: *x\n",
+        ".c = .b[\"p\"]",
+        "a: &x 1\nb:\n  p: *x\nc: *x\n",
+    ),
+    // A step the node cannot take reads nothing, so nothing is aliased.
+    (
+        "a: &x 1\nb:\n  - *x\n",
+        ".c = .b[\"p\"]?",
+        "a: &x 1\nb:\n  - *x\nc: null\n",
+    ),
+    (
+        "a: &x 1\nb:\n  - *x\n",
+        ".c = .b.p?",
+        "a: &x 1\nb:\n  - *x\nc: null\n",
+    ),
+    (
+        "a: &x 1\nb:\n  p: *x\n",
+        ".c = .b[0]?",
+        "a: &x 1\nb:\n  p: *x\nc: null\n",
+    ),
 ];
 
 #[test]
