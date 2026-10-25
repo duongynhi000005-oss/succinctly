@@ -12238,8 +12238,9 @@ fn is_plain_owned_assign(expr: &Expr) -> bool {
 }
 
 /// The structural half of [`owned_assign_step`]'s eligibility, with nothing
-/// evaluated: a path of static and closed-key steps, and a right side
-/// [`closed_expr_to_owned`] can answer. What the state and the keys turn out
+/// evaluated: a path of static steps and keys that are closed or read `.`
+/// ([`owned_state_expr_shape`], #5263), and a right side or filter that is
+/// either ([`closed_expr_to_owned`] answers the closed ones). What the state and the keys turn out
 /// to hold is still [`owned_assign_step`]'s to decide, so this only saves a
 /// pipe whose stage can never qualify from starting at all.
 fn owned_assign_shape(expr: &Expr) -> bool {
@@ -12248,7 +12249,9 @@ fn owned_assign_shape(expr: &Expr) -> bool {
             Expr::Identity | Expr::Field(_) | Expr::Index { key: None, .. } => true,
             Expr::Paren(inner) => path_shape(inner),
             Expr::Pipe(stages) => stages.iter().all(path_shape),
-            Expr::IndexExpr { target, key } => path_shape(target) && closed_expr_shape(key),
+            Expr::IndexExpr { target, key } => {
+                path_shape(target) && (closed_expr_shape(key) || owned_state_expr_shape(key))
+            }
             _ => false,
         }
     }
@@ -12263,16 +12266,18 @@ fn owned_assign_shape(expr: &Expr) -> bool {
         }
         Expr::Assign { path, value }
         | Expr::CompoundAssign { path, value, .. }
-        | Expr::AlternativeAssign { path, value } => path_shape(path) && closed_expr_shape(value),
+        | Expr::AlternativeAssign { path, value } => {
+            path_shape(path) && (closed_expr_shape(value) || owned_state_expr_shape(value))
+        }
         Expr::Update { path, filter } => {
             path_shape(path)
                 && match filter.as_ref() {
                     Expr::Arithmetic { left, right, .. }
                         if matches!(left.as_ref(), Expr::Identity) =>
                     {
-                        closed_expr_shape(right)
+                        closed_expr_shape(right) || owned_state_expr_shape(right)
                     }
-                    other => closed_expr_shape(other),
+                    other => closed_expr_shape(other) || owned_state_expr_shape(other),
                 }
         }
         _ => false, // patchcov: coverage tolerate-line reason="unreachable: owned_assign_shape's only caller (owned_step_shape) gates the call on is_owned_assign(expr), which recognizes exactly Assign/Update/CompoundAssign/AlternativeAssign and an `Alternative` or `As` around one -- the same variants this match already has explicit arms for, so `expr` can never be anything else here (#3138, #3944, #3978)"
@@ -12524,9 +12529,12 @@ fn closed_unary_builtin<S: EvalSemantics>(stage: &Expr, input: &OwnedValue) -> O
 
 /// What an eligible assignment writes at its path, before the old value
 /// there is known.
-enum OwnedAssignRhs {
+enum OwnedAssignRhs<'f> {
     /// `=`, and `|=` with a closed filter: the value itself.
     Value(OwnedValue),
+    /// `|=` with a filter that reads the old value ([`owned_state_expr_shape`],
+    /// #5263): evaluated on it, once it is known.
+    Filter(&'f Expr),
     /// `op=`, and `|= . op closed`: the old value combined with this one.
     Combine(ArithOp, OwnedValue),
     /// `//=`: the old value if truthy, else this one.
@@ -12614,7 +12622,7 @@ fn owned_assign_step<S: EvalSemantics>(
         }
         Expr::Assign { path, value } => (
             path,
-            OwnedAssignRhs::Value(closed_expr_to_owned::<S>(value)?),
+            OwnedAssignRhs::Value(owned_assign_operand::<S>(value, state)?),
         ),
         Expr::Update { path, filter } => (
             path,
@@ -12622,9 +12630,17 @@ fn owned_assign_step<S: EvalSemantics>(
                 Expr::Arithmetic {
                     op, left, right, ..
                 } if matches!(left.as_ref(), Expr::Identity) => {
-                    OwnedAssignRhs::Combine(*op, closed_expr_to_owned::<S>(right)?)
+                    match closed_expr_to_owned::<S>(right) {
+                        Some(right) => OwnedAssignRhs::Combine(*op, right),
+                        None if owned_state_expr_shape(right) => OwnedAssignRhs::Filter(filter),
+                        None => return None,
+                    }
                 }
-                other => OwnedAssignRhs::Value(closed_expr_to_owned::<S>(other)?),
+                other => match closed_expr_to_owned::<S>(other) {
+                    Some(value) => OwnedAssignRhs::Value(value),
+                    None if owned_state_expr_shape(other) => OwnedAssignRhs::Filter(other),
+                    None => return None,
+                },
             },
         ),
         Expr::CompoundAssign { op, path, value } => {
@@ -12637,12 +12653,12 @@ fn owned_assign_step<S: EvalSemantics>(
             };
             (
                 path,
-                OwnedAssignRhs::Combine(op, closed_expr_to_owned::<S>(value)?),
+                OwnedAssignRhs::Combine(op, owned_assign_operand::<S>(value, state)?),
             )
         }
         Expr::AlternativeAssign { path, value } => (
             path,
-            OwnedAssignRhs::Alternative(closed_expr_to_owned::<S>(value)?),
+            OwnedAssignRhs::Alternative(owned_assign_operand::<S>(value, state)?),
         ),
         _ => return None, // patchcov: coverage tolerate-line reason="unreachable: both call sites (try_eval_owned_step, gated on is_owned_assign; eval_owned_reindex_free's own Assign|Update|CompoundAssign|AlternativeAssign arm) only ever hand this function one of the same four variants, or an `Alternative` or `As` around one, all of which this match already covers explicitly (#3138, #3944, #3978)"
     };
@@ -12653,7 +12669,7 @@ fn owned_assign_step<S: EvalSemantics>(
     // writes through `set_field`/`set_index` directly; this path runs once
     // per fold step, and the general `set_path` walk cost #3025's
     // `.i += 1` loop ~6% of its instructions.
-    match owned_assign_single_step::<S>(path) {
+    match owned_assign_single_step::<S>(path, state) {
         SingleStep::Unclosed => None,
         SingleStep::Step(key) => {
             let old = owned_assign_step_child(&key, state)?;
@@ -12669,7 +12685,7 @@ fn owned_assign_step<S: EvalSemantics>(
         }
         SingleStep::Chain => {
             let mut steps = Vec::new();
-            owned_assign_path_steps::<S>(path, &mut steps)?;
+            owned_assign_path_steps::<S>(path, &mut steps, state)?;
             if steps.is_empty() {
                 return None;
             }
@@ -12712,6 +12728,13 @@ fn owned_assign_new_value<S: EvalSemantics>(
     }
     match rhs {
         OwnedAssignRhs::Value(value) => Some(value),
+        OwnedAssignRhs::Filter(_) if super::eval_generic::embed_table_active() => None,
+        OwnedAssignRhs::Filter(filter) => {
+            match eval_owned_multi_first::<S>(filter, old, Reentry::REBUILT) {
+                Ok(Some(value)) => Some(value),
+                _ => None,
+            }
+        }
         OwnedAssignRhs::Combine(op, right) => arith_combine::<S>(op, old.clone(), right).ok(),
         OwnedAssignRhs::Alternative(_) if old.is_truthy() => Some(old.clone()),
         OwnedAssignRhs::Alternative(value) => Some(value),
@@ -12761,15 +12784,18 @@ enum SingleStep<'e> {
 
 /// The one step a single-step [`owned_assign_step`] path names, found
 /// without allocating a step list for the common fold shape.
-fn owned_assign_single_step<S: EvalSemantics>(path: &Expr) -> SingleStep<'_> {
+fn owned_assign_single_step<'p, S: EvalSemantics>(
+    path: &'p Expr,
+    state: &OwnedValue,
+) -> SingleStep<'p> {
     match path {
-        Expr::Paren(inner) => owned_assign_single_step::<S>(inner),
+        Expr::Paren(inner) => owned_assign_single_step::<S>(inner, state),
         Expr::Pipe(stages) => match stages.as_slice() {
-            [only] => owned_assign_single_step::<S>(only), // patchcov: coverage tolerate-line reason="unreachable: Expr::pipe() (the parser's sole Pipe constructor) collapses a one-element list to the bare inner expr instead of wrapping it, and substitute_vars's substitute_var walk preserves a Pipe's stage count rather than dropping stages -- no other site builds an Expr::Pipe for a parsed assignment path, so a path's top-level Pipe here is never single-element (#3138)"
+            [only] => owned_assign_single_step::<S>(only, state), // patchcov: coverage tolerate-line reason="unreachable: Expr::pipe() (the parser's sole Pipe constructor) collapses a one-element list to the bare inner expr instead of wrapping it, and substitute_vars's substitute_var walk preserves a Pipe's stage count rather than dropping stages -- no other site builds an Expr::Pipe for a parsed assignment path, so a path's top-level Pipe here is never single-element (#3138)"
             _ => SingleStep::Chain,
         },
         Expr::IndexExpr { target, key } if matches!(target.as_ref(), Expr::Identity) => {
-            closed_key_step::<S>(key).map_or(SingleStep::Unclosed, SingleStep::Step)
+            owned_key_step::<S>(key, state).map_or(SingleStep::Unclosed, SingleStep::Step)
         }
         _ => static_step(path).map_or(SingleStep::Chain, SingleStep::Step),
     }
@@ -12785,20 +12811,37 @@ fn static_step(path: &Expr) -> Option<StepKey<'_>> {
 }
 
 /// The steps of an [`owned_assign_step`] path, outermost first, or `None`
-/// when a step is neither static nor closed.
+/// when a step is neither static nor closed. `at` is the value `path` is
+/// evaluated on: a key that reads `.` (#5263) reads that, so in `(.a | .[K])`
+/// the stage `.[K]` reads `.a`, and in `.a[K]` the key reads the value `.a[K]`
+/// starts from, as jq runs an index key on its target's input.
 fn owned_assign_path_steps<'e, S: EvalSemantics>(
     path: &'e Expr,
     steps: &mut Vec<StepKey<'e>>,
+    at: &OwnedValue,
 ) -> Option<()> {
     match path {
         Expr::Identity => Some(()),
-        Expr::Paren(inner) => owned_assign_path_steps::<S>(inner, steps),
-        Expr::Pipe(stages) => stages
-            .iter()
-            .try_for_each(|stage| owned_assign_path_steps::<S>(stage, steps)),
+        Expr::Paren(inner) => owned_assign_path_steps::<S>(inner, steps, at),
+        Expr::Pipe(stages) => {
+            // Each stage starts from the value the steps so far reach; that is
+            // only worth walking down to when a key reads it.
+            let descend = stages.iter().any(path_has_state_key);
+            let mut stage_input = at;
+            for stage in stages {
+                let before = steps.len();
+                owned_assign_path_steps::<S>(stage, steps, stage_input)?;
+                if descend {
+                    for step in &steps[before..] {
+                        stage_input = owned_assign_step_child(step, stage_input)?;
+                    }
+                }
+            }
+            Some(())
+        }
         Expr::IndexExpr { target, key } => {
-            owned_assign_path_steps::<S>(target, steps)?;
-            steps.push(closed_key_step::<S>(key)?);
+            owned_assign_path_steps::<S>(target, steps, at)?;
+            steps.push(owned_key_step::<S>(key, at)?);
             Some(())
         }
         _ => {
@@ -12808,10 +12851,88 @@ fn owned_assign_path_steps<'e, S: EvalSemantics>(
     }
 }
 
-/// The step a closed `.[K]` key names -- a string or an integer-spelled
-/// number -- or `None` for any other key, which the evaluator handles.
-fn closed_key_step<S: EvalSemantics>(key: &Expr) -> Option<StepKey<'static>> {
-    match closed_expr_to_owned::<S>(key)? {
+/// Whether a path holds an index key that reads `.` rather than being closed
+/// (#5263): the keys [`owned_assign_path_steps`] evaluates on a stage's input.
+fn path_has_state_key(path: &Expr) -> bool {
+    match path {
+        Expr::Paren(inner) => path_has_state_key(inner),
+        Expr::Pipe(stages) => stages.iter().any(path_has_state_key),
+        Expr::IndexExpr { target, key } => !closed_expr_shape(key) || path_has_state_key(target),
+        _ => false,
+    }
+}
+
+/// A key, right side or filter [`owned_assign_step`] answers by evaluating it
+/// on a value the state already holds (#5263): `length`, `. // 0`, `(. // 0) +
+/// 1`, `.n * 2`. It is one of the shapes below, each with exactly one output
+/// and no effect, so evaluating it once, ahead of the write, is what jq
+/// does -- and a filter that raises, or yields nothing, declines to the
+/// evaluator's own route and text. The operands of the closed shape
+/// ([`closed_expr_shape`]) never read `.`; this is the other half, which does.
+/// A variable is never one of them: a fold's variable is spliced in as a
+/// literal before the step runs.
+fn owned_state_expr_shape(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity | Expr::Literal(_) | Expr::Field(_) | Expr::Index { .. } | Expr::Not => true,
+        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => {
+            owned_state_expr_shape(inner)
+        }
+        Expr::Object(entries) => entries.iter().all(|entry| {
+            owned_state_expr_shape(&entry.value)
+                && match &entry.key {
+                    ObjectKey::Literal(_) => true,
+                    ObjectKey::Expr(key) => owned_state_expr_shape(key),
+                    ObjectKey::Bare => false,
+                }
+        }),
+        Expr::Pipe(stages) => stages.iter().all(owned_state_expr_shape),
+        Expr::Arithmetic { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::And(left, right)
+        | Expr::Or(left, right)
+        | Expr::Alternative(left, right) => {
+            owned_state_expr_shape(left) && owned_state_expr_shape(right)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            owned_state_expr_shape(cond)
+                && owned_state_expr_shape(then_branch)
+                && owned_state_expr_shape(else_branch)
+        }
+        Expr::Builtin(Builtin::ToString | Builtin::Type) => true,
+        other => is_closed_unary_builtin(other),
+    }
+}
+
+/// `expr`'s one value, for an operand of [`owned_assign_step`]: closed, or
+/// else evaluated on the whole `state` ([`owned_state_expr_shape`], #5263).
+/// `None` declines. Not while the #2889 embed table is live, whose bindings a
+/// read of `.` could reach, nor in yq mode.
+fn owned_assign_operand<S: EvalSemantics>(expr: &Expr, state: &OwnedValue) -> Option<OwnedValue> {
+    if let Some(value) = closed_expr_to_owned::<S>(expr) {
+        return Some(value);
+    }
+    if S::TAG != EvalTag::Jq
+        || !owned_state_expr_shape(expr)
+        || super::eval_generic::embed_table_active()
+    {
+        return None;
+    }
+    match eval_owned_multi_first::<S>(expr, state, Reentry::REBUILT) {
+        Ok(Some(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// The step a `.[K]` key names: the string or integer-spelled number `K` is
+/// when it is closed, or else the one it evaluates to on `at`, the value the
+/// key's stage starts from ([`owned_assign_operand`], #5263): jq runs an index
+/// key as a subexpression on its target's input.
+fn owned_key_step<S: EvalSemantics>(key: &Expr, at: &OwnedValue) -> Option<StepKey<'static>> {
+    match owned_assign_operand::<S>(key, at)? {
         OwnedValue::String(name) => Some(StepKey::Field(Cow::Owned(name.into_string()))),
         key => Some(StepKey::Index(integral_key(&key)?)),
     }
@@ -97571,9 +97692,11 @@ mod tests {
             }
         }
 
-        // `.missing += 1`, `.a.i += 1` and `.i = 1` are handled since #3138
-        // -- see `owned_assign_step_agrees_with_forced_bridge_3138`.
-        for src in [".n += \"x\"", ".i += .n"] {
+        // `.missing += 1`, `.a.i += 1` and `.i = 1` are handled since #3138, and
+        // `.i += .n` (a right side that reads `.`) since #5263 -- see
+        // `owned_assign_step_agrees_with_forced_bridge_3138`.
+        // `.i += .n.x` reads `.`, and the read raises: the evaluator's text.
+        for src in [".n += \"x\"", ".i += .n.x"] {
             let expr = parse(src).unwrap();
             assert!(
                 eval_owned_reindex_free::<JqSemantics>(&expr, &object).is_none(),
@@ -97623,14 +97746,25 @@ mod tests {
         // `.a[0]` parses as a flat two-stage `Pipe([Field("a"), Index{idx:
         // 0, key: None}])`, so `owned_assign_path_steps` reads its second
         // stage through `static_step` (a bare `Index`, not an
-        // `IndexExpr`/`closed_key_step` computed key) -- with `.a` already
+        // `IndexExpr`/`owned_key_step` computed key) -- with `.a` already
         // an empty array, this is the only row here whose chain produces a
         // `StepKey::Index`; every other multi-step row here closes a
-        // computed bracket on a string, which `closed_key_step` turns into
+        // computed bracket on a string, which `owned_key_step` turns into
         // `StepKey::Field` instead.
         let with_empty_array = OwnedValue::object_from([("a".to_string(), OwnedValue::array())]);
+        // #5263: a key that reads `.` reads the value its stage starts from.
+        let pair = OwnedValue::object_from([
+            ("a".to_string(), array.clone()),
+            (
+                "b".to_string(),
+                OwnedValue::from_number_literal::<JqSemantics>("1"),
+            ),
+        ]);
 
         let handled = [
+            (".a[length] = 9", pair.clone()),
+            ("(.a | .[length]) = 9", pair.clone()),
+            (".a[.b] |= . + 10", pair.clone()),
             (".[$r.name] = $r.score", OwnedValue::object_from([])),
             (".[$r.name] = $r.score", object.clone()),
             (".[$r.name] = $r.score", OwnedValue::Null),
@@ -97649,6 +97783,21 @@ mod tests {
             (".[2] = 9", array.clone()),
             (".[0] = 9", OwnedValue::Null),
             (".[$r.name] = {($r.name): $r.id}", object.clone()),
+            // #5263: an operand that reads `.` is evaluated on the state.
+            (".[$r.name] = .a", object.clone()),
+            (".[$r.name] |= (. // 0) + 1", object.clone()),
+            (".[$r.name] |= (. // 0) + 1", OwnedValue::Null),
+            (".[$r.name] |= if . == 1 then 5 else 6 end", object.clone()),
+            (".[$r.name] += (.a // 3)", object.clone()),
+            (".[$r.name] //= (.a // 3)", object.clone()),
+            (".[length] = 9", array.clone()),
+            (".[length - 1] |= . + 1", array.clone()),
+            (".[length] += 1", OwnedValue::Null),
+            (
+                ".[$r.name | length | tostring] = {\"s\": $r.score}",
+                object.clone(),
+            ),
+            (".x[.User7 | tostring] |= (. // [1])", object.clone()),
             // `[]` parses as `Array(Comma([]))`; only `[empty]` reaches the
             // `Array(Builtin::Empty)` arm.
             (".a = [empty]", object.clone()),
@@ -97713,8 +97862,8 @@ mod tests {
             (".[$r.name] -= \"s\"", object.clone()), // combine fails
             (".[$r.name] = (1, 2)", object.clone()), // two outputs
             (".[$r.name] |= empty", object.clone()), // deletes
-            (".[$r.name] = .a", object.clone()),     // reads `.`
-            (".[.a] = 1", object.clone()),           // key reads `.`
+            (".[.a] = 1", object.clone()),           // key reads `.`, a boolean
+            ("(.a | .[.b]) = 9", pair.clone()),      // key reads `.a`, an array: raises
             (".[] = 1", object.clone()),             // iterate
             (". = 1", object.clone()),               // no step at all
             (".[$r.name.x] = 1", object.clone()),    // key raises
@@ -97901,6 +98050,9 @@ mod tests {
         ]);
         let handled = [
             ".[$r.name] = ($r.score >= $r.id)",
+            // #5263: an operand that reads `.` is evaluated on the state.
+            ".[$r.name] = (.keep // 0)",
+            ".[$r.name] = (.keep == 1)",
             ".[$r.name] = ($r.id != 2)",
             ".[$r.name] = ($r.score > 50 and $r.id < 5)",
             ".[$r.name] = ($r.tag or $r.name)",
@@ -97962,8 +98114,6 @@ mod tests {
             ".[$r.name] = ($r.name - 1)",              // the operator raises
             ".[$r.name] = ($r.tag // error(\"x\"))",   // not closed
             ".[$r.name] = (1, 2) // 0",                // two outputs
-            ".[$r.name] = (.keep // 0)",               // reads `.`
-            ".[$r.name] = (.keep == 1)",               // reads `.`
             ".[$r.name] = ($r.score | keys)",          // not a whitelisted stage
             ".[$r.name] = ($r.score | (floor, ceil))", // fans out
             ".[$r.name] = ($r.nope | floor)",          // null | floor raises
@@ -98151,6 +98301,8 @@ mod tests {
             "$r.tag as $n | .[$n // \"d\"] = $r.score",
             "$r.name as $n | .a[$n] |= $r.score",
             "($r.name) as $n | (.[$n] //= 5)",
+            // #5263: the body reads `.`, which is the state.
+            "$r.name as $n | .[$n] = .x",
         ];
         for src in handled {
             for input in [object.clone(), OwnedValue::Null] {
@@ -98182,7 +98334,6 @@ mod tests {
             ".x as $n | .[$n] = $r.score",        // SOURCE reads `.`
             "($r.name, \"w\") as $n | .[$n] = 1", // two outputs
             "$r.name.x as $n | .[$n] = 1",        // SOURCE raises
-            "$r.name as $n | .[$n] = .x",         // body reads `.`
             "$r.name as $n | .[$n] = (1, 2)",     // two outputs
             "$r.name as $n | .[$n] | length",     // body is no assignment
             "$r.name as $n | .[$n + 1] = 1",      // key raises
@@ -98276,6 +98427,70 @@ mod tests {
         ] {
             assert_eq!(outputs(records, filter), [expected], "{filter}");
         }
+    }
+
+    /// #5263: an operand that reads `.` is evaluated on the state, which a binding the
+    /// #2889 embed table holds could reach, and yq mode's `//`, null and presentation
+    /// rules are not the jq model's. In yq mode, and under the table, each of these
+    /// declines to the evaluator with the state handed back untouched; a closed right
+    /// side beside them is still taken under the table, so the guard is the operand
+    /// and not the step.
+    #[test]
+    #[cfg(all(feature = "std", not(feature = "unshared-containers")))]
+    fn state_reading_operands_decline_under_the_embed_table_and_in_yq_5263() {
+        use crate::jq::eval_generic::embed_table_push;
+
+        let state = || {
+            OwnedValue::object_from([
+                ("a".to_string(), OwnedValue::Int(1)),
+                ("k".to_string(), OwnedValue::string("a")),
+            ])
+        };
+        let reading = [
+            ".b = .a",            // right side reads `.`
+            ".b |= (. // 0) + 1", // filter reads the old value
+            ".[.k] = 5",          // key reads `.`
+            ".b += (.a // 3)",
+            ".b //= .a",
+        ];
+        for src in reading {
+            let expr = parse(src).unwrap();
+            // Taken outside the table in jq mode ...
+            assert!(
+                matches!(
+                    try_eval_owned_step::<JqSemantics>(&expr, state()),
+                    OwnedStep::Handled(Ok(_))
+                ),
+                "{src}"
+            );
+            // ... and not in yq mode.
+            let OwnedStep::Declined(returned) = try_eval_owned_step::<YqSemantics>(&expr, state())
+            else {
+                panic!("yq mode must decline {src}"); // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this panic only fires if yq mode took a state-reading operand, which owned_assign_operand and owned_assign_new_value both refuse (#5263)"
+            };
+            assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
+        }
+
+        let bound = OwnedValue::object_from([("a".to_string(), OwnedValue::Int(1))]);
+        let origin = BindOrigin::Node {
+            node: 1,
+            document: 1,
+        };
+        let _guard = embed_table_push::<JqSemantics>(Some(&origin), &mut bound.clone());
+        for src in reading {
+            let expr = parse(src).unwrap();
+            let OwnedStep::Declined(returned) =
+                try_owned_assign_step::<JqSemantics>(&expr, state())
+            else {
+                panic!("the embed table must decline {src}"); // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this panic only fires if a state-reading operand was taken while the embed table is live, which both embed_table_active guards refuse (#5263)"
+            };
+            assert_eq!(format!("{returned:?}"), format!("{:?}", state()), "{src}");
+        }
+        let closed = parse(".b = 1").unwrap();
+        assert!(matches!(
+            try_owned_assign_step::<JqSemantics>(&closed, state()),
+            OwnedStep::Handled(Ok(_))
+        ));
     }
 
     /// #3241: a fold step takes the owned assignment while the #2889 embed
@@ -150863,6 +151078,31 @@ mod share_audit_2999 {
             "reduce .[] as $r ({}; .[$r.name] = ($r.name != $r.score))",
             &[],
         );
+    }
+
+    /// #5263: an operand that reads the accumulator -- the counting idiom's
+    /// `(. // 0) + 1`, a key such as `length` -- is evaluated on it before the
+    /// write, so the fold still hands the state to the write unshared and 1,000
+    /// steps force no copy. Each of these used to decline to the evaluator,
+    /// which copied the accumulator on every step.
+    #[test]
+    fn fold_state_reading_operands_copy_nothing_5263() {
+        let body: Vec<String> = (0..1000)
+            .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
+            .collect();
+        let json = format!("[{}]", body.join(",")).into_bytes();
+        for filter in [
+            "reduce .[] as $r ({}; .[$r.name] |= (. // 0) + 1)",
+            "reduce .[] as $r ({}; .[$r.name] |= if . == null then 1 else . + 1 end)",
+            "reduce .[] as $r ({}; .total |= (. // 0) + $r.score)",
+            "reduce .[] as $r ([]; .[length] = $r.score)",
+            "reduce .[] as $r ([]; .[length] += 1)",
+            "reduce .[] as $r ({}; .[$r.name] = length)",
+            "reduce .[] as $r ({}; .[length | tostring] = $r.score)",
+            "[foreach .[] as $r ([]; .[length] = $r.score; length)] | length",
+        ] {
+            assert_forced(&json, filter, &[]);
+        }
     }
 
     /// #5256: a target that stays dynamic runs on the path-mode interpreter, whose
