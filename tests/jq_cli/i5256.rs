@@ -158,7 +158,7 @@ fn test_write_lookahead_bound_answers_as_jq_5256() -> Result<()> {
             "x",
         ),
         (
-            r#"[range(5000)] | (((if true then .[] else empty end), .[-10000]) = 1)"#,
+            "[range(5000)] | (((if true then .[] else empty end), .[-10000]) = 1)",
             "Out of bounds negative array index",
         ),
         (
