@@ -18,6 +18,13 @@ const ROWS: &[(&str, &str, &str)] = &[
         ".c = .b",
         "a: &x 1\nb: *x # bc\nc: *x # bc\n",
     ),
+    // The target's parent is a scalar in the document the write started from (a null `c`), so
+    // there is no node there to read the target's own style from.
+    (
+        "b: [1, 2] # t\nc:\n",
+        ".c.d = .b",
+        "b: [1, 2] # t\nc:\n  d: [1, 2] # t\n",
+    ),
     (
         "a: &x 1\nb: *x # bc\nc: 2 # keep\n",
         ".c = .b",
@@ -219,5 +226,17 @@ fn test_targets_the_pass_does_not_reach_stay_plain_5249() -> Result<()> {
         assert_eq!(exit_code, 0, "filter: {filter} on {input:?}");
         assert_eq!(output, expected, "filter: {filter} on {input:?}");
     }
+    Ok(())
+}
+
+/// A target that already holds an alias, assigned a source that holds one and that a later stage
+/// edits, takes no copy, so the alias pass alone clears the alias the old target held and writes
+/// the source's: the same `b: [*x]` and `c: [7]` yq prints.
+#[test]
+fn test_an_alias_target_over_an_edited_alias_source_5249() -> Result<()> {
+    let (output, exit_code) =
+        run_yq_stdin(".b = .c | .c[0] = 7", "a: &x 1\nb: [*x]\nc: [*x]\n", &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "a: &x 1\nb: [*x]\nc: [7]\n");
     Ok(())
 }
