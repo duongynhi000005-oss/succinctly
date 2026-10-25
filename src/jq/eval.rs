@@ -150833,6 +150833,55 @@ mod share_audit_2999 {
         );
     }
 
+    /// #5256: a target that stays dynamic runs on the path-mode interpreter, whose
+    /// writes wait for the paths to finish, so a fold's accumulator is written in
+    /// place there too: 1,000 steps force one copy (step one, where the accumulator is
+    /// still the program's own `{}` literal), not one per step. `getpath` and a
+    /// conditional target are not paths the streaming walkers take.
+    ///
+    /// The control is a `label` in the paths, which has an effect of its own: the
+    /// writes are not held, so they run while the paths still hold the document and
+    /// copy it every step -- as jq's own does, which is quadratic on it too.
+    #[test]
+    fn interpreter_fold_assign_copies_once_5256() {
+        let body: Vec<String> = (0..1000)
+            .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
+            .collect();
+        let json = format!("[{}]", body.join(",")).into_bytes();
+        let once = &[(Kind::ObjectMakeMut, 1)];
+        for filter in [
+            "reduce .[] as $r ({}; getpath([$r.name]) = $r.score)",
+            "reduce .[] as $r ({}; getpath([$r.name]) |= (. // 0) + 1)",
+            "reduce .[] as $r ({}; getpath([$r.name]) += $r.score)",
+            "reduce .[] as $r ({}; (if true then .[$r.name] else empty end) = $r.score)",
+            "[foreach .[] as $r ({}; getpath([$r.name]) = $r.score; length)] | length",
+        ] {
+            assert_forced(&json, filter, once);
+        }
+        assert_forced(
+            &json,
+            "reduce .[] as $r ({}; .[$r.name | label $o | .] = $r.score)",
+            &[(Kind::ObjectMakeMut, 1000)],
+        );
+    }
+
+    /// #5256: the writes are held back for at most `WRITE_LOOKAHEAD` (4,096) paths.
+    /// Fewer, and a fold step copies nothing; more, and the writes start as the
+    /// paths come, copying the document once per step as they did before.
+    #[test]
+    fn interpreter_write_lookahead_is_bounded_5256() {
+        assert_forced(
+            b"null",
+            "reduce range(3) as $i ([range(100)]; (if true then .[] else empty end) = $i)",
+            &[],
+        );
+        assert_forced(
+            b"null",
+            "reduce range(3) as $i ([range(5000)]; (if true then .[] else empty end) = $i)",
+            &[(Kind::ArrayMakeMut, 3)],
+        );
+    }
+
     /// #3439: `range/3`'s generic loop appends to its accumulator in place
     /// once its consumer lets go of each value -- the run forces exactly one
     /// `make_mut` copy (step one, where the caller still holds the `from`
