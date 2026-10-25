@@ -789,104 +789,19 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// sequential access patterns.
     #[inline]
     pub fn ib_select1_from(&self, k: usize, hint: usize) -> Option<usize> {
-        let words = self.ib.as_ref();
-        if words.is_empty() {
-            return None;
-        }
-
-        let k32 = k as u32;
-        let n = words.len();
-
-        // #40: count `ib_rank` probes so this path's cost can be compared with
-        // the word-scan sites. Starts at 1 for the `hint_rank` probe below.
-        #[cfg(feature = "select-stats")]
-        let mut probes = 1usize;
-
-        // Clamp hint to valid range
-        let hint = hint.min(n.saturating_sub(1));
-
-        // Check if hint is already past k
-        let hint_rank = self.ib_rank[hint + 1];
-        let lo;
-        let hi;
-
-        if hint_rank <= k32 {
-            // k is at or after hint - search forward with exponential expansion
-            let mut bound = 1usize;
-            let mut prev = hint;
-
-            loop {
-                #[cfg(feature = "select-stats")]
-                {
-                    probes += 1;
-                }
-                let next = (hint + bound).min(n);
-                if next >= n || self.ib_rank[next + 1] > k32 {
-                    lo = prev;
-                    hi = next;
-                    break;
-                }
-                prev = next;
-                bound *= 2;
-            }
-        } else {
-            // k is before hint - search backward with exponential expansion
-            let mut bound = 1usize;
-            let mut prev = hint;
-
-            loop {
-                #[cfg(feature = "select-stats")]
-                {
-                    probes += 1;
-                }
-                let next = hint.saturating_sub(bound);
-                if next == 0 || self.ib_rank[next + 1] <= k32 {
-                    lo = next;
-                    hi = prev;
-                    break;
-                }
-                prev = next;
-                bound *= 2;
-            }
-        }
-
-        // Binary search within [lo, hi]
-        let mut lo = lo;
-        let mut hi = hi;
-        while lo < hi {
-            #[cfg(feature = "select-stats")]
-            {
-                probes += 1;
-            }
-            let mid = lo + (hi - lo) / 2;
-            if self.ib_rank[mid + 1] <= k32 {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-
+        let (result, _probes) = crate::util::gallop::select1_from(
+            self.ib.as_ref(),
+            &self.ib_rank,
+            self.ib_len,
+            k,
+            hint,
+        )?;
         #[cfg(feature = "select-stats")]
         crate::util::select_stats::record(
             crate::util::select_stats::Site::YamlIbSelectFrom,
-            probes,
+            _probes,
         );
-
-        if lo >= n {
-            return None;
-        }
-
-        // Now lo is the word index, and ib_rank[lo] is count before this word
-        let remaining = k - self.ib_rank[lo] as usize;
-        let word = words[lo];
-        let bit_pos = select_in_word(word, remaining as u32) as usize;
-        let result = lo * 64 + bit_pos;
-
-        if result < self.ib_len {
-            Some(result)
-        } else {
-            None
-        }
+        Some(result)
     }
 
     /// Perform select1 on the IB using pure binary search.

@@ -4,6 +4,7 @@
 //! Most users should not need to use these directly.
 
 pub(crate) mod broadword;
+pub(crate) mod gallop;
 pub(crate) mod table;
 
 // Scan-length instrumentation for the select word-scan loops (#40). Always
