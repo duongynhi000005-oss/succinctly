@@ -282,9 +282,10 @@ impl<W: Write> ColorSink<'_, W> {
 }
 
 /// Reaches [`ColorSink::write_result_terminator`] through whichever of the
-/// two concrete types a `json_ascii!`-wrapped `on_value` callback actually
-/// holds (#1709): a bare `ColorSink` when `--ascii-output` is off, or an
-/// `AsciiEscapeWriter` around one when it's on. `write_result_terminator`
+/// two types a `json_ascii!`-wrapped `on_value` callback actually holds
+/// (#1709): a bare `ColorSink` when `--ascii-output` is off, or the shared
+/// `&mut dyn AsciiSink` (an `AsciiEscapeWriter` around one, #1993) when it's
+/// on. `write_result_terminator`
 /// is a `ColorSink`-specific method, not part of `core::fmt::Write`, so it
 /// isn't reachable through the wrapper's own `Write` impl the way a plain
 /// `terminator.write_fmt(w)` call is -- and going through the wrapper's
