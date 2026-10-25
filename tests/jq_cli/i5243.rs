@@ -41,7 +41,11 @@ fn test_value_only_index_key_answers_as_jq_5243() -> Result<()> {
         assert_eq!((stdout.trim_end(), code), (want, 0), "`{filter}`: {stderr}");
         let (stdout, stderr, code) =
             run_jq_full(&["-n", "-c", &format!("input | {filter}")], Some(input))?;
-        assert_eq!((stdout.trim_end(), code), (want, 0), "-n `{filter}`: {stderr}");
+        assert_eq!(
+            (stdout.trim_end(), code),
+            (want, 0),
+            "-n `{filter}`: {stderr}"
+        );
     }
     Ok(())
 }
