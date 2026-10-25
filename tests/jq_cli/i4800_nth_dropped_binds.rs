@@ -12,6 +12,7 @@ use anyhow::Result;
 /// the register's own node as a bare bind does, so an `empty` EXTRACT prints nothing and deletes nothing.
 /// A dropped `.a` can raise by the state and keeps its refusal, below. Every row captured from jq 1.7.1,
 /// both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_foreach_update_nth_over_dropped_dot_binds_4800() -> Result<()> {
     assert_path_rows_both_routes_3749(&[

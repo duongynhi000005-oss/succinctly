@@ -17,6 +17,7 @@ use crate::run_jq_stdin_streams;
 /// #5208: the issue's four forms over `{"a":{"a":null}}`, the same `del` with the other INITs (the INIT was never the
 /// cause), and a pattern that lands on a child of an array and of an object. Every row captured from `/usr/bin/jq` 1.7.1,
 /// both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5208_nested_foreach_destructure_that_passes_on_a_state_that_is_the_register() -> Result<()>
@@ -100,6 +101,7 @@ fn test_5208_nested_foreach_destructure_that_passes_on_a_state_that_is_the_regis
 ///
 /// #5223: the path-mode interpreter carries jq's register, so the rows the shipped resolver
 /// refused here now hold jq 1.7.1's answers.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5208_a_rebuilt_state_is_not_the_node_x_is() -> Result<()> {

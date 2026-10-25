@@ -9,6 +9,7 @@ use anyhow::Result;
 /// nothing and `del`/`|=` leave the document. The marker sat under the `try` and the source was read by value, so
 /// `del` deleted `.a`. A handler that emits (`catch 5`) and a `try` around a comma that emits first answer as before.
 /// Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_try_around_a_nested_fold_on_a_known_register_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -61,6 +62,7 @@ fn test_fold_source_try_around_a_nested_fold_on_a_known_register_5030() -> Resul
 /// `catch empty`): a handler that can emit is kept, so a foreign destructure in the handler itself (`try error("x")
 /// catch reduce ($x as {b:$q} | .) ..`) still raises as jq does, and a `catch empty` around the nested fold leaves the
 /// source empty. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_handler_destructure_on_a_known_register_still_raises_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -101,6 +103,7 @@ fn test_fold_source_handler_destructure_on_a_known_register_still_raises_5030() 
 /// value: `del` deleted `.a` and `path` answered `["a"]`. The same holds on a `null` INIT behind a computed stage and under
 /// `?`/`try`. A `reduce` source (which backtracks), a register at the root and a bare `$x | .` answer as before.
 /// Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_register_marker_piped_into_a_destructure_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -188,6 +191,7 @@ fn test_fold_source_register_marker_piped_into_a_destructure_5030() -> Result<()
 /// a comma, an `if` branch or a `limit` as the register on every output. Inside another fold's UPDATE, `($x, $x) | .
 /// as [$q]` raises jq's own catchable error and `try` catches it; reading the marker as the register there refused
 /// with an error no `try` catches. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_body_marker_in_a_comma_or_branch_is_not_the_register_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -228,6 +232,7 @@ fn test_fold_body_marker_in_a_comma_or_branch_is_not_the_register_5030() -> Resu
 /// marker, so the source was read by value: `path` answered `["nope"]`, `= 9` wrote a `nope` key and `del` left the
 /// document. A `null` `$x` (identical to the register by kind), a `foreach` source and a non-`null` register answer as
 /// before. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_foreign_destructure_on_a_null_register_after_a_stage_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -307,6 +312,7 @@ fn test_fold_source_foreign_destructure_on_a_null_register_after_a_stage_5030() 
 // #5030, the `reduce` spelling of a `null` `$x` below INIT's node: every row below is captured from jq 1.7.1, both routes.
 
 /// The issue's rows: `$x` is `null` (bound at a missing key), INIT moved the register onto `.a`, a container.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_reduce_source_destructures_a_null_x_below_inits_register_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -328,6 +334,7 @@ fn test_reduce_source_destructures_a_null_x_below_inits_register_5030() -> Resul
 }
 
 /// Rows from a 12,000-row differential grid (bind site x INIT x source wrapper x fold kind x context x document) that `main` answered or wrote and jq raises, empties, or answers differently: a `try`/`?` around the destructure catches the raise, a bare one does not.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_reduce_source_null_x_below_init_register_in_the_grid_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -433,6 +440,7 @@ fn test_reduce_source_null_x_below_init_register_in_the_grid_5030() -> Result<()
 }
 
 /// Guards: a `$x` that is the register (a container at INIT's node, or a `null`/`false` where INIT left the register on one) is still answered.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_reduce_source_x_that_is_the_register_keeps_its_answer_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -560,6 +568,7 @@ fn test_marker_stage_navigated_into_a_destructure_on_the_register_5030() -> Resu
 /// source from the register INIT left: a foreign `$x` destructure there raises at its first step, as jq's does, where it
 /// was read by value (`del` deleted `.a`, `|= 9` wrote, `path` answered). A `try` around the destructure catches the
 /// raise and empties the source. The same on an INIT of two outputs (`(.a, .a)`). Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_foreign_x_destructure_in_another_fold_body_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -659,6 +668,7 @@ fn test_fold_source_foreign_x_destructure_in_another_fold_body_5030() -> Result<
 
 /// #5030: the converse, left as it was: where INIT leaves the register on the node `$x` is, the destructure passes as
 /// jq's does, and the fold's own emission is then judged. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_x_that_is_the_register_in_another_fold_body_keeps_its_answer_5030() -> Result<()>
 {
@@ -685,6 +695,7 @@ fn test_fold_source_x_that_is_the_register_in_another_fold_body_keeps_its_answer
 /// destructures that `$x`. The pattern's step passes, as it does outside a body, and moves the register onto `$x`'s
 /// child, so the UPDATE's `.c?` raises where the state is not that child. The source was read by value, so the register
 /// stayed on `.a`: `del` deleted `.a.c` and `path` answered `["a","c"]`. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_x_that_is_the_register_in_another_fold_body_walks_it_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -777,6 +788,7 @@ fn test_fold_source_x_that_is_the_register_in_another_fold_body_walks_it_5030() 
 
 /// #5030: a `null` `$x` is `jv_identical` to a `null` register by kind, not by node, so it is not read as the register
 /// here: these rows answered as jq does before and still do. Rows captured from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_null_x_in_another_fold_body_is_not_the_register_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -802,6 +814,7 @@ fn test_fold_source_null_x_in_another_fold_body_is_not_the_register_5030() -> Re
 /// trailing `.` is the document, not the register the walk moved, and is no yield to path-check: reading it so raised
 /// where jq answers. The last rows are the ones whose message named the document where jq names `$x`'s node. Rows captured
 /// from jq 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_fold_source_x_that_is_the_register_in_another_fold_body_trailing_dot_5030() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -898,6 +911,7 @@ fn test_fold_source_x_that_is_the_register_in_another_fold_body_trailing_dot_503
 /// onto `$x`'s child, so the UPDATE or EXTRACT is judged against it, as the uncaught spelling is. Under `path`, `?`, `|=`
 /// and `del`, `try`, `?` and `try $x as P`, an array pattern; the last two rows stay empty (`$x` is another node).
 /// Rows captured from `/usr/bin/jq` 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_fold_source_caught_x_that_is_the_register_in_another_fold_body_walks_it_5030() -> Result<()>

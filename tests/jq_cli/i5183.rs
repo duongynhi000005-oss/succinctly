@@ -11,6 +11,7 @@ use crate::assert_path_rows_both_routes_3749;
 // answers, and a `?` over it dropped the path.
 
 /// #5183: the issue's rows (the loop variable, a literal and `null` as the nested EXTRACT or UPDATE, behind a `try`), every row captured from `/usr/bin/jq` 1.7.1, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5183_nested_foreach_bind_with_an_inert_update_or_extract() -> Result<()> {
@@ -61,6 +62,7 @@ fn test_5183_nested_foreach_bind_with_an_inert_update_or_extract() -> Result<()>
 }
 
 /// #5183: `|=`, `del`, a comma beside the nested `foreach` and a two-element source.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5183_nested_foreach_bind_in_write_and_comma_contexts() -> Result<()> {
@@ -118,6 +120,7 @@ fn test_5183_nested_foreach_bind_in_write_and_comma_contexts() -> Result<()> {
 }
 
 /// #5183: the nested `.`/`.` form, a source that is not a bind, a `reduce` (jq restores the register when it backtracks out of it) and a `$i` outer EXTRACT are unchanged.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5183_nested_foreach_bind_shapes_that_keep_their_answer() -> Result<()> {
@@ -155,6 +158,7 @@ fn test_5183_nested_foreach_bind_shapes_that_keep_their_answer() -> Result<()> {
 
 /// #5183: the loop variable shadowing the `$x` it destructures, an outer EXTRACT that navigates, a `del` over two steps, and the
 /// pipe tails and heads on which the widening stays off (`FE | 7`, `FE | null`, `.a | FE`) answer as jq does, both routes.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5183_nested_foreach_bind_boundaries() -> Result<()> {

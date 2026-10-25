@@ -144,6 +144,7 @@ fn test_5181_wrapped_head_over_a_marker_navigation_onto_the_register() -> Result
 
 /// #5181: shapes the walk does not read keep the behaviour they had: a `limit(0; ..)` (no output, so no bind), a `[]` head
 /// whose siblings compare equal (only the register's own sibling could pass, and the plain bind does not walk `[]`).
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_5181_shapes_the_walk_does_not_read_are_unchanged() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
