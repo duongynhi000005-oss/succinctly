@@ -16644,58 +16644,78 @@ fn each_as_generic<S: EvalSemantics, V: DocumentValue>(
             )
     };
     let bound_any = core::cell::Cell::new(false);
+    // #2650: the source reads under the read-only absent-key rule and the body
+    // does not; see `eval::yq_as_source_scope`.
+    let previous = yq_read_only_context::active();
+    let source_scope = super::eval::yq_as_source_scope::<S>();
     let flow = fanout_arg_each_generic_deferring::<S, V, _>(
         expr,
         value.clone(),
         optional,
         cursor,
         &defer,
-        |bound| match bound {
-            Bound::Value(mut bound_val, origin) => {
-                bound_any.set(true);
-                // #2889: the binding holds this node's `OwnedValue` for the
-                // body's whole dynamic extent, exactly as jq's `. as $x` holds
-                // a reference to `.`'s `jv`. Registering it makes a later
-                // materialization of the same node hand back *this* `Rc`, so
-                // `{k:.}`/`[.]`/`. + {}` embed the value rather than a twin --
-                // see `embed_table`. The guard pops the entry however the body
-                // leaves, error and `break` included.
-                let _embed = embed_table_push::<S>(origin.as_ref(), &mut bound_val);
-                // #3134: and, where the storage clause cannot certify it (a
-                // scalar, or a node below a bound ancestor), its anchor.
-                let _anchor =
-                    embed_anchor_push::<S, _>(origin.as_ref(), &bound_val, cursor.as_ref(), body);
-                let substituted_body =
-                    substitute_bound_var_from::<S>(expr, body, var, &bound_val, origin);
-                eval_each_generic::<S, V>(&substituted_body, value.clone(), optional, cursor, sink)
-            }
-            // #3856: the node was never decoded. `deferred_bind_is_sound` has
-            // proved every read of `$var` happens where the ambient input is a
-            // cursor of this document, so the body names the node and the use
-            // site re-resolves it. Neither the embed table nor the anchor
-            // stack is touched: both exist for the path resolver's identity
-            // checks, and a sound body holds no `path(...)`, assignment or
-            // `del`.
-            Bound::Deferred(node) => {
-                bound_any.set(true);
-                #[cfg(test)]
-                DEFERRED_TAKEN.with(|n| n.set(n.get() + 1));
-                if names_var() {
-                    // #4036: the first whole-node read builds the value and the
-                    // rest share it, as the eager bind's entry made them. A body
-                    // that only reads members never builds one, so it gets no
-                    // entry to be looked up in.
-                    let reads = body_reads();
-                    let _lazy = (reads != Some(DeferredReads::Members))
-                        .then(|| embed_lazy_push(&node, reads == Some(DeferredReads::Sharing)));
-                    let deferred = substitute_deferred_var(body, var, bind_origin_of_cursor(&node));
-                    eval_each_generic::<S, V>(&deferred, value.clone(), optional, cursor, sink)
-                } else {
-                    eval_each_generic::<S, V>(body, value.clone(), optional, cursor, sink)
+        |bound| {
+            let _body_scope =
+                S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(|| yq_read_only_context::restore(previous));
+            match bound {
+                Bound::Value(mut bound_val, origin) => {
+                    bound_any.set(true);
+                    // #2889: the binding holds this node's `OwnedValue` for the
+                    // body's whole dynamic extent, exactly as jq's `. as $x` holds
+                    // a reference to `.`'s `jv`. Registering it makes a later
+                    // materialization of the same node hand back *this* `Rc`, so
+                    // `{k:.}`/`[.]`/`. + {}` embed the value rather than a twin --
+                    // see `embed_table`. The guard pops the entry however the body
+                    // leaves, error and `break` included.
+                    let _embed = embed_table_push::<S>(origin.as_ref(), &mut bound_val);
+                    // #3134: and, where the storage clause cannot certify it (a
+                    // scalar, or a node below a bound ancestor), its anchor.
+                    let _anchor = embed_anchor_push::<S, _>(
+                        origin.as_ref(),
+                        &bound_val,
+                        cursor.as_ref(),
+                        body,
+                    );
+                    let substituted_body =
+                        substitute_bound_var_from::<S>(expr, body, var, &bound_val, origin);
+                    eval_each_generic::<S, V>(
+                        &substituted_body,
+                        value.clone(),
+                        optional,
+                        cursor,
+                        sink,
+                    )
+                }
+                // #3856: the node was never decoded. `deferred_bind_is_sound` has
+                // proved every read of `$var` happens where the ambient input is a
+                // cursor of this document, so the body names the node and the use
+                // site re-resolves it. Neither the embed table nor the anchor
+                // stack is touched: both exist for the path resolver's identity
+                // checks, and a sound body holds no `path(...)`, assignment or
+                // `del`.
+                Bound::Deferred(node) => {
+                    bound_any.set(true);
+                    #[cfg(test)]
+                    DEFERRED_TAKEN.with(|n| n.set(n.get() + 1));
+                    if names_var() {
+                        // #4036: the first whole-node read builds the value and the
+                        // rest share it, as the eager bind's entry made them. A body
+                        // that only reads members never builds one, so it gets no
+                        // entry to be looked up in.
+                        let reads = body_reads();
+                        let _lazy = (reads != Some(DeferredReads::Members))
+                            .then(|| embed_lazy_push(&node, reads == Some(DeferredReads::Sharing)));
+                        let deferred =
+                            substitute_deferred_var(body, var, bind_origin_of_cursor(&node));
+                        eval_each_generic::<S, V>(&deferred, value.clone(), optional, cursor, sink)
+                    } else {
+                        eval_each_generic::<S, V>(body, value.clone(), optional, cursor, sink)
+                    }
                 }
             }
         },
     );
+    drop(source_scope);
     // yq's `as` runs its body once, with the variable unbound, when the source
     // has no output (#4139); see `eval::yq_runs_as_body_without_source`.
     if super::eval::yq_runs_as_body_without_source::<S>(bound_any.get(), &flow) {
@@ -36865,7 +36885,11 @@ fn eval_owned_identity_as<S: EvalSemantics, V: DocumentValue>(
     // The source stands where this stage stands, so its reads are constants
     // -- the same rewrite a computed navigation component gets, and the same
     // predicate gated it (`owned_identity_bind_supported`).
+    // #2650: the source alone reads under the read-only absent-key rule; see
+    // `eval::yq_as_source_scope`.
+    let source_scope = super::eval::yq_as_source_scope::<S>();
     let (bound_values, control) = owned_identity_bind_values::<S, V>(bind, value, id, optional);
+    drop(source_scope);
     // yq's `as` runs its body once, with the variable unset, when the source
     // has no output (#4139); see `eval::yq_runs_as_body_without_source`.
     if S::TAG == EvalTag::Yq && bound_values.is_empty() && control.is_none() {

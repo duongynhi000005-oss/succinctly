@@ -4747,27 +4747,22 @@ them now agreeing:
 that document), which the value model could not answer at all: they are cursor-only and are
 never derivable from an accumulated path.
 
-Two read-side residues remain, both of them predating #2072 and neither caused by the
+Read-side residues remain, all of them predating #2072 and none caused by the
 binding carrying an origin; the write side is unchanged and still refuse-only (below).
 
-**A variable bound from an absent key.** Real yq's `as` binds a *candidate list*, and a key
-lookup that finds nothing contributes no candidate, so the whole body is skipped — while
-the same key read without a binding is `null` at a real position. succinctly's value model
-has no absent-versus-null distinction to bind, so the variable stands at the missing key's
-position. Captured on `a: {b: 1}` / `c: {b: 1}` (`-o=json -I=0`):
+**A variable bound from an absent key — resolved (#2650).**
+Real yq's `as` binds a *candidate list*, and a key lookup that finds nothing contributes no candidate, so the variable is never bound while the same key read without a binding is `null` at a real position.
+`succinctly yq` now reads a bare `as` source under the same read-only absent-key rule as a binary-operator operand (#2470), on every route that binds one: no candidate, so the body runs once with the variable unbound (#4139) and `$x` reads as no output.
+Captured on `a: {b: 1}` / `c: {b: 1}` (`-o=json -I=0`), both tools now agree:
 
 ```console
-$ yq          '.c | (.a as $x | $x)'          # (nothing)
-$ succinctly yq '.c | (.a as $x | $x)'        # null
-$ yq          '.c | (.a as $x | $x) | path'   # (nothing)
-$ succinctly yq '.c | (.a as $x | $x) | path' # ["c","a"]
-$ yq          '.c | .a | path'                # ["c","a"]   <- unbound, both tools agree
+$ yq '.c | (.a as $x | $x)'          # (nothing)
+$ yq '.c | (.a as $x | $x) | path'   # (nothing)
+$ yq '.c | .a | path'                # ["c","a"]   <- unbound, both tools agree
 ```
 
-This is the same read-only-context rule for a key lookup that finds nothing that
-`test_as_binding_keeps_the_input_identity_2563` already records for
-`.zzz as $v | [$v]` ([#2470](https://github.com/rust-works/succinctly/issues/2470)/[#2481](https://github.com/rust-works/succinctly/issues/2481)),
-reached through a bind source rather than through the walk.
+Only the *source* is read-only: the body keeps the scope it had, so `.zz as $x | .zz = 3` still creates `zz`.
+A numeric index on a mapping (`.[0] as $x | [$x]`) is not covered, since the read-only rule is keyed on a key lookup, not on an index.
 
 **An anchor's flow style read through an alias binding.** Captured on
 `a: "1" # keep` / `b: &anc [1, 2]` / `c: *anc` (YAML output):
