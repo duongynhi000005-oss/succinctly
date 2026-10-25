@@ -12105,6 +12105,32 @@ pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedVal
     if is_owned_assign(expr) || is_owned_setpath(expr) {
         return try_owned_assign_step::<S>(expr, state);
     }
+    // `.[1:]` as a fold's UPDATE (#5274): a slice with literal bounds of an array or a string
+    // is a plain cut of the owned value, which shares its elements. Through the bridge each
+    // step wrote the whole state out as JSON and indexed it again. An array this step owns
+    // outright is cut in place (a `memmove`, no element touched); any other is cut into a new
+    // one. jq mode, and an error is the bridge's to report.
+    if let (EvalTag::Jq, Expr::Slice { start, end, .. }) = (S::TAG, unwrap_paren(expr)) {
+        match state {
+            OwnedValue::Array(mut items) if !items.is_shared() => {
+                let range = literal_array_slice_range(items.len(), *start, *end);
+                items.truncate(range.end);
+                items.drain(..range.start);
+                // The kept part does not keep the buffer it was cut from alive.
+                if items.capacity() > 2 * items.len() + 16 {
+                    items.shrink_to_fit();
+                }
+                return OwnedStep::Handled(Ok(OwnedValue::Array(items)));
+            }
+            OwnedValue::Array(_) | OwnedValue::String(_) => {
+                if let Ok(Some(cut)) = slice_owned_value_read::<S>(&state, *start, *end, false) {
+                    return OwnedStep::Handled(Ok(cut));
+                }
+                return OwnedStep::Declined(state);
+            }
+            other => return OwnedStep::Declined(other),
+        }
+    }
     match eval_owned_reindex_free::<S>(expr, &state) {
         Some(result) => OwnedStep::Handled(result),
         None => OwnedStep::Declined(state),
@@ -31015,7 +31041,7 @@ pub(crate) fn slice_owned_value(
 ) -> Result<Option<OwnedValue>, EvalError> {
     match target {
         OwnedValue::Array(items) => {
-            let range = SliceBounds::from_literals(start, end).resolve(items.len());
+            let range = literal_array_slice_range(items.len(), start, end);
             Ok(Some(OwnedValue::Array(items[range].to_vec().into())))
         }
         OwnedValue::Null => Ok(Some(OwnedValue::Null)),
@@ -31030,6 +31056,17 @@ pub(crate) fn slice_owned_value(
             "object",
         )),
     }
+}
+
+/// The elements an array of `len` keeps for the slice `.[start:end]`: the one
+/// definition [`slice_owned_value`] copies from and the fold step cuts in place by
+/// (#5274), so the two cannot disagree on a bound.
+fn literal_array_slice_range(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> core::ops::Range<usize> {
+    SliceBounds::from_literals(start, end).resolve(len)
 }
 
 /// Slice one `OwnedValue` target on the *read* path (`.[S:E]`), applying
@@ -75306,7 +75343,9 @@ fn fold_step_each<S: EvalSemantics>(
 /// between them.
 ///
 /// While the #2889 embed table is live (the loop runs inside an `as` binding
-/// that holds a document node) only the assignment half of the step runs;
+/// that holds a document node) only the assignment half of the step runs -- not
+/// the slice cut of [`try_eval_owned_step`] either (#5274), whose result shares the
+/// state's elements, which the table is there to witness;
 /// `to_entries`/`from_entries` stay on the bridge, where
 /// [`eval_owned_relocating_fold`] owns them. The assignment step is sound
 /// under the table because it reads no table entry and no marker's identity (its
@@ -98496,6 +98535,79 @@ mod tests {
             ),
         ] {
             assert_eq!(outputs(records, filter), [expected], "{filter}");
+        }
+    }
+
+    /// #5274: a fold's `.[1:]` cuts a uniquely owned array in place and leaves a shared one
+    /// untouched (the cut is a new array), and both answer jq's slice: out-of-range and
+    /// negative bounds, an empty cut, a string by codepoints. `null` and yq mode decline.
+    #[test]
+    fn slice_step_cuts_a_unique_array_in_place_and_a_shared_one_into_a_new_one_5274() {
+        let numbers = |range: core::ops::Range<i64>| {
+            OwnedValue::array_from(range.map(OwnedValue::Int).collect::<Vec<_>>())
+        };
+        let ptr = |value: &OwnedValue| match value {
+            OwnedValue::Array(items) => items.as_ptr(),
+            other => panic!("expected an array: {other:?}"),
+        };
+
+        // Unique: the same buffer, shorter.
+        let unique = numbers(0..8);
+        let before = ptr(&unique);
+        let expr = parse(".[2:-1]").unwrap();
+        let OwnedStep::Handled(Ok(cut)) = try_eval_owned_step::<JqSemantics>(&expr, unique) else {
+            panic!("a slice of a unique array must be taken");
+        };
+        assert_eq!(cut, numbers(2..7));
+        assert_eq!(ptr(&cut), before, "the unique array was copied");
+
+        // Shared: the other handle keeps its elements.
+        let shared = numbers(0..8);
+        let keep = shared.clone();
+        let OwnedStep::Handled(Ok(cut)) = try_eval_owned_step::<JqSemantics>(&expr, shared) else {
+            panic!("a slice of a shared array must be taken");
+        };
+        assert_eq!(cut, numbers(2..7));
+        assert_eq!(keep, numbers(0..8), "the shared array was written through");
+
+        for (src, input, want) in [
+            (".[1:]", numbers(0..3), numbers(1..3)),
+            (".[:0]", numbers(0..3), numbers(0..0)),
+            (".[2:1]", numbers(0..3), numbers(0..0)),
+            (".[-100:100]", numbers(0..3), numbers(0..3)),
+            (".[0:]", numbers(0..3), numbers(0..3)),
+        ] {
+            let expr = parse(src).unwrap();
+            let OwnedStep::Handled(Ok(got)) = try_eval_owned_step::<JqSemantics>(&expr, input)
+            else {
+                panic!("{src} must be taken");
+            };
+            assert_eq!(got, want, "{src}");
+        }
+        let text = OwnedValue::string("h\u{e9}llo \u{1f600}!");
+        let OwnedStep::Handled(Ok(got)) =
+            try_eval_owned_step::<JqSemantics>(&parse(".[1:-1]").unwrap(), text)
+        else {
+            panic!("a string slice must be taken");
+        };
+        assert_eq!(got, OwnedValue::string("\u{e9}llo \u{1f600}"));
+
+        // Anything else is the evaluator's, with the state handed back.
+        for (input, mode_yq) in [
+            (OwnedValue::Null, false),
+            (OwnedValue::Int(3), false),
+            (numbers(0..3), true),
+        ] {
+            let expr = parse(".[1:]").unwrap();
+            let step = if mode_yq {
+                try_eval_owned_step::<YqSemantics>(&expr, input.clone())
+            } else {
+                try_eval_owned_step::<JqSemantics>(&expr, input.clone())
+            };
+            let OwnedStep::Declined(returned) = step else {
+                panic!("{input:?} (yq: {mode_yq}) must decline");
+            };
+            assert_eq!(returned, input);
         }
     }
 
