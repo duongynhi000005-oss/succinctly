@@ -37000,8 +37000,12 @@ fn eval_owned_identity_as<S: EvalSemantics, V: DocumentValue>(
     // #5261: a source that bound nothing still runs its context-free stages
     // against the empty context it left, inside the scope that emptied it.
     if S::READ_ONLY_ABSENT_KEY_IS_EMPTY && bound_values.is_empty() && control.is_none() {
-        if let Some(retried) = super::eval::yq_as_source_retry::<S, _>(bind, |reemit| {
-            owned_identity_bind_values::<S, V>(reemit, value, id, optional)
+        // A rewritten source that reads its position (`.zz | [.] | key`) would be
+        // handed this stage's identity, which a node the rewrite constructed does
+        // not have: the unbound body is what yq answers there.
+        if let Some(Some(retried)) = super::eval::yq_as_source_retry::<S, _>(bind, |reemit| {
+            (!super::eval::needs_path_context(reemit))
+                .then(|| owned_identity_bind_values::<S, V>(reemit, value, id, optional))
         }) {
             (bound_values, control) = retried;
         }

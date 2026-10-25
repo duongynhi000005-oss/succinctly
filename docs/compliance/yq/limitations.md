@@ -4797,6 +4797,9 @@ It is the rule an assignment's right side and an `and`/`or`/arithmetic operand a
 The root cause the issue named was wrong: yq does not run the later stage on a `null` node it creates, it runs it on zero nodes, which is why `length`, `tostring` and `+` bind nothing while `error` and a literal still run.
 A comma source where one branch comes up empty and another does not (`(.a, (.zz | error("x"))) as $x | [$x]`, `((.zz | "a"), "b") as $x | [$x]`) still sees only the branch that produced output, since the rewrite applies only to a source that bound nothing.
 The general form of that gap is a pipe whose left side is empty, outside any `as`: `select(false) | error("x")` raises in yq and is no output here.
+The retry replays the stages from the first context-free one on, so a stage there with an effect (`debug`, `stderr`) runs again when the first pass had already reached it and still bound nothing.
+An `as` that sits in a path position or the left side of a write (`del((.zz | error("x")) as $x | .a)`, which raises in yq) goes through `resolve_bind_source`, the path-register route, and gets no retry.
+A rewritten source that reads its position (`.zz | [.] | key`) is not run on the owned-identity route, since the node it constructs has no position of its own there; the body runs unbound, as yq answers.
 
 **An anchor's flow style read through an alias binding.** Captured on
 `a: "1" # keep` / `b: &anc [1, 2]` / `c: *anc` (YAML output):

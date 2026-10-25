@@ -33,6 +33,8 @@ const VALUE_ROWS: &[(&str, &str)] = &[
     // A constructed input takes the owned bind route.
     ("{\"a\": 1} | (.zz | \"s\") as $x | [$x]", "[\"s\"]"),
     ("{\"a\": 1} | (.zz | length) as $x | [$x]", "[]"),
+    // A rewritten source that would read the position of a node it constructed is not run.
+    (".x | (.zz | [.] | key) as $v | [$v]", "[]"),
     // A stage that cannot be rewritten stays empty.
     ("(.zz | length | tostring) as $x | [$x]", "[]"),
 ];
@@ -82,7 +84,10 @@ fn test_error_after_an_absent_key_raises_in_an_as_source_5261() -> Result<()> {
             run_yq_stdin_with_stderr(filter, DOC, &["-o=json", "-I=0"])?;
         assert_eq!(exit_code, 1, "filter: {filter}");
         assert_eq!(output, "", "filter: {filter}");
-        assert!(stderr.contains('x'), "filter: {filter}, stderr: {stderr}");
+        assert!(
+            stderr.contains("Error: x"),
+            "filter: {filter}, stderr: {stderr}"
+        );
     }
     Ok(())
 }
