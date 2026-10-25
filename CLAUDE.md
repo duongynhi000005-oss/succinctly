@@ -554,6 +554,11 @@ CI works around but this repo's own docs don't all say consistently:
   the helpers it calls do not turn into dead code. `cargo test --all-features
   --test jq_cli_tests --lib` then fails only the tests that failed before #5233,
   and a new failure there is a real one (CI does not run that build's tests).
+  `git grep 'holdout refusal (#5246)'` lists the ignored ones; one that stops
+  hitting the refusal (a program the holdout can answer, or the refusal lifted)
+  can drop its attribute. Check that the refusal is the reason before adding
+  one: a program the holdout refuses wrongly is a bug in the holdout, not a test
+  to skip.
 
 If you're deciding what `cargo test`/`cargo clippy` invocation "covers
 everything": it's the CI legs matching the **default** feature set
