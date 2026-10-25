@@ -261,6 +261,10 @@ impl Raise {
     }
 }
 
+/// How many paths [`Interp::paths_then_writes`] holds back before it starts
+/// writing them as they come (#5256).
+const WRITE_LOOKAHEAD: usize = 4096;
+
 type R = Result<(), Raise>;
 type Sink<'s> = dyn FnMut(OwnedValue, Reg) -> R + 's;
 /// An update for [`Interp::modify_native`]: the value at a path in, each
@@ -3147,9 +3151,10 @@ impl<'e> Interp<'e> {
         update: &mut Update<'_, 'e>,
         sink: &mut Sink<'_>,
     ) -> R {
-        let state = RefCell::new(input.clone());
+        let generated = input.clone();
+        let state = RefCell::new(input);
         let mut deletions: Vec<OwnedValue> = Vec::new();
-        self.path_mode(paths, env, input, reg.clone(), &mut |path, _| {
+        self.paths_then_writes(paths, env, generated, &reg, &mut |path| {
             let OwnedValue::Array(keys) = &path else {
                 return Err(unsupported("a path that is not an array")); // patchcov: coverage tolerate-line reason="unreachable: path() emits arrays only"
             };
@@ -3200,9 +3205,10 @@ impl<'e> Interp<'e> {
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
-        self.eval(value, env, input.clone(), reg.sub(), &mut |v, _| {
-            let state = RefCell::new(input.clone());
-            self.path_mode(paths, env, input.clone(), reg.clone(), &mut |path, _| {
+        let write = |paths: &'e Expr, input: OwnedValue, v: &OwnedValue, reg: &Reg| {
+            let generated = input.clone();
+            let state = RefCell::new(input);
+            self.paths_then_writes(paths, env, generated, reg, &mut |path| {
                 let OwnedValue::Array(keys) = &path else {
                     return Err(unsupported("a path that is not an array")); // patchcov: coverage tolerate-line reason="unreachable: path() emits arrays only"
                 };
@@ -3212,8 +3218,72 @@ impl<'e> Interp<'e> {
                 *state.borrow_mut() = after;
                 Ok(())
             })?;
-            sink(state.into_inner(), reg.clone())
+            Ok(state.into_inner())
+        };
+        // One value: take it before the paths run, so nothing here holds the
+        // input once they are done and the write can be in place (#5256).
+        if self.single(value, env) {
+            let mut assigned = None;
+            self.eval(value, env, input.clone(), reg.sub(), &mut |v, _| {
+                assigned = Some(v);
+                Ok(())
+            })?;
+            let Some(v) = assigned else { return Ok(()) };
+            return sink(write(paths, input, &v, &reg)?, reg);
+        }
+        self.eval(value, env, input.clone(), reg.sub(), &mut |v, _| {
+            sink(write(paths, input.clone(), &v, &reg)?, reg.clone())
         })
+    }
+
+    /// `path(paths)` on `input`, each path handed to `write` in order -- but
+    /// with up to [`WRITE_LOOKAHEAD`] of them held back until the paths are
+    /// done (#5256). The path evaluator holds the document it runs on until
+    /// it returns, so a write made while it runs finds the state shared and
+    /// copies the container it writes into: one copy per `reduce` step, the
+    /// fold quadratic. Held back, the writes find the state alone, and
+    /// `write`'s `make_mut` writes in place, as jq's does.
+    ///
+    /// Nothing observable moves: a write is pure, and the paths run on the
+    /// input, not on what the writes make. An error from `paths` after some
+    /// paths were held back is raised after their writes, so a write's own
+    /// error, which jq reaches first, still wins. Only when `paths` has an
+    /// effect of its own (`input`, `debug`) are the writes not held, since a
+    /// write that fails would otherwise no longer stop it. The first
+    /// `WRITE_LOOKAHEAD` paths are held at most: a longer run of paths writes
+    /// as it goes, from there, as before.
+    fn paths_then_writes(
+        &self,
+        paths: &'e Expr,
+        env: &Env<'e>,
+        input: OwnedValue,
+        reg: &Reg,
+        write: &mut dyn FnMut(OwnedValue) -> R,
+    ) -> R {
+        let mut hold = if self.pure(paths, env) {
+            WRITE_LOOKAHEAD
+        } else {
+            0
+        };
+        let mut held: Vec<OwnedValue> = Vec::new();
+        let generated = self.path_mode(paths, env, input, reg.clone(), &mut |path, _| {
+            if hold == 0 {
+                return write(path);
+            }
+            held.push(path);
+            if held.len() == hold {
+                hold = 0;
+                for path in core::mem::take(&mut held) {
+                    write(path)?;
+                }
+            }
+            Ok(())
+        });
+        // A write's error is the one jq raises first.
+        for path in held {
+            write(path)?;
+        }
+        generated
     }
 
     /// `getpath(p)`'s value on `root` (`jv_getpath`): each key in turn,
@@ -3286,14 +3356,14 @@ impl<'e> Interp<'e> {
         reg: Reg,
         sink: &mut Sink<'_>,
     ) -> R {
-        self.eval(value, env, input.clone(), reg, &mut |t, reg_t| {
+        let modify = |t: OwnedValue, reg_t: Reg, input: OwnedValue, sink: &mut Sink<'_>| {
             if !reg_t.tracking() && !Self::may_retry(path, env) {
                 // `. op $t` and `. // $t` are single-valued and catch nothing.
                 let mut update =
                     |_: &Self, v: OwnedValue, emit: &mut dyn FnMut(OwnedValue) -> R| {
                         emit(compound_step(name, &v, &t)?)
                     };
-                return self.modify_native(path, env, input.clone(), reg_t, &mut update, sink);
+                return self.modify_native(path, env, input, reg_t, &mut update, sink);
             }
             // `path` closes over the caller's environment; the re-read
             // `$__sp_t` over one that binds the value just computed.
@@ -3303,7 +3373,23 @@ impl<'e> Interp<'e> {
                 .lookup_func(name, 2)
                 .ok_or_else(|| unsupported(format!("prelude {name}/2")))?;
             let args = [(path, env.clone()), (&self.prelude.t_var, env_t)];
-            self.call_with(callee, &args, input.clone(), reg_t, sink)
+            self.call_with(callee, &args, input, reg_t, sink)
+        };
+        // One value: take it before the paths run, so the input is handed on
+        // rather than kept here, and the write can be in place (#5256).
+        if self.single(value, env) {
+            let mut computed = None;
+            self.eval(value, env, input.clone(), reg, &mut |t, reg_t| {
+                computed = Some((t, reg_t));
+                Ok(())
+            })?;
+            let Some((t, reg_t)) = computed else {
+                return Ok(());
+            };
+            return modify(t, reg_t, input, sink);
+        }
+        self.eval(value, env, input.clone(), reg, &mut |t, reg_t| {
+            modify(t, reg_t, input.clone(), sink)
         })
     }
 }
