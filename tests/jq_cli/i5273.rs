@@ -86,6 +86,74 @@ fn test_growing_one_slot_answers_as_jq_5273() -> Result<()> {
             "reduce range(3) as $x ({a:[]}; .a = .a + [])",
             r#"{"a":[]}"#,
         ),
+        // A longer path grows its slot the same way, by key or by index, negative included.
+        (
+            "reduce range(3) as $x ({a:{b:[]}}; .a.b += [$x])",
+            r#"{"a":{"b":[0,1,2]}}"#,
+        ),
+        (
+            "reduce range(3) as $x ({a:{b:{}}}; .a.b += {($x|tostring):$x})",
+            r#"{"a":{"b":{"0":0,"1":1,"2":2}}}"#,
+        ),
+        (
+            r#"reduce range(3) as $x ({a:{b:[]}}; .["a"].b |= (. // []) + [$x])"#,
+            r#"{"a":{"b":[0,1,2]}}"#,
+        ),
+        (
+            r#"reduce range(3) as $x ({"k":{"l":[]}}; .["k"]["l"] = .["k"]["l"] + [$x])"#,
+            r#"{"k":{"l":[0,1,2]}}"#,
+        ),
+        (
+            "reduce range(3) as $x ({a:[[]]}; .a[0] |= (. // []) + [$x])",
+            r#"{"a":[[0,1,2]]}"#,
+        ),
+        (
+            "reduce range(3) as $x ([1,[2]]; .[-1] |= (. // []) + [$x])",
+            "[1,[2,0,1,2]]",
+        ),
+        (
+            "reduce range(3) as $x ([1,[2]]; .[-1] += [$x])",
+            "[1,[2,0,1,2]]",
+        ),
+        // An index one past the end is a `null` slot, not a container to extend.
+        (
+            "reduce range(3) as $x ([[0]]; .[1] |= (. // []) + [$x])",
+            "[[0],[0,1,2]]",
+        ),
+        (
+            "reduce range(3) as $x ([[0]]; .[1] = .[1] + [$x])",
+            "[[0],[0,1,2]]",
+        ),
+        // A default that reads `.` is the evaluator's, as is a right side that does.
+        (
+            "reduce range(3) as $x ({a:[1]}; .a |= (. // [.]) + [$x])",
+            r#"{"a":[1,0,1,2]}"#,
+        ),
+        (
+            "reduce range(3) as $x ({a:null,n:[7]}; .a |= (. // .n) + [$x])",
+            r#"{"a":[0,1,2],"n":[7]}"#,
+        ),
+        (
+            "reduce range(3) as $x ({a:[1]}; .a = (.a // [length]) + [$x])",
+            r#"{"a":[1,0,1,2]}"#,
+        ),
+        // The accumulator starts as a value bound elsewhere, which keeps its own contents.
+        (
+            "[1,2] as $b | reduce range(2) as $x ({a:$b}; .a = .a + [$x]) | [., $b]",
+            r#"[{"a":[1,2,0,1]},[1,2]]"#,
+        ),
+        (
+            "[1,2] as $b | reduce range(2) as $x ({a:$b}; .a |= (. // []) + [$x]) | [., $b]",
+            r#"[{"a":[1,2,0,1]},[1,2]]"#,
+        ),
+        (
+            "[1,2] as $b | reduce range(2) as $x ({a:$b}; .a += [$x]) | [., $b]",
+            r#"[{"a":[1,2,0,1]},[1,2]]"#,
+        ),
+        (
+            r#"{"p":[1]} as $b | reduce range(2) as $x ({a:[1]}; .a = .a + $b.p) | [., $b]"#,
+            r#"[{"a":[1,1,1]},{"p":[1]}]"#,
+        ),
         // Growing a copy leaves the value it was copied from alone.
         (
             "{a:[1,2]} as $o | ($o | .a = .a + [3]) as $n | [$o, $n]",
