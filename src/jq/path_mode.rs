@@ -59,7 +59,9 @@ use super::resolve::ModuleRun;
 use super::value::{
     jv_identical, ArrayVec, NumberRepr, OwnedValue, SharableLiteral, SharableString,
 };
-use super::walk::{any_subexpr, builtin_kids, map_builtin_subexprs, BuiltinKids};
+use super::walk::{
+    any_subexpr, builtin_kids, map_builtin_subexprs, search_subexpr, BuiltinKids, Visit,
+};
 
 /// A string with storage of its own: a fresh `jv_string`.
 fn string(s: &str) -> OwnedValue {
@@ -1063,7 +1065,7 @@ fn is_static_target(expr: &Expr) -> bool {
         // (#4001's walker). A key that could retry, hide one in a call, or
         // hold a dynamic path target of its own stays dynamic (#5243). A NaN
         // key is a component the walker carries as jq does (#5245).
-        Expr::IndexExpr { target, key } => is_value_only_condition(key) && is_static_target(target),
+        Expr::IndexExpr { target, key } => is_value_only_key(key) && is_static_target(target),
         Expr::Paren(inner) | Expr::Optional(inner) => is_static_target(inner),
         Expr::Pipe(stages) => stages.iter().all(is_static_target),
         Expr::Comma(items) => items.iter().all(is_static_target),
@@ -1088,15 +1090,20 @@ fn is_static_target(expr: &Expr) -> bool {
     }
 }
 
-/// A `select` condition that only computes a value: no `?//` an error after
-/// the `select` could retry into, no function call (whose body could hold
-/// one) or label, no input builtin, and no dynamic path target of its own,
-/// which would need the register the shipped evaluator does not carry.
+/// An expression inside a static target that only computes a value: a
+/// `select` condition, or an index key (#5243). No `?//` that an error after
+/// it could retry into, no function call (whose body could hold one) or label,
+/// no input builtin, and no dynamic path target of its own, which would need
+/// the register the shipped evaluator does not carry.
 fn is_value_only_condition(cond: &Expr) -> bool {
-    !any_subexpr(cond, &mut |e| match e {
+    !search_subexpr(cond, &mut |e| match e {
         Expr::AsPattern { patterns, .. }
         | Expr::Reduce { patterns, .. }
-        | Expr::Foreach { patterns, .. } => patterns.len() > 1,
+        | Expr::Foreach { patterns, .. }
+            if patterns.len() > 1 =>
+        {
+            Visit::Found
+        }
         Expr::FuncCall { .. }
         | Expr::FuncDef { .. }
         | Expr::NamespacedCall { .. }
@@ -1104,9 +1111,42 @@ fn is_value_only_condition(cond: &Expr) -> bool {
         | Expr::Shared(_)
         | Expr::Label { .. }
         | Expr::Break(_)
-        | Expr::Builtin(Builtin::Input | Builtin::Inputs) => true,
-        other => is_dynamic_path_target(other),
+        | Expr::Builtin(Builtin::Input | Builtin::Inputs) => Visit::Found,
+        // A nested path construct: `is_static_target` judges its target,
+        // keys and conditions included, so the target is not walked again
+        // here -- that would judge every nested key once per enclosing level,
+        // exponential in the nesting (#5243 review).
+        Expr::Builtin(Builtin::Path(target) | Builtin::Del(target) | Builtin::Pick(target)) => {
+            if is_static_target(target) {
+                Visit::Skip
+            } else {
+                Visit::Found
+            }
+        }
+        Expr::Assign { path, value }
+        | Expr::CompoundAssign { path, value, .. }
+        | Expr::AlternativeAssign { path, value }
+        | Expr::Update {
+            path,
+            filter: value,
+        } => {
+            if is_static_target(path) && is_value_only_condition(value) {
+                Visit::Skip
+            } else {
+                Visit::Found
+            }
+        }
+        _ => Visit::Descend,
     })
+}
+
+/// An index key the shipped walker evaluates as jq does (#5243): one that
+/// only computes a value ([`is_value_only_condition`]) and reads nothing the
+/// interpreter declines. The walker evaluates a key off the cursor, so a
+/// cursor-metadata or path-context builtin in it (`.a[line | tostring]`)
+/// would read the wrong node; such a program stays dynamic, and is refused.
+fn is_value_only_key(key: &Expr) -> bool {
+    is_value_only_condition(key) && !any_subexpr(key, &mut |e| declined_construct(e).is_some())
 }
 
 /// Whether the interpreter runs this node: not a product of the shipped

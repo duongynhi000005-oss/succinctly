@@ -2167,3 +2167,37 @@ fn path_context_builtins_are_named_5233() {
     );
     assert_eq!(path_context_name(&Builtin::Length), None);
 }
+
+/// An index key that reads a succinctly extension (`line`, `key`, ...) keeps the
+/// target dynamic, so the program is refused as before #5243: the walker would
+/// evaluate the key off the cursor and read the wrong node.
+#[test]
+fn an_extension_in_an_index_key_keeps_the_target_dynamic_5243() {
+    for filter in [
+        ".a[line | tostring] = 9",
+        "[path(.a[line | tostring])]",
+        "del(.[key])",
+        ".x[$v + column] |= 1",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Refused(_)),
+            "{filter}"
+        );
+    }
+}
+
+/// Routing a key that nests path targets inside index keys inside path targets
+/// is linear in the nesting: `is_value_only_condition` does not re-walk a
+/// nested target `is_static_target` already judged (it was exponential, about
+/// 4x per two levels, before the #5243 review).
+#[test]
+fn nested_index_keys_route_in_linear_time_5243() {
+    on_big_stack(|| {
+        let mut target = ".a".to_string();
+        for _ in 0..64 {
+            target = format!(".[path({target}) | length]");
+        }
+        let program = parse(&format!("{target} = 1")).expect("parses");
+        assert!(matches!(route(&program), Route::Shipped));
+    });
+}
