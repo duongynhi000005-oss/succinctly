@@ -16490,9 +16490,13 @@ fn builtin_length<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
                 // `1e5`, `1.50`), and yq measures that text, as `tostring` echoes it. A JSON
                 // document's number was collapsed to a plain `Int`/`Float` on the way in
                 // (#3597), so its text is the rendering that is measured there too.
-                QueryResult::Owned(OwnedValue::Int(
-                    String::from_utf8_lossy(n.raw_bytes()).chars().count() as i64,
-                ))
+                // #1071: a document `.INF`/`.NaN` crossed the bridge as a token; its text is
+                // the spelling it carried, not the token.
+                let width = match n.bridge_nonfinite_literal() {
+                    Some(literal) => literal.chars().count(),
+                    None => String::from_utf8_lossy(n.raw_bytes()).chars().count(),
+                };
+                QueryResult::Owned(OwnedValue::Int(width as i64))
             } else if let Ok(i) = n.as_i64() {
                 QueryResult::Owned(numeric_length_owned::<S>(OwnedValue::Int(i)))
             } else if let Ok(f) = json_number_f64::<S>(n) {
@@ -20764,22 +20768,10 @@ fn eval_string_interpolation_single_value<'a, W: Clone + AsRef<[u64]>, S: EvalSe
 /// infinity still takes the `Float` arm's `DBL_MAX` text (`1e400 + 0 |
 /// tostring`), and nothing left here can be one.
 ///
-/// yq mode instead wants YAML's own `.nan`/`.inf`/`-.inf` spelling (#1060) --
-/// this was previously unconditional (`f.to_string()`, jq's own spelling in
-/// both modes), the same class of gap #1030 fixed for finite literals.
-/// Real yq's own Go-based number model actually distinguishes a
-/// document-sourced non-finite scalar (`.inf`) from a genuinely *computed*
-/// one (`1/0` -> Go's own `+Inf`, confirmed live against the pinned oracle)
-/// -- but succinctly's `OwnedValue` can't make that distinction once a
-/// document-sourced `.inf`/`.nan` degrades to a plain `Float`: YAML's
-/// `number_literal()` override never captures these spellings as a
-/// `NumberLiteral` in the first place (`is_preservable_float_literal`'s
-/// JSON-syntax gate rejects them, since neither starts with a digit or
-/// `-digit`). So this always answers with the document-sourced spelling --
-/// correct for the common case (`.a | tostring` on an untouched `.inf`/
-/// `.nan` scalar), diverging from real yq's Go-style spelling only for a
-/// genuinely computed non-finite result, a narrower, rarer case left
-/// unaddressed here.
+/// yq mode instead spells a non-finite the way real yq does (#1060, #1071). A document
+/// `.inf`/`.NaN` scalar is a `NumberLiteral` carrying its own text, which is echoed as
+/// written (`.INF`, `+.inf`, `.NaN`); a computed non-finite is a bare `Float`, which yq
+/// prints as Go does: `NaN`/`+Inf`/`-Inf`.
 pub(crate) fn numeric_display_string<S: EvalSemantics>(value: &OwnedValue) -> String {
     if let OwnedValue::NumberLiteral(repr, literal) = value {
         if let NumberRepr::Float(f) = repr {
@@ -20788,8 +20780,8 @@ pub(crate) fn numeric_display_string<S: EvalSemantics>(value: &OwnedValue) -> St
             // (#2902, `OwnedValue::from_json_number`) -- so in jq mode an
             // overflowed one keeps its literal like any other and reaches
             // `format_number_jq_compat` below: `1e400 | tostring` is
-            // `"1E+400"` in jq 1.7.1 (#1083, #3212). A document literal is
-            // never NaN; the check stays as a guard.
+            // `"1E+400"` in jq 1.7.1 (#1083, #3212). In yq mode a YAML `.NaN` is a
+            // NaN literal too (#1071), and a document non-finite echoes its text.
             if f.is_nan() || (f.is_infinite() && S::TAG == EvalTag::Yq) {
                 return if S::TAG == EvalTag::Yq {
                     nonfinite_literal_display(*f, literal).to_string()
@@ -20902,22 +20894,10 @@ pub fn nonfinite_display_string<S: EvalSemantics>(f: f64) -> &'static str {
 /// yq's YAML-tag spelling of a non-finite double (`.nan`/`.inf`/`-.inf`).
 ///
 /// It is what a non-finite `NumberLiteral` that is *not* a document `.inf`/`.NaN` scalar
-/// prints (`1e400`, an `nan` the evaluator read), and what JSON text turned into YAML does.
-///
-/// A bare `Float` is not spelled this way in yq mode: it is a computed value, and real
-/// yq prints that as Go does, `NaN`/`+Inf`/`-Inf` ([`nonfinite_display_string`], #1071).
-///
-/// # Examples
-///
-/// ```
-/// use succinctly::jq::nonfinite_yaml_spelling;
-///
-/// assert_eq!(nonfinite_yaml_spelling(f64::NAN), ".nan");
-/// assert_eq!(nonfinite_yaml_spelling(f64::INFINITY), ".inf");
-/// assert_eq!(nonfinite_yaml_spelling(f64::NEG_INFINITY), "-.inf");
-/// ```
+/// prints (a `1e400` that overflowed), and what JSON text turned into YAML does. A bare
+/// `Float` is a computed value, which yq prints as Go does ([`nonfinite_display_string`]).
 #[must_use]
-pub fn nonfinite_yaml_spelling(f: f64) -> &'static str {
+pub(crate) fn nonfinite_yaml_spelling(f: f64) -> &'static str {
     if f.is_nan() {
         ".nan"
     } else if f.is_sign_negative() {
@@ -20931,8 +20911,8 @@ pub fn nonfinite_yaml_spelling(f: f64) -> &'static str {
 ///
 /// `f` is its double and `literal` its stored text. A document `.inf`/`-.INF`/`.NaN` scalar echoes the bytes it
 /// was written with, as real yq does (`.NaN | tostring` is `.NaN`, `+.inf` stays `+.inf`);
-/// any other literal that overflowed to a non-finite double keeps
-/// [`nonfinite_yaml_spelling`].
+/// any other literal that overflowed to a non-finite double keeps `.nan`/`.inf`/`-.inf`.
+#[doc(hidden)]
 #[must_use]
 pub fn nonfinite_literal_display(f: f64, literal: &str) -> &str {
     if crate::yaml::nonfinite_literal_index(literal).is_some() {

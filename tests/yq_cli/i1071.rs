@@ -78,3 +78,27 @@ fn test_nonfinite_json_output_stays_null_1071() -> Result<()> {
     }
     Ok(())
 }
+
+/// A document spelling that crossed the reindex bridge is still a literal with text of its own: `length` measures the
+/// bytes it was written with, not the bridge's token.
+#[test]
+fn test_nonfinite_literal_survives_the_bridge_1071() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        ("[.a, .b, .c, .d] | map(length)", "- 4\n- 4\n- 5\n- 5\n"),
+        ("[.a, .b, .c, .d] | .[] | length", "4\n4\n5\n5\n"),
+        (
+            "[.a, .b, .c, .d] | map(. == .)",
+            "- true\n- true\n- true\n- true\n",
+        ),
+        (
+            "[.a, .b, .c, .d] | map(type)",
+            "- '!!float'\n- '!!float'\n- '!!float'\n- '!!float'\n",
+        ),
+    ];
+    for (filter, want) in rows {
+        let (stdout, code) = run_yq_stdin(filter, DOC, &[])?;
+        assert_eq!(code, 0, "for {filter:?}: {stdout:?}");
+        assert_eq!(&stdout, want, "for {filter:?}");
+    }
+    Ok(())
+}

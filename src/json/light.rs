@@ -3217,7 +3217,13 @@ impl<'a> JsonNumber<'a> {
         if !self.bridge {
             return None;
         }
-        crate::jq::OwnedValue::bridge_nonfinite_from_bytes(self.raw_bytes())
+        let bytes = self.raw_bytes();
+        // #1071: a document `.inf`/`.NaN` the bridge carried is a literal with text of its own
+        // (`.INF | length` is 4), not a computed non-finite number.
+        if crate::json::validate::parse_nonfinite_literal_token(bytes).is_some() {
+            return None;
+        }
+        crate::jq::OwnedValue::bridge_nonfinite_from_bytes(bytes)
     }
 
     /// Whether this number was read from the reindex bridge's text (an owned value written out
@@ -3345,8 +3351,8 @@ use crate::jq::escape::{write_json_body_jq, write_json_body_yq};
 use crate::jq::stream::{StreamFailure, StreamResult};
 use crate::jq::{
     format_number_jq_compat, is_jq_canonical_number, jq_canonical_number_prefix,
-    nesting_depth_exceeded_message, nonfinite_display_string, nonfinite_yaml_spelling, EvalError,
-    JqSemantics, NumberRepr, OwnedValue, MAX_VALUE_TREE_DEPTH,
+    nesting_depth_exceeded_message, nonfinite_display_string, EvalError, JqSemantics, NumberRepr,
+    OwnedValue, MAX_VALUE_TREE_DEPTH,
 };
 
 /// A [`JsonError`] as the uncatchable decode failure (#1620) every
@@ -5491,7 +5497,7 @@ fn stream_json_as_yaml<W: AsRef<[u64]> + Clone, Out: core::fmt::Write>(
                 Ok(write!(out, "{i}")?)
             } else if let Ok(f) = n.as_f64() {
                 if f.is_nan() || f.is_infinite() {
-                    Ok(out.write_str(nonfinite_yaml_spelling(f))?)
+                    Ok(out.write_str(crate::jq::nonfinite_yaml_spelling(f))?)
                 } else {
                     Ok(write!(out, "{f}")?)
                 }

@@ -3396,7 +3396,14 @@ impl OwnedValue {
         // #1071: a YAML document's `.inf`/`-.INF`/`.NaN` is not JSON number
         // text, so the parse below cannot read it. yq keeps the spelling, jq's
         // number model has no such literal and reads the double.
-        if let Some(f) = crate::yaml::nonfinite_literal_value(&literal) {
+        // Every spelling is `.`/`+`/`-`-led and at most five bytes: the gate keeps the
+        // table scan off every ordinary number.
+        let gated =
+            literal.len() <= 5 && matches!(literal.as_bytes().first(), Some(b'.' | b'+' | b'-'));
+        if let Some(f) = gated
+            .then(|| crate::yaml::nonfinite_literal_value(&literal))
+            .flatten()
+        {
             return if S::TAG == EvalTag::Yq {
                 Self::NumberLiteral(NumberRepr::Float(f), literal.into())
             } else {
