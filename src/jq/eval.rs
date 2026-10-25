@@ -12903,6 +12903,12 @@ fn owned_state_expr_shape(expr: &Expr) -> bool {
                 && owned_state_expr_shape(else_branch)
         }
         Expr::Builtin(Builtin::ToString | Builtin::Type) => true,
+        // A call to a `def` with no parameters, whose body is itself one of these. The body is
+        // the definition as written, where a call to another definition (or to itself) is an
+        // unresolved name this does not admit, so a recursive body is never one of them.
+        Expr::DefCall { def, args, .. } => {
+            args.is_empty() && def.params.is_empty() && owned_state_expr_shape(&def.body)
+        }
         other => is_closed_unary_builtin(other),
     }
 }
@@ -37696,7 +37702,7 @@ fn wrap_fresh(steps: &[Expr], value: OwnedValue, yq_mode: bool) -> Result<OwnedV
 }
 
 /// Get the type name for an owned value.
-fn owned_type_name(value: &OwnedValue) -> &'static str {
+pub(crate) fn owned_type_name(value: &OwnedValue) -> &'static str {
     match value {
         OwnedValue::Null => "null",
         OwnedValue::Bool(_) => "boolean",
@@ -151100,6 +151106,8 @@ mod share_audit_2999 {
             "reduce .[] as $r ({}; .[$r.name] = length)",
             "reduce .[] as $r ({}; .[length | tostring] = $r.score)",
             "[foreach .[] as $r ([]; .[length] = $r.score; length)] | length",
+            // A call to a parameterless `def` whose body is such a shape.
+            "def inc: (. // 0) + 1; reduce .[] as $r ({}; .[$r.name] |= inc)",
         ] {
             assert_forced(&json, filter, &[]);
         }
@@ -151130,9 +151138,26 @@ mod share_audit_2999 {
         ] {
             assert_forced(&json, filter, once);
         }
+        // #5263: a key that calls a parameterless `def` is as pure as the `def`'s body.
+        assert_forced(
+            &json,
+            "def f: ascii_downcase; reduce .[] as $r ({}; .[$r.name | f] = $r.score)",
+            once,
+        );
+        assert_forced(
+            &json,
+            "def f: length; reduce .[] as $r ([]; .[f] = $r.score)",
+            &[(Kind::ArrayMakeMut, 1)],
+        );
         assert_forced(
             &json,
             "reduce .[] as $r ({}; .[$r.name | label $o | .] = $r.score)",
+            &[(Kind::ObjectMakeMut, 1000)],
+        );
+        // A recursive `def` is never pure: its writes are not held back.
+        assert_forced(
+            &json,
+            "def f: if type == \"string\" then . else f end; reduce .[] as $r ({}; .[$r.name | f] = $r.score)",
             &[(Kind::ObjectMakeMut, 1000)],
         );
     }

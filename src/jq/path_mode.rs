@@ -265,6 +265,9 @@ impl Raise {
 /// writing them as they come (#5256).
 const WRITE_LOOKAHEAD: usize = 4096;
 
+/// How deep [`Interp::pure`] follows calls to parameterless `def`s (#5263).
+const MAX_PURE_DEF_DEPTH: u32 = 4;
+
 type R = Result<(), Raise>;
 type Sink<'s> = dyn FnMut(OwnedValue, Reg) -> R + 's;
 /// An update for [`Interp::modify_native`]: the value at a path in, each
@@ -819,6 +822,9 @@ pub struct Interp<'e> {
     /// the native-stack floor, as `MAX_EVAL_FRAMES` is for the shipped
     /// evaluator.
     depth: Cell<u32>,
+    /// How many `def` bodies [`Self::pure`] is looking inside right now, which
+    /// bounds its walk through a definition that calls itself (#5263).
+    pure_depth: Cell<u32>,
     /// Array slices as `jvp_array_slice` makes them: a view (`offset`, `size`)
     /// into the root allocation. Keyed by `(root, offset, size)`, so equal
     /// slices of one array are one value; each view maps back to its root
@@ -1250,6 +1256,7 @@ impl<'e> Interp<'e> {
             consts: RefCell::new(BTreeMap::new()),
             next_label: Cell::new(0),
             depth: Cell::new(0),
+            pure_depth: Cell::new(0),
             slices: RefCell::new(BTreeMap::new()),
             slice_roots: RefCell::new(BTreeMap::new()),
         }
@@ -2514,6 +2521,21 @@ impl<'e> Interp<'e> {
             E::As { expr, body, .. } => self.pure(expr, env) && self.pure(body, env),
             E::FuncCall { name, args, .. } if args.is_empty() => match env.lookup_func(name, 0) {
                 Some(Callee::Arg { frame, .. }) => self.arg_is_pure(&frame),
+                // A call to a `def` with no parameters is as pure as its body, in the
+                // definition's own scope (#5263). A body that calls itself, or another
+                // `def`, is followed only so far: past `MAX_PURE_DEF_DEPTH` it is not
+                // pure, so a recursive definition never is.
+                Some(Callee::Def {
+                    params,
+                    body,
+                    env: def_env,
+                    ..
+                }) if params.is_empty() && self.pure_depth.get() < MAX_PURE_DEF_DEPTH => {
+                    self.pure_depth.set(self.pure_depth.get() + 1);
+                    let pure = self.pure(body, &def_env);
+                    self.pure_depth.set(self.pure_depth.get() - 1);
+                    pure
+                }
                 _ => false,
             },
             E::Builtin(builtin) => {
@@ -4036,6 +4058,28 @@ fn emit_c_builtin(
             };
             return sink(value, reg.clone());
         }
+    }
+    // `length` and `type` of a value that is not a number, natively: delegated, they
+    // re-serialize the whole input for the shipped evaluator, which makes a `reduce`
+    // whose key is `.[length]` quadratic in the size of its state (#5263).
+    match (builtin, args, input) {
+        (
+            Builtin::Length,
+            [],
+            OwnedValue::Null | OwnedValue::String(_) | OwnedValue::Array(_) | OwnedValue::Object(_),
+        ) => {
+            let length = match input {
+                OwnedValue::String(text) => text.chars().count(),
+                OwnedValue::Array(items) => items.len(),
+                OwnedValue::Object(map) => map.len(),
+                _ => 0,
+            };
+            return sink(OwnedValue::Int(length as i64), reg.clone());
+        }
+        (Builtin::Type, [], _) => {
+            return sink(string(super::eval::owned_type_name(input)), reg.clone());
+        }
+        _ => {}
     }
     // `setpath`/`delpaths` write natively, with copy-on-write: the input is
     // shared with the caller, so the written containers are copied once, as
