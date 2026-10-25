@@ -301,9 +301,31 @@ impl<W: Write> DispatchResultTerminator for ColorSink<'_, W> {
     }
 }
 
-impl<W: Write> DispatchResultTerminator for AsciiEscapeWriter<'_, ColorSink<'_, W>> {
-    fn dispatch_result_terminator(&mut self, terminator: Terminator) -> core::fmt::Result {
+/// What `json_ascii!`'s `--ascii-output` arm streams through: one `dyn` sink shared by every use
+/// site, so the JSON streamers are instantiated for it once instead of once per sink type (#1993).
+/// `terminate` is [`DispatchResultTerminator`] for the wrapper types, which a trait object cannot
+/// name by its concrete sink.
+trait AsciiSink: core::fmt::Write {
+    fn terminate(&mut self, terminator: Terminator) -> core::fmt::Result;
+}
+
+impl<W: Write> AsciiSink for AsciiEscapeWriter<'_, ColorSink<'_, W>> {
+    fn terminate(&mut self, terminator: Terminator) -> core::fmt::Result {
         self.inner_mut().write_result_terminator(terminator)
+    }
+}
+
+/// `--inplace`'s direct writer has no `ColorSink` to buffer or flush, so a terminator is a plain
+/// (ASCII, hence escape-free) write, as `ColorSink::Direct` does.
+impl<W: Write> AsciiSink for AsciiEscapeWriter<'_, FmtWriter<W>> {
+    fn terminate(&mut self, terminator: Terminator) -> core::fmt::Result {
+        terminator.write_fmt(self.inner_mut())
+    }
+}
+
+impl DispatchResultTerminator for &mut dyn AsciiSink {
+    fn dispatch_result_terminator(&mut self, terminator: Terminator) -> core::fmt::Result {
+        self.terminate(terminator)
     }
 }
 
@@ -360,7 +382,8 @@ macro_rules! json_ascii {
         let sink = $sink;
         if $ascii {
             let mut escaped = AsciiEscapeWriter::new(sink);
-            let $out = &mut escaped;
+            let mut shared: &mut dyn AsciiSink = &mut escaped;
+            let $out = &mut shared;
             $body
         } else {
             let $out = sink;
