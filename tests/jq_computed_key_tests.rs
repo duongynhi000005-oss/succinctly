@@ -1445,10 +1445,9 @@ fn test_recurse_over_a_null_producing_filter() {
         Outcome::error("recurse: maximum nodes exceeded"),
     );
 
-    // The same walk in path position meets the cap too through the library
-    // entry, which runs it on the path-mode interpreter (#5223) and walks `.a?`
-    // of `null` as jq does (jq never returns). `eval_full`, this evaluator alone,
-    // keeps `resolve_recurse_sink`'s pruning of the null child: one output.
+    // The same walk in path position meets the cap too, through either entry:
+    // both run it on the path-mode interpreter (#5223; `eval_full` since #5233),
+    // which walks `.a?` of `null` as jq does (jq never returns).
     let filter = r"[path(recurse(.a?) | objects | .[.k]?)]";
     assert_eq!(
         generic(doc.as_bytes(), filter),
@@ -1456,7 +1455,7 @@ fn test_recurse_over_a_null_producing_filter() {
     );
     assert_eq!(
         full(doc.as_bytes(), filter),
-        Outcome::values(&[r#"[["a"]]"#])
+        Outcome::error("recurse: maximum nodes exceeded")
     );
 }
 

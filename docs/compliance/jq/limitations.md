@@ -33,11 +33,11 @@ Measured against jq-1.7.1 over the 240 probes in
 **both** evaluators — the full one (`src/jq/eval.rs`) and the generic one
 (`src/jq/eval_generic.rs`, which the CLI uses):
 
-| Dimension                                    | Result              | Meaning                                                |
-|----------------------------------------------|---------------------|--------------------------------------------------------|
-| **Message text** (both evaluators, verbatim) | **238/240 = 99.2%** | Byte-identical to jq                                   |
-| **Wording divergences**                      | **2**               | Both evaluators raise, but word it differently from jq |
-| **Behaviour / parser gaps**                  | **0**               | succinctly does not raise the error at all             |
+| Dimension                                    | Result               | Meaning                                                |
+|----------------------------------------------|----------------------|--------------------------------------------------------|
+| **Message text** (both evaluators, verbatim) | **240/240 = 100.0%** | Byte-identical to jq                                   |
+| **Wording divergences**                      | **0**                | Both evaluators raise, but word it differently from jq |
+| **Behaviour / parser gaps**                  | **0**                | succinctly does not raise the error at all             |
 
 These three numbers are asserted, not maintained by hand: `jq_error_message_tests.rs`
 parses them back out of this page and fails if they drift from the corpus (they went stale
@@ -519,11 +519,16 @@ non-array path argument.
 Since [#5223](https://github.com/rust-works/succinctly/issues/5223) ([ADR-0026](../../adrs/adr-0026.md)), a jq-mode program whose path target is more than navigation runs whole through the path-mode interpreter (`src/jq/path_mode.rs`), which carries jq 1.7.1's path register `(path, value)` with every output and checks it with `jv_identical` where jq does.
 A target counts as dynamic when an argument of `path`/`del`/`pick`, or the target of `=`, `|=`, `op=` or `//=`, binds, folds, branches, retries a `?//`, catches an error with a handler, or calls a function.
 Targets made only of navigation (`.a`, `.[i]`, `.[$k]`, `.[a:b]`, `.[]`, `..`, `recurse`, `recurse(.[]?)`), or of value filters over it (`try S`, `try S catch empty`, `first(S)`, `S // T`, `select(c)` for a condition with no `?//`, function call or input), stay on the streaming walkers, which answer them as jq does.
-A program that uses `key`, `file_index`, `filename` or a cursor-metadata builtin (`line`, `column`, `document_index`, `anchor`, `style`, the comment builtins, `at_offset`, `at_position`) stays on the shipped route too, and so does a document the interpreter cannot materialize whole (a lone surrogate, nesting past 256 levels): the shipped route decodes only what the program reads.
-A `foreach` or `reduce` in a dynamic path target of a program that uses one of those builtins is refused instead of run on the shipped resolver (#5239, the last bullet below).
+Since [#5233](https://github.com/rust-works/succinctly/issues/5233) no jq-mode program with a dynamic target runs on the shipped route.
+One that also uses a succinctly extension the interpreter does not run (`key`, `file_index`, `parent`, `parent(n)`, bare `path`, or a cursor-metadata builtin: `line`, `column`, `document_index`, `anchor`, `style`, the comment builtins, `at_offset`, `at_position`) is refused with `<name> is not supported in a program whose path expression does more than navigate`, wherever in the program the extension sits.
+The CLI reports it once, as a compile error (exit 3) before any input is read; the library entries return it as an evaluation error.
+jq 1.7.1 rejects each such program at compile time (`key/0 is not defined`), so no jq answer is lost; the same extension beside navigation-only targets still answers (`(.a[] | select(. > 1)) |= (parent | length)`).
+A dynamic-target program over a document the interpreter cannot materialize whole (a lone surrogate, nesting past 256 levels) raises the decode error (`invalid unicode escape sequence`, `nesting depth exceeds limit of 256`, exit 5).
+jq rejects such a document when it parses it, with its own parse error (`Invalid \uXXXX\uXXXX surrogate pair escape`, `Exceeds depth limit for parsing`), so the wording and the reported location differ from jq's while both refuse; a program with no dynamic target still decodes only what it reads (#4412).
+The `unshared-containers` A/B holdout, a measurement build that never ships, refuses a dynamic-target program outright: its by-value `jv_identical` makes the interpreter refuse rows jq answers, and the shipped resolver no longer answers such a target.
 yq mode is unchanged.
 
-So the sections below that describe the path resolver's inferred register (the `Path-mode ...` sections, the register refusals under [Where succinctly errors and jq does not](#where-succinctly-errors-and-jq-does-not), the "artefact guard" and every "refused where jq answers" row) describe the shipped route, which jq mode now reaches only for the programs just listed.
+So the sections below that describe the path resolver's inferred register (the `Path-mode ...` sections, the register refusals under [Where succinctly errors and jq does not](#where-succinctly-errors-and-jq-does-not), the "artefact guard" and every "refused where jq answers" row) describe the shipped route, which jq mode no longer reaches with a dynamic target.
 For a program the interpreter takes, the answer is jq's: the refusals those sections record no longer apply to it, and the superseded issues' rows are pinned as jq answers them (`tests/jq_cli/iN.rs`, `test_superseded_rows_match_jq_through_the_path_mode_interpreter_N`).
 
 The interpreter's own recorded divergences:
@@ -539,14 +544,13 @@ The interpreter's own recorded divergences:
 - **A fold in a dynamic path target, beside a builtin the interpreter declines, is refused** ([#5239](https://github.com/rust-works/succinctly/issues/5239)).
   The builtins are the cursor-metadata ones (`line`, `column`, `document_index`, `anchor`, `style`, `line_comment`, `head_comment`, `foot_comment`, `at_offset`, `at_position`) and the path-context ones (`key`, `file_index`, `path`, `parent`); none of them is a jq 1.7.1 builtin, so there is no jq answer for the builtin itself.
   `filename` is not defined in jq mode, so it never reaches this check.
-  A program with a `foreach` or `reduce` inside a `path`/`del`/`pick` argument or an assignment target, and one of those builtins anywhere, raises `<builtin> cannot be combined with a foreach or reduce in a path target: ...` (exit 5) at the first document, before any output.
+  A program with a `foreach` or `reduce` inside a `path`/`del`/`pick` argument or an assignment target, and one of those builtins anywhere, raises `<builtin> is not supported in a program whose path expression does more than navigate` at compile time (exit 3, `jq: 1 compile error`), before any document is read; since [#5233](https://github.com/rust-works/succinctly/issues/5233) that message covers every dynamic target beside such a builtin, not only a fold.
   Such a program used to stay on the shipped resolver, which reads the cursor, and there it answered the shapes of [#5225](https://github.com/rust-works/succinctly/issues/5225), [#5226](https://github.com/rust-works/succinctly/issues/5226) and [#5228](https://github.com/rust-works/succinctly/issues/5228) as the sections below record.
   Measured against `/usr/bin/jq` 1.7.1 on those three issues' 67 rows, with `0 as $z |` for jq and `(try at_offset(0) catch 0) as $z |` for succinctly (the twelve builtins probed give the same counts): 42 rows differed, 12 of them silent wrong accepts (exit 0 and a landed write where jq exits 5), 19 refusals of a program jq answers, 9 differing error text and 2 differing output.
   Now every one of the 67 rows is refused, so none is a wrong accept: 28 are programs jq answers (the divergence this entry records), 4 are programs where jq prints output before its error, and 35 are programs where jq errors, here with this message in place of jq's.
   The same rows without the builtin match jq through the interpreter, so the builtin is the only difference (`tests/jq_cli/i5239.rs`).
   Refusing was chosen over implementing the builtins in the interpreter: it works on a materialized value, which has no cursor to read a line, an anchor, a comment or a byte offset from.
-  Every other dynamic target beside those builtins stays on the shipped resolver, because nothing showed it wrong there and programs rely on it: a bind or comma in the target with no fold (`.a[(0,1)] |= key`, `at_offset(5) as $x | del(.a | $x)`), and a fold outside every path target.
-  Those are as wrong as the sections below say wherever they say "wrong on the shipped resolver" (#5233 decides what stays).
+  [#5233](https://github.com/rust-works/succinctly/issues/5233) removed the shipped resolver from jq mode's dynamic targets, so the other dynamic targets beside those builtins (a bind or comma in the target with no fold: `.a[(0,1)] |= key`, `at_offset(5) as $x | del(.a | $x)`; a fold outside every path target) are refused the same way instead of answered from the inferred register.
   A document the interpreter cannot materialize (a lone surrogate, nesting past 256 levels) still runs on the shipped route for every program, as above.
   The `unshared-containers` holdout keeps the shipped routing and refuses nothing.
 
@@ -9936,12 +9940,16 @@ are unaffected by any of this — real yq genuinely *is* sticky-any-error across
 unlike jq, so `yq_runner.rs`'s own use of `sink.hit()` at its final exit-code check already
 matches and needs no exception recorded in [yq Limitations](../yq/limitations.md).
 
-### `ascii_downcase`/`ascii_upcase` inside `path()` name the outer value, not jq's inner exploded-array step — no carve-out; recorded on its merits
+### `ascii_downcase`/`ascii_upcase` inside `path()` name the outer value, not jq's inner exploded-array step — fixed by the path-mode interpreter (#5223)
+
+Since [#5223](https://github.com/rust-works/succinctly/issues/5223) a `path()` around either builtin runs on the path-mode interpreter, which runs jq's own `builtin.jq` body for them, so the error names the exploded array as jq's does.
+The library's hidden shipped-evaluator entry agrees since [#5233](https://github.com/rust-works/succinctly/issues/5233), which routes it the same way.
+The record below is what the shipped evaluator answered, kept for its reasoning.
 
 ```console
 $ echo '{"a":"xyz"}' | jq -c 'path(.a | ascii_downcase)'
 jq: error (at <stdin>:1): Invalid path expression near attempt to iterate through [120,121,122]
-$ echo '{"a":"xyz"}' | succinctly jq -c 'path(.a | ascii_downcase)'
+$ echo '{"a":"xyz"}' | succinctly jq -c 'path(.a | ascii_downcase)'   # before #5223
 jq: error (at <stdin>:1): Invalid path expression with result "xyz"
 ```
 

@@ -25,7 +25,10 @@
 //!
 //! Run with: cargo test --test jq_recurse_depth_tests
 
-use succinctly::jq::{eval_full, parse, JqSemantics, OwnedValue, QueryResult};
+use succinctly::jq::{
+    eval_full, parse, parse_with_mode_and_extensions, JqSemantics, OwnedValue, ParserMode,
+    QueryResult, YqSemantics,
+};
 use succinctly::json::JsonIndex;
 
 /// Deep enough to exercise many recursion frames; see module doc for why this
@@ -83,13 +86,31 @@ fn bare_recurse_correct_at_depth() {
 }
 
 /// `recurse(f; cond)` — the `resolve_recurse_sink` stack-based path. `cond` stops
-/// exactly at the `{}` leaf (its `.k` is `null`, not an object), producing
-/// the same path set as the bare form on this document.
+/// exactly at the `{}` leaf (its `.k` is `null`, not a map), producing the
+/// same path set as the bare form on this document.
+///
+/// Under yq's semantics, where `type` of a map is `!!map`: since #5233 a jq program with this path target runs
+/// on the path-mode interpreter even through `eval_full`, and that interpreter
+/// materializes the document, which stops at 256 levels (jq 1.7.1 rejects the
+/// document outright). yq still resolves it here.
 #[test]
 fn parameterized_recurse_correct_at_depth() {
     let json = linear_nest(DEPTH);
-    assert_eq!(
-        run_paths(&json, r#"path(recurse(.k; type=="object"))"#),
-        expected_paths(DEPTH)
+    let bytes = json.as_bytes();
+    let index = JsonIndex::build(bytes);
+    let expr =
+        parse_with_mode_and_extensions(r#"path(recurse(.k; type=="!!map"))"#, ParserMode::Yq, true)
+            .expect("parse failed");
+    let result: QueryResult<Vec<u64>> =
+        eval_full::<Vec<u64>, YqSemantics>(&expr, index.root(bytes));
+    assert!(
+        !result.is_error(),
+        "errored on the depth-{DEPTH} document: {result:?}"
     );
+    let paths: Vec<String> = result
+        .collect_owned::<YqSemantics>()
+        .iter()
+        .map(OwnedValue::to_json)
+        .collect();
+    assert_eq!(paths, expected_paths(DEPTH));
 }

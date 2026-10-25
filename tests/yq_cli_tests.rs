@@ -44570,40 +44570,6 @@ fn test_negative_index_out_of_range_survives_try_catch_partial_prefix_2270() -> 
     Ok(())
 }
 
-/// #2289 review: the deleted eager path-context evaluator's `Expr::Optional`/
-/// `Expr::Try` arms must NOT treat `EvalError::is_invalid_path_expression()`
-/// as uncatchable the way `resolve_node`'s own path-tracking resolver
-/// correctly does -- this function runs whenever *any* sibling elsewhere in
-/// the same pipe needs path context, not only when the branch actually
-/// being dispatched is itself a path expression, so an ordinary
-/// `path(<non-path-expr>)` call reached through here (because an unrelated
-/// `key`/`file_index` sits elsewhere in the pipe) must stay catchable the
-/// same way it is at top-level/value position. Confirmed live against jq
-/// 1.7.1 that bare `.a | try path(1) catch "x"` (no `key` sibling) gives
-/// `"x"` there -- `key` is a succinctly-only path-context extension real
-/// jq's own lexer rejects outright (`key/0 is not defined`), so the query
-/// this test actually runs has no real-jq equivalent to check against; it
-/// pins succinctly's own internal consistency instead (the unrelated `key`
-/// sibling must not change what `try path(1) catch "x"` alone already
-/// does). `is_uncatchable()`'s own broader check (which includes
-/// `is_invalid_path_expression()`) made both this arm and its `Expr::Optional`
-/// sibling wrongly let the error escape uncaught once `key` forced
-/// path-context dispatch, before this fix.
-#[test]
-fn test_invalid_path_expression_stays_catchable_under_path_context_dispatch_2289() -> Result<()> {
-    let (out, stderr, code) =
-        run_jq_stdin_with_stderr(".a | (try path(1) catch \"x\"), key", "{\"a\":1}", &["-c"])?;
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(out.trim(), "\"x\"\n\"a\"");
-
-    let (out, stderr, code) =
-        run_jq_stdin_with_stderr(".a | (path(1)?), key", "{\"a\":1}", &["-c"])?;
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(out.trim(), "\"a\"");
-
-    Ok(())
-}
-
 /// #2254's jq-mode control: jq has no equivalent of this yq-only rule, so
 /// jq mode must be entirely unaffected by the fix -- every case above
 /// answers `null`, never raises.

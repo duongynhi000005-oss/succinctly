@@ -62,14 +62,14 @@ use super::eval::{
     classify_skip_n, clear_nonretryable_stop, collapse_vec, collect_pattern_var_names,
     compare_key_arrays, compare_values, debug_assert_materialization_error, def_spine_len,
     demote_for_reentry, descriptor_slice_bounds, each_path_on_owned, each_pattern_binding_set,
-    each_recurse_walk, enter_def_call, entries_to_object, eval_each_owned, eval_full as full_eval,
-    finish_fork_flow, finish_fork_from_flow, finish_short_circuit, fold_escaped_generator_prefix,
-    foreach_forks, format_owned, has_type_mismatch_is_permissive, index_component_value,
-    index_in_array_bounds, index_one_owned_read as index_owned_by_key, is_assignment_expr,
-    is_eager_arg, is_identity_passthrough, is_retryable_control, is_retryable_stop, key_arrays_eq,
-    limit_raising, literal_to_owned, mark_nonretryable_escape, native_stack_exhausted,
-    needs_path_context, numeric_key_to_array_index, numeric_key_to_index, numeric_length_owned,
-    owned_bound_to_i64_for, owned_index_key_to_expr, owned_to_string,
+    each_recurse_walk, enter_def_call, entries_to_object, eval_each_owned,
+    eval_full_unrouted as full_eval, finish_fork_flow, finish_fork_from_flow, finish_short_circuit,
+    fold_escaped_generator_prefix, foreach_forks, format_owned, has_type_mismatch_is_permissive,
+    index_component_value, index_in_array_bounds, index_one_owned_read as index_owned_by_key,
+    is_assignment_expr, is_eager_arg, is_identity_passthrough, is_retryable_control,
+    is_retryable_stop, key_arrays_eq, limit_raising, literal_to_owned, mark_nonretryable_escape,
+    native_stack_exhausted, needs_path_context, numeric_key_to_array_index, numeric_key_to_index,
+    numeric_length_owned, owned_bound_to_i64_for, owned_index_key_to_expr, owned_to_string,
     pattern_alternatives_var_names, pipe_needs_path_context, prefer_pending_control,
     probe_def_call, range_from_literal_override, range_max_exceeded_error, range_num,
     range_values_f64, range_values_int, reads_parent, recurse_walk_flow, reduce_forks,
@@ -95,6 +95,7 @@ use super::expr::{
     ArithOp, ArithSettleMemo, AssignOp, BindOrigin, BoundBody, Builtin, CompareOp, Expr,
     FormatType, FuncDefData, Literal, NumberKey, ObjectEntry, ObjectKey, Pattern, StringPart,
 };
+use super::path_mode::Route;
 use super::slice::{literal_component_from_values, slice_str, SliceBounds};
 use super::value::{owned_value_eq, subarray_indices, NumberRepr, OwnedValue};
 
@@ -7508,15 +7509,12 @@ fn eval_using_unscoped<S: EvalSemantics, V: DocumentValue>(
     // #5223: as [`eval_with_cursor_unscoped`].
     if S::TAG == EvalTag::Jq {
         match super::path_mode::route(expr) {
-            super::path_mode::Route::Interpreter => {
-                if let Ok(owned) = to_owned_with_cursor::<_, S>(&value, None) {
-                    return path_mode_collect::<V>(expr, owned);
-                }
+            Route::Interpreter => {
+                let owned = owned_or_err!(to_owned_with_cursor::<_, S>(&value, None));
+                return path_mode_collect::<V>(expr, owned);
             }
-            super::path_mode::Route::Refused(builtin) => {
-                return GenericResult::Error(super::path_mode::refusal(builtin));
-            }
-            super::path_mode::Route::Shipped => {}
+            Route::Refused(e) => return GenericResult::Error(e),
+            Route::Shipped => {}
         }
     }
     if takes_input_queue_bridge(expr) {
@@ -10632,22 +10630,16 @@ fn eval_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     // #5223: a jq program with a path target the shipped walkers cannot take
     // natively runs whole through the path-mode interpreter, which carries
     // jq's register. It needs the whole document: one that cannot be decoded
-    // (a lone surrogate, or nesting past the materializer's 256 levels) stays
-    // on the shipped route, which decodes only what the program reads (#4412)
-    // and walks deeper (#3850).
-    // A cursor builtin beside a dynamic target has no route (#5239): the
-    // shipped resolver is wrong on it, and the interpreter has no cursor.
+    // (a lone surrogate, or nesting past the materializer's 256 levels) raises
+    // the decode error, as jq rejects that document when it parses it (#5233).
     if S::TAG == EvalTag::Jq {
         match super::path_mode::route(expr) {
-            super::path_mode::Route::Interpreter => {
-                if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
-                    return path_mode_collect::<C::Value>(expr, owned);
-                }
+            Route::Interpreter => {
+                let owned = owned_or_err!(to_owned_cursor::<S, _>(&cursor));
+                return path_mode_collect::<C::Value>(expr, owned);
             }
-            super::path_mode::Route::Refused(builtin) => {
-                return GenericResult::Error(super::path_mode::refusal(builtin));
-            }
-            super::path_mode::Route::Shipped => {}
+            Route::Refused(e) => return GenericResult::Error(e),
+            Route::Shipped => {}
         }
     }
     eval_with_cursor_shipped::<S, C>(expr, cursor)
@@ -10788,17 +10780,14 @@ fn eval_each_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     // #5223: as [`eval_with_cursor_unscoped`], each output streamed.
     if S::TAG == EvalTag::Jq {
         match super::path_mode::route(expr) {
-            super::path_mode::Route::Interpreter => {
-                if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
-                    return super::path_mode::run_program(expr, owned, &mut |v| {
-                        on_value(GenericResult::Owned(v))
-                    });
-                }
+            Route::Interpreter => {
+                let owned = push_or_control!(to_owned_cursor::<S, _>(&cursor));
+                return super::path_mode::run_program(expr, owned, &mut |v| {
+                    on_value(GenericResult::Owned(v))
+                });
             }
-            super::path_mode::Route::Refused(builtin) => {
-                return Some(Control::Error(super::path_mode::refusal(builtin)));
-            }
-            super::path_mode::Route::Shipped => {}
+            Route::Refused(e) => return Some(Control::Error(e)),
+            Route::Shipped => {}
         }
     }
     eval_each_with_cursor_shipped::<S, C>(expr, cursor, on_value)

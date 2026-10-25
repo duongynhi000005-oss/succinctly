@@ -1598,22 +1598,36 @@ fn the_routed_library_entries_run_the_interpreter_5223() {
         );
 
         // A document the interpreter cannot materialize whole (a lone surrogate)
-        // falls back to the shipped route, which reads only what the program does
-        // and answers (#4412); without the fallback both entries raise the decode
-        // error.
+        // raises the decode error on every entry, where jq rejects the document
+        // when it parses it (#5233). The shipped route no longer answers a
+        // dynamic target in its place.
         let lone = br#"{"a":"\ud800","d":5}"#;
         let index = JsonIndex::build(lone);
         let expr = parse("[.d | path(if . then . else empty end)]").expect("parses");
-        assert!(takes_program(&expr));
-        let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone))
-            .collect_owned::<JqSemantics>()
-            .expect("materializes");
-        assert_eq!(json(&collected), ["[[]]"], "eval_with_cursor");
+        assert!(matches!(route(&expr), Route::Interpreter));
+        use crate::jq::eval_generic::GenericResult;
+        let collected = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(lone));
+        assert!(
+            matches!(&collected, GenericResult::Error(e) if e.is_decode_failure()),
+            "eval_with_cursor: {collected:?}"
+        );
         let using =
-            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(lone).value())
-                .collect_owned::<JqSemantics>()
-                .expect("materializes");
-        assert_eq!(json(&using), ["[[]]"], "eval_using");
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(lone).value());
+        assert!(
+            matches!(&using, GenericResult::Error(e) if e.is_decode_failure()),
+            "eval_using: {using:?}"
+        );
+        let mut streamed = 0;
+        let escape =
+            crate::jq::eval_generic::eval_each_with_cursor(&expr, index.root(lone), &mut |_| {
+                streamed += 1;
+                true
+            });
+        assert_eq!(streamed, 0);
+        assert!(
+            matches!(&escape, Some(Control::Error(e)) if e.is_decode_failure()),
+            "eval_each_with_cursor: {escape:?}"
+        );
 
         // A taken program that raises ends the owned entry's run with the error,
         // after what it emitted.
@@ -1758,6 +1772,56 @@ fn a_hand_raised_label_payload_breaks_its_label_5223() {
     });
 }
 
+/// Every routed library entry raises the refusal for a program `route` refuses
+/// (the CLI reports it at compile time, before any entry runs): a library
+/// caller reaches it through the entry itself (#5233).
+#[test]
+fn every_routed_library_entry_raises_the_refusal_5233() {
+    on_big_stack(|| {
+        let doc = br#"{"a":{"b":1}}"#;
+        let index = JsonIndex::build(doc);
+        let expr = parse("path(.a as $x | .b), key").expect("parses");
+        let Route::Refused(want) = route(&expr) else {
+            panic!("not refused");
+        };
+        use crate::jq::eval::QueryResult;
+        use crate::jq::eval_generic::GenericResult;
+
+        let result = crate::jq::eval::eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(doc));
+        assert!(
+            matches!(&result, QueryResult::Error(e) if e.message == want.message),
+            "eval_full"
+        );
+        let owned = to_owned::<JqSemantics, _>(&index.root(doc).value()).expect("doc");
+        let result = crate::jq::eval::eval_owned_with_file_index::<Vec<u64>, JqSemantics>(
+            &expr,
+            &owned,
+            &[],
+        );
+        assert!(
+            matches!(&result, QueryResult::Error(e) if e.message == want.message),
+            "eval_owned_with_file_index"
+        );
+        let result = crate::jq::eval_generic::eval_with_cursor(&expr, index.root(doc));
+        assert!(
+            matches!(&result, GenericResult::Error(e) if e.message == want.message),
+            "eval_with_cursor"
+        );
+        let result =
+            crate::jq::eval_generic::eval_using::<JqSemantics, _>(&expr, index.root(doc).value());
+        assert!(
+            matches!(&result, GenericResult::Error(e) if e.message == want.message),
+            "eval_using"
+        );
+        let escape =
+            crate::jq::eval_generic::eval_each_with_cursor(&expr, index.root(doc), &mut |_| true);
+        assert!(
+            matches!(&escape, Some(Control::Error(e)) if e.message == want.message),
+            "eval_each_with_cursor"
+        );
+    });
+}
+
 /// A program that skipped `resolve_all_jq` (a library caller parsing it
 /// itself) raises the shipped evaluator's errors for an unbound variable or a
 /// `break` with no enclosing label, rather than an internal error.
@@ -1778,12 +1842,12 @@ fn an_unresolved_program_raises_the_shipped_errors_5223() {
     });
 }
 
-/// `takes_program` routes a program to the interpreter exactly when it holds
-/// a path target that is neither navigation nor a value filter over it, and
-/// nothing the interpreter declines.
+/// `route` sends a program to the interpreter exactly when it holds a path
+/// target that is neither navigation nor a value filter over it, and nothing
+/// the interpreter declines; with something it declines, it refuses it (#5233).
 #[test]
-fn takes_program_routes_dynamic_path_targets_only_5223() {
-    let takes = |filter: &str| takes_program(&parse(filter).expect(filter));
+fn route_sends_dynamic_path_targets_to_the_interpreter_only_5223() {
+    let takes = |filter: &str| matches!(route(&parse(filter).expect(filter)), Route::Interpreter);
     for filter in [
         "del(.users[] | .score as $y | select($y < 100))",
         "path(.a as $x | $x)",
@@ -1820,62 +1884,81 @@ fn takes_program_routes_dynamic_path_targets_only_5223() {
         "path(recurse(.[]?))",
     ] {
         assert!(!takes(filter), "{filter}");
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Shipped),
+            "{filter}"
+        );
     }
 }
 
-/// `route` refuses a fold in a dynamic path target beside a builtin the
-/// interpreter declines, naming the builtin (#5239), and leaves every other
-/// program with such a builtin on the shipped route.
+/// A program with a dynamic path target that also uses an extension builtin
+/// the interpreter does not run is refused, naming it, wherever the builtin is
+/// (#5233). Every one is a succinctly extension jq 1.7.1 does not define
+/// (`key/0 is not defined`, ...), so jq rejects each program whole; the same
+/// construct beside static targets only stays on the shipped route.
 #[test]
-fn route_refuses_a_fold_target_beside_a_declined_builtin_5239() {
-    let route_of = |filter: &str| route(&parse(filter).expect(filter));
-    let fold = "foreach (1,2) as $i (null; $i)";
-    for (builtin, name) in [
-        ("line", "line"),
-        ("at_offset(0)", "at_offset"),
-        ("at_position(1; 1)", "at_position"),
-        ("key", "key"),
-        ("file_index", "file_index"),
-        ("path", "path"),
-        ("parent", "parent"),
-        ("parent(2)", "parent"),
-        ("anchor", "anchor"),
-        ("head_comment", "head_comment"),
+fn route_refuses_a_dynamic_path_target_beside_a_declined_construct_5233() {
+    for (filter, name) in [
+        ("path(.a as $x | .b), key", "key"),
+        ("[path(.a | key as $k | .b)]", "key"),
+        ("file_index, del(.[] | . as $x | $x)", "file_index"),
+        ("path(.a | if . then path else . end)", "path"),
+        ("path(.a as $x | .b) | parent", "parent"),
+        ("path(.a as $x | .b) | parent(1)", "parent"),
+        ("del(.a | . as $x | .b), line", "line"),
+        ("column, (.a as $x | .b) |= 1", "column"),
+        (
+            "document_index, path(first(.[] | . as $x | $x))",
+            "document_index",
+        ),
+        ("anchor, path(.a as $x | .b)", "anchor"),
+        ("style, path(.a as $x | .b)", "style"),
+        ("line_comment, path(.a as $x | .b)", "line_comment"),
+        ("head_comment, path(.a as $x | .b)", "head_comment"),
+        ("foot_comment, path(.a as $x | .b)", "foot_comment"),
+        ("at_offset(0), path(.a as $x | .b)", "at_offset"),
+        ("at_position(1; 1), path(.a as $x | .b)", "at_position"),
     ] {
-        // Either side of the target, and every construct that takes one.
-        for filter in [
-            format!("{builtin} as $z | path(. as $x | {fold})"),
-            format!("path(. as $x | {fold}) | {builtin}"),
-            format!("del(. as $x | {fold}), {builtin}"),
-            format!("(. as $x | {fold}) |= {builtin}"),
-            format!("(. as $x | {fold}) //= 1 | {builtin}"),
-            format!("(. as $x | reduce (1,2) as $i (null; $i)) += 1 | {builtin}"),
-        ] {
-            assert_eq!(route_of(&filter), Route::Refused(name), "{filter}");
-        }
+        let program = parse(filter).expect(filter);
+        let Route::Refused(error) = route(&program) else {
+            panic!("{filter}: not refused");
+        };
+        assert_eq!(
+            error.message,
+            format!(
+                "{name} is not supported in a program whose path expression does more than navigate"
+            ),
+            "{filter}"
+        );
     }
-    for (filter, want) in [
-        // The same program without the builtin goes to the interpreter.
-        (format!("path(. as $x | {fold})"), Route::Interpreter),
-        // A dynamic target with no fold in it, a fold outside every target, and a
-        // static target stay shipped beside the builtin.
-        (
-            "line as $z | path(. as $x | .a)".to_string(),
-            Route::Shipped,
-        ),
-        (
-            format!("({fold}) as $s | line as $z | path(. as $x | .a)"),
-            Route::Shipped,
-        ),
-        (format!("line as $z | path(.a), ({fold})"), Route::Shipped),
-        // A builtin with no cursor dependence the interpreter declines (a module
-        // call) is not named, so it keeps the shipped route.
-        (
-            "m::f as $z | path(. as $x | foreach (1,2) as $i (null; $i))".to_string(),
-            Route::Shipped,
-        ),
-    ] {
-        assert_eq!(route_of(&filter), want, "{filter}");
+    let namespaced = Expr::Pipe(
+        vec![
+            Expr::NamespacedCall {
+                namespace: "m".into(),
+                name: "f".into(),
+                args: Vec::new(),
+            },
+            parse("path(.a as $x | .b)").expect("parses"),
+        ]
+        .into(),
+    );
+    // A module call (rewritten away by the CLI) and the shipped evaluator's own
+    // rewrites keep the shipped route, as before #5233: a `Shared` argument
+    // under a target that only its substitution made dynamic is one.
+    assert!(matches!(route(&namespaced), Route::Shipped));
+    let rewritten = Expr::Pipe(
+        vec![
+            Expr::Builtin(Builtin::Key),
+            Expr::Builtin(Builtin::Path(Box::new(Expr::shared(Expr::Identity)))),
+        ]
+        .into(),
+    );
+    assert!(matches!(route(&rewritten), Route::Shipped));
+    for filter in ["path(.a) | key", "del(.a), line", "[paths] | at_offset(0)"] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Shipped),
+            "{filter}"
+        );
     }
 }
 
@@ -2051,4 +2134,21 @@ fn loadvn_and_generator_arguments_keep_jqs_meaning_5223() {
             ),
         ]);
     });
+}
+
+/// `filename` is a yq builtin, so the jq parser never hands it to the router,
+/// but the name table is shared: each path-context builtin is named, and a
+/// builtin that reads no path context is not (#5233).
+#[test]
+fn path_context_builtins_are_named_5233() {
+    assert_eq!(path_context_name(&Builtin::Key), Some("key"));
+    assert_eq!(path_context_name(&Builtin::FileIndex), Some("file_index"));
+    assert_eq!(path_context_name(&Builtin::Filename), Some("filename"));
+    assert_eq!(path_context_name(&Builtin::PathNoArg), Some("path"));
+    assert_eq!(path_context_name(&Builtin::Parent), Some("parent"));
+    assert_eq!(
+        path_context_name(&Builtin::ParentN(Box::new(Expr::Identity))),
+        Some("parent")
+    );
+    assert_eq!(path_context_name(&Builtin::Length), None);
 }
