@@ -344,7 +344,9 @@ the baseline, so a flip between a VPOPCNTDQ-capable host and one without cannot
 generate a phantom delta. Since #2467 the file is no longer excluded wholesale
 (it used to be listed in [`.patchcov/config.yaml`](.patchcov/config.yaml)), so its
 other ~440 lines count in the **`Total:`** the comment reports at their real
-coverage. The `fail-under-lines` gate is computed by `cargo llvm-cov` itself,
+coverage. The CPU-gated lines stay in that number too, as they ran on this
+run's host, so the headline percentage can still differ by a few lines from run
+to run; what is masked is the *delta* against `main`. The `fail-under-lines` gate is computed by `cargo llvm-cov` itself,
 independently of `patchcov`, over the unfiltered set.
 
 If `popcount.rs` moves by ±26pp on an otherwise-unrelated PR (e.g. a dependabot
