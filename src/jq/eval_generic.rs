@@ -7482,9 +7482,17 @@ fn eval_using_unscoped<S: EvalSemantics, V: DocumentValue>(
     value: V,
 ) -> GenericResult<V> {
     // #5223: as [`eval_with_cursor_unscoped`].
-    if S::TAG == EvalTag::Jq && super::path_mode::takes_program(expr) {
-        if let Ok(owned) = to_owned_with_cursor::<_, S>(&value, None) {
-            return path_mode_collect::<V>(expr, owned);
+    if S::TAG == EvalTag::Jq {
+        match super::path_mode::route(expr) {
+            super::path_mode::Route::Interpreter => {
+                if let Ok(owned) = to_owned_with_cursor::<_, S>(&value, None) {
+                    return path_mode_collect::<V>(expr, owned);
+                }
+            }
+            super::path_mode::Route::Refused(builtin) => {
+                return GenericResult::Error(super::path_mode::refusal(builtin));
+            }
+            super::path_mode::Route::Shipped => {}
         }
     }
     if takes_input_queue_bridge(expr) {
@@ -10603,9 +10611,19 @@ fn eval_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     // (a lone surrogate, or nesting past the materializer's 256 levels) stays
     // on the shipped route, which decodes only what the program reads (#4412)
     // and walks deeper (#3850).
-    if S::TAG == EvalTag::Jq && super::path_mode::takes_program(expr) {
-        if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
-            return path_mode_collect::<C::Value>(expr, owned);
+    // A cursor builtin beside a dynamic target has no route (#5239): the
+    // shipped resolver is wrong on it, and the interpreter has no cursor.
+    if S::TAG == EvalTag::Jq {
+        match super::path_mode::route(expr) {
+            super::path_mode::Route::Interpreter => {
+                if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
+                    return path_mode_collect::<C::Value>(expr, owned);
+                }
+            }
+            super::path_mode::Route::Refused(builtin) => {
+                return GenericResult::Error(super::path_mode::refusal(builtin));
+            }
+            super::path_mode::Route::Shipped => {}
         }
     }
     eval_with_cursor_shipped::<S, C>(expr, cursor)
@@ -10744,11 +10762,19 @@ fn eval_each_with_cursor_unscoped<S: EvalSemantics, C: DocumentCursor>(
     on_value: &mut dyn FnMut(GenericResult<C::Value>) -> bool,
 ) -> Option<Control> {
     // #5223: as [`eval_with_cursor_unscoped`], each output streamed.
-    if S::TAG == EvalTag::Jq && super::path_mode::takes_program(expr) {
-        if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
-            return super::path_mode::run_program(expr, owned, &mut |v| {
-                on_value(GenericResult::Owned(v))
-            });
+    if S::TAG == EvalTag::Jq {
+        match super::path_mode::route(expr) {
+            super::path_mode::Route::Interpreter => {
+                if let Ok(owned) = to_owned_cursor::<S, _>(&cursor) {
+                    return super::path_mode::run_program(expr, owned, &mut |v| {
+                        on_value(GenericResult::Owned(v))
+                    });
+                }
+            }
+            super::path_mode::Route::Refused(builtin) => {
+                return Some(Control::Error(super::path_mode::refusal(builtin)));
+            }
+            super::path_mode::Route::Shipped => {}
         }
     }
     eval_each_with_cursor_shipped::<S, C>(expr, cursor, on_value)
