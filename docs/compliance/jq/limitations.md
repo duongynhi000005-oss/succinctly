@@ -538,8 +538,11 @@ The interpreter's own recorded divergences:
   The difference is observable only through jq's 65,536-element slice-copy rule: `[range(70003)] | .[60000:] | .[0] = 0 | del(.[6000:] as $x | .[6000:] | $x) | length` is `6000` here and an `Invalid path expression` in jq, whose second slice reaches offset 66,000 and is copied (`test_5118_a_written_view_answers_where_jq_refuses_5223`).
 - **A walk jq never finishes raises the existing caps.** `null | [path(recurse(.a))] | length` and `path(recurse(.a?; true))` on `{"a":null}` never return in jq; they raise `recurse: maximum nodes exceeded` here after 10,000 nodes, as the value walker does (the shipped path walker pruned a `null` node's children and answered `1`, #856).
   `until`/`while`, `range` and `repeat` keep their caps the same way (see the sections on each below).
-- **`del(.[nan])`** loops forever in jq 1.7.1; here the NaN path names no element and the document comes back unchanged.
+- **`del(.[nan])`** loops forever in jq 1.7.1 on an array; here the NaN path names no element and the document comes back unchanged.
   `path(.[nan])` is jq's `[null]`.
+  The same holds on every route, for a key held in a variable (`nan as $v | del(.[$v])`) and for `|= empty` through one (#5245).
+  Through a `null` or absent parent jq answers, and so does this: `{"c":null} | nan as $v | del(.c[$v])` is `{"c":null}`.
+  A write that produces a value still raises `Cannot set array element at NaN index`, as in jq.
 - **A `?` around a function call** (`def opt(f): f?; path(opt(.a))`) formats the index error the `?` then drops: the same answer as jq, at two allocator calls per member that the shipped walker's settled lookup avoids.
 - **A fold in a dynamic path target, beside a builtin the interpreter declines, is refused** ([#5239](https://github.com/rust-works/succinctly/issues/5239)).
   The builtins are the cursor-metadata ones (`line`, `column`, `document_index`, `anchor`, `style`, `line_comment`, `head_comment`, `foot_comment`, `at_offset`, `at_position`) and the path-context ones (`key`, `file_index`, `path`, `parent`); none of them is a jq 1.7.1 builtin, so there is no jq answer for the builtin itself.

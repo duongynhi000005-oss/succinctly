@@ -828,8 +828,19 @@ impl EvalError {
         Self::new(Self::CANNOT_UPDATE_ARRAY_INDEX_OF_ARRAY)
     }
 
+    /// `Cannot set array element at NaN index`.
+    ///
+    /// jq's `jv_array_set` refuses a NaN index when a write reaches it; the
+    /// path naming it is fine (`path(.[nan])` is `[null]`), so this is raised
+    /// by the write, not by resolving the path (#5245). An inline `?` does not
+    /// hide it: that covers reaching the target, not writing there.
+    pub fn nan_index() -> Self {
+        Self::new(Self::NAN_INDEX)
+    }
+
     const CANNOT_UPDATE_ARRAY_INDEX_OF_ARRAY: &'static str =
         "Cannot update field at array index of array";
+    const NAN_INDEX: &'static str = "Cannot set array element at NaN index";
     const OUT_OF_BOUNDS_NEGATIVE_INDEX: &'static str = "Out of bounds negative array index";
     const SLICE_ASSIGN_NON_ARRAY: &'static str =
         "A slice of an array can only be assigned another array";
