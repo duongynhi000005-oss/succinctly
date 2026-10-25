@@ -36921,6 +36921,12 @@ fn update_path_with_deletes<S: EvalSemantics>(
                 .expect("non-optional index yields a value or errors");
             let wrote =
                 update_root_with_filter::<S>(&mut read, filter_expr, None, Reentry::REBUILT, None)?;
+            // #5245: a filter with no output deletes, and a NaN index names nothing to delete:
+            // jq's `delpaths` leaves a `null` or absent parent as it is (`{"c":null} | .c[nan] |=
+            // empty`), and never returns on an array. The document stays as it is.
+            if !wrote && is_nan_index_key(key) {
+                return Ok(false);
+            }
             Err(array_key_write_error(
                 key,
                 if wrote {
@@ -69515,11 +69521,7 @@ fn resolve_index_expr_sink<'a, S: EvalSemantics>(
             // `{"a":1}` in jq while `[1,2,3] | .[nan]? = 5` raises. jq's NaN key is a
             // path component (#5245), refused where a write reaches it instead.
             if S::TAG == EvalTag::Yq
-                && matches!(
-                    k,
-                    OwnedValue::Int(_) | OwnedValue::Float(_) | OwnedValue::NumberLiteral(..)
-                )
-                && numeric_key_to_index(k).is_none()
+                && is_nan_index_key(k)
                 && matches!(
                     target_value.as_ref(),
                     OwnedValue::Array(_) | OwnedValue::Null
@@ -84263,15 +84265,22 @@ impl DeleteTrieBuilder {
         // #3506: a subarray-search key that ends the path is what jq's
         // `delpaths` cannot delete; one with more path after it is refused
         // by `child_of` with the update wording.
+        //
+        // #5245: a NaN index names no element, so a path through one deletes nothing: jq leaves a
+        // `null` or absent parent as it is and never returns on an array.
         if let PathPrefix::Node { component, .. } = &**path {
             if let Some(key) = trailing_array_key(component) {
-                return Err(array_key_write_error(
-                    key,
-                    EvalError::cannot_delete_element_of_array("array"),
-                ));
+                if is_nan_index_key(key) {
+                    return Ok(());
+                }
+                return Err(EvalError::cannot_delete_element_of_array("array"));
             }
         }
-        let id = self.intern(path)?;
+        let id = match self.intern(path) {
+            Ok(id) => id,
+            Err(e) if e.is_nan_index() => return Ok(()),
+            Err(e) => return Err(e),
+        };
         self.trie.nodes[id as usize].terminal = true;
         Ok(())
     }
@@ -86547,10 +86556,9 @@ fn delete_at_path(
             "internal error: unresolved computed slice in delete path",
         )),
         // #3506: jq will not delete through a subarray-search key.
-        Expr::ArrayKey(key) => Err(array_key_write_error(
-            key,
-            EvalError::cannot_delete_element_of_array("array"),
-        )),
+        // #5245: a NaN index names no element: nothing to delete.
+        Expr::ArrayKey(key) if is_nan_index_key(key) => Ok(()),
+        Expr::ArrayKey(_) => Err(EvalError::cannot_delete_element_of_array("array")),
         _ => Err(EvalError::new("cannot use expression as delete target")),
     }
 }
@@ -87135,18 +87143,14 @@ fn delete_path_steps(
                 // terminal key is deleted from its parent first, and that is
                 // where jq refuses (`del(.[[1]][[0]])`).
                 let ending = rest.last().and_then(trailing_array_key);
-                return Err(match ending {
-                    Some(last) => array_key_write_error(
-                        last,
-                        array_key_write_error(
-                            key,
-                            EvalError::cannot_delete_element_of_array("array"),
-                        ),
-                    ),
-                    None => array_key_write_error(
-                        key,
-                        EvalError::cannot_update_field_at_array_index_of_array(),
-                    ),
+                // #5245: a NaN index names no element, so a path through one deletes nothing.
+                if is_nan_index_key(key) || ending.is_some_and(is_nan_index_key) {
+                    return Ok(());
+                }
+                return Err(if ending.is_some() {
+                    EvalError::cannot_delete_element_of_array("array")
+                } else {
+                    EvalError::cannot_update_field_at_array_index_of_array()
                 });
             }
             _ => return delete_at_path(root, first, here, yq_mode, real_slot),
