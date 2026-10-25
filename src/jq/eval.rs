@@ -61067,66 +61067,69 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
     // walk is read at most once, and only for a bind whose variable reaches path position.
     let marker_walk: core::cell::OnceCell<Option<Vec<OwnedValue>>> = core::cell::OnceCell::new();
     let bound_at = core::cell::Cell::new(0_usize);
-    let flow = resolve_bind_source_sink::<S>(
-        source,
-        body,
-        var,
-        value,
-        trackable,
-        frame,
-        &mut |bound, origin, witnessed| {
-            bound_any.set(true);
-            let at = bound_at.replace(bound_at.get() + 1);
-            // Equal to the register *now*: an output that differs from it cannot be
-            // its node whatever the source forwarded (`(select(false) // .a) as $v`
-            // binds `.a`, which an equal-valued sibling register is not).
-            let ambiguous = !witnessed
+    let mut on_bound = |bound: OwnedValue, origin: Option<Origin>, witnessed: bool| {
+        bound_any.set(true);
+        let at = bound_at.replace(bound_at.get() + 1);
+        // Equal to the register *now*: an output that differs from it cannot be
+        // its node whatever the source forwarded (`(select(false) // .a) as $v`
+        // binds `.a`, which an equal-valued sibling register is not).
+        let ambiguous = !witnessed
                 && *may_alias
                     .get_or_init(|| source_may_alias_register::<S>(source, trackable, frame))
                 // #3795: or, with the register lost upstream, could be the lost one.
                 && may_be_register_in_hand(&bound, value, trackable, frame);
-            // #5181: ...the walk's node in place of the by-value copy of it, which shares the marker's storage where the
-            // evaluator's bridge may have copied. A head that starts at a `$x` marker and yields one output (no `[]`, so the
-            // witness route's order and the walk's cannot drift apart, and nothing is walked ahead of demand); a `.` a stage
-            // handed on is not read here (the register is not in hand: the bind stays `Unproven`).
-            let walked = (S::TAG == EvalTag::Jq && origin.is_none() && !ambiguous)
-                .then(|| {
-                    marker_walk
-                        .get_or_init(|| {
-                            (var_reaches_path_position(body, var)
-                                && !snapshot.is_marked()
-                                && any_subexpr(source, &mut |e| matches!(e, Expr::TrackedVar(_)))
-                                && !any_subexpr(source, &mut |e| matches!(e, Expr::Iterate))
-                                && head_spine_navigates(unwrap_paren(source)))
-                            .then(|| marker_navigation_outputs(unwrap_paren(source), None))
-                            .flatten()
-                        })
-                        .as_ref()
-                        .and_then(|outputs| outputs.get(at))
-                        .filter(|out| **out == bound)
-                        .cloned()
-                })
-                .flatten();
-            let keep_container_identity = walked.is_some();
-            let bound = walked.unwrap_or(bound);
-            let substituted = substitute_bound_var_at(
-                source,
-                body,
-                var,
-                &bound,
-                identity_at.clone(),
-                if ambiguous {
-                    Some(Origin::Unproven)
-                } else {
-                    origin
-                },
-                None,
-                S::TAG == EvalTag::Jq,
-                keep_container_identity,
-            );
-            resolve_node_sink::<S>(&substituted, value, trackable, snapshot, frame, keep, sink)
-        },
-    );
+        // #5181: ...the walk's node in place of the by-value copy of it, which shares the marker's storage where the
+        // evaluator's bridge may have copied. A head that starts at a `$x` marker and yields one output (no `[]`, so the
+        // witness route's order and the walk's cannot drift apart, and nothing is walked ahead of demand); a `.` a stage
+        // handed on is not read here (the register is not in hand: the bind stays `Unproven`).
+        let walked = (S::TAG == EvalTag::Jq && origin.is_none() && !ambiguous)
+            .then(|| {
+                marker_walk
+                    .get_or_init(|| {
+                        (var_reaches_path_position(body, var)
+                            && !snapshot.is_marked()
+                            && any_subexpr(source, &mut |e| matches!(e, Expr::TrackedVar(_)))
+                            && !any_subexpr(source, &mut |e| matches!(e, Expr::Iterate))
+                            && head_spine_navigates(unwrap_paren(source)))
+                        .then(|| marker_navigation_outputs(unwrap_paren(source), None))
+                        .flatten()
+                    })
+                    .as_ref()
+                    .and_then(|outputs| outputs.get(at))
+                    .filter(|out| **out == bound)
+                    .cloned()
+            })
+            .flatten();
+        let keep_container_identity = walked.is_some();
+        let bound = walked.unwrap_or(bound);
+        let substituted = substitute_bound_var_at(
+            source,
+            body,
+            var,
+            &bound,
+            identity_at.clone(),
+            if ambiguous {
+                Some(Origin::Unproven)
+            } else {
+                origin
+            },
+            None,
+            S::TAG == EvalTag::Jq,
+            keep_container_identity,
+        );
+        resolve_node_sink::<S>(&substituted, value, trackable, snapshot, frame, keep, sink)
+    };
+    let mut flow =
+        resolve_bind_source_sink::<S>(source, body, var, value, trackable, frame, &mut on_bound);
+    // #5278: as on the value routes (#5261), a source that bound nothing still runs its
+    // context-free stages against the empty context it left, before the body runs unbound.
+    if S::TAG == EvalTag::Yq && !bound_any.get() && matches!(flow, ResolveFlow::Exhausted) {
+        if let Some(retried) =
+            resolve_as_source_retry::<S>(source, body, var, value, trackable, frame, &mut on_bound)
+        {
+            flow = retried;
+        }
+    }
     // yq's `as` runs its body once, with the variable unset, when the source
     // has no output, so a write or `del` through it reaches the body's paths
     // (#4139); see `yq_runs_as_body_without_source`.
@@ -61134,6 +61137,23 @@ fn resolve_as_source_sink<'a, S: EvalSemantics>(
         return resolve_node_sink::<S>(body, value, trackable, snapshot, frame, keep, sink);
     }
     flow
+}
+
+/// [`resolve_as_source_sink`]'s second run of a yq source that bound nothing (#5278); see
+/// [`yq_as_source_retry`]. Out of line so the resolver's recursing frame stays as it was.
+#[inline(never)]
+fn resolve_as_source_retry<S: EvalSemantics>(
+    source: &Expr,
+    body: &Expr,
+    var: &str,
+    value: &OwnedValue,
+    trackable: bool,
+    frame: &Frame,
+    bind: &mut dyn FnMut(OwnedValue, Option<Origin>, bool) -> ResolveFlow,
+) -> Option<ResolveFlow> {
+    yq_as_source_retry::<S, _>(source, |reemit| {
+        resolve_bind_source_sink::<S>(reemit, body, var, value, trackable, frame, bind)
+    })
 }
 
 fn resolve_bind_source_sink<S: EvalSemantics>(
