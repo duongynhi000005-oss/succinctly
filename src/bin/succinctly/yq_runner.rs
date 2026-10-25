@@ -4033,25 +4033,155 @@ fn propagate_assign_alias_marks(expr: &Expr, tree: &mut CommentTree) {
         return;
     };
     for (path_expr, value_expr) in stages {
-        let Some(path_steps) = static_nav_steps(path_expr) else {
+        let Some(targets) = static_nav_targets(path_expr) else {
             continue;
         };
-        let source_mark = match static_nav_steps(value_expr) {
-            Some(value_steps) => comment_tree_at_path_mut(tree, &value_steps)
-                .and_then(|node| node.anchor_mark().cloned()),
-            None => None,
-        };
-        let Some(node) = comment_tree_at_path_mut(tree, &path_steps) else {
-            continue;
-        };
-        match source_mark {
-            Some(AnchorMark::Aliases(name)) => {
-                node.meta_mut().anchor = Some(AnchorMark::Aliases(name));
+        // The source is read before any target is written: `(.c, .d) = .c` must copy the
+        // mark `.c` held going in. A negative index counts from the end of the node's array
+        // (#2505), which only the tree can say, so the source walks the tree rather than a
+        // path ([`static_nav_steps`] declines `.[-1]`).
+        let source = nav_node(tree, value_expr)
+            .filter(|node| contains_alias_mark(node))
+            .cloned();
+        for path_steps in targets {
+            match &source {
+                // The source node is an alias itself: the target becomes one too, created if
+                // the write made it under a parent the tree has no node for (`.c.d = .b`, #2505).
+                Some(src) if src.alias_name().is_some() => {
+                    if let Some(node) = comment_tree_at_path_or_create_mut(tree, &path_steps) {
+                        node.meta_mut().anchor = src.anchor_mark().cloned();
+                    }
+                }
+                // A container holding aliases is copied whole by go-yaml's `Set`, so each
+                // alias inside it stays one in the copy (`.c = .b` on `b: [*x]`, #2505).
+                Some(src) => {
+                    if let Some(node) = comment_tree_at_path_or_create_mut(tree, &path_steps) {
+                        clear_alias_marks(node);
+                        copy_alias_marks(src, node);
+                    }
+                }
+                None => {
+                    if let Some(node) = comment_tree_at_path_mut(tree, &path_steps) {
+                        if matches!(node.anchor_mark(), Some(AnchorMark::Aliases(_))) {
+                            node.meta_mut().anchor = None;
+                        }
+                    }
+                }
             }
-            _ if matches!(node.anchor_mark(), Some(AnchorMark::Aliases(_))) => {
-                node.meta_mut().anchor = None;
+        }
+    }
+}
+
+/// The node `expr` reads from `node` when `expr` is static navigation, like [`static_nav_steps`]
+/// but walking the comment tree itself so a negative index can count from the end of the array
+/// it lands on (`.b[-1]`, #2505).
+fn nav_node<'t>(node: &'t CommentTree, expr: &Expr) -> Option<&'t CommentTree> {
+    match expr {
+        Expr::Field(name) => match node {
+            CommentTree::Object(_, fields, _) => fields.get(name.as_str()),
+            _ => None,
+        },
+        Expr::Index { idx, .. } => match node {
+            CommentTree::Array(_, items) => {
+                let i = match usize::try_from(*idx) {
+                    Ok(i) => i,
+                    Err(_) => items
+                        .len()
+                        .checked_sub(usize::try_from(idx.unsigned_abs()).ok()?)?,
+                };
+                items.get(i)
             }
-            _ => {}
+            _ => None,
+        },
+        Expr::IndexExpr { .. } => {
+            let (target, name) = expr.literal_bracket_key()?;
+            let base = if matches!(target, Expr::Identity) {
+                node
+            } else {
+                nav_node(node, target)?
+            };
+            match base {
+                CommentTree::Object(_, fields, _) => fields.get(name),
+                _ => None,
+            }
+        }
+        Expr::Paren(inner) | Expr::Optional(inner) => nav_node(node, inner),
+        Expr::Pipe(stages) => stages
+            .iter()
+            .try_fold(node, |current, stage| nav_node(current, stage)),
+        _ => None,
+    }
+}
+
+/// [`static_nav_steps`] for an assignment's target, which may also be a comma of such paths
+/// (`(.c, .d) = .b`, #2505): every branch names a node the write sets.
+fn static_nav_targets(expr: &Expr) -> Option<Vec<Vec<TreeStep<'_>>>> {
+    match expr {
+        Expr::Comma(items) => {
+            let mut targets = Vec::with_capacity(items.len());
+            for item in items {
+                targets.extend(static_nav_targets(item)?);
+            }
+            Some(targets)
+        }
+        Expr::Paren(inner) => static_nav_targets(inner),
+        _ => static_nav_steps(expr).map(|steps| vec![steps]),
+    }
+}
+
+/// Whether `node` or anything under it is an `*alias` reference.
+fn contains_alias_mark(node: &CommentTree) -> bool {
+    node.alias_name().is_some()
+        || match node {
+            CommentTree::Leaf(_) => false,
+            CommentTree::Array(_, items) => items.iter().any(contains_alias_mark),
+            CommentTree::Object(_, fields, _) => fields.values().any(contains_alias_mark),
+        }
+}
+
+/// Drop every `*alias` mark at or under `node`: the value a plain `=` replaced no longer holds
+/// the node those marks named.
+fn clear_alias_marks(node: &mut CommentTree) {
+    if node.alias_name().is_some() {
+        node.meta_mut().anchor = None;
+    }
+    match node {
+        CommentTree::Leaf(_) => {}
+        CommentTree::Array(_, items) => items.iter_mut().for_each(clear_alias_marks),
+        CommentTree::Object(_, fields, _) => fields.values_mut().for_each(clear_alias_marks),
+    }
+}
+
+/// Copy each `*alias` mark under `src` onto the node at the same position under `dst`, growing
+/// `dst` where the write left it without one. Marks only: the copy's comments and styles stay
+/// whatever the reconciled tree gave it.
+fn copy_alias_marks(src: &CommentTree, dst: &mut CommentTree) {
+    if src.alias_name().is_some() {
+        dst.meta_mut().anchor = src.anchor_mark().cloned();
+    }
+    match src {
+        CommentTree::Leaf(_) => {}
+        CommentTree::Array(_, items) => {
+            for (i, item) in items.iter().enumerate() {
+                if contains_alias_mark(item) {
+                    if let Some(child) =
+                        comment_tree_at_path_or_create_mut(dst, &[TreeStep::Index(i)])
+                    {
+                        copy_alias_marks(item, child);
+                    }
+                }
+            }
+        }
+        CommentTree::Object(_, fields, _) => {
+            for (key, field) in fields {
+                if contains_alias_mark(field) {
+                    if let Some(child) =
+                        comment_tree_at_path_or_create_mut(dst, &[TreeStep::Key(key.as_str())])
+                    {
+                        copy_alias_marks(field, child);
+                    }
+                }
+            }
         }
     }
 }
