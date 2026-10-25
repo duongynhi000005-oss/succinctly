@@ -36,6 +36,33 @@ fn test_value_only_index_key_answers_as_jq_5243() -> Result<()> {
         (r#"{"b":[10,20,30]}"#, "path(.b[length - 1])", r#"["b",0]"#),
         // A NaN key: the walker carries it as jq does (#5245).
         ("[1,2]", "path(.[nan])", "[null]"),
+        // A key holding an assignment of its own, static or not.
+        (
+            r#"{"a":1}"#,
+            ".[(.a = 7) | .a | tostring] = 2",
+            r#"{"a":1,"7":2}"#,
+        ),
+        (
+            r#"{"a":1}"#,
+            ".[(.a |= . + 1) | .a | tostring] = 2",
+            r#"{"a":1,"2":2}"#,
+        ),
+        (
+            r#"{"a":1}"#,
+            ".[(.a += 3) | .a | tostring] = 2",
+            r#"{"a":1,"4":2}"#,
+        ),
+        (
+            r#"{"a":1}"#,
+            ".[(.z //= \"q\") | .z] = 2",
+            r#"{"a":1,"q":2}"#,
+        ),
+        (r#"{"a":1}"#, "[path(.[(.b = \"a\") | .b])]", r#"[["a"]]"#),
+        (
+            r#"{"a":1}"#,
+            "def f: 9; .[(.a = f) | .a | tostring] = 2",
+            r#"{"a":1,"9":2}"#,
+        ),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
         assert_eq!((stdout.trim_end(), code), (want, 0), "`{filter}`: {stderr}");

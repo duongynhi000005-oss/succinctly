@@ -2201,3 +2201,32 @@ fn nested_index_keys_route_in_linear_time_5243() {
         assert!(matches!(route(&program), Route::Shipped));
     });
 }
+
+/// A key or condition holding a path construct of its own is judged by that
+/// construct's parts: static when its target is static and an assignment's
+/// right side only computes a value, dynamic otherwise (#5243).
+#[test]
+fn an_index_key_holding_an_assignment_is_judged_by_its_parts_5243() {
+    for filter in [
+        ".[(.a = 7) | .a | tostring] = 2",
+        ".[(.a |= . + 1) | .a | tostring] = 2",
+        ".[(.a += 3) | .a | tostring] = 2",
+        ".[(.z //= \"q\") | .z] = 2",
+        "[path(.[(.b = \"a\") | .b])]",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Shipped),
+            "{filter}"
+        );
+    }
+    for filter in [
+        "def f: 9; .[(.a = f) | .a | tostring] = 2",
+        ".[(path(if . then .a else .b end) | length)] = 2",
+        ".[(del(.a as $x | $x)) | length] = 2",
+    ] {
+        assert!(
+            matches!(route(&parse(filter).expect(filter)), Route::Interpreter),
+            "{filter}"
+        );
+    }
+}
