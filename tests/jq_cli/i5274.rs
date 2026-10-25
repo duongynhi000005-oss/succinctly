@@ -53,6 +53,31 @@ fn test_slice_folds_answer_as_jq_5274() -> Result<()> {
         ),
         ("null", "reduce range(2) as $i (.; .[1:])", "null"),
         ("[[1],[2],[3]]", "reduce range(2) as $i (.; .[1:])", "[[3]]"),
+        (
+            "[1,2,3,4,5,6]",
+            "reduce range(3) as $i (.; (.[1:]))",
+            "[4,5,6]",
+        ),
+        (
+            "[1,2,3,4,5,6]",
+            "reduce range(2) as $i (.; .[1.5:])",
+            "[3,4,5,6]",
+        ),
+        (
+            "[1,2,3,4,5,6]",
+            "reduce range(2) as $i (.; .[:-1.5])",
+            "[1,2,3,4]",
+        ),
+        (
+            r#"{"list":[1,2,3,4,5,6]}"#,
+            ".list as $d | reduce range(2) as $i ($d; .[1:]) | [., $d]",
+            "[[3,4,5,6],[1,2,3,4,5,6]]",
+        ),
+        (
+            "null",
+            "reduce range(3) as $i ([range(70000)]; .[1:]) | [length, .[0], .[-1]]",
+            "[69997,3,69999]",
+        ),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
         assert_eq!(

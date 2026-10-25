@@ -12113,9 +12113,13 @@ pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedVal
     if let (EvalTag::Jq, Expr::Slice { start, end, .. }) = (S::TAG, unwrap_paren(expr)) {
         match state {
             OwnedValue::Array(mut items) if !items.is_shared() => {
-                let range = SliceBounds::from_literals(*start, *end).resolve(items.len());
+                let range = literal_array_slice_range(items.len(), *start, *end);
                 items.truncate(range.end);
                 items.drain(..range.start);
+                // The kept part does not keep the buffer it was cut from alive.
+                if items.capacity() > 2 * items.len() + 16 {
+                    items.shrink_to_fit();
+                }
                 return OwnedStep::Handled(Ok(OwnedValue::Array(items)));
             }
             OwnedValue::Array(_) | OwnedValue::String(_) => {
@@ -31037,7 +31041,7 @@ pub(crate) fn slice_owned_value(
 ) -> Result<Option<OwnedValue>, EvalError> {
     match target {
         OwnedValue::Array(items) => {
-            let range = SliceBounds::from_literals(start, end).resolve(items.len());
+            let range = literal_array_slice_range(items.len(), start, end);
             Ok(Some(OwnedValue::Array(items[range].to_vec().into())))
         }
         OwnedValue::Null => Ok(Some(OwnedValue::Null)),
@@ -31052,6 +31056,17 @@ pub(crate) fn slice_owned_value(
             "object",
         )),
     }
+}
+
+/// The elements an array of `len` keeps for the slice `.[start:end]`: the one
+/// definition [`slice_owned_value`] copies from and the fold step cuts in place by
+/// (#5274), so the two cannot disagree on a bound.
+fn literal_array_slice_range(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> core::ops::Range<usize> {
+    SliceBounds::from_literals(start, end).resolve(len)
 }
 
 /// Slice one `OwnedValue` target on the *read* path (`.[S:E]`), applying
@@ -75328,7 +75343,9 @@ fn fold_step_each<S: EvalSemantics>(
 /// between them.
 ///
 /// While the #2889 embed table is live (the loop runs inside an `as` binding
-/// that holds a document node) only the assignment half of the step runs;
+/// that holds a document node) only the assignment half of the step runs -- not
+/// the slice cut of [`try_eval_owned_step`] either (#5274), whose result shares the
+/// state's elements, which the table is there to witness;
 /// `to_entries`/`from_entries` stay on the bridge, where
 /// [`eval_owned_relocating_fold`] owns them. The assignment step is sound
 /// under the table because it reads no table entry and no marker's identity (its
