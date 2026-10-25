@@ -551,14 +551,17 @@ CI works around but this repo's own docs don't all say consistently:
   `--all-features`. Mark it
   `#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]`
   above its `#[test]` — an ignore, not a `cfg`, so it still compiles and
-  the helpers it calls do not turn into dead code. `cargo test --all-features
-  --test jq_cli_tests --lib` then fails only the tests that failed before #5233,
-  and a new failure there is a real one (CI does not run that build's tests).
-  `git grep 'holdout refusal (#5246)'` lists the ignored ones; one that stops
-  hitting the refusal (a program the holdout can answer, or the refusal lifted)
-  can drop its attribute. Check that the refusal is the reason before adding
-  one: a program the holdout refuses wrongly is a bug in the holdout, not a test
-  to skip.
+  the helpers it calls do not turn into dead code. A test that pins node
+  identity or sharing (`ptr_eq`, a NaN compared by identity, a loop that must
+  not go quadratic) fails there for the holdout's own reason, not the refusal,
+  and takes `ignore = "holdout has no node identity or sharing (#5254)"`.
+  The x86_64 `holdout` leg of `.github/workflows/ci.yml` runs
+  `cargo test --all-features --test jq_cli_tests --lib`, so a failure there is
+  a real one. `git grep 'ignore = "holdout'` lists the ignored ones; one
+  that stops hitting its reason (a program the holdout can answer, the refusal
+  lifted, identity added) can drop its attribute. Check that the refusal is the reason
+  before adding one: a program the holdout refuses wrongly is a bug in the
+  holdout, not a test to skip.
 
 If you're deciding what `cargo test`/`cargo clippy` invocation "covers
 everything": it's the CI legs matching the **default** feature set

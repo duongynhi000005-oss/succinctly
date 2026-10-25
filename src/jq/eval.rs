@@ -98598,6 +98598,10 @@ mod tests {
     /// the owned step answers it. `$m == $m` over a NaN-bearing container is `true`
     /// because the two operands are one shared node (jq's instance check, #3896),
     /// which only holds if the step reads the marker rather than a rebuilt copy.
+    #[cfg_attr(
+        feature = "unshared-containers",
+        ignore = "holdout has no node identity or sharing (#5254)"
+    )]
     #[test]
     fn owned_assign_step_reads_markers_by_value_for_scalars_4005() {
         let nan_row = OwnedValue::array_from(vec![
@@ -128407,6 +128411,10 @@ mod tests {
     /// the reindex bridge at all (#3261 -- it raises the depth-limit error),
     /// so a `select` that answers over one is a `select` that did not take
     /// the bridge.
+    #[cfg_attr(
+        feature = "unshared-containers",
+        ignore = "holdout has no node identity or sharing (#5254)"
+    )]
     #[test]
     fn owned_select_door_is_reached_and_skips_the_bridge_3439() {
         let mut deep = OwnedValue::Null;

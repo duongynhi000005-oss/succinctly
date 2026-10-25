@@ -13,6 +13,7 @@ use crate::assert_path_rows_both_routes_3749;
 const DOC: &str = r#"{"a":{"b":1,"c":{"b":3}},"b":2}"#;
 
 /// #5181: a plain `as $q` bind of a marker navigation onto the register, used as the path and navigated from.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 fn test_5181_plain_bind_of_a_marker_navigation_onto_the_register() -> Result<()> {
     assert_path_rows_both_routes_3749(&[
@@ -63,6 +64,7 @@ fn test_5181_plain_bind_of_a_marker_navigation_onto_the_register() -> Result<()>
 }
 
 /// #5181: a `?//` chain over a marker navigation, which passes the first step and so never retries unless the body fails.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5181_alternation_over_a_marker_navigation_onto_the_register() -> Result<()> {
@@ -107,6 +109,7 @@ fn test_5181_alternation_over_a_marker_navigation_onto_the_register() -> Result<
 }
 
 /// #5181: heads wrapped in `first(..)` and `limit(N; ..)` over the marker's `.`.
+#[cfg_attr(feature = "unshared-containers", ignore = "holdout refusal (#5246)")]
 #[test]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
 fn test_5181_wrapped_head_over_a_marker_navigation_onto_the_register() -> Result<()> {
