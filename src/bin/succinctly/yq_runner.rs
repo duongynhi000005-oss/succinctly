@@ -336,25 +336,26 @@ impl DispatchResultTerminator for &mut dyn AsciiSink {
 /// code it had before — no per-write branch, and no extra layer between the
 /// M2 streamers and the writer (the `if` costs one predictable test per
 /// streaming call, not one per character). `$body` is duplicated across the
-/// two arms for that reason; it is a single streaming call at every use site.
-/// The duplication is not free, and the cost is code size rather than any
-/// branch: it monomorphizes each streamer twice, worth +108 KB (+1.3%) of
-/// release binary on arm64 and +123 KB (+1.1%) on x86_64 across the six use
-/// sites (measured against this commit's parent on the pinned benchmark
-/// hosts). That shows up in time on x86_64. An interleaved A/B of the
-/// *default*, non-`--ascii-output` path — `.` and `.[]` over 1 MB and 10 MB
-/// `users`/`navigation` documents, 7 reps, output identity gated — reads
-/// +0.49% median with **every one of 8 rows slower** on a 7950X, against a
-/// control floor there of −0.00% median / 4-of-8-slower; the same run on an
-/// M4 Pro is −1.21% median, 0 of 8 slower, against a −0.48% floor. Small, but
-/// the sign consistency on x86 makes it a real regression rather than noise,
-/// and it is the effect #965 was sensitive to arriving by a different route
-/// (code size, not a lost inline). It is accepted here because the flag it
-/// buys back was silently dropping duplicate mapping keys; if it ever needs
-/// recovering, the lever is to stop instantiating the streamers a second time
-/// — give the `--ascii-output` arm a `&mut dyn Write` and leave the default
-/// arm concrete, which pays a vtable call only on the branch that is already
-/// doing per-character escaping.
+/// two arms, but the `--ascii-output` arm streams through one shared
+/// `&mut dyn AsciiSink` (#1993), so each streamer is instantiated once for it
+/// rather than once per sink type.
+///
+/// Why the `dyn`: #1983's first version wrapped each sink in a concrete
+/// `AsciiEscapeWriter`, which monomorphized every streamer a second time across
+/// the six use sites — +108 KB (+1.3%) of release binary on arm64 and +123 KB
+/// (+1.1%) on x86_64, and an interleaved A/B of the *default* path reading
+/// +0.49% median with all 8 rows slower on a 7950X (`.` and `.[]` over 1 MB and
+/// 10 MB `users`/`navigation`, against a control floor of −0.00% / 4-of-8). The
+/// shared sink took back 62 KB (arm64) and 74 KB (x86_64) of that and put the
+/// 7950X's default path at −1.12% median, 2 of 8 slower, against a −0.03%
+/// control floor; the M4 Pro reads +0.18% against a −0.41% floor. The price is a
+/// virtual call per write on the `--ascii-output` path itself, +0.8% (M4 Pro)
+/// and +0.9% (7950X) median there, which the flag's rarity accepts. The
+/// distinct sink types (`ColorSink` five times, the `--inplace` `FmtWriter`
+/// once) still each instantiate the default arm, which is the pre-#1983 count;
+/// folding the escaping into `ColorSink` itself would remove the rest, at the
+/// cost of a branch in every `write_str` of the default path. See
+/// `docs/parsing/yaml.md` (O13).
 ///
 /// Escaping the *sink* rather than teaching the streamers an `ascii` flag is
 /// sound because of a property of JSON rather than of any particular writer —
