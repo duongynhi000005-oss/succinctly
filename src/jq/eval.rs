@@ -12872,37 +12872,46 @@ fn path_has_state_key(path: &Expr) -> bool {
 /// A variable is never one of them: a fold's variable is spliced in as a
 /// literal before the step runs.
 fn owned_state_expr_shape(expr: &Expr) -> bool {
+    owned_state_expr_shape_in(expr, true)
+}
+
+/// [`owned_state_expr_shape`], with `calls` saying whether a call to a `def` is
+/// admitted: not inside a `def`'s own body, so a definition that reaches itself
+/// (or another) is never followed.
+fn owned_state_expr_shape_in(expr: &Expr, calls: bool) -> bool {
+    let shape = |e: &Expr| owned_state_expr_shape_in(e, calls);
     match expr {
         Expr::Identity | Expr::Literal(_) | Expr::Field(_) | Expr::Index { .. } | Expr::Not => true,
-        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => {
-            owned_state_expr_shape(inner)
-        }
+        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => shape(inner),
         Expr::Object(entries) => entries.iter().all(|entry| {
-            owned_state_expr_shape(&entry.value)
+            shape(&entry.value)
                 && match &entry.key {
                     ObjectKey::Literal(_) => true,
-                    ObjectKey::Expr(key) => owned_state_expr_shape(key),
+                    ObjectKey::Expr(key) => shape(key),
                     ObjectKey::Bare => false,
                 }
         }),
-        Expr::Pipe(stages) => stages.iter().all(owned_state_expr_shape),
+        Expr::Pipe(stages) => stages.iter().all(shape),
         Expr::Arithmetic { left, right, .. }
         | Expr::Compare { left, right, .. }
         | Expr::And(left, right)
         | Expr::Or(left, right)
-        | Expr::Alternative(left, right) => {
-            owned_state_expr_shape(left) && owned_state_expr_shape(right)
-        }
+        | Expr::Alternative(left, right) => shape(left) && shape(right),
         Expr::If {
             cond,
             then_branch,
             else_branch,
-        } => {
-            owned_state_expr_shape(cond)
-                && owned_state_expr_shape(then_branch)
-                && owned_state_expr_shape(else_branch)
-        }
+        } => shape(cond) && shape(then_branch) && shape(else_branch),
         Expr::Builtin(Builtin::ToString | Builtin::Type) => true,
+        // A call to a `def` with no parameters, whose body is itself one of these. Inside a
+        // `def`'s own body a call is not followed, so a definition that reaches itself, or
+        // another, is never one of them, whatever a later pass does to the bodies.
+        Expr::DefCall { def, args, .. } => {
+            calls
+                && args.is_empty()
+                && def.params.is_empty()
+                && owned_state_expr_shape_in(&def.body, false)
+        }
         other => is_closed_unary_builtin(other),
     }
 }
@@ -37696,7 +37705,7 @@ fn wrap_fresh(steps: &[Expr], value: OwnedValue, yq_mode: bool) -> Result<OwnedV
 }
 
 /// Get the type name for an owned value.
-fn owned_type_name(value: &OwnedValue) -> &'static str {
+pub(crate) fn owned_type_name(value: &OwnedValue) -> &'static str {
     match value {
         OwnedValue::Null => "null",
         OwnedValue::Bool(_) => "boolean",
@@ -151100,6 +151109,8 @@ mod share_audit_2999 {
             "reduce .[] as $r ({}; .[$r.name] = length)",
             "reduce .[] as $r ({}; .[length | tostring] = $r.score)",
             "[foreach .[] as $r ([]; .[length] = $r.score; length)] | length",
+            // A call to a parameterless `def` whose body is such a shape.
+            "def inc: (. // 0) + 1; reduce .[] as $r ({}; .[$r.name] |= inc)",
         ] {
             assert_forced(&json, filter, &[]);
         }
@@ -151130,9 +151141,33 @@ mod share_audit_2999 {
         ] {
             assert_forced(&json, filter, once);
         }
+        // #5263: a key that calls a parameterless `def` is as pure as the `def`'s body.
+        assert_forced(
+            &json,
+            "def f: ascii_downcase; reduce .[] as $r ({}; .[$r.name | f] = $r.score)",
+            once,
+        );
+        assert_forced(
+            &json,
+            "def f: length; reduce .[] as $r ([]; .[f] = $r.score)",
+            &[(Kind::ArrayMakeMut, 1)],
+        );
         assert_forced(
             &json,
             "reduce .[] as $r ({}; .[$r.name | label $o | .] = $r.score)",
+            &[(Kind::ObjectMakeMut, 1000)],
+        );
+        // A chain of `def`s deeper than a recursion guard by count would allow is still pure.
+        assert_forced(
+            &json,
+            "def a: ascii_downcase; def b: a; def c: b; def d: c; def e: d; def g: e; \
+             reduce .[] as $r ({}; .[$r.name | g] = $r.score)",
+            once,
+        );
+        // A recursive `def` is never pure: its writes are not held back.
+        assert_forced(
+            &json,
+            "def f: if type == \"string\" then . else f end; reduce .[] as $r ({}; .[$r.name | f] = $r.score)",
             &[(Kind::ObjectMakeMut, 1000)],
         );
     }
