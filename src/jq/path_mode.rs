@@ -939,7 +939,7 @@ pub(crate) fn route(program: &Expr) -> Route {
     // more (#5233), so that measurement build refuses one outright rather than
     // answer it wrongly.
     HOLDOUT_REFUSAL
-        .map(str::to_owned)
+        .map(str::to_string)
         .or_else(|| {
             extension.map(|name| {
                 format!(
