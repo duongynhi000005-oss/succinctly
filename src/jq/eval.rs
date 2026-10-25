@@ -19402,6 +19402,10 @@ fn builtin_reverse<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             )),
         },
         _ if optional => QueryResult::None,
+        // #1998: yq's own wording.
+        _ if S::TAG == EvalTag::Yq => {
+            QueryResult::Error(EvalError::yq_node_not_an_array(yaml_type_tag(&value)))
+        }
         _ => QueryResult::Error(EvalError::cannot_index_with_type(
             type_name(&value),
             "number",
@@ -20059,6 +20063,10 @@ fn builtin_sort<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // unconditionally, checked ahead of `optional` -- see
         // `scalar_decode_failure`.
         _ => scalar_fallback(&value, optional, || {
+            if S::TAG == EvalTag::Yq {
+                // #1998: yq's own wording.
+                return EvalError::yq_node_not_an_array_or_map(yaml_type_tag(&value));
+            }
             EvalError::cannot_be_sorted(&to_owned_lossy::<S, _>(&value))
         }),
     }
@@ -20138,6 +20146,10 @@ fn builtin_sort_by<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // unconditionally, checked ahead of `optional` -- see
         // `scalar_decode_failure`.
         _ => scalar_fallback(&value, optional, || {
+            if S::TAG == EvalTag::Yq {
+                // #1998: yq's own wording.
+                return EvalError::yq_node_not_an_array_or_map(yaml_type_tag(&value));
+            }
             EvalError::cannot_iterate_with(S::TAG, &to_owned_lossy::<S, _>(&value))
         }),
     }
@@ -95177,7 +95189,8 @@ fn builtin_shuffle<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             QueryResult::Owned(OwnedValue::array_from(items))
         }
         _ if optional => QueryResult::None,
-        _ => QueryResult::Error(EvalError::type_error("array", type_name(&value))),
+        // #1998: yq's own wording (`shuffle` is yq-only).
+        _ => QueryResult::Error(EvalError::yq_node_not_an_array(yaml_type_tag(&value))),
     }
 }
 

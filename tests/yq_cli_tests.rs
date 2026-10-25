@@ -10743,9 +10743,10 @@ fn test_yaml_explicit_tag_error_messages_agree_with_type_903() -> Result<()> {
     assert_eq!(code, 1);
     assert!(err.contains("Cannot index string with"), "{err}");
 
+    // #1998: `reverse` and `shuffle` use yq's own wording, with the tag the node reports.
     let (_, err, code) = run_yq_stdin_with_stderr(".a | reverse", input, &[])?;
     assert_eq!(code, 1);
-    assert!(err.contains("Cannot index string with"), "{err}");
+    assert!(err.contains("is not an array (it's a !!str)"), "{err}");
 
     let (_, err, code) = run_yq_stdin_with_stderr(".a | pivot", input, &[])?;
     assert_eq!(code, 1);
@@ -10753,7 +10754,7 @@ fn test_yaml_explicit_tag_error_messages_agree_with_type_903() -> Result<()> {
 
     let (_, err, code) = run_yq_stdin_with_stderr(".a | shuffle", input, &[])?;
     assert_eq!(code, 1);
-    assert!(err.contains("shuffle requires array, got string"), "{err}");
+    assert!(err.contains("is not an array (it's a !!str)"), "{err}");
 
     Ok(())
 }
@@ -39597,7 +39598,8 @@ fn test_yq_error_value_preview_matches_tostring_number_literal_spelling_1055() -
 /// yq rule (`null` -> `[]`, any other scalar -> unchanged passthrough) the
 /// value-only `builtin_map` already had since #1907.
 ///
-/// The trigger is now `.a | sort_by(.)`, which iterates its input through
+/// The trigger was `.a | sort_by(.)` until #1998 gave `sort_by` yq's own non-array wording; it is now
+/// `.a | add` (a gated extension, so `--jq-extensions`), which iterates its input through
 /// `cannot_iterate_with` rather than through any `map`/`.[]` evaluation arm
 /// (#4464 removed the earlier trigger, an assignment whose *path* expression
 /// iterates -- `.a | (.[] | key) = 1` -- by making yq's no-op there match yq).
@@ -39616,7 +39618,8 @@ fn test_yq_cannot_iterate_preview_matches_tostring_number_literal_spelling_1055(
         let (tostring_out, code) = run_yq_stdin(".a | tostring", &input, &[])?;
         assert_eq!(code, 0, "literal={literal} tostring out: {tostring_out:?}");
         let expected = tostring_out.trim();
-        let (_out, stderr, code) = run_yq_stdin_with_stderr(".a | sort_by(.)", &input, &[])?;
+        let (_out, stderr, code) =
+            run_yq_stdin_with_stderr(".a | add", &input, &["--jq-extensions"])?;
         assert_ne!(code, 0, "literal={literal} unexpectedly iterated a scalar");
         assert!(
             stderr.contains(expected),
