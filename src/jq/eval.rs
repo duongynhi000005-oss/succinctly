@@ -12102,7 +12102,7 @@ pub(crate) enum OwnedStep {
 /// copy-on-write container. A decline returns the untouched original so the
 /// caller can take its existing evaluator route exactly once.
 pub(crate) fn try_eval_owned_step<S: EvalSemantics>(expr: &Expr, state: OwnedValue) -> OwnedStep {
-    if is_owned_assign(expr) {
+    if is_owned_assign(expr) || is_owned_setpath(expr) {
         return try_owned_assign_step::<S>(expr, state);
     }
     match eval_owned_reindex_free::<S>(expr, &state) {
@@ -12125,6 +12125,9 @@ pub(crate) fn try_owned_assign_step<S: EvalSemantics>(
     expr: &Expr,
     mut state: OwnedValue,
 ) -> OwnedStep {
+    if let Expr::Builtin(Builtin::SetPath(path, value)) = unwrap_paren(expr) {
+        return owned_setpath_step::<S>(path, value, state);
+    }
     if !is_owned_assign(expr) {
         return OwnedStep::Declined(state);
     }
@@ -12225,6 +12228,30 @@ fn is_owned_assign(expr: &Expr) -> bool {
         Expr::As { body, .. } => is_owned_assign(unwrap_paren(body)),
         _ => is_plain_owned_assign(expr),
     }
+}
+
+/// Whether `expr` is a `setpath(P; V)` call, which [`owned_setpath_step`] may answer (#5271).
+fn is_owned_setpath(expr: &Expr) -> bool {
+    matches!(unwrap_paren(expr), Expr::Builtin(Builtin::SetPath(..)))
+}
+
+/// `setpath(P; V)` against an owned state (#5271): `P` and `V` are each one value
+/// that is closed or read the state ([`owned_assign_operand`]), and the write is
+/// [`set_value_at_path`]'s, which is what the evaluator's own `setpath` does, on
+/// the state moved in rather than a copy of it. Anything else -- a path that is not
+/// an array, an operand that raises or yields other than once, yq mode -- declines
+/// to the evaluator with the state handed back untouched.
+fn owned_setpath_step<S: EvalSemantics>(path: &Expr, value: &Expr, state: OwnedValue) -> OwnedStep {
+    if S::TAG != EvalTag::Jq {
+        return OwnedStep::Declined(state);
+    }
+    let Some(OwnedValue::Array(keys)) = owned_assign_operand::<S>(path, &state) else {
+        return OwnedStep::Declined(state);
+    };
+    let Some(value) = owned_assign_operand::<S>(value, &state) else {
+        return OwnedStep::Declined(state);
+    };
+    OwnedStep::Handled(set_value_at_path::<S>(state, &keys, value))
 }
 
 fn is_plain_owned_assign(expr: &Expr) -> bool {
@@ -12669,6 +12696,25 @@ fn owned_assign_step<S: EvalSemantics>(
     // writes through `set_field`/`set_index` directly; this path runs once
     // per fold step, and the general `set_path` walk cost #3025's
     // `.i += 1` loop ~6% of its instructions.
+    // `. += X` and `. |= . + X` (#5271): the whole state is the target. It is combined
+    // in place when the operands are of one kind a `+` cannot fail on, so the
+    // accumulator's own spare capacity is reused; any other pairing declines.
+    if S::TAG == EvalTag::Jq && matches!(unwrap_paren(path), Expr::Identity) {
+        return match rhs {
+            OwnedAssignRhs::Combine(ArithOp::Add, right)
+                if matches!(
+                    (&*state, &right),
+                    (OwnedValue::Array(_), OwnedValue::Array(_))
+                        | (OwnedValue::Object(_), OwnedValue::Object(_))
+                        | (OwnedValue::String(_), OwnedValue::String(_))
+                ) =>
+            {
+                let old = core::mem::replace(state, OwnedValue::Null);
+                Some(arith_combine::<S>(ArithOp::Add, old, right).map(|sum| *state = sum))
+            }
+            _ => None,
+        };
+    }
     match owned_assign_single_step::<S>(path, state) {
         SingleStep::Unclosed => None,
         SingleStep::Step(key) => {
@@ -12882,7 +12928,13 @@ fn owned_state_expr_shape_in(expr: &Expr, calls: bool) -> bool {
     let shape = |e: &Expr| owned_state_expr_shape_in(e, calls);
     match expr {
         Expr::Identity | Expr::Literal(_) | Expr::Field(_) | Expr::Index { .. } | Expr::Not => true,
-        Expr::Paren(inner) | Expr::Negate(inner) | Expr::Array(inner) => shape(inner),
+        Expr::Paren(inner) | Expr::Negate(inner) => shape(inner),
+        // `[]`, `[a, b]` and `[a]`: each element is one value, so the array is one.
+        Expr::Array(inner) => match inner.as_ref() {
+            Expr::Builtin(Builtin::Empty) => true,
+            Expr::Comma(items) => items.iter().all(shape),
+            single => shape(single),
+        },
         Expr::Object(entries) => entries.iter().all(|entry| {
             shape(&entry.value)
                 && match &entry.key {
@@ -151111,8 +151163,25 @@ mod share_audit_2999 {
             "[foreach .[] as $r ([]; .[length] = $r.score; length)] | length",
             // A call to a parameterless `def` whose body is such a shape.
             "def inc: (. // 0) + 1; reduce .[] as $r ({}; .[$r.name] |= inc)",
+            // `setpath(P; V)` writes in place like `.[P] = V`.
+            "reduce .[] as $r ({}; setpath([$r.name]; $r.score))",
+            "reduce .[] as $r ({}; setpath([$r.name, \"n\"]; $r.score))",
+            "reduce .[] as $r ([]; setpath([length]; $r.score))",
+            // `. += X`: the whole state is the target.
+            "reduce .[] as $r ([]; . += [$r.score])",
+            "reduce .[] as $r ({}; . += {($r.name): $r.score})",
+            "reduce .[] as $r (\"\"; . += $r.name)",
         ] {
             assert_forced(&json, filter, &[]);
+        }
+        // #5271: an array operand (`[]`, `[a, b]`) is one value, so the step is taken. What
+        // each step still copies is the one array it extends (a group, here of one
+        // element), not the accumulator: 1,000 small copies, none of the 1,000-key state.
+        for filter in [
+            "reduce .[] as $r ({}; .[$r.name] |= (. // []) + [$r.score, $r])",
+            "reduce .[] as $r ({}; .[$r.name] |= [.] + [$r.score])",
+        ] {
+            assert_forced(&json, filter, &[(Kind::ArrayUnwrap, 1000)]);
         }
     }
 
