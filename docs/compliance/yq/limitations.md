@@ -3357,6 +3357,7 @@ every later stage then runs normally on it. Captured live against yq v4.53.3 on
 | `1 + 1` / `"s" + "t"` / `1 == 1` / `1 // 3` | the operator applied to the re-emitted operands (`2`, `"st"`, `true`, `1`) |
 | `(true, false)` / `(1, .b)` / `(.b, 1)` | the re-emitting branches only: `=` keeps the last (`false`, `1`, `1`), `and`/`or` see every one |
 | `true \| not` / `1 \| tostring` / `[1] \| length` / `{"q": 1} \| .q` | `false` / `"1"` / `0` / `1` — the first stage re-emits and the tail runs on it |
+| `error("x")` / `error("x" + "y")` | raises `x` / `xy` — `errorOperator` ignores its context, so the stage runs and raises (#5261) |
 | `.` / `.b` / `length` / `tostring` / `select(true)` / `. // 3` | nothing (propagates, matching the pre-existing #2460 oracle rows for `key`/`parent`) |
 
 Before [#2540](https://github.com/rust-works/succinctly/issues/2540), succinctly propagated
@@ -3417,6 +3418,7 @@ an operand of the shapes above; all checked live against v4.53.3):
   operator restarts an empty stream, not only the first), `x: 5` here. The rewrite keeps
   the tail after the first re-emitting stage verbatim, because whether a later stage's
   input is empty is only known while evaluating;
+- `error(.q)` and the bare `error`: yq raises `aborted` for the first, because the message reads its input and is empty, and an arity error (`'|' expects 2 args but there is 1`) for the second; the rewrite declines both, so they stay empty (#5261);
 - an operator with **one** re-emitting operand and one that reads its input, which yq
   answers asymmetrically: `.x = (.a.zz | 1 == .b)` (and `!=`, `<`, `>`, `<=`, `>=`) is
   `false`/`true` in yq while `.b == 2` and `1 + .b` are nothing. The operator declines
@@ -4789,7 +4791,12 @@ $ yq '.c | .a | path'                # ["c","a"]   <- unbound, both tools agree
 
 Only the *source* is read-only: the body keeps the scope it had, so `.zz as $x | .zz = 3` still creates `zz`.
 A numeric index on a mapping (`.[0] as $x | [$x]`) is not covered, since the read-only rule is keyed on a key lookup, not on an index.
-A stage after the absent key that raises (`(.zz | error("x")) as $x | 1`) no longer raises: yq runs the stage on the `null` node it creates and then binds nothing, where the read-only source here yields no node for the stage to run on.
+A stage after the absent key that does not read its context still runs against the empty context the lookup leaves, as in yq (#5261).
+`(.zz | error("x")) as $x | 1` raises, `(.zz | "s") as $x | $x` binds `"s"`, `(.zz | [.]) as $x | $x` binds `[]`, and `(.zz | length) as $x | [$x]` binds nothing, all as in yq v4.53.3.
+It is the rule an assignment's right side and an `and`/`or`/arithmetic operand already follow (#2588, above): a source that bound nothing is re-run once as `yq_empty_context_reemit` rewrites it, inside the scope that emptied it.
+The root cause the issue named was wrong: yq does not run the later stage on a `null` node it creates, it runs it on zero nodes, which is why `length`, `tostring` and `+` bind nothing while `error` and a literal still run.
+A comma source where one branch comes up empty and another does not (`(.a, (.zz | error("x"))) as $x | [$x]`, `((.zz | "a"), "b") as $x | [$x]`) still sees only the branch that produced output, since the rewrite applies only to a source that bound nothing.
+The general form of that gap is a pipe whose left side is empty, outside any `as`: `select(false) | error("x")` raises in yq and is no output here.
 
 **An anchor's flow style read through an alias binding.** Captured on
 `a: "1" # keep` / `b: &anc [1, 2]` / `c: *anc` (YAML output):

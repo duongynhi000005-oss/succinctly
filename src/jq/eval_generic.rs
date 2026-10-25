@@ -16755,9 +16755,80 @@ fn each_as_generic<S: EvalSemantics, V: DocumentValue>(
     // yq's `as` runs its body once, with the variable unbound, when the source
     // has no output (#4139); see `eval::yq_runs_as_body_without_source`.
     if super::eval::yq_runs_as_body_without_source::<S>(bound_any.get(), &flow) {
-        return eval_each_generic::<S, V>(body, value, optional, cursor, sink);
+        return each_as_empty_source_generic::<S, V>(
+            expr, var, body, value, optional, cursor, sink,
+        );
     }
     flow
+}
+
+/// What [`each_as_generic`] does when yq's `as` source bound nothing: the source
+/// still emits whatever its context-free stages emit against the empty context it
+/// left (#5261, see `eval::yq_as_source_retry`), and only when that binds nothing
+/// either does the body run once with the variable unbound (#4139).
+///
+/// Its own function, reached only from that empty branch, because
+/// [`each_as_generic`] sits in a recursive `def`'s frame once per `$` parameter
+/// and is measured against a native-stack budget with next to nothing to spare
+/// (`test_literal_dollar_argument_matches_jq_3260`): the retry's second fan-out
+/// and its rewritten `Expr` must not be locals of that frame. A rewritten source
+/// is built from literals and constructors, so it yields owned values and never
+/// defers a bind.
+#[inline(never)]
+fn each_as_empty_source_generic<S: EvalSemantics, V: DocumentValue>(
+    expr: &Expr,
+    var: &str,
+    body: &Expr,
+    value: V,
+    optional: bool,
+    cursor: Option<V::Cursor>,
+    sink: &mut dyn Sink<V>,
+) -> Flow {
+    let bound_any = core::cell::Cell::new(false);
+    let retried = super::eval::yq_as_source_retry::<S, _>(expr, |reemit| {
+        let previous = yq_read_only_context::active();
+        let source_scope = super::eval::yq_as_source_scope::<S>();
+        let flow = fanout_arg_each_generic_deferring::<S, V, _>(
+            reemit,
+            value.clone(),
+            optional,
+            cursor,
+            &|_, _| false,
+            |bound| {
+                let _body_scope = yq_read_only_context::restore(previous);
+                match bound {
+                    Bound::Value(mut bound_val, origin) => {
+                        bound_any.set(true);
+                        let _embed = embed_table_push::<S>(origin.as_ref(), &mut bound_val);
+                        let _anchor = embed_anchor_push::<S, _>(
+                            origin.as_ref(),
+                            &bound_val,
+                            cursor.as_ref(),
+                            body,
+                        );
+                        let substituted_body =
+                            substitute_bound_var_from::<S>(expr, body, var, &bound_val, origin);
+                        eval_each_generic::<S, V>(
+                            &substituted_body,
+                            value.clone(),
+                            optional,
+                            cursor,
+                            sink,
+                        )
+                    }
+                    Bound::Deferred(_) => {
+                        unreachable!("never defers") // patchcov: coverage tolerate-line reason="unreachable: the defer test passed above is `|_, _| false`, and `Bound::Deferred` is only built when it answers true (#3856)"
+                    }
+                }
+            },
+        );
+        drop(source_scope);
+        flow
+    });
+    match retried {
+        Some(flow) if bound_any.get() || !matches!(flow, Flow::Exhausted) => flow,
+        _ => eval_each_generic::<S, V>(body, value, optional, cursor, sink),
+    }
 }
 
 /// Lazy twin of `eval::each_as_pattern` (#2180 WP2b widens #1596 the same
@@ -36924,7 +36995,17 @@ fn eval_owned_identity_as<S: EvalSemantics, V: DocumentValue>(
     // #2650: the source alone reads under the read-only absent-key rule; see
     // `eval::yq_as_source_scope`.
     let source_scope = super::eval::yq_as_source_scope::<S>();
-    let (bound_values, control) = owned_identity_bind_values::<S, V>(bind, value, id, optional);
+    let (mut bound_values, mut control) =
+        owned_identity_bind_values::<S, V>(bind, value, id, optional);
+    // #5261: a source that bound nothing still runs its context-free stages
+    // against the empty context it left, inside the scope that emptied it.
+    if S::READ_ONLY_ABSENT_KEY_IS_EMPTY && bound_values.is_empty() && control.is_none() {
+        if let Some(retried) = super::eval::yq_as_source_retry::<S, _>(bind, |reemit| {
+            owned_identity_bind_values::<S, V>(reemit, value, id, optional)
+        }) {
+            (bound_values, control) = retried;
+        }
+    }
     drop(source_scope);
     // yq's `as` runs its body once, with the variable unset, when the source
     // has no output (#4139); see `eval::yq_runs_as_body_without_source`.
