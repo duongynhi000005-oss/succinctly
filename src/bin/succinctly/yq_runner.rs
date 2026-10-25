@@ -12210,6 +12210,20 @@ mod tests {
             "!!float +Inf"
         );
 
+        // #1071: the `style` writes spell a computed non-finite the way yq prints it.
+        assert_eq!(
+            plain_scalar_text(&OwnedValue::Float(f64::NEG_INFINITY)).as_deref(),
+            Some("-Inf")
+        );
+        assert_eq!(
+            plain_scalar_text(&OwnedValue::NumberLiteral(
+                NumberRepr::Float(f64::INFINITY),
+                "+.inf".into()
+            ))
+            .as_deref(),
+            Some("+.inf")
+        );
+
         // #1071: a document `.INF`/`.NaN` echoes its own bytes.
         for literal in ["-.INF", "+.inf", ".NaN"] {
             let value = OwnedValue::from_number_literal_plain(literal);

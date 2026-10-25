@@ -825,7 +825,7 @@ mod tests {
             match resolve_plain(s) {
                 Float(f) if want.is_nan() => assert!(f.is_nan(), "{s}"),
                 Float(f) => assert_eq!(f, want, "{s}"),
-                other => panic!("{s} resolved to {other:?}"),
+                other => assert!(matches!(other, Float(_)), "{s} resolved to {other:?}"),
             }
         }
         for s in [".INf", "inf", "-.nan", "+.nan", ".5", "", "1e400"] {

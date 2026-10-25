@@ -102,3 +102,32 @@ fn test_nonfinite_literal_survives_the_bridge_1071() -> Result<()> {
     }
     Ok(())
 }
+
+/// `style = "tagged"` spells the tag and the value separately: a computed non-finite is Go's text, a document one its own.
+#[test]
+fn test_nonfinite_tagged_style_1071() -> Result<()> {
+    let rows: &[(&str, &str)] = &[
+        (
+            ".q = (1e300 * 1e300) | .q style = \"tagged\"",
+            "a: .inf\nb: .NaN\nc: -.INF\nd: +.inf\nq: !!float +Inf\n",
+        ),
+        (
+            ".q = 0 * (1e300 * 1e300) | .q style = \"tagged\"",
+            "a: .inf\nb: .NaN\nc: -.INF\nd: +.inf\nq: !!float NaN\n",
+        ),
+        (
+            ".a style = \"tagged\"",
+            "a: !!float .inf\nb: .NaN\nc: -.INF\nd: +.inf\n",
+        ),
+        (
+            ".b style = \"tagged\"",
+            "a: .inf\nb: !!float .NaN\nc: -.INF\nd: +.inf\n",
+        ),
+    ];
+    for (filter, want) in rows {
+        let (stdout, code) = run_yq_stdin(filter, DOC, &[])?;
+        assert_eq!(code, 0, "for {filter:?}: {stdout:?}");
+        assert_eq!(&stdout, want, "for {filter:?}");
+    }
+    Ok(())
+}

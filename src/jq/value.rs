@@ -10565,6 +10565,9 @@ mod tests {
             literal("1"),
             literal("1.0"),
             literal("1e100"),
+            // #1071: a document non-finite rides the bridge as its numbered token.
+            OwnedValue::NumberLiteral(NumberRepr::Float(f64::NAN), ".NaN".into()),
+            OwnedValue::NumberLiteral(NumberRepr::Float(f64::NEG_INFINITY), "-.INF".into()),
             literal("-0.0"),
             literal("1e400"),
             literal("100000000000000000000"),
