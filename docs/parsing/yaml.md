@@ -5676,6 +5676,45 @@ no output separates taking it from declining it: the A/B above is its evidence.
 
 ---
 
+## O13: One Shared Sink for `--ascii-output` — Accepted ✅
+
+**Issue**: #1993 (a 0.49% default-path regression on x86_64, bought by #1983's `--ascii-output` fix).
+
+### What it cost
+
+`json_ascii!` duplicated each streaming call across a plain arm and an `AsciiEscapeWriter`-wrapped arm,
+so every JSON streamer was monomorphized twice at each of its six sites: +108 KB (arm64) and +123 KB
+(x86_64) of release binary, and on a 7950X the default path read +0.49% median with every one of 8 rows slower.
+
+### The change
+
+The `--ascii-output` arm coerces its wrapper to `&mut dyn AsciiSink` (`Write` plus the result-terminator
+dispatch `ColorSink` needs, which a trait object cannot reach by concrete type), so the streamers are
+instantiated for it once. The default arm is the unchanged concrete call. Candidate B, folding the escaping
+into `ColorSink::write_str`, would also remove the remaining per-sink-type default instantiations but puts a
+branch on every default write; the A/B below met the default-path target without it, so it was not built.
+
+### Measured (interleaved A/B, min of 11, `yq -o json`, 1 and 10 MB `users`/`navigation`, base `9389c6b7b`, output identical on 8 of 8 rows per run)
+
+|                                              | M4 Pro                              | 7950X                               |
+|----------------------------------------------|-------------------------------------|-------------------------------------|
+| release binary                               | 18,230,288 -> 18,167,824 B (-62 KB) | 22,119,744 -> 22,045,680 B (-74 KB) |
+| default path, median of 8 rows (rows slower) | +0.18% (5 of 8)                     | -1.12% (2 of 8)                     |
+| default path, `--control` floor              | -0.41% (0 of 8)                     | -0.03% (4 of 8)                     |
+| `-a` path, median of 8 rows (rows slower)    | +0.84% (7 of 8)                     | +0.90% (6 of 8)                     |
+| `-a` path, `--control` floor                 | -1.00% (1 of 8)                     | -1.56% (0 of 8)                     |
+
+The default path is inside the control's spread on both machines and no longer slower on every row on x86_64.
+The `-a` path pays a virtual call per write, +1.8% and +2.5% relative to its own control's offset; the
+flag is rare and its output is dominated by the escaping it exists for. The release binary is still about
++46 KB (arm64) and +49 KB (x86_64) over the pre-#1983 build, short of the ~+20 KB the triage asked for.
+
+### Files Modified
+
+- `src/bin/succinctly/yq_runner.rs` — `json_ascii!`, `AsciiSink`
+
+---
+
 ## See Also
 
 - [YamlIndex wiki page](yaml-index.md) — concept overview, dependencies, and academic references
