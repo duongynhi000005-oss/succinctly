@@ -3340,8 +3340,11 @@ impl<'a> Parser<'a> {
                             start.saturating_sub(1),
                         ));
                     }
+                    // jq reads a suffix after `..` as a postfix on the term (`..[0]?`, `..[]?`,
+                    // `.. .a`), which yq's lexer rejects (#5248), so only jq mode takes it.
+                    let term = self.postfix_if_jq(Expr::RecursiveDescent)?;
                     self.last_primary_is_term = true; // #3038: leaf Term, no recursion below to reset a stale flag
-                    return Ok(Expr::RecursiveDescent);
+                    return Ok(term);
                 }
 
                 // Check for `.[...]` (index/iterate). A leading bracket indexes
@@ -11223,6 +11226,23 @@ mod tests {
     #[test]
     fn test_recursive_descent() {
         assert_eq!(parse("..").unwrap(), Expr::RecursiveDescent);
+    }
+
+    /// #5248: jq reads a bracket suffix straight after `..` as a postfix on the term, so it is
+    /// the same expression as `(..)[0]?`, `.. | .[0]?` and its other bracket forms.
+    #[test]
+    fn test_recursive_descent_takes_a_bracket_suffix_in_jq_mode_5248() {
+        for suffix in ["[0]?", "[]?", "[\"a\"]?", "[1:]?", " [0]?", " .a?"] {
+            let direct =
+                parse(&format!("..{suffix}")).unwrap_or_else(|e| panic!("..{suffix}: {e}"));
+            assert_ne!(direct, Expr::RecursiveDescent, "..{suffix}");
+            let piped = parse(&format!("(..){}", suffix.trim_start())).unwrap();
+            // Same suffix, same chain: only the head differs (a paren round trip vs the bare term).
+            let (Expr::Pipe(a), Expr::Pipe(b)) = (&direct, &piped) else {
+                panic!("..{suffix} did not parse as a postfix chain: {direct:?}");
+            };
+            assert_eq!(a[1..], b[1..], "..{suffix}");
+        }
     }
 
     #[test]
