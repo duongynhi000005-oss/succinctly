@@ -7879,12 +7879,17 @@ fn each_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     sink: &mut dyn FnMut(Item<'a, W>) -> Demand,
 ) -> Flow {
     let mut bound_any = false;
+    let previous = yq_read_only_context::active();
+    let source_scope = yq_as_source_scope::<S>();
     let flow = fanout_arg_each_with_origin::<W, S, _>(
         expr,
         value.clone(),
         optional,
         |mut bound_val, origin| {
             bound_any = true;
+            // #2650: the body is not part of the source; see `yq_as_source_scope`.
+            let _body_scope =
+                S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(|| yq_read_only_context::restore(previous));
             // #2889 Stage B: the mirror of `each_as_generic`'s own push --
             // the binding holds this node's `OwnedValue` for the body's
             // whole dynamic extent, so registering it makes a later
@@ -7899,12 +7904,27 @@ fn each_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             eval_each::<W, S>(&substituted_body, value.clone(), optional, sink)
         },
     );
+    drop(source_scope);
     // yq's `as` runs its body once, with the variable unbound, when the source
     // has no output (#4139).
     if yq_runs_as_body_without_source::<S>(bound_any, &flow) {
         return eval_each::<W, S>(body, value, optional, sink);
     }
     flow
+}
+
+/// The scope a bare `as` source is evaluated under (#2650).
+///
+/// yq's `A as $v | B` binds from `A`'s matched nodes, and a key `A` does not
+/// find matches none: `.zz as $x | $x` is no output at all (the body runs once
+/// with `$x` unbound, #4139), though the plain read `.zz` answers `null`.
+/// That is the read-only absent-key rule ([`yq_absent_key_read_is_empty`])
+/// applied to the source alone: the caller drops the guard before the body
+/// runs, and a lazy caller restores the scope it was entered from inside its
+/// body closure, since that closure runs inside the source's own sink.
+/// `None` outside yq mode, which binds `null` like jq.
+pub(crate) fn yq_as_source_scope<S: EvalSemantics>() -> Option<yq_read_only_context::Guard> {
+    S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(yq_read_only_context::enter)
 }
 
 /// Whether an `as` whose source produced nothing still runs its body (#4139).
@@ -60671,6 +60691,10 @@ fn resolve_bind_source_sink<S: EvalSemantics>(
     // `path(([1] as $q ?// $b | $q) as $y | .[$y:])` is a slice in jq 1.7.1,
     // not the abandoned alternative's "slice indices must be integers".
     let stashed: StashedVerdict<ResolveFlow> = StashedVerdict::new();
+    // #2650: as on the value routes, the source alone reads under the read-only
+    // absent-key rule; see `yq_as_source_scope`.
+    let previous = yq_read_only_context::active();
+    let source_scope = yq_as_source_scope::<S>();
     let flow = eval_each_owned::<S>(
         source,
         value,
@@ -60678,6 +60702,8 @@ fn resolve_bind_source_sink<S: EvalSemantics>(
         Reentry::at_register(trackable),
         &mut |bound| {
             stashed.begin();
+            let _body_scope =
+                S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(|| yq_read_only_context::restore(previous));
             match bind(bound, None, false) {
                 ResolveFlow::Exhausted => Demand::Continue,
                 other => {
@@ -60690,6 +60716,7 @@ fn resolve_bind_source_sink<S: EvalSemantics>(
             }
         },
     );
+    drop(source_scope);
     let direct_retry = direct_pattern_retry(source);
     let stashed = stashed.take_unless(|at| retry_superseded(&flow, at, direct_retry));
     resolve_stream_flow(flow, stashed)
@@ -74364,6 +74391,10 @@ fn eval_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
+    // #2650: the source reads under the read-only absent-key rule, so a key it
+    // does not find binds nothing (see `yq_as_source_scope`). Dropped before
+    // the body runs, which keeps the scope it was entered from.
+    let source_scope = yq_as_source_scope::<S>();
     // Evaluate the expression to get the value to bind
     let bound_result = eval_single::<W, S>(expr, value.clone(), optional);
 
@@ -74394,6 +74425,7 @@ fn eval_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         _ => Vec::new(),
     };
     let (bound_values, bound_control) = stream_outputs::<_, S>(bound_result);
+    drop(source_scope);
 
     // For each bound value, substitute and evaluate the body. #1902/#1934:
     // [`push_owned_values`] folds an undecodable body output into

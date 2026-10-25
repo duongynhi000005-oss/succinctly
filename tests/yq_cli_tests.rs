@@ -58688,14 +58688,10 @@ fn test_bound_variable_carries_node_identity_2072() -> Result<()> {
         (".a as $x | .c | $x | path", "[\"a\"]"),
         (".a as $x | .c | $x | key", "\"a\""),
         (".a as $x | .c | $x | .b | path", "[\"a\",\"b\"]"),
-        // Real yq's own quirk (see the doc comment above) prints nothing
-        // here: a variable bound from an *absent* key has no candidates at
-        // all in yq, where the same key read unbound is `null`. succinctly's
-        // value model has no absent-versus-null distinction to bind, so the
-        // variable stands at the missing key's position -- the same answer
-        // `.c | .a | path` gives in both tools. Recorded in
-        // `docs/compliance/yq/limitations.md`; not closed by #2072.
-        (".c | (.a as $x | $x) | path", "[\"c\",\"a\"]"),
+        // A variable bound from an *absent* key has no candidates in yq, where
+        // the same key read unbound is `null`; closed by #2650 (the unbound
+        // `.c | .a | path` is `["c","a"]` in both tools).
+        (".c | (.a as $x | $x) | path", ""),
     ] {
         let (output, code) = run_yq_stdin(filter, BOUND_VAR_DUP_VALUE_DOC_2072, args)?;
         assert_eq!(code, 0, "`{filter}`: {output:?}");
