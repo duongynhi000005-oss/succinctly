@@ -6438,7 +6438,7 @@ assignment's right-hand side (`.z = (.b | kind)`, `.[] |= kind`), a value built 
 (`{"k": .b} | .k | kind`), and `--eval-all`/`-s`/`-i`. Separately, `..` still descends
 into a `!!null`-tagged collection, where yq stops at the `scalar` (`[.. | kind]` has one more element).
 
-## `@yaml` of a flow-sourced container, a multi-line string, a root computed float or a non-finite float ([#1183](https://github.com/rust-works/succinctly/issues/1183))
+## `@yaml` of a flow-sourced container, a multi-line string, or a root computed float ([#1183](https://github.com/rust-works/succinctly/issues/1183))
 
 `@yaml` runs the same owned-value YAML streamer as the CLI's own output, so it inherits that
 streamer's known gaps; each is pinned in `recorded_gaps_1183` (`tests/yq_cli_tests.rs`).
@@ -6450,4 +6450,3 @@ Captured live (v4.53.3):
 | `a: [1, 2]` then `.a \| @yaml` | `[1, 2]\n`        | `- 1\n- 2\n`  | same                                                                                                                    |
 | `"x\ny" \| @yaml`              | `\|-\n  x\n  y\n` | `"x\ny"\n`    | a line break is double-quoted, not a literal block (the computed-value streamer; #3587 closed the JSON route)           |
 | `2.0*1 \| @yaml`               | `!!float 2\n`     | `2\n`         | yq tags a computed float but not a document-sourced `!!float 2` (the #1090 test); an owned float cannot tell them apart |
-| `(1/0) \| @yaml`               | `!!float +Inf\n`  | `.inf\n`      | non-finite spelling (#1071)                                                                                             |

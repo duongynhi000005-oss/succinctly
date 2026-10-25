@@ -8599,6 +8599,14 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
                     {
                         Some(str_val)
                     }
+                    // #1071: a document `.inf`/`-.INF`/`.NaN` keeps its spelling, which
+                    // is what tells it from a computed non-finite (a bare `Float`).
+                    ResolvedScalar::Float(f)
+                        if !f.is_finite()
+                            && crate::yaml::nonfinite_literal_index(&str_val).is_some() =>
+                    {
+                        Some(str_val)
+                    }
                     ResolvedScalar::Float(_) => {
                         preservable_float_literal_text(&str_val).map(Cow::Owned)
                     }

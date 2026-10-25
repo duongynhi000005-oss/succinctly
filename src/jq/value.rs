@@ -25,7 +25,7 @@ use indexmap::IndexMap;
 
 use super::error::EvalError;
 use super::escape::{escape_json_body, write_json_body_jq};
-use super::eval::{EvalSemantics, JqSemantics, YqSemantics};
+use super::eval::{EvalSemantics, EvalTag, JqSemantics, YqSemantics};
 use super::expr::Literal;
 
 /// Recursion-depth ceiling for tree-walkers over an already-materialized
@@ -3393,6 +3393,16 @@ impl OwnedValue {
     /// already-owned `Box<str>` (e.g. from `JqValue::NumberLiteral`) instead
     /// of allocating a fresh one.
     pub(crate) fn from_number_literal_boxed<S: EvalSemantics>(literal: Box<str>) -> Self {
+        // #1071: a YAML document's `.inf`/`-.INF`/`.NaN` is not JSON number
+        // text, so the parse below cannot read it. yq keeps the spelling, jq's
+        // number model has no such literal and reads the double.
+        if let Some(f) = crate::yaml::nonfinite_literal_value(&literal) {
+            return if S::TAG == EvalTag::Yq {
+                Self::NumberLiteral(NumberRepr::Float(f), literal.into())
+            } else {
+                Self::Float(f)
+            };
+        }
         let Some(repr) = parse_i64_or_f64_in::<S>(&literal) else {
             return Self::Null;
         };
@@ -3417,13 +3427,18 @@ impl OwnedValue {
         if let Some(f) = parse_nan_instance_token(bytes) {
             return Some(f);
         }
-        is_infinity_sentinel(bytes).map(|negative| {
+        if let Some(f) = is_infinity_sentinel(bytes).map(|negative| {
             if negative {
                 f64::NEG_INFINITY
             } else {
                 f64::INFINITY
             }
-        })
+        }) {
+            return Some(f);
+        }
+        // #1071: the token for a document `.inf`/`.NaN` is non-finite too.
+        crate::json::validate::parse_nonfinite_literal_token(bytes)
+            .and_then(crate::yaml::nonfinite_literal_value)
     }
 
     /// Materialize a document number read through a cursor: the reindex
@@ -3445,6 +3460,10 @@ impl OwnedValue {
     /// yields two values `==` agrees are the same instance. A bridge NaN is
     /// a computed one and stays a bare `Float`.
     pub fn from_json_number<S: EvalSemantics>(n: &crate::json::light::JsonNumber<'_>) -> Self {
+        // #1071: a document `.inf`/`.NaN` the bridge carried, back as the literal it was.
+        if let Some(literal) = n.bridge_nonfinite_literal() {
+            return Self::from_number_literal::<S>(literal);
+        }
         if let Some(f) = n.bridge_value() {
             return Self::from_bridge_float(f);
         }
@@ -4239,6 +4258,13 @@ impl OwnedValue {
             // bridge's `nan_fmt` writes its instance into the token, so a
             // `--slurp` of `NaN` still has `.[0] == .[0]`.
             Self::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() => nan_fmt(*f),
+            // A document `.inf` is no JSON number text: yq's encoder rejects it, and
+            // this prints what the bare infinity did before the spelling was kept (#1071).
+            Self::NumberLiteral(NumberRepr::Float(f), literal)
+                if f.is_infinite() && crate::yaml::nonfinite_literal_index(literal).is_some() =>
+            {
+                infinite_fmt(f.is_sign_negative()).into()
+            }
             // An infinite `NumberLiteral` reaching here is always a genuine
             // document literal, which still has its own source text to
             // fall back to -- `1e400 | .` (identity, no computation) echoes
@@ -4358,6 +4384,12 @@ impl OwnedValue {
                 out.push('"');
             }
             Self::Float(f) if f.is_nan() => out.push_str(NAN_SENTINEL),
+            // A document `.inf`/`.NaN` keeps its spelling through the bridge (#1071).
+            Self::NumberLiteral(NumberRepr::Float(_), literal)
+                if crate::yaml::nonfinite_literal_index(literal).is_some() =>
+            {
+                out.push_str(&nonfinite_literal_bridge_token(literal));
+            }
             // A parsed NaN keeps its instance through the bridge (#3309).
             Self::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() => {
                 out.push_str(&nan_instance_token(*f));
@@ -4423,6 +4455,11 @@ impl OwnedValue {
         check_value_tree_depth(depth)?;
         Ok(match self {
             Self::Float(f) if f.is_nan() => NAN_SENTINEL.to_string(),
+            Self::NumberLiteral(NumberRepr::Float(_), literal)
+                if crate::yaml::nonfinite_literal_index(literal).is_some() =>
+            {
+                nonfinite_literal_bridge_token(literal)
+            }
             // A parsed NaN keeps its instance through the bridge (#3309).
             Self::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() => nan_instance_token(*f),
             Self::Float(f) if f.is_infinite() => overflow_literal(*f).to_string(),
@@ -5077,6 +5114,13 @@ fn yq_infinite_float_json_text(_negative: bool) -> &'static str {
 /// text decodes it (`JsonNumber::bridge_value`); in a document it is a
 /// malformed number like `9e999e998`.
 pub(crate) const NAN_SENTINEL: &str = "9e999e999";
+
+/// The bridge token for a document non-finite `literal` (#1071); the caller has already checked
+/// it is one of [`NONFINITE_LITERALS`](crate::yaml::NONFINITE_LITERALS).
+fn nonfinite_literal_bridge_token(literal: &str) -> String {
+    let index = crate::yaml::nonfinite_literal_index(literal).unwrap_or(0);
+    crate::json::validate::nonfinite_literal_token(index)
+}
 
 /// True if `bytes` is exactly [`NAN_SENTINEL`] -- the one definition of
 /// the spelling, so the comparison can't diverge between call sites the way
@@ -5892,7 +5936,11 @@ impl From<Literal> for OwnedValue {
                 debug_assert!(
                     Some(repr) == parse_i64_or_f64_in::<JqSemantics>(&text)
                         || Some(repr) == parse_i64_or_f64_in::<YqSemantics>(&text)
-                        || matches!(repr, NumberRepr::Float(f) if is_nan_instance(f) && text == "null"),
+                        || matches!(repr, NumberRepr::Float(f) if is_nan_instance(f) && text == "null")
+                        // #1071: a YAML document's `.inf`/`.NaN` is not JSON number text.
+                        || matches!(repr, NumberRepr::Float(f)
+                            if crate::yaml::nonfinite_literal_value(&text)
+                                .is_some_and(|v| v.is_nan() == f.is_nan() && (v.is_nan() || v == f))),
                     "Literal::NumberLiteral's repr {repr:?} doesn't match a fresh parse of its own text {text:?} under either mode"
                 );
                 Self::NumberLiteral(repr, text.into())

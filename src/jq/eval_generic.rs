@@ -1132,7 +1132,7 @@ pub fn to_owned_yaml_cursor<S: EvalSemantics, W: AsRef<[u64]> + Clone>(
         None,
         0,
         &nesting_depth_check,
-        &yaml_scalar_in_one_resolve,
+        &yaml_scalar_in_one_resolve::<S, _>,
         &[],
     );
     // #2334: the depth-0 entry point asserts, as `to_owned_cursor` does.
@@ -1152,7 +1152,7 @@ pub fn to_owned_yaml_cursor<S: EvalSemantics, W: AsRef<[u64]> + Clone>(
 /// `yaml_one_resolve_override_agrees_with_the_accessor_chain_2664` pins over a
 /// corpus of scalar spellings, and the #224/#835/#903/#1801 tests pin the
 /// tag, alias and error cases.
-fn yaml_scalar_in_one_resolve<W: AsRef<[u64]> + Clone>(
+fn yaml_scalar_in_one_resolve<S: EvalSemantics, W: AsRef<[u64]> + Clone>(
     cursor: &crate::yaml::YamlCursor<'_, W>,
     value: &crate::yaml::YamlValue<'_, W>,
 ) -> Option<OwnedValue> {
@@ -1168,13 +1168,16 @@ fn yaml_scalar_in_one_resolve<W: AsRef<[u64]> + Clone>(
             // `None` skips a second resolve.
             if let Some(tag) = cursor.explicit_tag_at(None) {
                 if let Some(resolved) = crate::yaml::resolve_tagged(&text, tag) {
-                    return Some(resolved.to_owned_value(text));
+                    return Some(resolved_scalar_to_owned::<S>(resolved, text));
                 }
             }
             if !s.is_unquoted() {
                 return Some(OwnedValue::String(text.into_owned().into()));
             }
-            Some(s.resolve_plain_scalar(&text).to_owned_value(text))
+            Some(resolved_scalar_to_owned::<S>(
+                s.resolve_plain_scalar(&text),
+                text,
+            ))
         }
         _ => None,
     }
@@ -1487,7 +1490,7 @@ fn to_owned_cursor_at_depth<S: EvalSemantics, C: DocumentCursor, B: CursorWalkOu
         // can raise.
         match cursor
             .explicit_tag()
-            .and_then(|tag| tagged_scalar_to_owned(tag, &value))
+            .and_then(|tag| tagged_scalar_to_owned::<S, _>(tag, &value))
             .or_else(|| {
                 // A JSON-sourced number literal never keeps its own
                 // spelling (#978, #1398) -- checked before the ordinary
@@ -1536,10 +1539,32 @@ fn to_owned_cursor_at_depth<S: EvalSemantics, C: DocumentCursor, B: CursorWalkOu
 /// container, already excluded by [`to_owned_cursor`]'s caller) or the tag
 /// doesn't apply to this text (e.g. `!!int` on `"abc"` — [`resolve_tagged`]
 /// itself decides applicability).
-fn tagged_scalar_to_owned<V: DocumentValue>(tag: &str, value: &V) -> Option<OwnedValue> {
+fn tagged_scalar_to_owned<S: EvalSemantics, V: DocumentValue>(
+    tag: &str,
+    value: &V,
+) -> Option<OwnedValue> {
     let text = value.as_str()?;
     let resolved = crate::yaml::resolve_tagged(&text, tag)?;
-    Some(resolved.to_owned_value(text))
+    Some(resolved_scalar_to_owned::<S>(resolved, text))
+}
+
+/// [`ResolvedScalar::to_owned_value`] under `S`'s number model (#1071).
+///
+/// It keeps a document `.inf`/`-.INF`/`.NaN` as a literal, the spelling yq echoes. Only yq's
+/// number model has such a literal: jq reads the double, as the accessor chain does.
+fn resolved_scalar_to_owned<S: EvalSemantics>(
+    resolved: crate::yaml::ResolvedScalar,
+    text: Cow<'_, str>,
+) -> OwnedValue {
+    match resolved.to_owned_value(text) {
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), literal)
+            if S::TAG != EvalTag::Yq
+                && crate::yaml::nonfinite_literal_index(&literal).is_some() =>
+        {
+            OwnedValue::Float(f)
+        }
+        other => other,
+    }
 }
 
 /// Materializes `value`, preferring the cursor-aware, tag-resolving
@@ -3258,7 +3283,7 @@ fn to_owned_with_comments_at_depth<V: DocumentValue, S: EvalSemantics>(
         // `resolve_tagged` doesn't recognize).
         let owned = match cursor
             .and_then(|c| c.explicit_tag())
-            .and_then(|tag| tagged_scalar_to_owned(tag, value))
+            .and_then(|tag| tagged_scalar_to_owned::<S, _>(tag, value))
         {
             Some(owned) => owned,
             None => to_owned_at_depth::<S, _>(value, cursor, depth)?,

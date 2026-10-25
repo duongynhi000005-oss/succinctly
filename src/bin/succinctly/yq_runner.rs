@@ -26,9 +26,9 @@ use succinctly::jq::eval_generic::{
 use succinctly::jq::stream::StreamFailure;
 use succinctly::jq::{
     self, alias_identity, assert_value_tree_depth, is_alias_sensitive_assign,
-    nesting_depth_exceeded_message, nonfinite_display_string, sync_aliased_paths, Builtin,
-    DefScope, EvalError, Expr, Literal, MetaSlot, NumberRepr, ObjectKey, OwnedValue, QueryResult,
-    YqSemantics,
+    nesting_depth_exceeded_message, nonfinite_display_string, nonfinite_literal_display,
+    sync_aliased_paths, Builtin, DefScope, EvalError, Expr, Literal, MetaSlot, NumberRepr,
+    ObjectKey, OwnedValue, QueryResult, YqSemantics,
 };
 use succinctly::json::light::JsonCursor;
 use succinctly::json::validate;
@@ -7674,8 +7674,15 @@ fn emit_yaml_value_at_depth(
         OwnedValue::Null => "null".to_string(),
         OwnedValue::Bool(b) => b.to_string(),
         OwnedValue::Int(n) => n.to_string(),
+        // #1071: a computed non-finite is Go's `NaN`/`+Inf`/`-Inf`, which reads back as a
+        // string, so anywhere nested it carries the `!!float` tag a whole float does.
         OwnedValue::Float(f) if f.is_nan() || f.is_infinite() => {
-            nonfinite_display_string::<YqSemantics>(*f).to_string()
+            let text = nonfinite_display_string::<YqSemantics>(*f);
+            if depth == 0 {
+                text.to_string()
+            } else {
+                format!("!!float {text}")
+            }
         }
         // Real yq drops a computed whole float's decimal point (`2`, not
         // `2.0`) only at document-root scalar position, where it suppresses
@@ -7686,8 +7693,10 @@ fn emit_yaml_value_at_depth(
         // would read back as an int (`a: !!float 2`, issue #1090).
         OwnedValue::Float(f) if depth == 0 => format_float_yq_yaml(*f),
         OwnedValue::Float(f) => format_float_yq_yaml_nested(*f),
-        OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() || f.is_infinite() => {
-            nonfinite_display_string::<YqSemantics>(*f).to_string()
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), literal)
+            if f.is_nan() || f.is_infinite() =>
+        {
+            nonfinite_literal_display(*f, literal).to_string()
         }
         // #3576: yq's JSON decoder keeps no spelling for a float it reads, so a
         // JSON-sourced run prints the float the way a computed one is (`1e+20`).
@@ -8465,7 +8474,7 @@ fn emit_tagged_scalar(
         OwnedValue::NumberLiteral(repr, literal) => match repr {
             NumberRepr::Float(f) if f.is_nan() || f.is_infinite() => (
                 "!!float",
-                nonfinite_display_string::<YqSemantics>(*f).to_string(),
+                nonfinite_literal_display(*f, literal).to_string(),
             ),
             NumberRepr::Float(_) => ("!!float", literal.to_string()),
             NumberRepr::Int(_) => ("!!int", literal.to_string()),
@@ -12155,8 +12164,7 @@ mod tests {
             "-.inf"
         );
 
-        // #1064: the plain `Float` arm (this test's own doc comment above
-        // claims parity with it, but never actually exercised it).
+        // #1064/#1071: the plain `Float` arm, a *computed* non-finite: Go's spelling at the root.
         assert_eq!(
             emit_yaml_value(
                 &OwnedValue::Float(f64::NAN),
@@ -12165,7 +12173,7 @@ mod tests {
                 "",
                 false
             ),
-            ".nan"
+            "NaN"
         );
         assert_eq!(
             emit_yaml_value(
@@ -12175,7 +12183,7 @@ mod tests {
                 "",
                 false
             ),
-            ".inf"
+            "+Inf"
         );
         assert_eq!(
             emit_yaml_value(
@@ -12185,7 +12193,35 @@ mod tests {
                 "",
                 false
             ),
-            "-.inf"
+            "-Inf"
+        );
+
+        // #1071: nested, a computed non-finite carries the `!!float` tag it needs to read back.
+        assert_eq!(
+            emit_yaml_value_at_depth(
+                &OwnedValue::Float(f64::INFINITY),
+                &CommentTree::empty(),
+                &config,
+                "",
+                false,
+                1,
+                "",
+            ),
+            "!!float +Inf"
+        );
+
+        // #1071: a document `.INF`/`.NaN` echoes its own bytes.
+        for literal in ["-.INF", "+.inf", ".NaN"] {
+            let value = OwnedValue::from_number_literal_plain(literal);
+            assert!(
+                matches!(value, OwnedValue::Null),
+                "plain parse cannot read {literal}"
+            );
+        }
+        let nan = OwnedValue::NumberLiteral(NumberRepr::Float(f64::NAN), ".NaN".into());
+        assert_eq!(
+            emit_yaml_value(&nan, &CommentTree::empty(), &config, "", false),
+            ".NaN"
         );
     }
 

@@ -18672,10 +18672,13 @@ fn is_empty_object_literal(expr: &Expr) -> bool {
 /// (`other.to_json_yq()`) handles every other variant unchanged.
 fn yq_join_nonfinite_part(value: &OwnedValue) -> Option<String> {
     match value {
-        OwnedValue::Float(f) | OwnedValue::NumberLiteral(NumberRepr::Float(f), _)
+        OwnedValue::Float(f) if f.is_nan() || f.is_infinite() => {
+            Some(nonfinite_display_string::<YqSemantics>(*f).to_string())
+        }
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), literal)
             if f.is_nan() || f.is_infinite() =>
         {
-            Some(nonfinite_display_string::<YqSemantics>(*f).to_string())
+            Some(nonfinite_literal_display(*f, literal).to_string())
         }
         _ => None,
     }
@@ -20788,7 +20791,11 @@ pub(crate) fn numeric_display_string<S: EvalSemantics>(value: &OwnedValue) -> St
             // `"1E+400"` in jq 1.7.1 (#1083, #3212). A document literal is
             // never NaN; the check stays as a guard.
             if f.is_nan() || (f.is_infinite() && S::TAG == EvalTag::Yq) {
-                return nonfinite_display_string::<S>(*f).to_string();
+                return if S::TAG == EvalTag::Yq {
+                    nonfinite_literal_display(*f, literal).to_string()
+                } else {
+                    nonfinite_display_string::<S>(*f).to_string()
+                };
             }
         }
         // yq preserves a document-sourced literal's exact source spelling
@@ -20872,9 +20879,9 @@ pub(crate) fn numeric_display_string<S: EvalSemantics>(value: &OwnedValue) -> St
 /// assert_eq!(nonfinite_display_string::<JqSemantics>(f64::INFINITY), "1.7976931348623157e+308");
 /// assert_eq!(nonfinite_display_string::<JqSemantics>(f64::NEG_INFINITY), "-1.7976931348623157e+308");
 ///
-/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::NAN), ".nan");
-/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::INFINITY), ".inf");
-/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::NEG_INFINITY), "-.inf");
+/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::NAN), "NaN");
+/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::INFINITY), "+Inf");
+/// assert_eq!(nonfinite_display_string::<YqSemantics>(f64::NEG_INFINITY), "-Inf");
 /// ```
 pub fn nonfinite_display_string<S: EvalSemantics>(f: f64) -> &'static str {
     if S::TAG != EvalTag::Yq {
@@ -20884,11 +20891,54 @@ pub fn nonfinite_display_string<S: EvalSemantics>(f: f64) -> &'static str {
             infinite_float_preview_text(f.is_sign_negative())
         }
     } else if f.is_nan() {
+        "NaN"
+    } else if f.is_sign_negative() {
+        "-Inf"
+    } else {
+        "+Inf"
+    }
+}
+
+/// yq's YAML-tag spelling of a non-finite double (`.nan`/`.inf`/`-.inf`).
+///
+/// It is what a non-finite `NumberLiteral` that is *not* a document `.inf`/`.NaN` scalar
+/// prints (`1e400`, an `nan` the evaluator read), and what JSON text turned into YAML does.
+///
+/// A bare `Float` is not spelled this way in yq mode: it is a computed value, and real
+/// yq prints that as Go does, `NaN`/`+Inf`/`-Inf` ([`nonfinite_display_string`], #1071).
+///
+/// # Examples
+///
+/// ```
+/// use succinctly::jq::nonfinite_yaml_spelling;
+///
+/// assert_eq!(nonfinite_yaml_spelling(f64::NAN), ".nan");
+/// assert_eq!(nonfinite_yaml_spelling(f64::INFINITY), ".inf");
+/// assert_eq!(nonfinite_yaml_spelling(f64::NEG_INFINITY), "-.inf");
+/// ```
+#[must_use]
+pub fn nonfinite_yaml_spelling(f: f64) -> &'static str {
+    if f.is_nan() {
         ".nan"
     } else if f.is_sign_negative() {
         "-.inf"
     } else {
         ".inf"
+    }
+}
+
+/// How yq mode spells a non-finite `NumberLiteral` (#1071).
+///
+/// `f` is its double and `literal` its stored text. A document `.inf`/`-.INF`/`.NaN` scalar echoes the bytes it
+/// was written with, as real yq does (`.NaN | tostring` is `.NaN`, `+.inf` stays `+.inf`);
+/// any other literal that overflowed to a non-finite double keeps
+/// [`nonfinite_yaml_spelling`].
+#[must_use]
+pub fn nonfinite_literal_display(f: f64, literal: &str) -> &str {
+    if crate::yaml::nonfinite_literal_index(literal).is_some() {
+        literal
+    } else {
+        nonfinite_yaml_spelling(f)
     }
 }
 
@@ -22071,8 +22121,10 @@ fn props_value_to_string(value: &OwnedValue, escape: bool) -> String {
         // earlier version of this arm documented itself as unreachable and
         // spelled the value with plain `Display`, #1064).
         OwnedValue::Float(f) => crate::yaml::format_float_yq_yaml(*f),
-        OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() || f.is_infinite() => {
-            nonfinite_display_string::<YqSemantics>(*f).to_string()
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), literal)
+            if f.is_nan() || f.is_infinite() =>
+        {
+            nonfinite_literal_display(*f, literal).to_string()
         }
         // Echo verbatim (#1008): `@props` is documented as a yq-flavored
         // format function (CLAUDE.md's format table marks it `(yq)`) --
@@ -120477,20 +120529,20 @@ mod tests {
             }
         );
 
-        // #1064: NaN/Infinity spell YAML-native, not jq's bare NaN/inf.
+        // #1064/#1071: a computed NaN/Infinity spells as Go does in yq (`NaN`/`+Inf`/`-Inf`).
         query!(br"null", "nan | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".nan\n");
+                assert_eq!(s, "NaN\n");
             }
         );
         query!(br"null", "infinite | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf\n");
+                assert_eq!(s, "+Inf\n");
             }
         );
         query!(br"null", "-infinite | @yaml",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf\n");
+                assert_eq!(s, "-Inf\n");
             }
         );
 
@@ -120581,20 +120633,20 @@ mod tests {
             }
         );
 
-        // #1064: NaN/Infinity spell YAML-native, not jq's bare NaN/inf.
+        // #1064/#1071: a computed NaN/Infinity spells as Go does in yq (`NaN`/`+Inf`/`-Inf`).
         query!(br"null", "nan | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".nan\n");
+                assert_eq!(s, "NaN\n");
             }
         );
         query!(br"null", "infinite | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, ".inf\n");
+                assert_eq!(s, "+Inf\n");
             }
         );
         query!(br"null", "-infinite | @props",
             QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "-.inf\n");
+                assert_eq!(s, "-Inf\n");
             }
         );
 
