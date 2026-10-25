@@ -1626,7 +1626,7 @@ fn the_routed_library_entries_run_the_interpreter_5223() {
             true
         }) {
             Some(Control::Error(e)) => {
-                assert!(e.message.contains("invalid unicode escape"), "{e:?}")
+                assert!(e.message.contains("invalid unicode escape"), "{e:?}");
             }
             other => panic!("eval_each_with_cursor: expected the decode error, got {other:?}"),
         }

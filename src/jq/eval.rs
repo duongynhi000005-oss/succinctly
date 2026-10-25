@@ -44756,122 +44756,36 @@ fn map_f_resolves_live<S: EvalSemantics>(f: &Expr) -> bool {
     S::TAG == EvalTag::Jq && !cannot_move_register(f)
 }
 
-/// `[inner]` in path position, resolved live: `inner` runs against the register,
-/// every navigation in it is path-checked as jq checks it, and the collect
-/// backtracks to where it began. The body of the resolver's `[E]` arm
-/// (#3263), shared with the `map(f)` arm (#3865), which reaches it for an `f`
-/// the `[E]` arm's own gate would leave to the eager fallback.
-fn resolve_collect_live<'a, S: EvalSemantics>(
-    inner: &Expr,
-    value: &'a OwnedValue,
-    trackable: bool,
-    snapshot: &Snapshot,
-    frame: &Frame,
-    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
-) -> ResolveFlow {
-    let mut items = Vec::new();
-    let flow = resolve_node_sink::<S>(
-        inner,
-        value,
-        trackable,
-        snapshot,
-        frame,
-        Keep::AtMost(usize::MAX),
-        &mut |branch| {
-            items.push(branch.value.into_owned());
-            Demand::Continue
-        },
-    );
-    // #3263: jq's collect backtracks to where it began, so the
-    // register is where it was entering -- `value` itself when
-    // trackable -- but only when every navigation inside was
-    // checked here too. Otherwise none is claimed, and on a trackable
-    // entry that is a loss with no position ([`BranchRegister::
-    // LostSomewhere`]): `LostAt(value)` would be the precise answer,
-    // and would let a refusal of a `$x` frozen elsewhere be caught --
-    // a promotion with oracle rows of its own, not this arm's.
-    let register = if !trackable {
-        BranchRegister::None
-    } else if array_contents_are_checked(inner) {
-        BranchRegister::Unmoved(Cow::Borrowed(value))
-    } else {
-        BranchRegister::LostSomewhere
-    };
-    forward_drained_result(flow, OwnedValue::Array(items.into()), register, sink)
-}
-
-/// Whether `indices`/`index`/`rindex` on this input are the path step `.[$i]` jq defines them as
-/// (#3890): an array, an object or `null`, in jq mode. A string input keeps the leaf route for
-/// `indices` (nothing is navigated when it is searched for a string), and `index`/`rindex` on one
-/// step the access of the answer.
-fn pattern_search_steps<S: EvalSemantics>(search: PatternSearch, value: &OwnedValue) -> bool {
-    S::TAG == EvalTag::Jq
-        && match value {
-            OwnedValue::Array(_) | OwnedValue::Object(_) | OwnedValue::Null => true,
-            // `index` and `rindex` take `.[0]` / `.[-1:][0]` of what `indices` answered, which is
-            // never the register: a string searched for a string answers its positions by
-            // value, and the access raises on them (`near attempt to access element 0 of [1]`).
-            OwnedValue::String(_) => !matches!(search, PatternSearch::Indices),
-            _ => false,
-        }
-}
-
-/// [`resolve_node_sink`]'s arm for `indices`/`index`/`rindex` on an input
-/// [`pattern_search_steps`] admits (#3890): resolve the lookup jq defines them as, so the
-/// register moves by its component. An array wraps a non-array pattern into the
-/// one-element array the lookup is keyed by; `index` and `rindex` then step `.[0]` and
-/// `.[-1:][0]` of the answer.
-#[allow(clippy::too_many_arguments)]
-fn resolve_pattern_search_step<'a, S: EvalSemantics>(
-    search: PatternSearch,
-    pattern: &Expr,
-    value: &'a OwnedValue,
-    trackable: bool,
-    snapshot: &Snapshot,
-    frame: &Frame,
-    keep: Keep,
-    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
-) -> ResolveFlow {
-    if matches!(value, OwnedValue::String(_)) {
-        // The positions come from the leaf (by value), then the access of them is path-checked.
-        let positions = Expr::Builtin(Builtin::Indices(Box::new(pattern.clone())));
-        let steps = match search {
-            PatternSearch::Rindex => {
-                vec![positions, Expr::slice(Some(-1), None), Expr::index(0)]
-            }
-            _ => vec![positions, Expr::index(0)],
-        };
-        let steps = Expr::Pipe(steps.into());
-        return resolve_node_sink::<S>(&steps, value, trackable, snapshot, frame, keep, sink);
-    }
-    let key = if matches!(value, OwnedValue::Array(_)) {
-        Expr::Pipe(
-            vec![
-                pattern.clone(),
-                Expr::if_then_else(
-                    Expr::Compare {
-                        op: CompareOp::Eq,
-                        left: Box::new(Expr::Builtin(Builtin::Type)),
-                        right: Box::new(Expr::Literal(Literal::String("array".into()))),
-                    },
-                    Expr::Identity,
-                    Expr::array(Expr::Identity),
-                ),
-            ]
-            .into(),
-        )
-    } else {
-        pattern.clone()
-    };
-    let lookup = Expr::index_by(Expr::Identity, key);
-    let steps = match search {
-        PatternSearch::Indices => lookup,
-        PatternSearch::Index => Expr::Pipe(vec![lookup, Expr::index(0)].into()),
-        PatternSearch::Rindex => {
-            Expr::Pipe(vec![lookup, Expr::slice(Some(-1), None), Expr::index(0)].into())
-        }
-    };
-    resolve_node_sink::<S>(&steps, value, trackable, snapshot, frame, keep, sink)
+/// Whether `expr` is a node a static path target is made of
+/// (`path_mode::is_static_target`, node by node): the only nodes a jq-mode
+/// resolve meets since #5233. A computed key or slice bound is a value, so
+/// any `IndexExpr`/`SliceExpr` qualifies, and so does any `try`: the
+/// resolver reaches one whose handler is more than `empty` only in yq mode.
+fn is_static_target_node(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Identity
+            | Expr::Field(_)
+            | Expr::Index { .. }
+            | Expr::Slice { .. }
+            | Expr::Iterate
+            | Expr::RecursiveDescent
+            | Expr::IndexExpr { .. }
+            | Expr::SliceExpr { .. }
+            | Expr::Paren(_)
+            | Expr::Optional(_)
+            | Expr::Pipe(_)
+            | Expr::Comma(_)
+            | Expr::Try { .. }
+            | Expr::FirstExpr(_)
+            | Expr::Alternative(..)
+            | Expr::Builtin(
+                Builtin::Recurse
+                    | Builtin::RecurseF(_)
+                    | Builtin::Select(_)
+                    | Builtin::FirstStream(_)
+            )
+    )
 }
 
 /// Emits each branch to `sink` as it is produced (#1952), so a bounded
@@ -44891,6 +44805,18 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
     keep: Keep,
     sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
 ) -> ResolveFlow {
+    // #5233: every jq-mode entry hands a dynamic path target to the path-mode
+    // interpreter (`path_mode::route`), so a jq-mode resolve only meets the
+    // nodes a static target is made of. The arms below for any other construct
+    // serve yq mode.
+    if S::TAG == EvalTag::Jq && !is_static_target_node(expr) {
+        return ResolveFlow::Escaped(
+            EvalError::new(
+                "internal error: a dynamic path target reached the shipped resolver in jq mode",
+            )
+            .into(),
+        );
+    }
     match expr {
         // `None`: an ordinary pipe has no externally-known register to
         // inject (#2046) — see `resolve_seq_sink`'s own doc comment.
@@ -44900,132 +44826,24 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
         Expr::Paren(inner) => {
             resolve_node_sink::<S>(inner, value, trackable, snapshot, frame, keep, sink)
         }
-        // #3713: jq defines `walk(f)` as `def w: if type == "object" then
-        // map_values(w) elif type == "array" then map(w) else . end | f; w`, so on
-        // a scalar it is `. | f`, run on the path register itself: `f`'s
-        // navigation moves it, and `null | path(walk(.a))` is `["a"]`. The eager
-        // fallback evaluated `walk` by value, so its `null` at depth 0 matched the
-        // root and #3125's terminal carve-out answered `[]` (and a write of `9`
-        // over the whole document for `(walk(.a)) |= 9`, where jq writes
-        // `{"a":9}`). Re-dispatching as `f` reuses every rule `f` has in path
-        // position, as the bare `first` arm below does, and answers what jq
-        // answers where the fallback guessed: `path(walk(.a) | .x)` and
-        // `path(.x | walk(.a))` were refused and now name `["a","x"]` and
-        // `["x","a"]`; `walk(select(true))`, `walk(..)` and `walk(.a // .)` stay on
-        // the root, `walk(first)` is `[0]`, and `walk(1)` still refuses with its
-        // result. An array or object does not qualify: `map(w)` rebuilds the
-        // container, so the trailing `| f` runs on a computed value and the by-value
-        // route keeps judging it, for what it produces
-        // (`always_refuses_as_live_path`) and, for an array, by observing the
-        // trailing `f` inline (`walk_observed`, #3736), which jq refuses just the
-        // same whether or not `f` yields anything: a stream like `..|walk(.a?)`
-        // reaches the scalar leaves only through those containers, so their
-        // silence would let it write. jq mode only (ADR-0018): yq has no oracle
-        // for it.
-        Expr::Builtin(Builtin::Walk(f))
-            if S::TAG == EvalTag::Jq
-                && !matches!(value, OwnedValue::Array(_) | OwnedValue::Object(_)) =>
-        {
-            resolve_node_sink::<S>(f, value, trackable, snapshot, frame, keep, sink)
-        }
-        // #3545: jq defines bare `first` as `.[0]` and bare `last` as `.[-1]`
-        // (`def first: .[0]; def last: .[-1];`), so in a path they extend it by
-        // that component and a write through them lands. Without an arm here
-        // both fell to the eager value fallback, which reports the element's
-        // *value* as an untracked result (`[1,2] | path(first)` refused, and
-        // `null | first = 9` wrote `9` where jq writes `[9]`). Re-dispatching
-        // as the index step reuses every `Index` rule -- null input, an empty
-        // array's `-1`, the near-access wording -- instead of restating them.
-        // `first` is jq mode only, because yq's `first` is not `.[0]`: it is a
-        // root-only operator (`first = 9` is `[9,2]` on `[1,2]`, `.a | first` is
-        // an error, yq v4.53.3), so yq mode has its own arm below (#3551). `last`
-        // is not gated: real yq's lexer rejects it outright, so yq mode only
-        // reaches it through `--jq-extensions`, whose builtins mean what jq
+        // #3545: jq defines bare `last` as `.[-1]` (`def last: .[-1];`), so in a
+        // path it extends it by that component and a write through it lands.
+        // Re-dispatching as the index step reuses every `Index` rule -- null
+        // input, an empty array's `-1`, the near-access wording -- instead of
+        // restating them. Real yq's lexer rejects `last` outright, so yq mode
+        // only reaches it through `--jq-extensions`, whose builtins mean what jq
         // defines them as (#3560, as for `nth` below). Without this arm a write
-        // through it was silently discarded (`(.a | last) = 9` left `[1,2]`, exit 0).
-        Expr::Builtin(step @ (Builtin::First | Builtin::Last))
-            if S::TAG == EvalTag::Jq || matches!(step, Builtin::Last) =>
-        {
-            let component = Expr::index(if matches!(step, Builtin::First) {
-                0
-            } else {
-                -1
-            });
-            resolve_node_sink::<S>(&component, value, trackable, snapshot, frame, keep, sink)
-        }
-        // #3890: jq defines `indices($i)` as `.[$i]` on an array (the pattern wrapped into a
-        // one-element array unless it already is one) and on an object or `null`, `index` as
-        // that then `.[0]`, `rindex` as that then `.[-1:][0]`. The lookup is a path step like
-        // any other, so on a tracked input it moves the register by that component
-        // (`path(.a | indices(1))` is `["a",[1]]`, `path(.a | index(1))` is `["a",[1],0]`), and
-        // on an untracked one it raises where the `Index` arm raises. Re-dispatching as the
-        // lookup reuses every `IndexExpr` rule, as the bare `first` arm above does for `.[0]`.
-        // A string input (searched by `_strindices`, or indexed by a non-string) keeps the leaf
-        // route. jq mode only: yq's `index` is not this definition.
-        Expr::Builtin(Builtin::Indices(pattern))
-            if pattern_search_steps::<S>(PatternSearch::Indices, value) =>
-        {
-            resolve_pattern_search_step::<S>(
-                PatternSearch::Indices,
-                pattern,
-                value,
-                trackable,
-                snapshot,
-                frame,
-                keep,
-                sink,
-            )
-        }
-        Expr::Builtin(Builtin::Index(pattern))
-            if pattern_search_steps::<S>(PatternSearch::Index, value) =>
-        {
-            resolve_pattern_search_step::<S>(
-                PatternSearch::Index,
-                pattern,
-                value,
-                trackable,
-                snapshot,
-                frame,
-                keep,
-                sink,
-            )
-        }
-        Expr::Builtin(Builtin::Rindex(pattern))
-            if pattern_search_steps::<S>(PatternSearch::Rindex, value) =>
-        {
-            resolve_pattern_search_step::<S>(
-                PatternSearch::Rindex,
-                pattern,
-                value,
-                trackable,
-                snapshot,
-                frame,
-                keep,
-                sink,
-            )
-        }
-        // #3865: jq defines `map(f)` as `[.[] | f]`, so in a path `f` runs on each
-        // element with the register on it and path-checks whatever it navigates.
-        // The by-value leaf evaluated `map(f)` as one opaque value and never
-        // raised for an `f` that navigates a computed value (`{k:1} | .k`,
-        // `sort | .[0]`), so a stage that discarded the result accepted where jq
-        // raises: `path(map({k:1} | .k) | empty)` answered nothing, and
-        // `del([map({k:1} | .k)] and (.a)?)` deleted nothing at exit 0. Resolving
-        // the collect jq defines reuses every rule the `[E]` arm has -- the pipe's
-        // register, the near-access wording, an untracked input's raise from the
-        // `.[]`. It is that arm's body ([`resolve_collect_live`]) and not the arm
-        // itself, because the arm's gate leaves any collect holding `getpath` to
-        // the eager fallback (#2759: a `getpath` that is the *first* stage meets no
-        // carried register), and `.[] | f` never starts with one. An `f` that cannot
-        // move the register keeps the by-value leaf: nothing in it is path-checked, so
-        // the answer is the same and the clone and the live walk are skipped (a sweep
-        // over `map(.)` and `map(tostring)`, 20,027 rows, found no row that differs
-        // without the guard, so it is a cost guard, not a behaviour one). jq mode
-        // only (ADR-0018).
-        Expr::Builtin(Builtin::Map(f)) if map_f_resolves_live::<S>(f) => {
-            let inner = Expr::Pipe(vec![Expr::Iterate, (**f).clone()].into());
-            resolve_collect_live::<S>(&inner, value, trackable, snapshot, frame, sink)
-        }
+        // through it was silently discarded (`(.a | last) = 9` left `[1,2]`, exit
+        // 0). (yq's bare `first` is not `.[0]`; its arm is below, #3551.)
+        Expr::Builtin(Builtin::Last) => resolve_node_sink::<S>(
+            &Expr::index(-1),
+            value,
+            trackable,
+            snapshot,
+            frame,
+            keep,
+            sink,
+        ),
         // #3551 (yq mode): real yq's bare `first` is a path step at the head of
         // an expression, so `first = 9`, `first |= 5`, `first += 1` and
         // `del(first)` act on what it names (yq v4.53.3, input `[1,2]`:
@@ -45248,69 +45066,8 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 ResolveFlow::Exhausted
             }
         }
-        // #3460: jq's `tostring`/`@text` of a string and `tonumber` of a number
-        // return their input as the very same `jv`, so `path()` accepts them
-        // (`path(.b|tostring)` is `["b"]`) and an update writes through them.
-        // Judged on the value's kind alone, from the 1.7.1 source: any other
-        // input builds a fresh value and stays a refusal. `tostring`/`@text`
-        // are jq only: yq's `(.b|tostring) = 9` is a no-op.
-        Expr::Builtin(Builtin::ToString) | Expr::Format(FormatType::Text)
-            if S::TAG == EvalTag::Jq && matches!(value, OwnedValue::String(_)) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        // #4444: `ltrimstr("x", "s")` runs once per output of its argument, and each run is its
-        // own judgement of the same input (`path(.b|ltrimstr("x","s"))` answers `["b"]` and
-        // then refuses the fresh `""`). A comma of literals is that sequence of one-literal
-        // trims, which the arms below judge one by one. Any other generator argument keeps
-        // the refusal.
-        Expr::Builtin(Builtin::Ltrimstr(_) | Builtin::Rtrimstr(_))
-            if S::TAG == EvalTag::Jq && trim_generator_literals(expr).is_some() =>
-        {
-            let split = split_trim_generator(expr);
-            resolve_node_sink::<S>(&split, value, trackable, snapshot, frame, keep, sink)
-        }
-        // #4016: `ltrimstr`/`rtrimstr` hand their input back as the same `jv`
-        // unless a string argument actually matches the string input's edge
-        // (an empty argument matches), in which case the result is fresh. Only
-        // a literal argument is judged; anything else keeps the refusal. jq
-        // only: yq's `--jq-extensions` `ltrimstr` keeps its no-op write.
-        Expr::Builtin(Builtin::Ltrimstr(arg))
-            if S::TAG == EvalTag::Jq && trim_returns_input(true, arg, value) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        Expr::Builtin(Builtin::Rtrimstr(arg))
-            if S::TAG == EvalTag::Jq && trim_returns_input(false, arg, value) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        // #4295: `del(f)` is `delpaths([path(f)])`, and jq's `delpaths` hands its
-        // input back as the same `jv` when the path set is empty, so `path()`
-        // accepts it (`5 | path(del(.[]?))` is `[]`). Judged on the resolved path
-        // set, never on the shape of `f`: `del(.b?)` is empty over `[1]` and not
-        // over `{"a":1}`. A non-empty set builds a fresh value and stays a
-        // refusal. jq only: yq's `del` is a write, not an identity.
-        Expr::Builtin(Builtin::Del(target))
-            if S::TAG == EvalTag::Jq && del_resolves_no_path::<S>(target, value) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        // #4295: `delpaths([])` and `setpath([]; .)` return their input itself.
-        Expr::Builtin(Builtin::DelPaths(paths))
-            if S::TAG == EvalTag::Jq && is_empty_array_literal(unwrap_paren(paths)) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        Expr::Builtin(Builtin::SetPath(path, new_value))
-            if S::TAG == EvalTag::Jq
-                && is_empty_array_literal(unwrap_paren(path))
-                && is_identity_stage(new_value) =>
-        {
-            emit_passthrough(value, trackable, snapshot, sink)
-        }
-        // yq's `(.n|tonumber) = 5` writes through a number as well (v4.53.3), so
-        // this arm is not mode-gated.
+        // #3460: yq's `(.n|tonumber) = 5` writes through a number (v4.53.3), as
+        // jq's `tonumber` hands a number back as the very same `jv`.
         Expr::Builtin(Builtin::ToNumber)
             if matches!(
                 value,
@@ -45989,21 +45746,14 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
             forward_drained_branch(flow, result, sink)
         }
 
-        // #3763, #4114: jq defines `isempty(g)` as `first((g | false), true)`, so in
-        // a path it is `any`/`all`'s drain with every output of `g` decisive
-        // ([`resolve_isempty_sink`]). Jq mode only (ADR-0018).
-        Expr::Builtin(Builtin::IsEmpty(inner)) if S::TAG == EvalTag::Jq => {
-            resolve_isempty_sink::<S>(inner, value, trackable, snapshot, frame, keep, sink)
-        }
-
         Expr::Builtin(Builtin::IsEmpty(inner)) => {
             // A single output is all `resolve_bounded_sink` needs to see to
             // know the argument isn't empty -- answering `Demand::Stop`
             // immediately (its own `n = 1` cap already stops the underlying
             // generator after one branch either way) turns its returned
             // `flow` itself into the emptiness signal: `Stopped` means a
-            // branch arrived, `Exhausted` means none did. (yq mode: the jq
-            // arm above states jq's register and answers per output.)
+            // branch arrived, `Exhausted` means none did. (yq mode only: jq
+            // mode runs `isempty` in a path on the path-mode interpreter.)
             let flow = resolve_bounded_sink::<S>(
                 inner,
                 value,
@@ -46036,37 +45786,6 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 gen,
                 cond,
                 matches!(builtin, Builtin::AnyCond(..)),
-                value,
-                trackable,
-                snapshot,
-                frame,
-                sink,
-            )
-        }
-
-        // #3763: jq defines `any` as `any(.[]; .)` and `any(f)` as `any(.[];
-        // f)` (`all` alike), so in a path they are the two-argument form with
-        // `.[]` as the generator and take its rules: a deciding element emits
-        // its boolean at the register `.[]` left, and the by-value leaf these
-        // used to fall to could only report a loss. An untracked input still
-        // raises `near attempt to iterate through` from the `.[]` itself, as
-        // `builtin_navigation` did, and the arm is jq mode only (ADR-0018):
-        // yq's `any`/`all` are real yq builtins with no oracle for this (a
-        // bare `all` on a scalar keeps yq's `all only supports arrays`).
-        Expr::Builtin(
-            builtin @ (Builtin::Any | Builtin::All | Builtin::AnyF(_) | Builtin::AllF(_)),
-        ) if S::TAG == EvalTag::Jq => {
-            // The pattern admits exactly these four, so `All` is what is left.
-            let (cond, target_truthy) = match builtin {
-                Builtin::Any => (&Expr::Identity, true),
-                Builtin::AnyF(cond) => (&**cond, true),
-                Builtin::AllF(cond) => (&**cond, false),
-                _ => (&Expr::Identity, false),
-            };
-            resolve_any_all_gen_cond_sink::<S>(
-                &Expr::Iterate,
-                cond,
-                target_truthy,
                 value,
                 trackable,
                 snapshot,
@@ -46125,239 +45844,6 @@ fn resolve_node_sink<'a, S: EvalSemantics>(
                 drained_register::<S>(trackable, value),
                 sink,
             )
-        }
-
-        // #2689/#3049: array construction on a tracked or untracked input. jq's `[f]`
-        // (`gen_collect`) runs `f` with path tracking live -- unlike `{k:f}`,
-        // `if f`, `select(f)`, `try f`, an `as` source or `"\(f)"`, all of
-        // which suspend it -- so an INDEX/EACH inside the brackets on a value
-        // that is not `value_at_path` raises exactly as it would as a bare
-        // stage. Left to `resolve_leaf`'s catch-all, `[.a]` was evaluated
-        // *by value*: the `.a` inside succeeded, the array came back
-        // untracked, and a continuation that emitted nothing left nothing for
-        // `resolve_terminal` to object to. `path(1 | [.[]?] | empty)` and
-        // `path(. as {a:$v} | [.a] | ($v.b?) as $w | $w)` answered nothing at
-        // exit 0, and `del(...)` of the latter returned the document
-        // unchanged, where jq raises "near attempt to access element "a"" --
-        // the same accept-where-jq-refuses shape as #2646, on a leaf its
-        // static table cannot express because `inner` is arbitrary code.
-        //
-        // Resolving `inner` instead of evaluating it is what surfaces that
-        // navigation: the inner `Field`/`Index`/`Slice`/`Iterate` arms raise
-        // jq's exact wording against an untracked input, and a literal, `.`
-        // or an empty constructor pass straight through, so `[5]`, `[.]` and
-        // `[]` stay accepted. jq drains the whole collect, so the inner bound
-        // is unlimited whatever the outer `keep` -- `keep` governs how many
-        // *arrays* the consumer wants, and there is exactly one.
-        //
-        // #3049: a tracked input needs the same live resolution when its
-        // body can move the register. A navigation-free body such as `[1]`
-        // keeps the old catch-all: `path(. as $x | [1] | $x)` relies on
-        // preserving the register for the later `$x`. So, since #3186, does
-        // a body whose navigation all sits inside jq subexps (`[{k:.a}]`,
-        // `[.a + 1]`, `[if .a then 1 else 2 end]`): nothing in a subexp can
-        // raise a path error or move the register, so value evaluation
-        // answers exactly what live resolution would. Pass ambient tracking
-        // into a resolved `inner`; its constructed array is untracked. The
-        // seq-level register handling
-        // (`cannot_move_register`'s own `Array` arm) is unchanged. jq mode
-        // only (ADR-0018): real yq's lexer rejects every shape that reaches
-        // here, so there is no yq oracle, and yq mode keeps `Untracked::Skip`.
-        //
-        // **Also keyed on `inner` containing no `GetPath`, the one remaining
-        // shape whose own untracked handling is wrong.** Evaluating by value
-        // had been *masking* that bug inside brackets, and routing the
-        // brackets through the resolver would unmask it -- turning a working
-        // program into an error, the one direction this fix must never move.
-        // #2896 made the `keys.is_empty()` arm *defer* in jq mode -- the only
-        // mode this guard runs in -- so the eager refusal this exclusion was
-        // originally written against is gone. It is kept because the reason
-        // is now a different one: resolved from here, a `getpath` stage is
-        // handed no `carried_register` and no ambient positional mark, so
-        // neither `getpath_preserves_register` nor `getpath_result_position`
-        // has anything to work from and the bracket would refuse where jq
-        // accepts. `path(1 | [getpath([])] | empty)` is accepted by jq.
-        // #2759.
-        //
-        // A bare `TrackedVar` anywhere in `inner` used to be excluded here
-        // too (#2759), on the theory that resolving it live would see it as
-        // just another untracked value and refuse navigation jq accepts
-        // through it. That exclusion scanned `inner`'s *whole* subtree, so a
-        // `TrackedVar` anywhere in a mixed array disqualified live
-        // resolution for every other element too -- silently un-checking
-        // real navigation elsewhere in the same array (`[.a, $v0]`'s `.a`
-        // stopped refusing the moment `$v0` existed anywhere in the
-        // brackets). #3290: removed. `resolve_node_sink`'s own
-        // `Expr::TrackedVar` arm already certifies (or correctly declines to
-        // certify) a marked `$var` against the ambient `snapshot`/`frame`
-        // wherever it's reached, the same as it would for any other direct
-        // resolution -- there was never a real gap here once the resolver's
-        // own recursive dispatch is trusted to decide per node, the same
-        // lesson #2760 (PR #3288) learned for `and`/`or`. Confirmed live
-        // against jq 1.7.1 across `[$v0, .a]`, `[.a, $v0]`, `[[$v0, .a]]`
-        // and the `del()`/`|=` write-position forms.
-        //
-        // The recurse family and `Optional` were excluded here too until
-        // #2764 made each defer its refusal the way jq does: parameterized
-        // recursion resolves `f` against an untracked seed instead of
-        // refusing on sight, and a `try`-scoped `(E)?` keeps its catching
-        // `?` through `push_path_components`'s flatten rather than turning
-        // into the non-catching postfix `E?`.
-        //
-        // The scan is O(|inner|), the same order as resolving it.
-        Expr::Array(inner) if array_resolves_live::<S>(inner, trackable) => {
-            resolve_collect_live::<S>(inner, value, trackable, snapshot, frame, sink)
-        }
-
-        // `and`/`or`/unary minus in path position, jq mode (#2760, #3289).
-        //
-        // jq's `gen_and`/`gen_or` are not subexps: `L and R` is `DUP; L;
-        // JUMP_F; POP; R; ...; LOADK true|false`. `L` runs on the input and
-        // moves the path register wherever it navigates; `R` runs on the
-        // *original* input (the `DUP`ed copy) while the register stays where
-        // `L` left it, so any navigation inside `R` is checked against that
-        // register; and the result is a fresh boolean at the register's
-        // position, which `PATH_END` accepts only when it is `jv_identical`
-        // to what the register holds. In register terms `L and R` is the pipe
-        // `. as $in | L | <if truthy> $in | R | <bool>`, with the short-circuit
-        // taken per `L` branch. Live against jq 1.7.1:
-        // `path((.a and .b) | empty)` on `{"a":1}` refuses near `"b"` (`R`
-        // navigates off a register `L` moved), `path(.a and .b)` on
-        // `{"a":false}` is `["a"]` (short-circuited at `L`'s register, and
-        // `false` is identical to it), and `path(.a and 5)` on `{"a":0}`
-        // refuses (`true` is not identical to `0`).
-        //
-        // So each arm resolves `L` live, then per branch either emits the
-        // short-circuit constant at `L`'s register or resolves `R` from the
-        // restored input ([`resolve_from_restored_input`]) and emits each of
-        // its booleans at that branch's register
-        // ([`computed_at_branch_register`]). Unary minus has one operand and
-        // no short-circuit: it resolves live and emits each negated value at
-        // its branch's register.
-        //
-        // Both trackability states take these arms (#2760 fixed only the
-        // untracked one, which fell to the eager catch-all below and never
-        // checked navigation at all; #3289 is the trackable one, which fell
-        // there too). No `TrackedVar` guard on either operand: the resolver's
-        // own `Expr::TrackedVar` arm certifies a marked `$var` per node, the
-        // lesson #2760's review learned from two drafts that scanned an
-        // operand from outside (`. as {a:$v0} | ((.a and $v0) and .k)` must
-        // still check `.a`).
-        //
-        // Gated to `S::TAG == EvalTag::Jq`: real yq's `and`/`or` are real
-        // operators whose eager catch-all behaviour these arms would change
-        // (live against yq v4.53.3, `del(1 | (.a and true) | select(false))`
-        // on `a: false` is a silent no-op), and yq has no unary minus at all,
-        // so its `-E == E * -1` extension (docs/compliance/yq/limitations.md)
-        // must keep both spellings on the same path.
-        Expr::And(left, right) | Expr::Or(left, right)
-            if and_or_negate_resolves_live::<S>(expr) =>
-        {
-            // `and` short-circuits on a falsy `L`, `or` on a truthy one; in
-            // both cases the short-circuit value *is* `L`'s truthiness.
-            let short_circuit_on = matches!(expr, Expr::Or(..));
-            // Every operand output can now be accepted, so every one must be
-            // reached -- the `[E]` arm drains with `AtMost` for the same reason.
-            let drain = Keep::AtMost(usize::MAX);
-            // `R`'s own stop or escape, handed to `L`'s generator as `Stop`.
-            // Reset per `L` output: a re-invocation after a stop is a `?//`
-            // retry inside `L`, which supersedes it (#3293's rule).
-            let mut inner_flow: Option<(ResolveFlow, u64)> = None;
-            let flow =
-                resolve_node_sink::<S>(left, value, trackable, snapshot, frame, drain, &mut |l| {
-                    inner_flow = None;
-                    let truthy = l.value.is_truthy();
-                    let left_trackable = l.trackable;
-                    let (path, register) = register_after(left, l, frame);
-                    if truthy == short_circuit_on {
-                        return sink(computed_at_register(
-                            OwnedValue::Bool(truthy),
-                            path,
-                            register,
-                        ));
-                    }
-                    // `R` enters with the register `L` left, not the one the
-                    // arm entered with: an unknown `L` register must not be
-                    // papered over by the frame's (#3289 review: `nth(0) and
-                    // true` on a constructed `[true]` wrote through the entry
-                    // register where jq's own `.[0]` refuses).
-                    let right_frame = if left_trackable {
-                        Cow::Borrowed(frame)
-                    } else {
-                        Cow::Owned(frame.with_register(register.unmoved_value()))
-                    };
-                    match resolve_from_restored_input::<S>(
-                        right,
-                        path,
-                        register,
-                        value,
-                        trackable,
-                        snapshot,
-                        &right_frame,
-                        drain,
-                        &mut |r| {
-                            let bit = OwnedValue::Bool(r.value.is_truthy());
-                            let (path, register) = register_after(right, r, &right_frame);
-                            sink(computed_at_register(bit, path, register))
-                        },
-                    ) {
-                        ResolveFlow::Exhausted => Demand::Continue,
-                        other => {
-                            if let ResolveFlow::Escaped(escape) = &other {
-                                mark_nonretryable_escape(&Control::from(escape.clone()));
-                            }
-                            inner_flow = Some((other, pipe_retry_generation()));
-                            Demand::Stop
-                        }
-                    }
-                });
-            match inner_flow {
-                Some((inner, at))
-                    if !resolve_retry_superseded(&flow, at, direct_pattern_retry(left)) =>
-                {
-                    inner
-                }
-                _ => flow,
-            }
-        }
-        // See the `And`/`Or` arm just above. Reset the negation escape on
-        // each branch: `?//` can retry after a failed alternative and resolve
-        // a later one. A final `arith_negate` error still escapes through the
-        // shared stop classifier so `?//` sees its proper retryability.
-        Expr::Negate(inner) if and_or_negate_resolves_live::<S>(expr) => {
-            let mut negate_escape: Option<(EvalEscape, u64)> = None;
-            let flow = resolve_node_sink::<S>(
-                inner,
-                value,
-                trackable,
-                snapshot,
-                frame,
-                Keep::AtMost(usize::MAX),
-                &mut |branch| {
-                    negate_escape = None;
-                    let negated = arith_negate::<S>(branch.value.clone().into_owned());
-                    match negated {
-                        Ok(negated) => {
-                            let (path, register) = register_after(inner, branch, frame);
-                            sink(computed_at_register(negated, path, register))
-                        }
-                        Err(e) => {
-                            let mut slot = None;
-                            let demand = stop_with_eval_escape(&mut slot, e.into());
-                            negate_escape = slot.map(|escape| (escape, pipe_retry_generation()));
-                            demand
-                        }
-                    }
-                },
-            );
-            match negate_escape {
-                Some((escape, at))
-                    if !resolve_retry_superseded(&flow, at, direct_pattern_retry(inner)) =>
-                {
-                    ResolveFlow::Escaped(escape)
-                }
-                _ => flow,
-            }
         }
 
         // #2267: both computed-navigation resolvers drive their own
@@ -50135,66 +49621,6 @@ fn resolve_any_all_gen_cond_sink<'a, S: EvalSemantics>(
     )
 }
 
-/// The path-position body of `isempty(g)` in jq mode (#3456, #3763, #4114).
-///
-/// jq defines it as `first((g | false), true)`: the first output of `g` answers
-/// `false` and the `first` then breaks, and only a `g` that ran to its end
-/// answers `true`. That is `any`/`all`'s drain with every output of `g`
-/// decisive and no `cond`, so it hands its answers to the consumer the same way
-/// ([`AnswerDelivery`]): `false` at the register [`register_after`] states, from
-/// inside the drain, and the identity element `true` once `g` ran to its end
-/// after a swallowed answer.
-///
-/// The `first`'s break is an error a `?//` inside `g` catches, as it catches a
-/// path error the consumer raises on the `false` (jq refuses `false` unless it is
-/// identical to the register): the retry resolves the next alternative, which may
-/// answer again or come up dry, and a dry retry leaves `g` running to its end so
-/// the trailing `true` fires (`path(.x | isempty(. as $q ?// $z | if $q then true
-/// else empty end))` on `{"x":true}` is `["x"]`). A `g` with no `?//` stops at its
-/// first output, as it did when this arm drained it through
-/// [`resolve_bounded_sink`]. A generator that emitted nothing backtracked every
-/// branch it explored, so the register is where it entered
-/// ([`drained_register_at_entry`], #3456, #4341).
-#[allow(clippy::too_many_arguments)] // STYLE-0004: the resolver's threaded ambient state, plus the arm's operand.
-fn resolve_isempty_sink<'a, S: EvalSemantics>(
-    gen: &Expr,
-    value: &'a OwnedValue,
-    trackable: bool,
-    snapshot: &Snapshot,
-    frame: &Frame,
-    keep: Keep,
-    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
-) -> ResolveFlow {
-    // Every output of `g` is `false` (`target_truthy`), the identity element `true`.
-    let mut delivery = AnswerDelivery::new(sink, false);
-    // #4698: `g | false` throws what `g` emits away; jq checks none of it.
-    let _discarded = fold_body::emissions_discarded();
-    let flow = resolve_node_sink::<S>(
-        gen,
-        value,
-        trackable,
-        snapshot,
-        frame,
-        // The first output of each resolution is all `first` takes; a retry is
-        // another resolution, with its own.
-        keep.at_most(1),
-        &mut |branch| {
-            delivery.answer(register_after(gen, branch, frame));
-            Demand::Stop
-        },
-    );
-    if delivery.delivered == 0 {
-        return forward_drained_result(
-            flow,
-            OwnedValue::Bool(true),
-            drained_register_at_entry::<S>(trackable, value, frame),
-            delivery.sink,
-        );
-    }
-    let at_entry = drained_register_at_entry::<S>(trackable, value, frame);
-    finish_any_all_answers(delivery, flow, None, at_entry)
-}
-
 /// The consumer side of `any`/`all`'s path answers (#3827, #3899): each decisive
 /// output is handed to `sink` from inside the drain, the way jq's path tracker
 /// sees it, so what a retried alternative does (`stderr`, `debug`, `halt`) runs
@@ -50579,119 +50005,6 @@ fn resolve_flow_as_flow(flow: &ResolveFlow) -> Flow {
         ResolveFlow::Stopped => Flow::Stopped { pending: None },
         ResolveFlow::Escaped(escape) => Flow::Escaped(Control::from(escape.clone())),
     }
-}
-
-/// Whether `expr` holds a `try` whose body always raises after navigating (`try
-/// (.a | error) catch .`), which [`cannot_move_register`] admits because the raise
-/// backtracks the move (#3965).
-///
-/// The navigation still runs, path-checked, against the register jq stands on at
-/// the `try`: off it, `.a` raises a path error of its own *ahead of* the body's
-/// `error`, and the handler receives that message, not the value the body would
-/// have raised (#4125: `(.a)? or try (.a | error) catch .` hands the handler a
-/// string where evaluating the body from the entry hands it `false`). Evaluating
-/// such an operand from the entry is only faithful while the register is the
-/// entry, which [`resolve_from_restored_input`] has just established it is not.
-fn raising_try_navigates(expr: &Expr) -> bool {
-    any_subexpr(expr, &mut |e| match e {
-        Expr::Try { expr: body, .. } => body_always_raises(body) && !cannot_move_register(body),
-        _ => false,
-    })
-}
-
-/// Resolve `expr` against the *original* input `value` with jq's register at
-/// `path` holding `register` -- where one branch of an `and`/`or`'s `L`
-/// left it (#3289): jq's `DUP`ed input, run with the register wherever `L`
-/// left it.
-///
-/// - At the root with a register `L` provably left there
-///   ([`Unmoved`](BranchRegister::Unmoved)), `L` left the register where the
-///   arm entered, so `expr` resolves exactly as it would have without `L`. A
-///   root path with a *lost* register is not that case (#3456): a by-value
-///   operand jq navigates inside (`any`, `isempty(g)`) is emitted at the root
-///   because it navigated nothing *this resolver can see*, while jq's register
-///   has moved, so resolving `expr` live as though it had not would accept a
-///   navigation jq refuses (`del(any and .a)` on `{"a":true}`). An untracked
-///   entry keeps the shortcut as it was: its value is not the register, so a
-///   navigation in `expr` refuses against it whichever way `L` moved it.
-/// - An `expr` that provably cannot move the register never checks it
-///   either: jq computes its outputs while the register stays at `path`,
-///   and only their truthiness reaches the result. Seeding a pipe here
-///   instead would read a bare `.` on the untracked seed as the whole of
-///   `path()` and refuse "with result" the input (`((.a,.b) and .) |= 3` on
-///   `{"a":"s"}` is jq's "with result true", not the input). Except a `try`
-///   whose body navigates and then always raises ([`raising_try_navigates`]):
-///   that navigation is checked, and its path error is the handler's payload.
-/// - Otherwise `expr` runs as a pipe seeded at `path`, holding the input as
-///   its value and the register -- the seed #2649's `Expr::AsPattern` arm
-///   builds for a body whose pattern moved the register -- so a navigation
-///   in `expr` refuses with jq's own "near attempt to access" whenever the
-///   input is not the register. The input can be identical to a non-root
-///   register only by `null`/`true`/`false` kind, or as a *non-empty* array's
-///   full slice ([`restored_register_is_input`]; the slice of `[]` is a fresh
-///   `[]`, #3647). An unknown register means jq's is somewhere this resolver cannot see,
-///   so the seed carries the lost-register frame (#3267): a refusal there
-///   is a guess, loud rather than catchable. On a trackable entry the input
-///   *is* the node the register entered on, which jq still holds if `L` did
-///   not move it, so the lost seed is marked as such ([`Snapshot::register_entry`]):
-///   without the mark [`guess_refusal`] would call a computed-looking value
-///   exact, and a `try` or `?` around the arm would swallow the guess
-///   (`del(try (any or .b?))` echoed the document where jq exits 5).
-#[allow(clippy::too_many_arguments)] // STYLE-0004: the resolver's threaded ambient state plus the moved register.
-fn resolve_from_restored_input<'a, S: EvalSemantics>(
-    expr: &Expr,
-    path: Rc<PathPrefix>,
-    register: BranchRegister<'a>,
-    value: &'a OwnedValue,
-    trackable: bool,
-    snapshot: &Snapshot,
-    frame: &Frame,
-    keep: Keep,
-    sink: &mut dyn FnMut(PathBranch<'a>) -> Demand,
-) -> ResolveFlow {
-    if path.depth() == 0 && (register.unmoved_value().is_some() || !trackable) {
-        return resolve_node_sink::<S>(expr, value, trackable, snapshot, frame, keep, sink);
-    }
-    if cannot_move_register(expr) && !raising_try_navigates(expr) {
-        return resolve_node_sink::<S>(expr, value, trackable, snapshot, frame, keep, &mut |r| {
-            sink(
-                PathBranch::passthrough(Rc::clone(&path), r.value, false, Snapshot::No)
-                    .with_register(register.clone()),
-            )
-        });
-    }
-    // Anything but a known register is lost, and rides the frame below (D2):
-    // the seed carries a register or nothing.
-    let lost = register.unmoved_value().is_none();
-    let seed = match register.into_unmoved() {
-        // [`restored_register_is_input`]: `null`/`true`/`false` by kind, or the
-        // full slice of a non-empty array. Live against jq 1.7.1,
-        // `path((.[0:] and .[1]) | empty)` on `[1,2]` passes while `.[1:]`/
-        // `.[:1]` refuse, a full *string* slice is a copy that refuses too, and
-        // `[] | path(.[0:] and .b?)` refuses (#3647).
-        Some(reg) if restored_register_is_input(value, &reg) => {
-            PathBranch::new(path, Cow::Borrowed(value), true)
-        }
-        register => PathBranch::passthrough(
-            path,
-            Cow::Borrowed(value),
-            false,
-            if lost && trackable {
-                Snapshot::register_entry()
-            } else {
-                Snapshot::No
-            },
-        )
-        .with_register(register.map_or(BranchRegister::None, BranchRegister::Unmoved)),
-    };
-    let lost_frame;
-    let frame = if lost {
-        lost_frame = frame.with_register_loss(RegisterLoss::LostSomewhere);
-        &*lost_frame
-    } else {
-        frame
-    };
-    resolve_seq_from_seed::<S>(core::slice::from_ref(expr), seed, frame, keep, sink)
 }
 
 /// Shared tail for every "drain an argument fully via a discarding sink,
@@ -54018,16 +53331,6 @@ fn is_null_or_bool(value: &OwnedValue) -> bool {
 /// cannot reach one and miss the others.
 fn slice_is_same_array(value: &OwnedValue) -> bool {
     matches!(value, OwnedValue::Array(items) if !items.is_empty())
-}
-
-/// Whether the register `reg` an `and`/`or`'s left operand left at a non-root
-/// path *is* the input `value` the right operand navigates: `null`/`true`/
-/// `false` by kind, or a full slice of a non-empty array (a strict subtree of
-/// a finite document never equals the whole, so an equal array there can only
-/// be that slice). Never an empty array (#3647): `.[0:0] and .b?` on `[]` meets
-/// a register that is not the input.
-fn restored_register_is_input(value: &OwnedValue, reg: &OwnedValue) -> bool {
-    null_bool_identical(value, reg) || (slice_is_same_array(value) && *value == *reg)
 }
 
 /// Whether `marker` certifies against `target` -- storage identity (jq
@@ -70477,97 +69780,6 @@ fn type_filter_keeps(builtin: &Builtin, value: &OwnedValue) -> Option<bool> {
 /// array of an empty comma.
 fn is_empty_array_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Array(inner) if matches!(&**inner, Expr::Comma(items) if items.is_empty()))
-}
-
-/// Whether `del(target)` resolves no path over `value` (#4295), so that jq's
-/// `delpaths([])` returns `value` itself.
-///
-/// Only a target [`del_target_is_effect_free`] admits is resolved: the
-/// resolution is repeated by the refusal path when this answers no, and a
-/// target with a side effect would fire it twice. A resolution that raises
-/// answers no as well, leaving the error to the ordinary path.
-fn del_resolves_no_path<S: EvalSemantics>(target: &Expr, value: &OwnedValue) -> bool {
-    if !del_target_is_effect_free(target) {
-        return false;
-    }
-    // Stops at the first path: a non-empty set is refused by the caller's
-    // ordinary route, which resolves it again, so resolving it all here would
-    // double the work of every refusal.
-    let mut found = false;
-    let flow = resolve_terminal_sink::<S>(target, value, false, Untracked::Refuse, &mut |_| {
-        found = true;
-        Demand::Stop
-    });
-    flow.is_ok() && !found
-}
-
-/// [`is_pure_navigation`]'s grammar plus `empty`, the one non-navigating node
-/// a `del()` target is routinely made of.
-fn del_target_is_effect_free(target: &Expr) -> bool {
-    !any_subexpr(target, &mut |e| {
-        !(is_pure_navigation_node(e) || matches!(e, Expr::Builtin(Builtin::Empty)))
-    })
-}
-
-/// The one-literal trim builtin and the literals of a [`trim_generator_literals`] match.
-type TrimGenerator<'e> = (fn(Box<Expr>) -> Builtin, Vec<&'e Expr>);
-
-/// The literals a `ltrimstr(A, B, ...)` / `rtrimstr(A, B, ...)` argument is a comma of,
-/// in the order jq runs the argument's outputs, with the one-literal builtin to rebuild
-/// them with (#4444). `None` unless the argument is a comma (nested or parenthesised)
-/// of literals and nothing else.
-fn trim_generator_literals(expr: &Expr) -> Option<TrimGenerator<'_>> {
-    fn collect<'e>(arg: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
-        match unwrap_paren(arg) {
-            literal @ Expr::Literal(_) => {
-                out.push(literal);
-                true
-            }
-            Expr::Comma(items) => items.iter().all(|item| collect(item, out)),
-            _ => false,
-        }
-    }
-    let (arg, make): (&Expr, fn(Box<Expr>) -> Builtin) = match expr {
-        Expr::Builtin(Builtin::Ltrimstr(arg)) => (arg, Builtin::Ltrimstr),
-        Expr::Builtin(Builtin::Rtrimstr(arg)) => (arg, Builtin::Rtrimstr),
-        _ => return None,
-    };
-    let mut literals = Vec::new();
-    (matches!(unwrap_paren(arg), Expr::Comma(_)) && collect(arg, &mut literals))
-        .then_some((make, literals))
-}
-
-/// `ltrimstr(A, B)` / `rtrimstr(A, B)` over literals as the comma of its one-literal
-/// trims (#4444); see [`trim_generator_literals`]. Any other `expr` comes back as is,
-/// which the resolver arm never asks for (its guard is the same match).
-fn split_trim_generator(expr: &Expr) -> Expr {
-    trim_generator_literals(expr).map_or_else(
-        || expr.clone(),
-        |(make, literals)| {
-            Expr::Comma(
-                literals
-                    .into_iter()
-                    .map(|literal| Expr::Builtin(make(Box::new(literal.clone()))))
-                    .collect(),
-            )
-        },
-    )
-}
-
-/// Whether `ltrimstr`/`rtrimstr` with the literal `arg` returns `value` itself
-/// (#4016): `value` or `arg` is not a string, or the edge does not match.
-fn trim_returns_input(is_left: bool, arg: &Expr, value: &OwnedValue) -> bool {
-    let Expr::Literal(lit) = arg else {
-        return false;
-    };
-    let (Literal::String(edge), OwnedValue::String(text)) = (lit, value) else {
-        return true;
-    };
-    if is_left {
-        !text.as_str().starts_with(edge.as_str())
-    } else {
-        !text.as_str().ends_with(edge.as_str())
-    }
 }
 
 /// Whether `builtin` is one of the nine type filters, as [`type_filter_keeps`]
@@ -98904,6 +98116,22 @@ fn eval_func_call<'a, W: Clone + AsRef<[u64]>>(
     QueryResult::Error(EvalError::new(message))
 }
 
+/// [`eval_full`] in jq mode, except that a program with a dynamic path target
+/// goes through the routed [`eval`]: every jq-mode entry hands it to the
+/// path-mode interpreter (#5233), and this evaluator no longer answers it. For
+/// the tests, which drive this evaluator directly.
+#[cfg(test)]
+fn eval_full_routed<'a>(
+    expr: &Expr,
+    cursor: JsonCursor<'a, Vec<u64>>,
+) -> QueryResult<'a, Vec<u64>> {
+    if super::path_mode::leaves_the_shipped_route(expr) {
+        eval::<Vec<u64>, JqSemantics>(expr, cursor)
+    } else {
+        eval_full::<Vec<u64>, JqSemantics>(expr, cursor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100637,7 +99865,7 @@ mod tests {
         // evaluates the real array length.
         let mut resolved = parse("def length(x): x; length").unwrap();
         resolve_func_calls_all(&mut resolved);
-        match eval_full::<Vec<u64>, JqSemantics>(&resolved, index.root(json)) {
+        match eval_full_routed(&resolved, index.root(json)) {
             QueryResult::Owned(OwnedValue::Int(3)) => {}
             other => panic!("expected Owned(Int(3)), got {other:?}"),
         }
@@ -100646,7 +99874,7 @@ mod tests {
         // node's `builtin_fallback` is still `Some`, so this must name the
         // actual cause instead of reporting a bare arity/name mismatch.
         let unresolved = parse("def length(x): x; length").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&unresolved, index.root(json)) {
+        match eval_full_routed(&unresolved, index.root(json)) {
             QueryResult::Error(e) => {
                 assert!(
                     e.message.contains("resolve_func_calls"),
@@ -101535,7 +100763,7 @@ mod tests {
                     let bound_then = bind_def(&name, &params, &body, &then, &cache);
                     let json = b"null";
                     let index = crate::json::JsonIndex::build(json);
-                    let result = eval_full::<Vec<u64>, JqSemantics>(&bound_then, index.root(json));
+                    let result = eval_full_routed(&bound_then, index.root(json));
                     let out: Vec<String> = result
                         .collect_owned::<JqSemantics>()
                         .iter()
@@ -101705,11 +100933,9 @@ mod tests {
             let expr = parse(filter).expect("parses");
             let json = b"null";
             let index = JsonIndex::build(json);
-            with_stack_budget(0, || {
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json)) {
-                    QueryResult::Error(e) => e,
-                    other => panic!("{filter}: expected a refusal, got {other:?}"),
-                }
+            with_stack_budget(0, || match eval_full_routed(&expr, index.root(json)) {
+                QueryResult::Error(e) => e,
+                other => panic!("{filter}: expected a refusal, got {other:?}"),
             })
         };
         let err = refusal("def f: 1; f");
@@ -101759,9 +100985,8 @@ mod tests {
             "def f: .; .a | to_entries | f | parent",
         ] {
             let expr = parse(filter).expect("parses");
-            let refuse = || match with_stack_budget(0, || {
-                eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json))
-            }) {
+            let refuse = || match with_stack_budget(0, || eval_full_routed(&expr, index.root(json)))
+            {
                 QueryResult::Error(e) => assert!(
                     e.message.ends_with("exceeded maximum recursion depth"),
                     "{filter}: {}",
@@ -101774,7 +100999,7 @@ mod tests {
             // Warm the node's bound-body cache with the stack unregistered...
             assert!(
                 !matches!(
-                    eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json)),
+                    eval_full_routed(&expr, index.root(json)),
                     QueryResult::Error(_)
                 ),
                 "{filter}: answers with the stack unregistered"
@@ -101822,7 +101047,9 @@ mod tests {
 
         // A `DefCall` refuses before its body can read an argument, so an
         // argument read is reached here directly: `g` stands for an argument
-        // already bound into the query, as `bind_def_call` leaves it.
+        // already bound into the query, as `bind_def_call` leaves it. (A path
+        // target that is an argument, `path(g)` or `g |= 2`, is dynamic: in jq
+        // mode it runs on the path-mode interpreter, #5233.)
         for filter in [
             "g",
             "first(g)",
@@ -101830,8 +101057,6 @@ mod tests {
             "g | key",
             "[g | parent]",
             "g | .b",
-            "[path(g)]",
-            "g |= 2",
             ".a | to_entries | g | key",
             ".a | to_entries | g | parent",
         ] {
@@ -101866,7 +101091,7 @@ mod tests {
             (".a[] | .[0], .[0]", vec!["1", "1", "3", "3"]),
         ] {
             let expr = parse(filter).expect("parses");
-            let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json))
+            let got = eval_full_routed(&expr, index.root(json))
                 .collect_owned::<JqSemantics>()
                 .iter()
                 .map(OwnedValue::to_json)
@@ -101938,7 +101163,7 @@ mod tests {
                         .expect("parses");
                     let json = b"null";
                     let index = JsonIndex::build(json);
-                    match eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json)) {
+                    match eval_full_routed(&expr, index.root(json)) {
                         QueryResult::Error(e) => e.message,
                         _ => String::new(),
                     }
@@ -102862,7 +102087,7 @@ mod tests {
             let index = JsonIndex::build(json);
             let cursor = index.root(json);
             let expr = parse(src).unwrap();
-            let (values, tag) = normalize(eval_full::<Vec<u64>, JqSemantics>(&expr, cursor));
+            let (values, tag) = normalize(eval_full_routed(&expr, cursor));
             assert_eq!(tag, "ok", "`{src}` did not evaluate cleanly");
             values
         }
@@ -102958,22 +102183,14 @@ mod tests {
     }
 
     /// Helper macro to run a query and match the result.
-    /// Evaluate `$expr` on `$json` with this evaluator, [`eval_full`], and match
-    /// the result. A program with a dynamic path target goes through the
-    /// routed [`eval`] instead, as every jq-mode entry hands it to the
-    /// path-mode interpreter (#5233), which this evaluator no longer answers.
+    /// Evaluate `$expr` on `$json` with [`eval_full_routed`] and match the result.
     macro_rules! query {
         ($json:expr, $expr:expr, $pattern:pat $(if $guard:expr)? => $body:expr) => {{
             let json_bytes: &[u8] = $json;
             let index = JsonIndex::build(json_bytes);
             let cursor = index.root(json_bytes);
             let expr = parse($expr).unwrap();
-            let result = if crate::jq::path_mode::route(&expr) == crate::jq::path_mode::Route::Shipped {
-                eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
-            } else {
-                eval::<Vec<u64>, JqSemantics>(&expr, cursor)
-            };
-            match result {
+            match eval_full_routed(&expr, cursor) {
                 $pattern $(if $guard)? => $body,
                 other => panic!("unexpected result: {:?}", other),
             }
@@ -104940,7 +104157,7 @@ mod tests {
             let index = JsonIndex::build(json_bytes);
             let cursor = index.root(json_bytes);
             let expr = parse(filter).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Error(e) if e.is_decode_failure() => {
                     assert!(
                         e.message.contains("invalid UTF-8"),
@@ -106612,7 +105829,7 @@ mod tests {
             let index = JsonIndex::build(json_bytes);
             let cursor = index.root(json_bytes);
             let expr = parse("truncate_stream(tostream)").unwrap();
-            if let QueryResult::Error(e) = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            if let QueryResult::Error(e) = eval_full_routed(&expr, cursor) {
                 assert!(!e.is_decode_failure());
             }
         }
@@ -108116,7 +107333,7 @@ mod tests {
             let index = JsonIndex::build(b"null");
             let cursor = index.root(b"null");
             let expr = parse(filter).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Partial(prefix, Control::Error(e)) => {
                     assert_eq!(
                         prefix.iter().map(OwnedValue::to_json).collect::<Vec<_>>(),
@@ -108138,7 +107355,7 @@ mod tests {
             "IN([1] as [$x] ?// $x | if ($x|type)==\"number\" then $x else error(\"boom\") end)",
         )
         .unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Partial(prefix, Control::Error(e)) => {
                 assert_eq!(
                     prefix.iter().map(OwnedValue::to_json).collect::<Vec<_>>(),
@@ -108473,7 +107690,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
+        eval_full_routed(&expr, cursor)
             .collect_owned::<YqSemantics>()
             .iter()
             .map(OwnedValue::to_json)
@@ -108486,7 +107703,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Partial(values, Control::Error(e)) => (
                 values.iter().map(OwnedValue::to_json).collect(),
                 Some(e.to_string()),
@@ -109715,15 +108932,19 @@ mod tests {
                     Some(FixedPathDel::Input),
                     "jq mode: {src:?} on {value:?}"
                 );
-                let (bridge, ended) = normalize(eval_owned_input_bridge::<Vec<u64>, JqSemantics>(
-                    &expr, value, false,
-                ));
-                let bridge: Vec<String> = bridge.iter().map(OwnedValue::to_json).collect();
-                assert_eq!(
-                    (vec![value.to_json()], "ok"),
-                    (bridge, ended.as_str()),
-                    "jq mode: {src:?} on {value:?}"
-                );
+                // `del(empty)`'s target is dynamic: a jq-mode entry runs it on the
+                // path-mode interpreter (#5233), never through this bridge.
+                if !crate::jq::path_mode::leaves_the_shipped_route(&expr) {
+                    let (bridge, ended) = normalize(
+                        eval_owned_input_bridge::<Vec<u64>, JqSemantics>(&expr, value, false),
+                    );
+                    let bridge: Vec<String> = bridge.iter().map(OwnedValue::to_json).collect();
+                    assert_eq!(
+                        (vec![value.to_json()], "ok"),
+                        (bridge, ended.as_str()),
+                        "jq mode: {src:?} on {value:?}"
+                    );
+                }
                 assert_eq!(
                     fixed_path_del::<YqSemantics>(&expr, value),
                     None,
@@ -112447,7 +111668,7 @@ mod tests {
         let index = JsonIndex::build(b"null");
         let cursor = index.root(b"null");
         assert_eq!(
-            eval_full::<Vec<u64>, JqSemantics>(&substituted, cursor)
+            eval_full_routed(&substituted, cursor)
                 .collect_owned::<JqSemantics>()
                 .iter()
                 .map(OwnedValue::to_json)
@@ -113785,7 +113006,7 @@ mod tests {
             // construct's own per-value operation, then escapes with the
             // generator's own control.
             let jq_expr = parse(filter).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&jq_expr, index.root(json)) {
+            match eval_full_routed(&jq_expr, index.root(json)) {
                 QueryResult::Partial(vs, Control::Error(e)) => {
                     assert_eq!(vs, jq_prefix, "{site}: jq prefix");
                     assert_eq!(e.message, "x", "{site}: jq escape");
@@ -115940,7 +115161,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => {
                 assert_eq!(e.message, message, "filter: {filter} ({divergence})");
             }
@@ -115954,7 +115175,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Break(l) => assert_eq!(l, "out", "filter: {filter}"),
             other => panic!("{filter}: expected a bare Break, got {other:?}"),
         }
@@ -116387,10 +115608,7 @@ mod tests {
             let cursor = index.root(json);
             let expr = parse(filter).unwrap();
             assert!(
-                matches!(
-                    eval_full::<Vec<u64>, JqSemantics>(&expr, cursor),
-                    QueryResult::None
-                ),
+                matches!(eval_full_routed(&expr, cursor), QueryResult::None),
                 "filter: {filter}"
             );
         }
@@ -126000,10 +125218,7 @@ mod tests {
             let bytes = doc.as_bytes();
             let index = JsonIndex::build(bytes);
             let expr = parse(filter).unwrap();
-            format!(
-                "{:?}",
-                eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(bytes))
-            )
+            format!("{:?}", eval_full_routed(&expr, index.root(bytes)))
         };
         for (token, sibling) in [
             ("9e999e999", "9e999e998"),
@@ -126034,7 +125249,7 @@ mod tests {
         for (token, filter) in [("9e999e999", "isnan"), ("8e999e999", "isinfinite")] {
             let index = JsonIndex::build_reindex(token.as_bytes());
             let expr = parse(filter).unwrap();
-            let result = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(token.as_bytes()));
+            let result = eval_full_routed(&expr, index.root(token.as_bytes()));
             assert!(
                 matches!(result, QueryResult::Owned(OwnedValue::Bool(true))),
                 "{token} | {filter} as bridge text: {result:?}"
@@ -126474,7 +125689,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => Err(e.message),
             other => Ok(other
                 .collect_owned::<JqSemantics>()
@@ -130415,8 +129630,7 @@ mod tests {
             ),
         ] {
             let expr = parse(filter).unwrap();
-            let out =
-                eval_full::<Vec<u64>, JqSemantics>(&expr, cursor).collect_owned::<JqSemantics>();
+            let out = eval_full_routed(&expr, cursor).collect_owned::<JqSemantics>();
             assert_eq!(
                 out.iter().map(OwnedValue::to_json).collect::<Vec<_>>(),
                 [want],
@@ -130432,7 +129646,7 @@ mod tests {
             let index = JsonIndex::build(json);
             let cursor = index.root(json);
             let expr = parse(filter).expect("parse failed");
-            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor).collect_owned::<JqSemantics>()
+            eval_full_routed(&expr, cursor).collect_owned::<JqSemantics>()
         }
         // OneCursor: identity passes a container through unchanged.
         assert_eq!(owned(br#"{"a":1}"#, ".").len(), 1);
@@ -136948,7 +136162,7 @@ mod tests {
         let index = crate::json::JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = crate::jq::parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(v) => {
                 assert_eq!(
                     v,
@@ -136969,7 +136183,7 @@ mod tests {
         let index = crate::json::JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = crate::jq::parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(v) => {
                 assert_eq!(
                     v,
@@ -136989,7 +136203,7 @@ mod tests {
         let index = crate::json::JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = crate::jq::parse(filter).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(v) => {
                 assert_eq!(
                     v,
@@ -138069,7 +137283,7 @@ mod tests {
                     let cursor = index.root(json_bytes);
                     let query = format!(r#"load("{path}")"#);
                     let expr = parse(&query).unwrap();
-                    match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                    match eval_full_routed(&expr, cursor) {
                         QueryResult::Owned(OwnedValue::Object(obj)) => {
                             assert_eq!(
                                 obj.get("name"),
@@ -138098,7 +137312,7 @@ mod tests {
             let cursor = index.root(json_bytes);
             let query = format!(r#"load("{path}")"#);
             let expr = parse(&query).unwrap();
-            let result = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+            let result = eval_full_routed(&expr, cursor);
             let _ = fs::remove_file(path);
             match result {
                 QueryResult::Error(e) => assert!(e.is_decode_failure(), "{e:?}"),
@@ -138114,7 +137328,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         assert_eq!(
                             obj.get("name"),
@@ -138135,7 +137349,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         let items = obj.get("items").unwrap();
                         match items {
@@ -138158,7 +137372,7 @@ mod tests {
             let index = JsonIndex::build(json_bytes);
             let cursor = index.root(json_bytes);
             let expr = parse(r#"load("/tmp/nonexistent_file_12345.yaml")"#).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Error(err) => {
                     assert!(
                         err.message.contains("Failed to read file")
@@ -138176,7 +137390,7 @@ mod tests {
             let index = JsonIndex::build(json_bytes);
             let cursor = index.root(json_bytes);
             let expr = parse(r#"try load("/tmp/nonexistent_file_12345.yaml") catch null"#).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Owned(OwnedValue::Null) => {}
                 other => panic!("expected null, got: {other:?}"),
             }
@@ -138189,7 +137403,7 @@ mod tests {
             let cursor = index.root(json_bytes);
             let expr =
                 parse(r#"try load("/tmp/nonexistent_file_12345.yaml") catch "not found""#).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Owned(OwnedValue::String(s)) => {
                     assert_eq!(s, "not found");
                 }
@@ -138205,7 +137419,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#". + {{config: load("{path}")}}"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         assert_eq!(
                             obj.get("name"),
@@ -138235,7 +137449,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Array(arr)) => {
                         assert_eq!(arr.len(), 2);
                         match &arr[0] {
@@ -138271,7 +137485,7 @@ mod tests {
                 let index = JsonIndex::build(json_bytes);
                 let cursor = index.root(json_bytes);
                 let expr = parse(r"load(.path)").unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         assert_eq!(obj.get("loaded"), Some(&OwnedValue::Bool(true)));
                     }
@@ -138308,7 +137522,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         assert_eq!(obj.get("a"), Some(&OwnedValue::Null));
                         assert_eq!(obj.get("b"), Some(&OwnedValue::Bool(true)));
@@ -138345,7 +137559,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Array(items)) => {
                         assert_eq!(items, vec![OwnedValue::String("5".to_string().into())]);
                     }
@@ -138368,7 +137582,7 @@ mod tests {
                     let cursor = index.root(json_bytes);
                     let query = format!(r#"load("{path}")"#);
                     let expr = parse(&query).unwrap();
-                    match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                    match eval_full_routed(&expr, cursor) {
                         QueryResult::Owned(OwnedValue::Object(obj)) => {
                             assert_eq!(
                                 obj.get("quoted"),
@@ -138406,7 +137620,7 @@ mod tests {
                     let cursor = index.root(json_bytes);
                     let query = format!(r#"load("{path}")"#);
                     let expr = parse(&query).unwrap();
-                    let result = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+                    let result = eval_full_routed(&expr, cursor);
                     let expected = OwnedValue::String("value".to_string().into());
                     assert!(
                         matches!(
@@ -138437,7 +137651,7 @@ mod tests {
                     let cursor = index.root(json_bytes);
                     let query = format!(r#"load("{path}")"#);
                     let expr = parse(&query).unwrap();
-                    let result = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+                    let result = eval_full_routed(&expr, cursor);
                     assert!(
                         matches!(
                             &result,
@@ -138458,7 +137672,7 @@ mod tests {
                 let cursor = index.root(json_bytes);
                 let query = format!(r#"load("{path}")"#);
                 let expr = parse(&query).unwrap();
-                match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                match eval_full_routed(&expr, cursor) {
                     QueryResult::Owned(OwnedValue::Object(obj)) => {
                         assert_eq!(
                             obj.get("a"),
@@ -138490,7 +137704,7 @@ mod tests {
                     let cursor = index.root(json_bytes);
                     let query = format!(r#"load("{path}")"#);
                     let expr = parse(&query).unwrap();
-                    match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+                    match eval_full_routed(&expr, cursor) {
                         QueryResult::Owned(OwnedValue::Object(obj)) => {
                             assert_eq!(obj.get("a"), Some(&OwnedValue::Int(5)));
                             assert_eq!(obj.get("b"), Some(&OwnedValue::Int(5)));
@@ -139244,7 +138458,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
-        let result = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+        let result = eval_full_routed(&expr, cursor);
         let end = match &result {
             QueryResult::Error(e) => format!("error: {e}"),
             QueryResult::Break(label) => format!("break: {label}"),
@@ -139643,7 +138857,7 @@ mod tests {
                 for filter in [format!("{name}(.; {cond})"), format!("{name}({cond})")] {
                     let index = JsonIndex::build(b"[1]");
                     let expr = parse(&filter).unwrap();
-                    let result = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(b"[1]"));
+                    let result = eval_full_routed(&expr, index.root(b"[1]"));
                     let QueryResult::Partial(values, control) = result else {
                         panic!("`{filter}`: expected a boolean followed by control: {result:?}");
                     };
@@ -139680,7 +138894,7 @@ mod tests {
             for filter in [format!("{name}(.; {cond})"), format!("{name}({cond})")] {
                 let index = JsonIndex::build(b"[1]");
                 let expr = parse(&filter).unwrap();
-                let result = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(b"[1]"));
+                let result = eval_full_routed(&expr, index.root(b"[1]"));
                 let QueryResult::ManyOwned(values) = result else {
                     panic!("`{filter}`: expected two answers: {result:?}");
                 };
@@ -139713,7 +138927,7 @@ mod tests {
         ] {
             let index = JsonIndex::build(input.as_bytes());
             let expr = parse(filter).unwrap();
-            let result = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(input.as_bytes()));
+            let result = eval_full_routed(&expr, index.root(input.as_bytes()));
             let QueryResult::Error(error) = result else {
                 panic!("`{filter}` over {input}: expected an error: {result:?}");
             };
@@ -139745,7 +138959,7 @@ mod tests {
             let filter = format!("first({target}[{key}])");
             let index = JsonIndex::build(b"null");
             let expr = parse(&filter).unwrap();
-            let result = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(b"null"));
+            let result = eval_full_routed(&expr, index.root(b"null"));
             match (answers, result) {
                 (None, QueryResult::None) => {}
                 (Some(want), QueryResult::Partial(values, Control::Error(error))) => {
@@ -140964,14 +140178,27 @@ mod tests {
         // test's own baseline -- no other test happens to pin this exact
         // shape) produces, not silently regress to unbounded (or
         // `MAX_ITEMS`-only) growth just because a `cond` was added.
+        //
+        // In yq mode (`--jq-extensions`), where `resolve_recurse_sink` still
+        // runs: a jq-mode `recurse(f)` in a path is a dynamic target, which the
+        // path-mode interpreter walks as jq does, to its node cap (#5233).
+        let yq_outputs = |filter: &str| -> Vec<String> {
+            let json = br#"{"a":null}"#;
+            let index = JsonIndex::build(json);
+            let expr =
+                crate::jq::parse_with_mode_and_extensions(filter, crate::jq::ParserMode::Yq, true)
+                    .unwrap();
+            eval_full::<Vec<u64>, YqSemantics>(&expr, index.root(json))
+                .collect_owned::<YqSemantics>()
+                .iter()
+                .map(OwnedValue::to_json)
+                .collect()
+        };
         assert_eq!(
-            outputs(br#"{"a":null}"#, r"path(recurse(.a?; true))"),
+            yq_outputs(r"path(recurse(.a?; true))"),
             vec!["[]", r#"["a"]"#]
         );
-        assert_eq!(
-            outputs(br#"{"a":null}"#, r"path(recurse(.a?))"),
-            vec!["[]", r#"["a"]"#]
-        );
+        assert_eq!(yq_outputs(r"path(recurse(.a?))"), vec!["[]", r#"["a"]"#]);
     }
 
     #[test]
@@ -142834,7 +142061,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a = 5").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -142854,7 +142081,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("(.a = 5)?").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -142873,7 +142100,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a |= (.+1)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -142893,7 +142120,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map(.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143491,7 +142718,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("to_entries").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143508,7 +142735,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("to_entries").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143528,7 +142755,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map_values(.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "object/One: {e:?}"),
             other => panic!("object/One: expected a decode-failure error, got: {other:?}"),
         }
@@ -143536,7 +142763,7 @@ mod tests {
         // Object arm, `Many` shape (`map_values` takes only the first
         // output, per jq semantics -- still must decode-check it).
         let expr = parse("map_values(.,.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "object/Many: {e:?}"),
             other => panic!("object/Many: expected a decode-failure error, got: {other:?}"),
         }
@@ -143546,14 +142773,14 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map_values(.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "array/One: {e:?}"),
             other => panic!("array/One: expected a decode-failure error, got: {other:?}"),
         }
 
         // Array arm, `Many` shape.
         let expr = parse("map_values(.,.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "array/Many: {e:?}"),
             other => panic!("array/Many: expected a decode-failure error, got: {other:?}"),
         }
@@ -143568,7 +142795,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map(.,.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143586,7 +142813,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("path(.a)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143608,7 +142835,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a = .b").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "One: {e:?}"),
             other => panic!("One: expected a decode-failure error, got: {other:?}"),
         }
@@ -143617,7 +142844,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a = (.b, .b)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "Many: {e:?}"),
             other => panic!("Many: expected a decode-failure error, got: {other:?}"),
         }
@@ -143662,7 +142889,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a += .b").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143684,7 +142911,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("setpath([\"a\"]; 5)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "setpath: {e:?}"),
             other => panic!("setpath: expected a decode-failure error, got: {other:?}"),
         }
@@ -143692,7 +142919,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("del(.a)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "del: {e:?}"),
             other => panic!("del: expected a decode-failure error, got: {other:?}"),
         }
@@ -143700,7 +142927,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("delpaths([[\"a\"]])").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(e.is_decode_failure(), "delpaths: {e:?}"),
             other => panic!("delpaths: expected a decode-failure error, got: {other:?}"),
         }
@@ -143715,7 +142942,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("setpath([\"a\"]; 5)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), Some(&OwnedValue::Int(5)));
             }
@@ -143725,7 +142952,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("del(.a)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), None);
                 assert_eq!(m.get("b"), Some(&OwnedValue::Int(2)));
@@ -143736,7 +142963,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("delpaths([[\"a\"]])").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), None);
                 assert_eq!(m.get("b"), Some(&OwnedValue::Int(2)));
@@ -143761,7 +142988,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("path(.a | tonumber?)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143784,7 +143011,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("delpaths([[\"a\"]])?").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.is_decode_failure(),
                 "expected a decode-failure error, got: {e:?}"
@@ -143815,7 +143042,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("sort").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Array(items)) => {
                 assert_eq!(items.len(), 1, "expected the field to survive: {items:?}");
                 match &items[0] {
@@ -143850,7 +143077,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("sort").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(_) => {}
             other => panic!(
                 "expected the structurally non-string key to raise instead of being silently dropped, got: {other:?}"
@@ -143870,7 +143097,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("sort").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(e) => assert!(
                 e.message.contains("ambiguous"),
                 "expected a colliding-key error, got: {e:?}"
@@ -143896,7 +143123,7 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("sort").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Error(_) => {}
             other => panic!(
                 "expected the trailing unpaired member to raise instead of being silently dropped, got: {other:?}"
@@ -143916,14 +143143,14 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map_values(.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), Some(&OwnedValue::Int(1)));
             }
             other => panic!("object/One: unexpected result: {other:?}"),
         }
         let expr = parse("map_values(.,.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), Some(&OwnedValue::Int(1)));
             }
@@ -143935,14 +143162,14 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse("map_values(.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Array(vs)) => {
                 assert_eq!(vs, vec![OwnedValue::String("x".to_string().into())]);
             }
             other => panic!("array/One: unexpected result: {other:?}"),
         }
         let expr = parse("map_values(.,.)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Array(vs)) => {
                 assert_eq!(vs, vec![OwnedValue::String("x".to_string().into())]);
             }
@@ -143954,14 +143181,14 @@ mod tests {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(".a = .b").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::Object(m)) => {
                 assert_eq!(m.get("a"), Some(&OwnedValue::Int(2)));
             }
             other => panic!("assign/One: unexpected result: {other:?}"),
         }
         let expr = parse(".a = (.b, .b)").unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::ManyOwned(vs) => {
                 assert_eq!(vs.len(), 2);
                 for v in vs {
@@ -144134,7 +143361,7 @@ mod tests {
         ] {
             let index = JsonIndex::build(source.as_bytes());
             let expr = parse(".").expect("parse failed");
-            let value = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(source.as_bytes()))
+            let value = eval_full_routed(&expr, index.root(source.as_bytes()))
                 .collect_owned::<JqSemantics>()
                 .remove(0);
             let collected = tostream_events(&value);
@@ -145452,13 +144679,9 @@ mod tests {
             OwnedValue::array_from(vec![OwnedValue::Int(2)]),
         ]);
         for value in [OwnedValue::Int(1), OwnedValue::Null, nested] {
-            for filter in [
-                "..",
-                "recurse",
-                "recurse(.[]?)",
-                "recurse(.[]?; true)",
-                "recurse(empty)",
-            ] {
+            // The spellings a static path target holds: every other
+            // `recurse` runs on the path-mode interpreter in jq mode (#5233).
+            for filter in ["..", "recurse", "recurse(.[]?)"] {
                 let expr = parse(filter).unwrap();
                 let frame = Frame::enter(&expr);
                 let mut delivered = Vec::new();
@@ -146000,11 +145223,25 @@ mod tests {
     ///
     /// Each filter is evaluated wrapped as `[FILTER] | tojson`, so a row's
     /// expectation is jq's own `-c '[FILTER]'` line verbatim.
+    /// A path refusal, from the shipped resolver (by its kind) or from the
+    /// path-mode interpreter, which raises jq's message with no kind (#5233).
+    fn refuses_a_path(e: &EvalError) -> bool {
+        is_resolver_refusal(e) || e.message.starts_with("Invalid path expression")
+    }
+
+    /// [`refuses_a_path`]'s near-access form: the resolver's untracked
+    /// navigation kind, or jq's `near attempt to ...` message (#5233).
+    fn refuses_near_an_access(e: &EvalError) -> bool {
+        e.is_untracked_navigation_error()
+            || e.message
+                .starts_with("Invalid path expression near attempt")
+    }
+
     fn bind_origin_outputs(json: &[u8], filter: &str) -> Result<String, EvalError> {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
         let expr = parse(&format!("[{filter}] | tojson")).unwrap();
-        match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+        match eval_full_routed(&expr, cursor) {
             QueryResult::Owned(OwnedValue::String(s)) => Ok(s.into_string()),
             QueryResult::Error(e) => Err(e),
             other => panic!("{filter}: unexpected result {other:?}"),
@@ -146377,8 +145614,8 @@ mod tests {
     fn owned_doc_2872(json: &[u8]) -> OwnedValue {
         let index = JsonIndex::build(json);
         let cursor = index.root(json);
-        let mut outputs = eval_full::<Vec<u64>, JqSemantics>(&parse(".").unwrap(), cursor)
-            .collect_owned::<JqSemantics>();
+        let mut outputs =
+            eval_full_routed(&parse(".").unwrap(), cursor).collect_owned::<JqSemantics>();
         outputs.pop().expect("identity yields the document")
     }
 
@@ -146981,15 +146218,15 @@ mod tests {
         ];
         for (input, filter) in rows {
             match bind_origin_outputs(input, filter) {
-                Err(e) => assert!(is_resolver_refusal(&e), "{filter}: {}", e.message),
+                Err(e) => assert!(refuses_a_path(&e), "{filter}: {}", e.message),
                 Ok(got) => panic!("{filter}: answered {got} where jq refuses"),
             }
         }
     }
 
-    /// Deliberately refuse-only rows (jq answers, succinctly refuses), each
-    /// pinned so that closing one is a visible edit here rather than a
-    /// silent flip: a value-mode binding has no path (`eval_as` never
+    /// Rows the shipped resolver refused where jq answers, now answered as jq
+    /// does (#5233: a jq-mode entry runs every one on the path-mode
+    /// interpreter). The resolver's gaps, for the record: a value-mode binding has no path (`eval_as` never
     /// resolves its source; the accepting-direction twin of #2642),
     /// a `def` inside `path()` resolves as an opaque leaf,
     /// and a source navigating inside a construction is refused by the
@@ -147001,7 +146238,7 @@ mod tests {
     /// `path(. as $x | 5 | reduce (1) as $i (0; $x))` all refuse where jq
     /// answers `[]`), and one is slice spelling.
     #[test]
-    fn test_path_bind_origin_matrix_refuse_only_2042() {
+    fn test_path_bind_origin_matrix_former_refusals_answer_as_jq_2042() {
         // (input, filter, what jq 1.7.1 answers)
         let rows: &[(&[u8], &str, &str)] = &[
             // value-mode-binding-same-node
@@ -147049,13 +146286,16 @@ mod tests {
                 r#"[["a","b"]]"#,
             ),
         ];
+        // #5233: every jq-mode entry runs these on the path-mode interpreter,
+        // which answers each one as jq does.
         for (input, filter, jq_answer) in rows {
-            match bind_origin_outputs(input, filter) {
-                Err(e) => assert!(e.is_invalid_path_expression(), "{filter}: {}", e.message),
-                Ok(got) => panic!(
-                    "{filter}: now answers {got} (jq: {jq_answer}) -- move it to the accepting matrix"
-                ),
-            }
+            let got = bind_origin_outputs(input, filter).unwrap_or_else(|e| {
+                panic!(
+                    "{filter}: refused ({}) where jq answers {jq_answer}",
+                    e.message
+                )
+            });
+            assert_eq!(got, *jq_answer, "{filter}");
         }
     }
 
@@ -147197,9 +146437,9 @@ mod tests {
         for (input, filter, is_near_access) in rows {
             match bind_origin_outputs(input, filter) {
                 Err(e) if *is_near_access => {
-                    assert!(e.is_untracked_navigation_error(), "{filter}: {}", e.message);
+                    assert!(refuses_near_an_access(&e), "{filter}: {}", e.message);
                 }
-                Err(e) => assert!(e.is_invalid_path_expression(), "{filter}: {}", e.message),
+                Err(e) => assert!(refuses_a_path(&e), "{filter}: {}", e.message),
                 Ok(got) => panic!("{filter}: answered {got} where jq refuses"), // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- every row here is a shape jq refuses, confirmed live (#2649)"
             }
         }
@@ -147467,7 +146707,7 @@ mod tests {
             (br#"{"a":[1,2,3]}"#, "(.a[1:1] as $y | .a[1:1] | $y) = [9]"),
         ] {
             match bind_origin_outputs(input, filter) {
-                Err(e) => assert!(e.is_invalid_path_expression(), "{filter}: {}", e.message),
+                Err(e) => assert!(refuses_a_path(&e), "{filter}: {}", e.message),
                 Ok(got) => panic!("{filter}: fabricated {got} (jq refuses)"),
             }
         }
@@ -147560,11 +146800,12 @@ mod tests {
     /// against jq 1.7.1) and only a passthrough snapshot is certified against
     /// the ambient position. #2042's `Origin::At` is the resolver's own
     /// bind-time path witness, made only inside a resolver invocation
-    /// (`resolve_bind_source_witness`); this test is what keeps the #1466 class
-    /// closed for a binding made outside one.
+    /// (`resolve_bind_source_witness`). (The resolver half of this test, which
+    /// certified `path(<var>)` by these origins, went with #5233: a jq-mode
+    /// `path($y)` is a dynamic target, which the path-mode interpreter answers
+    /// by jq's identity rule.)
     #[test]
     fn test_origin_bearing_binding_keeps_the_resolver_contract_2072() {
-        let doc = br#"{"a":{"b":1},"c":{"b":1}}"#;
         let inner = OwnedValue::object_from([("b".to_string(), OwnedValue::Int(1))]);
         let root = OwnedValue::object_from([
             ("a".to_string(), inner.clone()),
@@ -147640,53 +146881,6 @@ mod tests {
         assert_eq!(var.origin, Origin::Untracked);
         assert_eq!(var.node, None);
         assert_eq!(var.value, inner);
-
-        // Resolver: `path(<var>)` with the ambient input equal to the value.
-        let index = JsonIndex::build(doc);
-        let path_of = |var: Expr| {
-            let cursor = index.root(doc);
-            let expr = Expr::Builtin(Builtin::Path(Box::new(var)));
-            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
-        };
-        // A tracked root snapshot certifies against the root: `path(. as $x
-        // | $x)` is `[]` in jq 1.7.1.
-        match path_of(passthrough) {
-            QueryResult::Owned(OwnedValue::Array(path)) => assert!(path.is_empty()),
-            other => panic!("expected [], got {other:?}"), // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this is the panic message for the #2072 pin itself, only formatted if the match doesn't hit the expected arm above (#2072)"
-        }
-        // The same value, untracked, is a literal to the resolver whatever
-        // node it carries -- refused, not certified by value equality.
-        let untracked_root = substitute_bound_var_from::<JqSemantics>(
-            &parse(".a").unwrap(),
-            &body,
-            "y",
-            &root,
-            Some(BindOrigin::Node {
-                node: 0,
-                document: 7,
-            }),
-        );
-        match path_of(untracked_root) {
-            QueryResult::Error(e) => assert!(e.is_invalid_path_expression()),
-            other => panic!("expected a refusal, got {other:?}"), // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this is the panic message for the #2072 pin itself, only formatted if the match doesn't hit the expected arm above (#2072)"
-        }
-        // #3069: the constructed container's marker is a literal to the
-        // resolver too -- equal to `.a`'s value, never `.a`'s node.
-        let at_a = |var: Expr| {
-            let cursor = index.root(doc);
-            let expr = Expr::Pipe(
-                vec![
-                    parse(".a").unwrap(),
-                    Expr::Builtin(Builtin::Path(Box::new(var))),
-                ]
-                .into(),
-            );
-            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
-        };
-        match at_a(constructed) {
-            QueryResult::Error(e) => assert!(e.is_invalid_path_expression()),
-            other => panic!("expected a refusal, got {other:?}"), // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this is the panic message for the #3069 pin itself, only formatted if the match doesn't hit the expected arm above"
-        }
     }
 
     /// #3036: a marker bound inside the owned identity pipe from a position
@@ -148234,9 +147428,8 @@ mod tests {
         ));
     }
 
-    /// #3647: the three places that apply jq's "a slice is the same node only
-    /// for a non-empty array" rule agree, and `restored_register_is_input` -- the
-    /// seed an `and`/`or`'s right operand gets -- never takes `[]` for the input.
+    /// #3647: the places that apply jq's "a slice is the same node only for a
+    /// non-empty array" rule agree.
     #[test]
     fn slice_identity_rule_agrees_across_its_sites_3647() {
         let empty = OwnedValue::array();
@@ -148277,27 +147470,6 @@ mod tests {
                 "{value:?}"
             );
         }
-        // The seed: by-kind scalars and a non-empty full slice are the input,
-        // `[]` never is, and unequal arrays never are.
-        assert!(restored_register_is_input(
-            &OwnedValue::Null,
-            &OwnedValue::Null
-        ));
-        assert!(restored_register_is_input(
-            &OwnedValue::Bool(true),
-            &OwnedValue::Bool(true)
-        ));
-        assert!(restored_register_is_input(&one, &one.clone()));
-        assert!(restored_register_is_input(
-            &nested_empty,
-            &nested_empty.clone()
-        ));
-        assert!(!restored_register_is_input(&empty, &OwnedValue::array()));
-        assert!(!restored_register_is_input(&one, &nested_empty));
-        assert!(!restored_register_is_input(
-            &OwnedValue::Int(0),
-            &OwnedValue::Int(0)
-        ));
     }
 
     /// `PathBranch` is moved and `Vec`-stored on every path-mode step, and
@@ -149906,7 +149078,7 @@ mod tests {
             let index = JsonIndex::build(json);
             let cursor = index.root(json);
             let expr = parse(src).unwrap();
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, cursor) {
+            match eval_full_routed(&expr, cursor) {
                 QueryResult::Error(e) => assert!(
                     e.message.starts_with("Invalid path expression"),
                     "{src}: {}",
@@ -149953,676 +149125,6 @@ mod tests {
         );
     }
 
-    /// #2979: a `?//` alternation in a fold's loop pattern is resolved in
-    /// path position, instead of falling back to by-value evaluation that
-    /// could only refuse on an output it emitted -- so a construct producing
-    /// nothing (`empty`, a refused `$v.b?`) exited 0 where jq refuses, and
-    /// `del`/`=`/`|=` wrote through it.
-    ///
-    /// Every row is captured from jq 1.7.1: its outputs, or the first line of
-    /// its error. They cover jq's four backtracking rules (a walk refusal, an
-    /// UPDATE escape, an escape after the state was stored, and the last
-    /// alternative propagating), both fold kinds, the write direction, and
-    /// the two rows where retrying would be unsound: a walk verdict this
-    /// resolver can only guess at, and a chain on an untracked stage
-    /// (family B).
-    ///
-    /// The value-mode rows are here as the comparison the accumulator rule
-    /// rests on: path mode must pick the same accumulator on a retry as
-    /// `try_reduce_step_alternatives`/`try_foreach_step_alternatives` do.
-    ///
-    /// Object-pattern colons are spaced (`{b: $v}`), cosmetic to jq, for the
-    /// reason `test_reduce_foreach_path_dispatch_falls_back_1440` gives.
-    #[test]
-    fn test_fold_pattern_alternatives_track_paths_2979() {
-        type Row = (
-            &'static str,
-            &'static str,
-            Result<&'static [&'static str], &'static str>,
-        );
-        let rows: &[Row] = &[
-        // rule 1: a walk refusal on a non-last alternative retries the next one
-        (
-            "{\"a\":[1]}",
-            "path(foreach .a as {b: $v} ?// [$v] (.; .; $v))",
-            Ok(&["[\"a\",0]"]),
-        ),
-        // rule 1, reduce: the same retry, UPDATE reading the retried alternative's bind
-        (
-            "{\"a\":[1]}",
-            "[path(reduce .a as {b: $v} ?// [$v] (.; $v))]",
-            Err("Invalid path expression with result 1"),
-        ),
-        // rule 2 in value mode: UPDATE's escape leaves the accumulator null
-        (
-            "null",
-            "[reduce 1 as $a ?// $b (10; if $b then . else error(\"x\") end)]",
-            Ok(&["[null]"]),
-        ),
-        // rule 2 in path mode: the same accumulator, so the register still answers
-        (
-            "null",
-            "[path(reduce 1 as $a ?// $b (.; if $b then . else error(\"x\") end))]",
-            Ok(&["[[]]"]),
-        ),
-        // rule 2: ...and the null accumulator is not the register here
-        (
-            "{\"a\":1}",
-            "[path(reduce 1 as $a ?// $b (.; if $b then . else error(\"x\") end))]",
-            Err("Invalid path expression with result null"),
-        ),
-        // rule 3 in value mode: what EXTRACT already emitted stays emitted
-        (
-            "null",
-            "[foreach 1 as $a ?// $b (0; .+1; if $b then . else (., error(\"x\")) end)]",
-            Ok(&["[1,2]"]),
-        ),
-        // rule 3 in path mode: the terminal refusal retries, after the emitted prefix
-        (
-            "{\"a\":{\"b\":1}}",
-            "[path(foreach .a as {b: $v} ?// $w (.; .; $v, 1))]",
-            Err("Invalid path expression with result null"),
-        ),
-        // rule 3: alternative 1's null $w is refused at PATH_END, then retried
-        (
-            "{\"a\":[1]}",
-            "[path(foreach .a as [$v] ?// $w (.; .; $w))]",
-            Ok(&["[[\"a\"]]"]),
-        ),
-        // rule 3, per element
-        (
-            "{\"a\":[1,2]}",
-            "[path(foreach .a[] as [$x] ?// $y (.; .; $y))]",
-            Ok(&["[[\"a\",0],[\"a\",1]]"]),
-        ),
-        // rule 4: the last alternative's refusal propagates
-        (
-            "{\"a\":{\"b\":1}}",
-            "[path(reduce .a as {b: $v} ?// $w (.; $v))]",
-            Err("Invalid path expression with result 1"),
-        ),
-        // rule 4: the last alternative's error propagates
-        (
-            "{\"a\":{\"b\":1}}",
-            "[path(foreach .a as {b: $v} ?// {c: $w} (.; .; if $w == null then error(\"e\") else . end))]",
-            Err("e"),
-        ),
-        // a guessed walk verdict refuses instead of retrying
-        (
-            "{\"a\":2,\"c\":2}",
-            "[path(foreach .a as {a: $v} ?// $v (.c; .; empty))]",
-            Err("Invalid path expression near attempt to access element \"a\" of {\"a\":2,\"c\":2}"),
-        ),
-        // the same, through reduce
-        (
-            "{\"a\":{\"b\":1},\"c\":{\"b\":1}}",
-            "[path(reduce .a as {b: $v} ?// $v (.c; .) | empty)]",
-            Err("Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1},\"c\":{\"b\":1}}"),
-        ),
-        // an outer bind still tracks through a chain
-        (
-            "{\"a\":1}",
-            "[path(. as $x | reduce (1) as $y ?// $z (0; $x))]",
-            Ok(&["[[]]"]),
-        ),
-        // the same, foreach
-        (
-            "{\"a\":1}",
-            "[path(. as $x | foreach (1) as $y ?// $z (0; $x; .))]",
-            Ok(&["[[]]"]),
-        ),
-        // the retried alternative's own bind keeps navigating
-        (
-            "{\"a\":{\"b\":{\"c\":1}}}",
-            "[path(foreach .a as {b: $v} ?// $w (.; .; $v | .c))]",
-            Ok(&["[[\"a\",\"b\",\"c\"]]"]),
-        ),
-        // one retry per source element
-        (
-            "{\"a\":{\"b\":1}}",
-            "[path(foreach (.a,.a) as {b: $v} ?// $w (.; .; $v))]",
-            Ok(&["[[\"a\",\"b\"],[\"a\",\"b\"]]"]),
-        ),
-        // a null register admits the walk, so no retry happens
-        (
-            "null",
-            "[path(foreach (1,2) as [$a] ?// $b (.; .; .))]",
-            Ok(&["[[],[]]"]),
-        ),
-        // a bounded consumer outside path()
-        (
-            "{\"a\":1}",
-            "[limit(1; path(foreach (1,2) as [$a] ?// $b (.; .; .)))]",
-            Ok(&["[[]]"]),
-        ),
-        // the write side goes through the retried alternative's path
-        (
-            "{\"a\":[1]}",
-            "[del(foreach .a as {b: $v} ?// [$v] (.; .; $v))]",
-            Ok(&["[{\"a\":[]}]"]),
-        ),
-        // a refused chain writes nothing
-        (
-            "{\"a\":{\"b\":1},\"c\":{\"b\":1}}",
-            "[(foreach .a as {b: $v} ?// $w (.c; .; empty)) |= 5]",
-            Err("Invalid path expression near attempt to access element \"a\" of {\"a\":{\"b\":1},\"c\":{\"b\":1}}"),
-        ),
-        // review: an alternative whose bind fails is not charged, so a
-        // retrying chain over a long source stays within the step budget
-        // as value mode does
-        (
-            "null",
-            "[path(reduce range(40000) as $a ?// [$b] ?// $c (.; if $a != null then error(\"x\") else . end))]",
-            Ok(&["[[]]"]),
-        ),
-        (
-            "null",
-            "[limit(2; path(foreach range(40000) as $a ?// [$b] ?// $c (.; if $a != null then error(\"x\") else . end; .)))]",
-            Ok(&["[[],[]]"]),
-        ),
-        // the emission's own consumer stopping (no EXTRACT) retries too
-        (
-            "{\"a\":[1]}",
-            "path(foreach .a as [$v] ?// $w (.; $w))",
-            Ok(&["[\"a\"]"]),
-        ),
-        // ...and a retry that runs UPDATE (or EXTRACT) is charged, so the
-        // step budget still trips where it did before -- jq answers `[[]]`
-        // and 240000 paths here; the cap is the recorded resource limit.
-        // Three charges per element (the element, two retried UPDATEs) and
-        // six (the element, one retried UPDATE, four EXTRACT outputs) put
-        // the 100001st charge on the retry sites themselves
-        (
-            "null",
-            "[path(reduce range(60000) as $a ?// $b ?// $c (.; if $c == null then error(\"x\") else . end))]",
-            Err("reduce: maximum iterations exceeded"),
-        ),
-        (
-            "null",
-            "[path(foreach range(60000) as $a ?// $b (.; if $b == null then error(\"x\") else . end; ., ., ., .))]",
-            Err("foreach: maximum iterations exceeded"),
-        ),
-        // family B: a chain on an untracked stage refuses -- and since
-        // #3120 with jq's own message: the walk's refusal (`5` is not the
-        // carried root) is exact, so it retries past the walk onto `$v`,
-        // whose body then refuses on `element "b" of 5` exactly as jq's does
-        (
-            "{\"a\":1}",
-            "[path(5 | . as {a: $v} ?// $v | .b?)]",
-            Err("Invalid path expression near attempt to access element \"b\" of 5"),
-        ),
-        // family B, closed by #3120: with the carried register in hand the
-        // walk's first-step refusal is jq's own verdict whenever the source
-        // is not even value-equal to the register (`5` vs the root), so it
-        // retries `$v` exactly as jq's fork does and answers `[]`.
-        (
-            "{\"a\":1}",
-            "[path(5 | 5 as {a: $v} ?// $v | empty)]",
-            Ok(&["[]"]),
-        ),
-        // #3808: the terminal refusal from the bare `$x` is superseded
-        // by the retry's own destructuring failure, as jq 1.7.1 reports.
-        // no_std has no generation for this nested foreach retry and
-        // retains the documented refusal (only direct retries are detected).
-        (
-            "null",
-            "[path(foreach (1) as $x ?// [$z] (null; .; $x))]",
-            Err(if cfg!(feature = "std") {
-                "Invalid path expression near attempt to access element 0 of 1"
-            } else {
-                "Invalid path expression with result 1"
-            }),
-        ),
-        ];
-
-        for (doc, filter, want) in rows {
-            let json = doc.as_bytes();
-            let index = JsonIndex::build(json);
-            let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
-            let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
-            match want {
-                Ok(want) => {
-                    let got: Vec<String> = got
-                        .collect_owned::<JqSemantics>()
-                        .iter()
-                        .map(OwnedValue::to_json)
-                        .collect();
-                    assert_eq!(got, *want, "{doc} | {filter}");
-                }
-                Err(want) => match got {
-                    QueryResult::Error(e) => assert_eq!(&e.message, want, "{doc} | {filter}"),
-                    other => panic!("{doc} | {filter}: expected a refusal, got {other:?}"),
-                },
-            }
-        }
-    }
-
-    /// #3043/#3120: a destructuring bind on an *untracked* stage checks its
-    /// first pattern step against the register the pipe carried in, never
-    /// against the stage's own value. Before the fix the walk was seeded
-    /// from the ambient value, so a `null` literal stage let the null-identity
-    /// clause pass a step jq refuses against the document root (rows 1-7:
-    /// exit 0 with nothing, or a `del`/`|=` no-op, where jq exits 5), and
-    /// the body's own `?` then pruned what was left (#3124 part A, rows 8-9).
-    /// With the register in hand the same shapes *accept* exactly where jq
-    /// does -- a null register behind a null literal (rows 10-12) -- and the
-    /// rows #2649 residue 2 / #2979 family B kept refusing for want of the
-    /// register now answer: a marker that *is* the register at the head of
-    /// the pattern (rows 13-16), and a `?//` whose refused first alternative
-    /// is provably jq's own verdict retries (row 17). Every row is captured
-    /// live from jq 1.7.1, message included.
-    #[test]
-    // jq filter literals like `{b:1}` are not formatting strings; clippy
-    // cannot tell the two apart from the brace shape alone.
-    #[allow(clippy::literal_string_with_formatting_args)]
-    fn test_destructure_on_untracked_stage_checks_the_carried_register_3120() {
-        type Row = (
-            &'static str,
-            &'static str,
-            Result<&'static [&'static str], String>,
-        );
-        let near = |k: &str, v: &str| -> String {
-            format!("Invalid path expression near attempt to access element {k} of {v}")
-        };
-        let rows: Vec<Row> = vec![
-            // #3043's own table: a null literal stage, register = the root.
-            (
-                "{\"a\":1}",
-                "path(null | . as [$v] | empty)",
-                Err(near("0", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "path(null | . as {a:{b:$v}} | empty)",
-                Err(near("\"a\"", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "path(.a | null | . as [$v] | empty)",
-                Err(near("0", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "del(null | . as [$v] | empty)",
-                Err(near("0", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "(null | . as [$v] | empty) |= 5",
-                Err(near("0", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "path(null | . as [$v] | $v)",
-                Err(near("0", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "path(1 | null as [$v] | empty)",
-                Err(near("0", "null")),
-            ),
-            // #3120 / #3124 part A: the body's `?` used to eat the deferred refusal.
-            (
-                "{\"a\":[1]}",
-                "path(null | .a as {arr:[$v]} | .arr[]?)",
-                Err(near("\"arr\"", "null")),
-            ),
-            (
-                "{\"a\":1}",
-                "path(null | ([.a] | .[0]) as [$v1] | ($v1 | .[]?))",
-                Err(near("0", "null")),
-            ),
-            // ... and the same shapes accept when jq's register really is null.
-            ("null", "[path(null | . as [$v] | empty)]", Ok(&["[]"])),
-            (
-                "{\"a\":null}",
-                "[path(.a | null | . as [$v] | empty)]",
-                Ok(&["[]"]),
-            ),
-            (
-                "{\"a\":null}",
-                "path(.a | null | . as {b:$v} | $v)",
-                Ok(&["[\"a\",\"b\"]"]),
-            ),
-            // #2649 residue 2 / #2979 family B: a marker that is the register.
-            (
-                "{\"a\":1}",
-                "path(. as $x | 5 | $x as {a:$q} | $q)",
-                Ok(&["[\"a\"]"]),
-            ),
-            (
-                "{\"a\":1}",
-                "path(. as $x | 5 | $x as {a:$q} ?// $z | $q)",
-                Ok(&["[\"a\"]"]),
-            ),
-            (
-                "{\"a\":1}",
-                "del(. as $x | 5 | $x as {a:$q} ?// $z | $q)",
-                Ok(&["{}"]),
-            ),
-            (
-                "{\"a\":{\"b\":{\"c\":1}}}",
-                "path(.a.b as $y | .a.b | 5 | $y as {c:$w} | $w)",
-                Ok(&["[\"a\",\"b\",\"c\"]"]),
-            ),
-            // #2979 family B: a first-step refusal that is jq's own verdict retries.
-            (
-                "{\"a\":1}",
-                "[path(5 | 5 as {a:$v} ?// $v | empty)]",
-                Ok(&["[]"]),
-            ),
-            // Review: a bare-`$z` alternative reached by retry keeps the
-            // register in hand, so a marker for it re-establishes (jq binds
-            // `$z` to the root the register still holds).
-            (
-                "{\"a\":1}",
-                "path(. as $x | 5 | $x as [$v] ?// $z | $z)",
-                Ok(&["[]"]),
-            ),
-            (
-                "{\"a\":1}",
-                "del(. as $x | 5 | $x as [$v] ?// $z | $z.a)",
-                Ok(&["{}"]),
-            ),
-            (
-                "{\"a\":1}",
-                "path(.a as $x | .a | 5 | $x as [$v] ?// $z | $z)",
-                Ok(&["[\"a\"]"]),
-            ),
-            // Controls: the register moved by the walk is the one the body sees,
-            // so the outer marker is no longer it; a non-null source is not the
-            // register; an equal-valued non-null source is still a guess and
-            // does not retry (both refuse, jq at PATH_END, here at the step).
-            (
-                "{\"a\":1}",
-                "path(. as $x | 5 | $x as {a:$q} | $x)",
-                Err("Invalid path expression with result {\"a\":1}".to_string()),
-            ),
-            (
-                "{\"a\":1}",
-                "path(5 | . as [$v] | empty)",
-                Err(near("0", "5")),
-            ),
-            (
-                "{\"a\":{\"b\":1}}",
-                "path(.a | {b:1} | . as {b:$v} ?// $z | $z)",
-                Err(near("\"b\"", "{\"b\":1}")),
-            ),
-            // Review: an opaque stage (a def call, `first(..)`) drops the carried
-            // register, so the walk has none and refuses unconditionally -- jq
-            // refuses the step too but retries onto `$v`; both refuse, differently
-            // worded (`main` echoed the document on the `del` twin, by the same
-            // ambient coincidence). A `reduce` is no longer one of them (#3710):
-            // it states its register, and the refusal is jq's own wording.
-            (
-                "{\"a\":{\"b\":null}}",
-                "path(reduce 1 as $i (null; null) | . as [$v] ?// $v | $v)",
-                Err("Invalid path expression with result null".to_string()),
-            ),
-            // A nested pipe (inside `if`) carries no register, so with a
-            // non-null register behind the literal it refuses as jq does...
-            (
-                "{\"a\":1}",
-                "path(.a | null | if true then (. as {b:$v} | empty) else . end)",
-                Err(near("\"b\"", "null")),
-            ),
-            // ... and with a null register the literal re-establishes it, so
-            // the nested bind is trackable and answers.
-            (
-                "{\"a\":null}",
-                "path(.a | null | if true then (. as {b:$v} | $v) else . end)",
-                Ok(&["[\"a\",\"b\"]"]),
-            ),
-        ];
-
-        for (doc, filter, want) in &rows {
-            let json = doc.as_bytes();
-            let index = JsonIndex::build(json);
-            let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
-            let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
-            match want {
-                Ok(want) => {
-                    let got: Vec<String> = got
-                        .collect_owned::<JqSemantics>()
-                        .iter()
-                        .map(OwnedValue::to_json)
-                        .collect();
-                    assert_eq!(got, *want, "{doc} | {filter}");
-                }
-                Err(want) => match got {
-                    QueryResult::Error(e) => assert_eq!(e.message, *want, "{doc} | {filter}"),
-                    other => panic!("{doc} | {filter}: expected a refusal, got {other:?}"),
-                },
-            }
-        }
-    }
-
-    /// `resolve_as_pattern`'s first-step identity test (jq's `path_intact`)
-    /// only recognized a bare `.` head as the register's own node -- every
-    /// other `is_identity_passthrough` spelling (`try . catch 1`,
-    /// `if true then . else . end`, `. // 1`) fell to the null/bool
-    /// catch-all, wrongly decided the step was not intact, and either
-    /// refused (a single pattern) or retried a `?//` chain onto the *wrong*
-    /// alternative -- which `del`/`=` then wrote through (row 3: succinctly
-    /// wrote `null`, deleting the whole document, where jq deletes one key).
-    /// Rows 1-6 are the issue's own repro table; rows 7-8 are the `if`
-    /// twin of rows 1/3, not in the issue but the same gap (`if`'s own
-    /// `Expr` variant, not just `try`/`Alternative`); row 9 is a confirmed
-    /// refuse-only divergence from `resolves_to_register`'s own extra
-    /// runtime gate (see its doc comment, and
-    /// [docs/compliance/jq/limitations.md](../../../docs/compliance/jq/limitations.md)).
-    /// The next block is a second review round's two findings against the
-    /// *first* fix -- see `resolves_to_register`'s own doc comment for why
-    /// a naive `is_identity_passthrough`-reuse for `If`/`Try` was unsound.
-    /// The next two rows are a *third* review round's finding: the
-    /// `Alternative` arm's `reg.is_truthy()` gate alone doesn't prove
-    /// `left` produces a value at all, only that it isn't filtered if it
-    /// does -- an `If` on `left` with an empty-yielding condition slipped
-    /// through and got `B`'s unrelated literal certified as the register.
-    /// The final two rows are coverage for `resolves_to_register`'s own
-    /// design: the null/bool fallback is load-bearing (not vestigial), and
-    /// the `If` arm's `&&` (not `||`) is what a mismatched-branch case
-    /// refuses on, both confirmed live. Every row is confirmed live
-    /// against `/usr/bin/jq` 1.7.1.
-    #[test]
-    // Several rows' filter strings are jq object-construction literals
-    // (`{a:1}`), not formatting strings; clippy cannot tell the two apart
-    // from the brace shape alone.
-    #[allow(clippy::literal_string_with_formatting_args)]
-    fn test_alternative_identity_passthrough_pattern_head_is_recognized_3119() {
-        type Row = (
-            &'static str,
-            &'static str,
-            Result<&'static [&'static str], String>,
-        );
-        let rows: Vec<Row> = vec![
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"path((try . catch 1) as {a:$v} | $v)",
-                Ok(&[r#"["a"]"#]),
-            ),
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"path((. // 1) as {a:$v} ?// $v | $v)",
-                Ok(&[r#"["a"]"#]),
-            ),
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"del((. // 1) as {a:$v} ?// $v | $v)",
-                Ok(&[r#"{"c":"s"}"#]),
-            ),
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"[path((try . catch 1) as {a:$v} ?// $v | ($v | .[]?))]",
-                Ok(&["[]"]),
-            ),
-            // Controls: the bare-`.` head was already fine.
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"[path(. as {a:$v} ?// $v | ($v | .[]?))]",
-                Ok(&["[]"]),
-            ),
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"del(. as {a:$v} ?// $v | $v)",
-                Ok(&[r#"{"c":"s"}"#]),
-            ),
-            // The `if` twin (not in the issue): both arms recognize, so the
-            // condition's own runtime answer doesn't matter.
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"path((if true then . else . end) as {a:$v} | $v)",
-                Ok(&[r#"["a"]"#]),
-            ),
-            (
-                r#"{"a":"s","c":"s"}"#,
-                r"del((if true then . else . end) as {a:$v} ?// $v | $v)",
-                Ok(&[r#"{"c":"s"}"#]),
-            ),
-            // #3119 review: `A // B`'s extra runtime gate (the register
-            // must also be truthy, not just `trackable`) is stricter than
-            // the issue's own suggested `bound == value` -- off-register
-            // (#3120's carried register, not this stage's own `value`), a
-            // truthy, non-null/bool coincidence is refused here even
-            // though it happens to be jq's own real node in this
-            // construction (jq answers `["a"]`; a value-only check can't
-            // tell a carried register's real node from a same-valued
-            // unrelated one, the exact #3129 class of bug, so this stays
-            // refuse-only rather than risk it).
-            (
-                r#"{"a":1}"#,
-                r"path(. as $x | 5 | ($x // 1) as {a:$q} ?// $z | $q)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "a" of {"a":1}"#
-                        .to_string(),
-                ),
-            ),
-            // #3119 second review round: two independently-found soundness
-            // gaps in the first fix, both now closed by
-            // `resolves_to_register`'s recursive TrackedVar re-check.
-            //
-            // 1. A recognized branch can itself contain a nested
-            //    `Alternative` -- `is_identity_passthrough` accepts it as a
-            //    candidate (its own "deliberate, safe under-approximation"
-            //    is safe only because a LATER value-equality check defers
-            //    the real verdict elsewhere, #844/#2978); this call site
-            //    has no later check, so trusting `trackable` alone for a
-            //    recognized `If`/`Try` wrongly certified whichever branch's
-            //    value actually ran, even when that value was `B`'s (not
-            //    `.` at all).
-            (
-                "null",
-                r"path((if true then (. // {a:1}) else . end) as {a:$v} | $v)",
-                Err(r#"Invalid path expression near attempt to access element "a" of {"a":1}"#
-                    .to_string()),
-            ),
-            // 2-4. A recognized branch can bottom out in a `TrackedVar`
-            //    frozen at a DIFFERENT position than the current register
-            //    -- the bare-`TrackedVar` arm re-checks `marker.value ==
-            //    *reg` itself, but the old `If`/`Try`/`Alternative` arms
-            //    granted `identical` from `trackable` alone without ever
-            //    reaching that check for a marker nested inside them.
-            (
-                r#"{"a":{"x":1,"y":2}}"#,
-                r"del(. as $x | .a | (if true then $x else $x end) as {x:$q} | $q)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "x" of {"a":{"x":1,"y":2}}"#
-                        .to_string(),
-                ),
-            ),
-            (
-                r#"{"a":{"other":1},"b":"X"}"#,
-                r"path(. as $x | .a | (try $x catch 1) as {b:$v} | $v)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "b" of {"a":{"other":1},"b":"X"}"#
-                        .to_string(),
-                ),
-            ),
-            (
-                r#"{"a":{"other":1},"b":"X"}"#,
-                r"path(. as $x | .a | ($x // 1) as {b:$v} | $v)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "b" of {"a":{"other":1},"b":"X"}"#
-                        .to_string(),
-                ),
-            ),
-            // #3119 third review round: `resolves_to_register`'s
-            // `Alternative` arm gated only on `trackable && reg.is_truthy()`,
-            // which proves `left` is never *filtered* by `//` if it
-            // produces a value, not that it produces one at all. `left`
-            // containing an `If` whose condition can itself yield nothing
-            // (`if empty then . else . end`) slipped through: `//` falls
-            // through to `B` regardless of the register's truthiness
-            // whenever `left` yields empty, and `B` (a fresh literal) was
-            // wrongly certified as the register's own node.
-            (
-                r#"{"a":{"p":1,"q":2}}"#,
-                r"path(.a | ((if empty then . else . end) // {p:100,q:200}) as {p:$x} | $x)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "p" of {"p":100,"q":200}"#
-                        .to_string(),
-                ),
-            ),
-            (
-                r#"{"a":{"p":1,"q":2},"c":"keep"}"#,
-                r"del(.a | ((if empty then . else . end) // {p:100,q:200}) as {p:$x} | $x)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "p" of {"p":100,"q":200}"#
-                        .to_string(),
-                ),
-            ),
-            // Coverage: a case where `resolves_to_register` itself refuses
-            // (an unrecognized `If` head, one branch a plain literal) but
-            // the null/bool value-identity fallback still admits it,
-            // because the register genuinely is `null` and the literal
-            // branch taken is also `null` -- proves the fallback in
-            // `resolve_as_pattern`'s own dispatch is load-bearing, not
-            // vestigial.
-            (
-                r#"{"a":null}"#,
-                r"path(.a | (if true then null else . end) as $v ?// $z | $v)",
-                Ok(&[r#"["a"]"#]),
-            ),
-            // Coverage: a case where `resolves_to_register`'s `If` arm's
-            // `&&` (both branches must independently resolve) is what
-            // refuses, proving it isn't accidentally `||` -- the condition
-            // is always true here, so jq answers (it only evaluates the
-            // taken branch); the static check can't know that without
-            // evaluating the condition, so this is refuse-only, the safe
-            // direction, matching `test_identity_bind_position_traps_keep_refusing_2978`'s
-            // row 9 for the same shape in the sibling mechanism.
-            (
-                r#"{"a":{"b":1}}"#,
-                r"path(.a | (if true then . else 5 end) as {b:$v} | $v)",
-                Err(
-                    r#"Invalid path expression near attempt to access element "b" of {"b":1}"#
-                        .to_string(),
-                ),
-            ),
-        ];
-
-        for (doc, filter, want) in &rows {
-            let json = doc.as_bytes();
-            let index = JsonIndex::build(json);
-            let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
-            let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
-            match want {
-                Ok(want) => {
-                    let got: Vec<String> = got
-                        .collect_owned::<JqSemantics>()
-                        .iter()
-                        .map(OwnedValue::to_json)
-                        .collect();
-                    assert_eq!(got, *want, "{doc} | {filter}");
-                }
-                Err(want) => match got {
-                    QueryResult::Error(e) => assert_eq!(e.message, *want, "{doc} | {filter}"),
-                    other => panic!("{doc} | {filter}: expected a refusal, got {other:?}"), // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- this is the panic message for the assertion above, only formatted if the match doesn't hit the Error arm (#3119)"
-                },
-            }
-        }
-    }
-
     /// #3127: `resolves_to_register`'s head-shape check had no arm for
     /// `Expr::Comma` at all, so a comma-fanned source (`(., .)`) fell to the
     /// `_ => false` default regardless of what each branch actually
@@ -150660,7 +149162,7 @@ mod tests {
             let json = doc.as_bytes();
             let index = JsonIndex::build(json);
             let expr = parse(filter).unwrap_or_else(|e| panic!("{filter}: {e:?}"));
-            let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
+            let got = eval_full_routed(&expr, index.root(json));
             match want {
                 Ok(want) => {
                     let got: Vec<String> = got
@@ -150682,7 +149184,7 @@ mod tests {
         let json = br#"{"a":[1,2],"b":[3]}"#;
         let index = JsonIndex::build(json);
         let expr = parse(r"del((.,.) as [$z] ?// {a:$q} | $q)").unwrap();
-        let got = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
+        let got = eval_full_routed(&expr, index.root(json));
         let got: Vec<String> = got
             .collect_owned::<JqSemantics>()
             .iter()
@@ -150986,147 +149488,6 @@ mod tests {
         }
     }
 
-    /// #4443, the other direction: a builtin the resolver passes through for some
-    /// input must be on the bind-source grammar, or be listed in `UNMODELLED` as a
-    /// known gap. A new pass-through arm that is not added to
-    /// `is_input_returning_stage` shows up as an accepted builtin off the grammar and
-    /// fails this test. `UNMODELLED` is pinned the opposite way (each entry must still
-    /// be off the grammar), so closing a gap forces the entry out, as the oracle
-    /// sweep's `stale-refuse-only` does.
-    ///
-    /// The corpus is what a hand-written list can reach: every builtin or format
-    /// spelling in it runs over the scalar and container documents in `DOCS`. Control
-    /// flow (`first`, `if`, `try`, `reduce`, `label`, an `as` body) is the grammar's
-    /// own structure, pinned by
-    /// `test_transparent_bind_source_takes_comma_and_navigation_leaves_3795`. `debug`,
-    /// `stderr` and `input` are left out on purpose, as they write to the process.
-    /// Every `UNMODELLED` stage is a builtin jq answers as the register and the
-    /// grammar leaves to the by-value route, which agrees with jq for `getpath([])`.
-    /// `walk(.)`, `values`, `scalars` and the type filters were listed until #4456,
-    /// when that route's refusal (`path(.b | strings as $y | $y)` is `["b"]` in jq
-    /// 1.7.1) was closed by admitting them to the grammar.
-    #[test]
-    fn test_resolver_pass_through_builtins_are_on_the_bind_source_grammar_4443() {
-        const DOCS: [&str; 10] = [
-            r#"{"x":"s"}"#,
-            r#"{"x":"z"}"#,
-            r#"{"x":5}"#,
-            r#"{"x":null}"#,
-            r#"{"x":true}"#,
-            r#"{"x":[1]}"#,
-            r#"{"x":{"a":1}}"#,
-            r#"{"x":""}"#,
-            r#"{"x":[]}"#,
-            r#"{"x":1.5}"#,
-        ];
-        const UNMODELLED: [&str; 1] = ["getpath([])"];
-        let corpus = [
-            "tostring",
-            "@text",
-            "tonumber",
-            "ltrimstr(\"z\")",
-            "rtrimstr(\"z\")",
-            "ltrimstr(\"\")",
-            "rtrimstr(\"\")",
-            "ltrimstr(1)",
-            "delpaths([])",
-            "delpaths([[]])",
-            "setpath([]; .)",
-            "setpath([]; 1)",
-            "setpath([\"a\"]; .)",
-            "del(.[]?)",
-            "del(.zz)",
-            "del(empty)",
-            "getpath([])",
-            "getpath([\"a\"])",
-            "walk(.)",
-            "walk(1)",
-            "values",
-            "scalars",
-            "strings",
-            "numbers",
-            "booleans",
-            "nulls",
-            "arrays",
-            "objects",
-            "iterables",
-            "recurse",
-            "..",
-            "tojson",
-            "ascii_downcase",
-            "ascii_upcase",
-            "trim",
-            "ltrim",
-            "rtrim",
-            "abs",
-            "floor",
-            "sqrt",
-            "length",
-            "sort",
-            "unique",
-            "reverse",
-            "flatten",
-            "add",
-            "min",
-            "max",
-            "keys",
-            "to_entries",
-            "from_entries",
-            "@json",
-            "@uri",
-            "@base64",
-            "@html",
-            "@sh",
-            "@csv",
-            "explode",
-            "implode",
-            "type",
-            "map(.)",
-            "map_values(.)",
-            "with_entries(.)",
-            "paths",
-            "any",
-            "all",
-            "toarray",
-            "pick(.a)",
-            "trimstr(\"z\")",
-            "sub(\"x\"; \"y\")",
-            "min_by(.)",
-            "unique_by(.)",
-            "group_by(.)",
-            "sort_by(.)",
-            "transpose",
-            "indices(1)",
-            "contains(.)",
-            "inside(.)",
-        ];
-        let mut violations = Vec::new();
-        for stage in corpus {
-            let passes = DOCS.iter().any(|doc| resolver_passes_through(doc, stage));
-            let expr = parse(stage).unwrap_or_else(|e| panic!("{stage}: {e:?}"));
-            let on_grammar = is_transparent_bind_source(&expr);
-            if UNMODELLED.contains(&stage) {
-                if !passes {
-                    violations.push(format!(
-                        "{stage}: no longer passes through, drop it from UNMODELLED"
-                    ));
-                }
-                if on_grammar {
-                    violations.push(format!(
-                        "{stage}: now on the grammar, drop it from UNMODELLED"
-                    ));
-                }
-            } else if passes && !on_grammar {
-                violations.push(format!(
-                    "{stage}: the resolver passes it through but the bind-source grammar does \
-                     not list it (add it to is_input_returning_stage, or to UNMODELLED with \
-                     the reason)"
-                ));
-            }
-        }
-        assert!(violations.is_empty(), "{violations:#?}");
-    }
-
     /// #3423: `may_alias_register` reads the forwarders (`,`, `if`, `//`, `try`,
     /// `first`/`last`/`limit`/`nth`, `label`, a rebind, `select`, a pipe) over the
     /// aliasing leaves (`.` and a `$var`), and nothing else: a value the source
@@ -151362,7 +149723,7 @@ mod tests {
         let refuses = |src: &str, want: &str| {
             let expr = parse(src).unwrap();
             let index = JsonIndex::build(doc);
-            match eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(doc)) {
+            match eval_full_routed(&expr, index.root(doc)) {
                 QueryResult::Error(e) => assert_eq!(e.message, want, "{src}"),
                 other => panic!("{src}: expected a refusal, got {other:?}"),
             }
@@ -151376,7 +149737,7 @@ mod tests {
         // orthogonal divergence in the refusal's wording, not its verdict
         // -- `resolve_leaf`'s catch-all names the whole fold's value where
         // jq names the destructuring step).
-        match eval_full::<Vec<u64>, JqSemantics>(
+        match eval_full_routed(
             &parse("path(reduce .b as {c:$x} (.; .b))").unwrap(),
             JsonIndex::build(doc).root(doc),
         ) {
@@ -151403,7 +149764,7 @@ mod tests {
         // though the source element is: `path(foreach (null) as {a:$x} (.;
         // .; $x))` on `{}` refuses (the coincidence needs the *register*'s
         // own value, not just the element's, to be null/bool).
-        match eval_full::<Vec<u64>, JqSemantics>(
+        match eval_full_routed(
             &parse("path(foreach (null) as {a:$x} (.; .; $x))").unwrap(),
             JsonIndex::build(br"{}").root(br"{}"),
         ) {
@@ -151441,7 +149802,7 @@ mod tests {
         // {b:{c:$x}} (.; $x))` raises "Invalid path expression with result
         // 5" in jq 1.7.1, even with a nested object pattern and a SOURCE
         // that is trivially the register (`.`).
-        match eval_full::<Vec<u64>, JqSemantics>(
+        match eval_full_routed(
             &parse("path(reduce . as {b:{c:$x}} (.; $x))").unwrap(),
             JsonIndex::build(doc).root(doc),
         ) {
@@ -151458,56 +149819,6 @@ mod tests {
         // yq mode's dispatch guard stays `[Pattern::Var(_)]`-only (#2676's
         // widening is jq-mode-only) -- see `test_fold_pattern_admitted_gate_2676`
         // for the direct check on the guard function itself.
-    }
-
-    /// `apply_pattern_bindings`'s `None`-origin arm: a destructured `$var`
-    /// substituted *without* a [`LazyMarker`] because the ambient
-    /// [`Frame`] the walk ran under has no absolute position at all
-    /// (`Frame::at == None`), not merely a register the walk could not
-    /// prove -- the `Some` arm's own `frame.origin_at` would answer `None`
-    /// here regardless of the walk's own verdict.
-    ///
-    /// Reached via `FoldRegister::advance`'s third arm: the *outer*
-    /// `foreach`'s UPDATE (`def f(g): null; f(1) | f(1)`, a pipe of calls that take
-    /// an argument -- `cannot_move_register` is `false` for those, unlike a literal;
-    /// a zero-argument call over a literal body reads as one since #4124)
-    /// produces an untrackable branch, so the fold's own register
-    /// frame becomes
-    /// `self.frame.unknown()` for the rest of that step. The *inner*
-    /// `foreach`'s own destructuring pattern (`{a:$x}`, admitted by
-    /// #2676's widened `may_bind_navigated` gate) then walks under that
-    /// unknown frame, where a binding's `frame.origin_at` has nothing to answer
-    /// with.
-    ///
-    /// #4007: the register the third arm leaves holds a `null` *placeholder*
-    /// (its value is unknown), not the document, so `fold_pattern_seed` no
-    /// longer lets the walk compare against it. This test pinned `["a"]` on
-    /// a `null` document, which the placeholder matched by luck; on any other
-    /// document the same placeholder wrote through a register jq does not
-    /// have (`del(...)` deleted `a` from `{"a":1,"b":2}`, where jq's
-    /// register sits on the object and refuses at the first step). Both now
-    /// refuse; the `null` document is a lost answer, not a wrong write
-    /// (ADR-0018's refuse-only direction).
-    #[test]
-    fn test_fold_pattern_none_origin_under_unknown_frame() {
-        let refusal = r#"Invalid path expression near attempt to access element "a" of null"#;
-        for (doc, filter) in [
-            (
-                &b"null"[..],
-                "path(foreach (1) as $y (.; (def f(g): null; f(1) | f(1)); \
-                 foreach (null) as {a:$x} (.; .; $x)))",
-            ),
-            (
-                &b"{\"a\":1,\"b\":2}"[..],
-                "del(foreach (1) as $y (.; (def f(g): null; f(1) | f(1)); \
-                 foreach (null) as {a:$x} (.; .; $x)))",
-            ),
-        ] {
-            let (values, error) = outputs_and_error(doc, filter);
-            assert!(values.is_empty(), "{filter}: {values:?}");
-            let error = error.unwrap_or_else(|| panic!("{filter}: expected a refusal"));
-            assert!(error.contains(refusal), "{filter}: {error}");
-        }
     }
 
     /// #2676 step 1: `may_bind_navigated`'s syntactic gate widens to admit a
@@ -153490,7 +151801,7 @@ mod tests {
                 .expect("one element");
             for filter in READERS {
                 let expr = parse(filter).expect("filter parses");
-                let concrete = match eval_full::<Vec<u64>, JqSemantics>(&expr, element) {
+                let concrete = match eval_full_routed(&expr, element) {
                     QueryResult::Error(e) => e.is_decode_failure(),
                     _ => false, // patchcov: coverage tolerate-line reason="unreachable in a passing suite by design -- every READERS filter raises a decode failure on every malformed json in this sweep, so this fallback never fires (#3222)"
                 };
@@ -153550,8 +151861,8 @@ mod tests {
                 .expect("one element");
             for filter in NON_READERS {
                 let expr = parse(filter).expect("filter parses");
-                let concrete = normalize(eval_full::<Vec<u64>, JqSemantics>(&expr, element));
-                let expected = normalize(eval_full::<Vec<u64>, JqSemantics>(&expr, good_element));
+                let concrete = normalize(eval_full_routed(&expr, element));
+                let expected = normalize(eval_full_routed(&expr, good_element));
                 // The report is built every time and kept only on a disagreement,
                 // so the failure-recording path is one executed line, not a
                 // branch a passing suite never reaches.
@@ -153791,7 +152102,7 @@ mod share_audit_2999 {
         let cursor = index.root(json);
         let expr = parse(filter).unwrap();
         let (ok, recorded) = share_stats::measure(|| {
-            let result = eval_full::<Vec<u64>, JqSemantics>(&expr, cursor);
+            let result = eval_full_routed(&expr, cursor);
             let ok = !matches!(result, QueryResult::Error(_));
             drop(result);
             ok
@@ -153815,31 +152126,23 @@ mod share_audit_2999 {
     /// #3138: a `reduce` whose UPDATE assigns into the accumulator hands
     /// the state to [`owned_assign_step`] unshared, so 1,000 steps force no
     /// copy on write at all.
+    ///
+    /// Only the row whose key is a bare variable stays on this route: a key
+    /// like `$r.name` makes the target dynamic, which every jq-mode entry runs
+    /// on the path-mode interpreter (#5223), and that copies the accumulator
+    /// per step. #5243 tracks it, and restores the other rows (`.[$r.name] =
+    /// $r.score`, `.x[$r.name] += $r.score`, `$r as $s | .[$s.name] = ...`,
+    /// and #4005's `.[$r.name] = ($r == $r)` and `($r.name != $r.score)`).
     #[test]
     fn fold_assign_step_copies_nothing_3138() {
         let body: Vec<String> = (0..1000)
             .map(|i| format!("{{\"name\":\"u{i}\",\"score\":{i}}}"))
             .collect();
         let json = format!("[{}]", body.join(",")).into_bytes();
-        assert_forced(&json, "reduce .[] as $r ({}; .[$r.name] = $r.score)", &[]);
-        assert_forced(&json, "reduce .[] as $r ({}; .x[$r.name] += $r.score)", &[]);
-        // #3978: the same assignment under an `as` bind copies nothing either.
+        // #3978: the assignment under an `as` bind copies nothing.
         assert_forced(
             &json,
             "reduce .[] as $r ({}; $r.name as $n | .[$n] = $r.score)",
-            &[],
-        );
-        assert_forced(
-            &json,
-            "reduce .[] as $r ({}; $r as $s | .[$s.name] = $s.score)",
-            &[],
-        );
-        // #4005: an explicit `==`/`!=` on the loop variable marks it (#3896), and the
-        // marker is read by value, so the accumulator is still written in place.
-        assert_forced(&json, "reduce .[] as $r ({}; .[$r.name] = ($r == $r))", &[]);
-        assert_forced(
-            &json,
-            "reduce .[] as $r ({}; .[$r.name] = ($r.name != $r.score))",
             &[],
         );
     }
@@ -153968,7 +152271,7 @@ mod share_audit_2999 {
         let cursor = index.root(&json);
         let expr = parse(".[(0,1)] = 0").unwrap();
         let ((), recorded) = share_stats::measure(|| {
-            drop(eval_full::<Vec<u64>, JqSemantics>(&expr, cursor));
+            drop(eval_full_routed(&expr, cursor));
         });
         assert!(!recorded.is_empty(), "{recorded:?}");
         for (site, _) in &recorded {
@@ -154010,11 +152313,12 @@ mod share_audit_2999 {
         );
     }
 
-    /// `|=` and `del` over the same multi-path shape.
+    /// `|=` and `del` over the same multi-path shape. (`del(.[(0,1)])`, which
+    /// the shipped walker answered with no copy, runs on the path-mode
+    /// interpreter since #5223 and copies twice: #5243.)
     #[test]
     fn update_and_delete_multi_path_shapes() {
         assert_forced(&ints(1000), ".[(0,1)] |= 0", &[(Kind::ArrayMakeMut, 1)]);
-        assert_forced(&ints(1000), "del(.[(0,1)])", &[]);
     }
 
     /// Reads share and never copy: binding the document to a variable and
@@ -155982,7 +154286,7 @@ mod touched_edge_cases_2999 {
         }
         // jq: the body runs per output of the source, so none.
         let expr = parse("select(false) as $y | 3").expect("filter parses");
-        let jq = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
+        let jq = eval_full_routed(&expr, index.root(json));
         assert_eq!(jq.collect_owned::<JqSemantics>().len(), 0);
     }
 

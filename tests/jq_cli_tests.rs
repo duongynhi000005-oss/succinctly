@@ -20588,13 +20588,13 @@ fn update_streaming_holdouts_2974() -> Result<()> {
 
     // (#5233: `.a[(0,1)] |= key` and `|= parent`, whose target is dynamic, are
     // refused now; `tests/jq_cli/i5233.rs`.)
-    for (filter, want) in [(
-        "(.a[] | select(. > 1)) |= (parent | length)",
-        "{\"a\":[1,3,3]}\n",
-    )] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("{\"a\":[1,2,3]}"))?;
-        assert_eq!((stdout.as_str(), code), (want, 0), "{filter}: {stderr:?}");
-    }
+    let filter = "(.a[] | select(. > 1)) |= (parent | length)";
+    let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some("{\"a\":[1,2,3]}"))?;
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("{\"a\":[1,3,3]}\n", 0),
+        "{filter}: {stderr:?}"
+    );
     Ok(())
 }
 
@@ -115461,15 +115461,14 @@ fn test_format_prefixed_key_parent_pipe_slot_raises_3369() -> Result<()> {
     // #5233: the `key`/`parent` rows (a dynamic target beside a path-context
     // builtin) are refused now, before any of this runs (`tests/jq_cli/i5233.rs`);
     // the `length` row is jq's own answer.
-    for (filter, input) in [(r#"path(@base64 "\(length|tostring)")"#, r#"{"foo":1}"#)] {
-        let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
-        assert_eq!(stdout, "", "{input} | {filter}");
-        assert_eq!(code, 5, "{input} | {filter}: {stderr}");
-        assert!(
-            stderr.contains("Invalid path expression"),
-            "{input} | {filter}: {stderr}"
-        );
-    }
+    let (filter, input) = (r#"path(@base64 "\(length|tostring)")"#, r#"{"foo":1}"#);
+    let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
+    assert_eq!(stdout, "", "{input} | {filter}");
+    assert_eq!(code, 5, "{input} | {filter}: {stderr}");
+    assert!(
+        stderr.contains("Invalid path expression"),
+        "{input} | {filter}: {stderr}"
+    );
     // Control: an ordinary (non-key/parent) pipe under a format is
     // unaffected by the flattening -- still evaluates normally.
     let (stdout, code) = run_jq_stdin(r#"@base64 "\(1+1|tostring)""#, "null", &["-c"])?;

@@ -21,17 +21,26 @@ use succinctly::jq::{
 };
 use succinctly::json::JsonIndex;
 
+/// `eval_full` in jq mode, except that a program with a dynamic path target goes
+/// through the routed `eval`: every jq-mode entry hands it to the path-mode
+/// interpreter (#5233), and the full evaluator no longer answers it.
+fn eval_full_jq<'a>(
+    expr: &Expr,
+    cursor: succinctly::json::light::JsonCursor<'a, Vec<u64>>,
+) -> QueryResult<'a, Vec<u64>> {
+    if succinctly::jq::path_mode::leaves_the_shipped_route(expr) {
+        eval::<Vec<u64>, JqSemantics>(expr, cursor)
+    } else {
+        eval_full::<Vec<u64>, JqSemantics>(expr, cursor)
+    }
+}
+
 /// Outputs of the full evaluator (`src/jq/eval.rs`).
 fn full_outputs(json: &[u8], filter: &str) -> Vec<String> {
     let index = JsonIndex::build(json);
     let cursor = index.root(json);
     let expr = parse(filter).expect("parse failed");
-    let result: QueryResult<Vec<u64>> =
-        if succinctly::jq::path_mode::leaves_the_shipped_route(&expr) {
-            succinctly::jq::eval::<Vec<u64>, JqSemantics>(&expr, cursor)
-        } else {
-            eval_full::<Vec<u64>, JqSemantics>(&expr, cursor)
-        };
+    let result: QueryResult<Vec<u64>> = eval_full_jq(&expr, cursor);
     result
         .collect_owned::<JqSemantics>()
         .iter()
@@ -191,8 +200,7 @@ fn test_pick_pathexps_errors_jq_3026() {
     ] {
         let index = JsonIndex::build(input);
         let expr = parse(filter).expect("parse failed");
-        let full: QueryResult<Vec<u64>> =
-            eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(input));
+        let full: QueryResult<Vec<u64>> = eval_full_jq(&expr, index.root(input));
         match full {
             QueryResult::Error(error) => assert_eq!(error.message, message, "{filter}"),
             other => panic!("expected jq error for {filter}, got {other:?}"),
@@ -793,7 +801,7 @@ fn test_parity_delpaths_398() {
 fn assert_optional_parity_suppressed(json: &[u8], expr: &Expr) {
     let index = JsonIndex::build(json);
 
-    let full: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(expr, index.root(json));
+    let full: QueryResult<Vec<u64>> = eval_full_jq(expr, index.root(json));
     assert!(
         !full.is_error(),
         "full evaluator: {expr:?} should be suppressed"
@@ -868,7 +876,7 @@ fn test_optional_pipe_fallback_no_longer_raises_386() {
     let json: &[u8] = br#"["ab"]"#;
     let index = JsonIndex::build(json);
 
-    let full: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
+    let full: QueryResult<Vec<u64>> = eval_full_jq(&expr, index.root(json));
     assert!(
         !full.is_error(),
         "full evaluator: optional pipe should be suppressed, not raise"
@@ -1698,7 +1706,7 @@ fn assert_error_parity(json: &[u8], filter: &str) {
     let expr = parse(filter).expect("parse failed");
 
     let full_cursor = index.root(json);
-    let full: QueryResult<Vec<u64>> = eval_full::<Vec<u64>, JqSemantics>(&expr, full_cursor);
+    let full: QueryResult<Vec<u64>> = eval_full_jq(&expr, full_cursor);
     let full_err = match full {
         QueryResult::Error(e) => e.message,
         other => panic!(
@@ -1973,7 +1981,7 @@ fn test_parenthesized_bind_array_collector_control_3031() {
     let filter = "([1] as [$x] ?// $x | .bad) | .";
     let index = JsonIndex::build(invalid);
     let expr = parse(filter).expect("parse failed");
-    match eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(invalid)) {
+    match eval_full_jq(&expr, index.root(invalid)) {
         QueryResult::Error(error) => {
             assert!(error.message.contains("invalid escape sequence"), "{error}");
         }
@@ -2083,8 +2091,7 @@ fn test_parity_fold_init_evaluated_before_source_2440() {
         // message jq gives.
         let index = JsonIndex::build(br#"{"a":1}"#);
         let expr = parse(filter).expect("parse failed");
-        let full: QueryResult<Vec<u64>> =
-            eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(br#"{"a":1}"#));
+        let full: QueryResult<Vec<u64>> = eval_full_jq(&expr, index.root(br#"{"a":1}"#));
         match full {
             QueryResult::Error(e) => assert_eq!(e.message, "init", "`{filter}`"),
             other => panic!(
@@ -3327,7 +3334,7 @@ fn test_eager_isvalid_uncatchable_and_empty_generator_2658() {
     let json = br#"{"n":0,"empty":[]}"#;
     let index = JsonIndex::build(json);
     let expr = parse(".n | isvalid(until(false; . + 1))").expect("parse failed");
-    match eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json)) {
+    match eval_full_jq(&expr, index.root(json)) {
         QueryResult::Error(e) => {
             assert!(e.is_uncatchable_at_value_position(), "{e}");
             assert!(e.to_string().contains("maximum iterations exceeded"), "{e}");

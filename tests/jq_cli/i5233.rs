@@ -138,6 +138,6 @@ fn test_retired_resolver_rows_match_jq_through_the_interpreter_5233() -> Result<
         );
         checked += 1;
     }
-    assert_eq!(checked, 186);
+    assert_eq!(checked, 258);
     Ok(())
 }
