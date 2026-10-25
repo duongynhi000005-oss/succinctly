@@ -4175,6 +4175,15 @@ pub(crate) fn yq_empty_context_reemit(expr: &Expr) -> Option<Expr> {
             (!kept.is_empty()).then(|| Expr::comma(kept))
         }
         Expr::Negate(operand) => Some(Expr::Negate(Box::new(yq_empty_context_reemit(operand)?))),
+        // #5261: `errorOperator` raises whatever its context holds, so
+        // `select(false) | error("x")` and `.a.zz | error("x")` raise in yq. The
+        // message is itself an operand evaluated against the empty context
+        // (`error("x" + "y")` is `xy`), so it has to re-emit too; a message that
+        // reads its input (`error(.q)`, yq's "aborted") and the bare `error`
+        // decline and stay empty.
+        Expr::Error(Some(message)) => Some(Expr::Error(Some(Box::new(yq_empty_context_reemit(
+            message,
+        )?)))),
         // An operator needs every operand to re-emit, see `reemit_operands`.
         Expr::Arithmetic {
             op, left, right, ..
@@ -7908,9 +7917,51 @@ fn each_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // yq's `as` runs its body once, with the variable unbound, when the source
     // has no output (#4139).
     if yq_runs_as_body_without_source::<S>(bound_any, &flow) {
-        return eval_each::<W, S>(body, value, optional, sink);
+        return each_as_empty_source::<W, S>(expr, var, body, value, optional, sink);
     }
     flow
+}
+
+/// What [`each_as`] does when yq's `as` source bound nothing: the source still
+/// emits whatever its context-free stages emit against the empty context it left
+/// (#5261, see [`yq_as_source_retry`]), and only when that binds nothing either
+/// does the body run once with the variable unbound (#4139). Out of line, reached
+/// only from that branch, for the reason `eval_generic::each_as_empty_source_generic`
+/// is: the recursing frame stays as it was.
+#[inline(never)]
+fn each_as_empty_source<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
+    expr: &Expr,
+    var: &str,
+    body: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+    sink: &mut dyn FnMut(Item<'a, W>) -> Demand,
+) -> Flow {
+    let mut bound_any = false;
+    let retried = yq_as_source_retry::<S, _>(expr, |reemit| {
+        let previous = yq_read_only_context::active();
+        let source_scope = yq_as_source_scope::<S>();
+        let flow = fanout_arg_each_with_origin::<W, S, _>(
+            reemit,
+            value.clone(),
+            optional,
+            |mut bound_val, origin| {
+                bound_any = true;
+                let _body_scope = yq_read_only_context::restore(previous);
+                let _embed =
+                    super::eval_generic::embed_table_push::<S>(origin.as_ref(), &mut bound_val);
+                let substituted_body =
+                    substitute_bound_var_from::<S>(expr, body, var, &bound_val, origin);
+                eval_each::<W, S>(&substituted_body, value.clone(), optional, sink)
+            },
+        );
+        drop(source_scope);
+        flow
+    });
+    match retried {
+        Some(flow) if bound_any || !matches!(flow, Flow::Exhausted) => flow,
+        _ => eval_each::<W, S>(body, value, optional, sink),
+    }
 }
 
 /// The scope a bare `as` source is evaluated under (#2650).
@@ -7925,6 +7976,33 @@ fn each_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
 /// `None` outside yq mode, which binds `null` like jq.
 pub(crate) fn yq_as_source_scope<S: EvalSemantics>() -> Option<yq_read_only_context::Guard> {
     S::READ_ONLY_ABSENT_KEY_IS_EMPTY.then(yq_read_only_context::enter)
+}
+
+/// Re-run a bare `as` source that bound nothing as what yq still emits (#5261).
+///
+/// yq's pipe hands its right side the empty context a left side that matched
+/// nothing left behind, and an operator that does not read its context
+/// (a literal, `[...]`, `error(...)`) runs on it regardless:
+/// `(.zz | error("x")) as $x | 1` raises and `(.zz | "s") as $x | $x` binds
+/// `"s"`, while `(.zz | length) as $x | [$x]` binds nothing. That is
+/// [`yq_empty_context_reemit`]'s rule, and the source reads under the same
+/// read-only scope as an assignment's right side ([`yq_as_source_scope`]), so
+/// the caller runs this inside that scope, once, after the source came up empty.
+/// `None` outside yq mode and for a source with no such stage.
+///
+/// Out of line on purpose: the `as` evaluators recurse once per `$`-parameter
+/// call, and the rewritten `Expr` and the second run's frame must not sit in
+/// theirs (`test_literal_dollar_argument_matches_jq_3260` pins a 12000-deep
+/// `def r($a; $b)` in a debug build).
+#[inline(never)]
+pub(crate) fn yq_as_source_retry<S: EvalSemantics, T>(
+    expr: &Expr,
+    run: impl FnOnce(&Expr) -> T,
+) -> Option<T> {
+    let reemit = S::READ_ONLY_ABSENT_KEY_IS_EMPTY
+        .then(|| yq_empty_context_reemit(expr))
+        .flatten()?;
+    Some(run(&reemit))
 }
 
 /// Whether an `as` whose source produced nothing still runs its body (#4139).
@@ -74623,36 +74701,47 @@ fn eval_as<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // does not find binds nothing (see `yq_as_source_scope`). Dropped before
     // the body runs, which keeps the scope it was entered from.
     let source_scope = yq_as_source_scope::<S>();
-    // Evaluate the expression to get the value to bind
-    let bound_result = eval_single::<W, S>(expr, value.clone(), optional);
+    let source_outputs = |source: &Expr| {
+        // Evaluate the expression to get the value to bind
+        let bound_result = eval_single::<W, S>(source, value.clone(), optional);
 
-    // Get all values from the expression. A `Partial` (#400, #494) still has
-    // its produced prefix bound and run through the body below — jq's
-    // generator processes each bound value as it's produced:
-    // `(1,2,error("x")) as $v | $v + 10` is `11`, `12`, then the error — so
-    // the bind expression's own control is held until that loop over its
-    // prefix has run its course. #1902/#1934: [`stream_outputs`]
-    // folds a checked-conversion failure into `bound_control` exactly like
-    // an ordinary `Partial`'s control (the comment above) -- an undecodable
-    // bound value used to silently become `""` here instead of raising; the
-    // already-converted prefix still runs through the body below before the
-    // decode failure surfaces as the terminal control.
-    let bound_result = bound_result.materialize_cursor();
-    // #2889 Stage B: the document node each bound value stands at, read off
-    // the borrowed results *before* `stream_outputs` materializes them --
-    // `to_owned` is what drops the cursor, exactly as it is on [`each_as`]'s
-    // lazy route. Index-aligned with `bound_values` below rather than zipped
-    // into them, so the fold that produces those stays the single definition
-    // #1902/#1934 made it: an owned or partial result contributes no origins
-    // at all (there is no cursor behind one), and a `Many` whose
-    // materialization fails part-way keeps its prefix in order, so position
-    // `i` names output `i` either way.
-    let bound_origins: Vec<Option<BindOrigin>> = match &bound_result {
-        QueryResult::One(v) => vec![standard_json_bind_origin::<S, W>(v)],
-        QueryResult::Many(vs) => vs.iter().map(standard_json_bind_origin::<S, W>).collect(),
-        _ => Vec::new(),
+        // Get all values from the expression. A `Partial` (#400, #494) still has
+        // its produced prefix bound and run through the body below — jq's
+        // generator processes each bound value as it's produced:
+        // `(1,2,error("x")) as $v | $v + 10` is `11`, `12`, then the error — so
+        // the bind expression's own control is held until that loop over its
+        // prefix has run its course. #1902/#1934: [`stream_outputs`]
+        // folds a checked-conversion failure into `bound_control` exactly like
+        // an ordinary `Partial`'s control (the comment above) -- an undecodable
+        // bound value used to silently become `""` here instead of raising; the
+        // already-converted prefix still runs through the body below before the
+        // decode failure surfaces as the terminal control.
+        let bound_result = bound_result.materialize_cursor();
+        // #2889 Stage B: the document node each bound value stands at, read off
+        // the borrowed results *before* `stream_outputs` materializes them --
+        // `to_owned` is what drops the cursor, exactly as it is on [`each_as`]'s
+        // lazy route. Index-aligned with `bound_values` below rather than zipped
+        // into them, so the fold that produces those stays the single definition
+        // #1902/#1934 made it: an owned or partial result contributes no origins
+        // at all (there is no cursor behind one), and a `Many` whose
+        // materialization fails part-way keeps its prefix in order, so position
+        // `i` names output `i` either way.
+        let bound_origins: Vec<Option<BindOrigin>> = match &bound_result {
+            QueryResult::One(v) => vec![standard_json_bind_origin::<S, W>(v)],
+            QueryResult::Many(vs) => vs.iter().map(standard_json_bind_origin::<S, W>).collect(),
+            _ => Vec::new(),
+        };
+        let (bound_values, bound_control) = stream_outputs::<_, S>(bound_result);
+        (bound_values, bound_control, bound_origins)
     };
-    let (bound_values, bound_control) = stream_outputs::<_, S>(bound_result);
+    let (mut bound_values, mut bound_control, mut bound_origins) = source_outputs(expr);
+    // #5261: a source that bound nothing still runs its context-free stages
+    // against the empty context it left, inside the scope that emptied it.
+    if S::READ_ONLY_ABSENT_KEY_IS_EMPTY && bound_values.is_empty() && bound_control.is_none() {
+        if let Some(retried) = yq_as_source_retry::<S, _>(expr, source_outputs) {
+            (bound_values, bound_control, bound_origins) = retried;
+        }
+    }
     drop(source_scope);
 
     // For each bound value, substitute and evaluate the body. #1902/#1934:
@@ -153484,6 +153573,83 @@ mod touched_edge_cases_2999 {
         let expr = parse("select(false) as $y | 3").expect("filter parses");
         let jq = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
         assert_eq!(jq.collect_owned::<JqSemantics>().len(), 0);
+    }
+
+    /// #5261: a source that bound nothing still runs its context-free stages against
+    /// the empty context it left, in the owned evaluators' two `as` implementations
+    /// (`eval_as` through `eval_full`, `each_as` through `eval_each`) as on the CLI's
+    /// generic one. Every row was captured from yq v4.53.3.
+    #[cfg(feature = "std")] // the read-only absent-key scope is a no-op without `std`
+    #[test]
+    fn yq_as_source_runs_context_free_stages_on_the_empty_context_in_the_owned_evaluators_5261() {
+        let json = br#"{"a":1}"#;
+        let index = JsonIndex::build(json);
+        let join = |values: Vec<OwnedValue>| {
+            values
+                .iter()
+                .map(OwnedValue::to_json)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let streamed = |expr: &Expr| {
+            let mut items = Vec::new();
+            let flow = eval_each::<Vec<u64>, YqSemantics>(
+                expr,
+                index.root(json).value(),
+                false,
+                &mut |item| {
+                    items.push(item);
+                    Demand::Continue
+                },
+            );
+            (
+                flow,
+                join(
+                    items_to_result_checked::<_, YqSemantics>(items).collect_owned::<YqSemantics>(),
+                ),
+            )
+        };
+        let yq = |filter: &str| {
+            parse_with_mode_and_extensions(filter, ParserMode::Yq, false).expect("filter parses")
+        };
+        for (filter, expected) in [
+            (r#"(.zz | "s") as $y | [$y]"#, r#"["s"]"#),
+            ("(.zz | [.]) as $y | [$y]", "[[]]"),
+            ("(.zz | 1 + 1) as $y | $y", "2"),
+            ("(.zz | length) as $y | [$y]", "[]"),
+            (r#"(.zz | "s" | length) as $y | $y"#, "1"),
+        ] {
+            let expr = yq(filter);
+            let full = eval_full::<Vec<u64>, YqSemantics>(&expr, index.root(json));
+            assert_eq!(
+                join(full.collect_owned::<YqSemantics>()),
+                expected,
+                "eval_full: {filter}"
+            );
+            let (flow, out) = streamed(&expr);
+            assert!(matches!(flow, Flow::Exhausted), "eval_each: {filter}");
+            assert_eq!(out, expected, "eval_each: {filter}");
+        }
+        // `error` raises however empty the context it runs against is.
+        for filter in [
+            r#"(.zz | error("x")) as $y | 1"#,
+            r#"(.zz | length | error("x")) as $y | $y"#,
+            r#"(select(false) | error("x")) as $y | 1"#,
+        ] {
+            let expr = yq(filter);
+            let full = eval_full::<Vec<u64>, YqSemantics>(&expr, index.root(json));
+            assert!(
+                matches!(&full, QueryResult::Error(e) if e.message == "x"),
+                "eval_full: {filter}: {full:?}"
+            );
+            let (flow, out) = streamed(&expr);
+            assert!(matches!(flow, Flow::Escaped(_)), "eval_each: {filter}");
+            assert_eq!(out, "", "eval_each: {filter}");
+        }
+        // jq mode binds the absent key as `null`, so `error` runs on it as before.
+        let expr = parse(r#"(.zz | "s") as $y | $y"#).expect("filter parses");
+        let jq = eval_full::<Vec<u64>, JqSemantics>(&expr, index.root(json));
+        assert_eq!(join(jq.collect_owned::<JqSemantics>()), r#""s""#);
     }
 
     /// #4182: `object_from_pairs` is where a construction's pairs become an
