@@ -34,7 +34,7 @@ fn test_value_only_index_key_answers_as_jq_5243() -> Result<()> {
             r#"{"a":[1],"i":1}"#,
         ),
         (r#"{"b":[10,20,30]}"#, "path(.b[length - 1])", r#"["b",0]"#),
-        // A key that names `nan` stays on the interpreter (#5245).
+        // A NaN key: the walker carries it as jq does (#5245).
         ("[1,2]", "path(.[nan])", "[null]"),
     ] {
         let (stdout, stderr, code) = run_jq_full(&["-c", filter], Some(input))?;
