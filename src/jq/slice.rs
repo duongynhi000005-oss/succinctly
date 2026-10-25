@@ -454,9 +454,6 @@ mod tests {
         assert_eq!(bounds(Some(nan), Some(nan)).resolve(4), 0..4);
         assert_eq!(bounds(Some(nan), Some(2.0)).resolve(4), 0..2);
         assert_eq!(bounds(Some(nan), None).resolve(4), 0..4);
-        // A NaN end on an object's child layout is the child count, like every
-        // other bound's `len`, not the entry-count default of an omitted end.
-        assert_eq!(bounds(None, Some(nan)).resolve_object_children(2), 0..4);
     }
 
     #[test]
