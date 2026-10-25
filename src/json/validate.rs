@@ -1402,10 +1402,93 @@ pub(crate) fn parse_computed_float_token(bytes: &[u8]) -> Option<f64> {
     f.is_finite().then_some(f)
 }
 
+/// The reindex bridge's spelling of a *document* `.inf`/`-.INF`/`.NaN`
+/// scalar (#1071): `7`, the spelling's position in
+/// [`NONFINITE_LITERALS`](crate::yaml::NONFINITE_LITERALS), then
+/// [`NONFINITE_LITERAL_TOKEN_SUFFIX`].
+///
+/// A document non-finite keeps the bytes it was written with (yq echoes
+/// `.NaN` and `+.inf` as they came), where a computed one is a bare `Float`
+/// spelled `NaN`/`+Inf`/`-Inf`, so the bridge has to carry *which* spelling,
+/// not just that the value is non-finite. The text itself is not JSON number
+/// syntax, so it cannot ride the bridge as written; this is the token for it.
+/// The doubled exponent marker is [`computed_float_token`]'s trick again:
+/// neither `str::parse::<f64>()` nor `::<i64>()` reads it, it starts with a
+/// digit and is drawn from `[0-9e]` so the scanners capture it whole, and the
+/// leading `7` keeps it apart from the NaN (`9e999e999`) and infinity
+/// (`8e999e999`) tokens of a computed value. Only a number read through an
+/// index built over bridge text decodes one (`JsonNumber::bridge_value`,
+/// #3034).
+pub(crate) const NONFINITE_LITERAL_TOKEN_SUFFIX: &str = "e999e999";
+
+/// The [`NONFINITE_LITERAL_TOKEN_SUFFIX`] token for the spelling at `index`
+/// in [`NONFINITE_LITERALS`](crate::yaml::NONFINITE_LITERALS).
+#[must_use]
+pub(crate) fn nonfinite_literal_token(index: usize) -> String {
+    alloc::format!("7{index}{NONFINITE_LITERAL_TOKEN_SUFFIX}")
+}
+
+/// Decodes a [`nonfinite_literal_token`] to the spelling it stands for,
+/// `None` for anything else -- the one definition of the shape, spelling
+/// only like [`parse_computed_float_token`].
+#[must_use]
+pub(crate) fn parse_nonfinite_literal_token(bytes: &[u8]) -> Option<&'static str> {
+    let index = bytes
+        .strip_prefix(b"7")?
+        .strip_suffix(NONFINITE_LITERAL_TOKEN_SUFFIX.as_bytes())?;
+    // Digits only, no leading zero: exactly what `nonfinite_literal_token` writes.
+    if index.is_empty() || index.len() > 2 || !index.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if index.len() == 2 && index[0] == b'0' {
+        return None;
+    }
+    let index: usize = core::str::from_utf8(index).ok()?.parse().ok()?;
+    crate::yaml::NONFINITE_LITERALS.get(index).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jq::JqSemantics;
+
+    /// #1071: a document non-finite's bridge token round-trips every spelling, and decodes
+    /// nothing else -- not the NaN/infinity tokens, not a computed-float token, not a
+    /// padded or out-of-range index.
+    #[test]
+    fn nonfinite_literal_token_round_trips_1071() {
+        for (i, literal) in crate::yaml::NONFINITE_LITERALS.iter().enumerate() {
+            let token = nonfinite_literal_token(i);
+            assert!(
+                token.parse::<f64>().is_err() && token.parse::<i64>().is_err(),
+                "{token}"
+            );
+            assert_eq!(
+                parse_nonfinite_literal_token(token.as_bytes()),
+                Some(*literal)
+            );
+        }
+        for bytes in [
+            "9e999e999",
+            "8e999e999",
+            "-8e999e999",
+            "1e0e0",
+            "7e999e999",
+            "712e999e999",
+            "7012e999e999",
+            "707e999e999",
+            "7e999e999e999",
+            "7-1e999e999",
+            "70e999e998",
+            "",
+        ] {
+            assert_eq!(
+                parse_nonfinite_literal_token(bytes.as_bytes()),
+                None,
+                "{bytes}"
+            );
+        }
+    }
 
     // ========================================================================
     // computed-float token tests (#2902)

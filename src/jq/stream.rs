@@ -469,6 +469,14 @@ pub(crate) fn stream_owned_value_json_jq_output<W: core::fmt::Write>(
 /// back to either; that case is handled unconditionally in
 /// `stream_owned_value_json_with` itself, ahead of ever reaching this.)
 fn preview_infinite_literal(raw: &[u8]) -> String {
+    // #1071: a YAML document's `.inf` is no number text `format_number_for_preview` can
+    // read; it previews as the infinity it is.
+    if let Some(f) = core::str::from_utf8(raw)
+        .ok()
+        .and_then(crate::yaml::nonfinite_literal_value)
+    {
+        return infinite_float_preview_text(f.is_sign_negative()).to_string();
+    }
     // The document literal this overflowed from is right here, so unlike
     // the plain-`Float` case this can do better than `DBL_MAX` text: reuse
     // the same jq-canonical-formatting path finite `NumberLiteral`s already
@@ -976,7 +984,11 @@ fn stream_owned_value_yaml_at_depth<W: core::fmt::Write>(
         OwnedValue::Bool(true) => out.write_str("true"),
         OwnedValue::Bool(false) => out.write_str("false"),
         OwnedValue::Int(n) => write!(out, "{n}"),
+        // #1071: a computed non-finite is Go's `NaN`/`+Inf`/`-Inf`; nested it carries `!!float`.
         OwnedValue::Float(f) if f.is_nan() || f.is_infinite() => {
+            if depth > 0 {
+                out.write_str("!!float ")?;
+            }
             out.write_str(super::nonfinite_display_string::<super::YqSemantics>(*f))
         }
         // Mirrors `emit_yaml_value_at_depth`'s identical depth split
@@ -996,8 +1008,10 @@ fn stream_owned_value_yaml_at_depth<W: core::fmt::Write>(
         // `.0` via the `NumberLiteral` arm below, unaffected by this.
         OwnedValue::Float(f) if depth == 0 => out.write_str(&format_float_yq_yaml(*f)),
         OwnedValue::Float(f) => out.write_str(&format_float_yq_yaml_nested(*f)),
-        OwnedValue::NumberLiteral(NumberRepr::Float(f), _) if f.is_nan() || f.is_infinite() => {
-            out.write_str(super::nonfinite_display_string::<super::YqSemantics>(*f))
+        OwnedValue::NumberLiteral(NumberRepr::Float(f), literal)
+            if f.is_nan() || f.is_infinite() =>
+        {
+            out.write_str(super::nonfinite_literal_display(*f, literal))
         }
         OwnedValue::NumberLiteral(_, literal) => {
             // Echo verbatim (#1008), matching this function's JSON sibling
@@ -2018,19 +2032,19 @@ mod tests {
         OwnedValue::Float(f64::NAN)
             .stream_yaml(&mut buf, IndentSpec::COMPACT, false)
             .unwrap();
-        assert_eq!(buf, ".nan");
+        assert_eq!(buf, "NaN");
 
         buf.clear();
         OwnedValue::Float(f64::INFINITY)
             .stream_yaml(&mut buf, IndentSpec::COMPACT, false)
             .unwrap();
-        assert_eq!(buf, ".inf");
+        assert_eq!(buf, "+Inf");
 
         buf.clear();
         OwnedValue::Float(f64::NEG_INFINITY)
             .stream_yaml(&mut buf, IndentSpec::COMPACT, false)
             .unwrap();
-        assert_eq!(buf, "-.inf");
+        assert_eq!(buf, "-Inf");
     }
 
     #[test]

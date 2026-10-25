@@ -134,6 +134,11 @@ impl ResolvedScalar {
             Self::Float(_) if is_preservable_float_literal(&text) => {
                 OwnedValue::from_number_literal::<YqSemantics>(&text)
             }
+            // #1071: a document `.inf`/`.NaN` keeps its spelling, which is what
+            // tells it from a computed non-finite (a bare `Float`).
+            Self::Float(f) if !f.is_finite() && nonfinite_literal_index(&text).is_some() => {
+                OwnedValue::from_number_literal::<YqSemantics>(&text)
+            }
             // #1129/#4921: an integer past `i64` keeps the digits the document
             // spelled, whether it resolved from its plain spelling or was
             // forced by `!!float`; the JSON writers still ask for the rounded
@@ -269,6 +274,36 @@ fn resolve_signed(s: &str, bytes: &[u8]) -> ResolvedScalar {
         Some(b'0'..=b'9') => parse_int_or_float(s),
         // `+inf`, `-_1`, a bare sign, … — never numeric in the core schema.
         _ => ResolvedScalar::Str,
+    }
+}
+
+/// The twelve plain spellings `resolve_dot`/`resolve_signed` read as a
+/// non-finite float, in the order `nonfinite_literal_index` numbers them
+/// (#1071).
+///
+/// A document scalar spelled one of these keeps its bytes the way every other
+/// float literal does: yq echoes `.NaN`, `-.INF` and `+.inf` as written, where
+/// a *computed* non-finite is Go's `NaN`/`+Inf`/`-Inf`. The reindex bridge
+/// numbers them to smuggle the exact spelling through its JSON text.
+pub const NONFINITE_LITERALS: [&str; 12] = [
+    ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF", ".nan", ".NaN",
+    ".NAN",
+];
+
+/// The position of `s` in [`NONFINITE_LITERALS`], or `None` for any other text.
+#[must_use]
+pub(crate) fn nonfinite_literal_index(s: &str) -> Option<usize> {
+    NONFINITE_LITERALS.iter().position(|&literal| literal == s)
+}
+
+/// The double a [`NONFINITE_LITERALS`] spelling stands for, or `None` for any
+/// other text: the same answer [`resolve_plain`] gives it.
+#[must_use]
+pub(crate) fn nonfinite_literal_value(s: &str) -> Option<f64> {
+    match nonfinite_literal_index(s)? {
+        0..=5 => Some(f64::INFINITY),
+        6..=8 => Some(f64::NEG_INFINITY),
+        _ => Some(f64::NAN),
     }
 }
 
@@ -777,6 +812,24 @@ mod tests {
                 matches!(resolve_plain(s), Float(f) if f.is_nan()),
                 "input: {s:?}"
             );
+        }
+    }
+
+    /// #1071: the table the reindex bridge numbers agrees with `resolve_plain`, spelling by
+    /// spelling, so a literal's value cannot drift from the one the parser reads.
+    #[test]
+    fn nonfinite_literals_agree_with_resolve_plain_1071() {
+        for (i, s) in NONFINITE_LITERALS.iter().enumerate() {
+            assert_eq!(nonfinite_literal_index(s), Some(i));
+            let want = nonfinite_literal_value(s).expect("a table spelling has a value");
+            assert!(
+                matches!(resolve_plain(s), Float(f) if f == want || (f.is_nan() && want.is_nan())),
+                "{s}"
+            );
+        }
+        for s in [".INf", "inf", "-.nan", "+.nan", ".5", "", "1e400"] {
+            assert_eq!(nonfinite_literal_index(s), None, "{s}");
+            assert_eq!(nonfinite_literal_value(s), None, "{s}");
         }
     }
 

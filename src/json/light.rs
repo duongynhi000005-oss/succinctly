@@ -3150,6 +3150,18 @@ impl<'a> JsonNumber<'a> {
             .or_else(|| crate::json::validate::parse_computed_float_token(bytes))
     }
 
+    /// The spelling of a document `.inf`/`-.INF`/`.NaN` scalar this span stands for, if it is
+    /// the reindex bridge's token for one
+    /// ([`nonfinite_literal_token`](crate::json::validate::nonfinite_literal_token)) **and** it
+    /// was read through an index built over bridge text; `None` otherwise (#1071, #3034).
+    #[inline]
+    pub(crate) fn bridge_nonfinite_literal(&self) -> Option<&'static str> {
+        if !self.bridge {
+            return None;
+        }
+        crate::json::validate::parse_nonfinite_literal_token(self.raw_bytes())
+    }
+
     /// The address of the token's first byte in the document text: the
     /// identity jq gives a NaN it parsed (#3309), since every read of one
     /// position answers the same address and no other live token does.
@@ -3205,7 +3217,13 @@ impl<'a> JsonNumber<'a> {
         if !self.bridge {
             return None;
         }
-        crate::jq::OwnedValue::bridge_nonfinite_from_bytes(self.raw_bytes())
+        let bytes = self.raw_bytes();
+        // #1071: a document `.inf`/`.NaN` the bridge carried is a literal with text of its own
+        // (`.INF | length` is 4), not a computed non-finite number.
+        if crate::json::validate::parse_nonfinite_literal_token(bytes).is_some() {
+            return None;
+        }
+        crate::jq::OwnedValue::bridge_nonfinite_from_bytes(bytes)
     }
 
     /// Whether this number was read from the reindex bridge's text (an owned value written out
@@ -3334,7 +3352,7 @@ use crate::jq::stream::{StreamFailure, StreamResult};
 use crate::jq::{
     format_number_jq_compat, is_jq_canonical_number, jq_canonical_number_prefix,
     nesting_depth_exceeded_message, nonfinite_display_string, EvalError, JqSemantics, NumberRepr,
-    OwnedValue, YqSemantics, MAX_VALUE_TREE_DEPTH,
+    OwnedValue, MAX_VALUE_TREE_DEPTH,
 };
 
 /// A [`JsonError`] as the uncatchable decode failure (#1620) every
@@ -4485,6 +4503,11 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for StandardJson<'a, W> {
     fn number_literal(&self) -> Option<Cow<'_, str>> {
         match self {
             StandardJson::Number(n) => {
+                // #1071: the bridge's token for a document `.inf`/`.NaN` stands for
+                // the spelling the owned value carried.
+                if let Some(literal) = n.bridge_nonfinite_literal() {
+                    return Some(Cow::Borrowed(literal));
+                }
                 let bytes = n.raw_bytes();
                 if crate::json::validate::is_valid_number(bytes) {
                     return core::str::from_utf8(bytes).ok().map(Cow::Borrowed);
@@ -5474,7 +5497,7 @@ fn stream_json_as_yaml<W: AsRef<[u64]> + Clone, Out: core::fmt::Write>(
                 Ok(write!(out, "{i}")?)
             } else if let Ok(f) = n.as_f64() {
                 if f.is_nan() || f.is_infinite() {
-                    Ok(out.write_str(nonfinite_display_string::<YqSemantics>(f))?)
+                    Ok(out.write_str(crate::jq::nonfinite_yaml_spelling(f))?)
                 } else {
                     Ok(write!(out, "{f}")?)
                 }

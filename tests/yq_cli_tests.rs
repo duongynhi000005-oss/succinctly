@@ -13597,13 +13597,13 @@ fn test_yq_tostring_computed_nan_uses_yaml_spelling_1060() -> Result<()> {
     for filter in ["nan | tostring", "(0/0) | tostring"] {
         let (stdout, code) = run_yq_stdin(filter, "a: 1\n", &["-r", "--jq-extensions"])?;
         assert_eq!(code, 0, "for {filter:?}: {stdout:?}");
-        assert_eq!(stdout.trim_end(), ".nan", "for {filter:?}");
+        assert_eq!(stdout.trim_end(), "NaN", "for {filter:?}");
     }
     // `@text` is documented as identical to `tostring` -- confirm they now
     // agree on the same computed value.
     let (stdout, code) = run_yq_stdin("nan | @text", "a: 1\n", &["-r", "--jq-extensions"])?;
     assert_eq!(code, 0);
-    assert_eq!(stdout.trim_end(), ".nan");
+    assert_eq!(stdout.trim_end(), "NaN");
     Ok(())
 }
 
@@ -14901,7 +14901,8 @@ fn test_p_json_input_is_unmoved_by_2877() -> Result<()> {
     assert_ne!(code, 0, "{output:?}");
     let (output, code) = run_yq_stdin("tonumber", r#""nan""#, &[])?;
     assert_eq!(code, 0);
-    assert_eq!(output.trim(), ".nan");
+    // A computed NaN, spelled as Go does (#1071).
+    assert_eq!(output.trim(), "NaN");
     Ok(())
 }
 
@@ -61386,10 +61387,14 @@ mod yaml_format_block_style_1183 {
                 // `OwnedValue::Float` cannot tell them apart, so the root
                 // stays untagged, as before this fix.
                 ("2.0*1 | @yaml", r#""2\n""#),
-                // yq spells it `!!float +Inf`: #1071.
-                ("(1/0) | @yaml", r#"".inf\n""#),
             ],
         )
+    }
+
+    /// #1071: a computed non-finite spells as Go does (`+Inf`), as yq's `@yaml` does.
+    #[test]
+    fn computed_non_finite_matches_yq_1071() -> Result<()> {
+        check_on("null\n", &[("(1/0) | @yaml", r#""+Inf\n""#)])
     }
 }
 

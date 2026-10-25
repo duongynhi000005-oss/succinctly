@@ -711,6 +711,14 @@ fn format_json_impl(value: &OwnedValue, opts: &JsonFormatOpts, level: usize) -> 
                         NumberRepr::Float(f) if opts.json_sourced && f.is_infinite() => {
                             "null".to_string()
                         }
+                        // #1071: a document `.inf` is no JSON number text; the bare
+                        // infinity it replaced printed `null`.
+                        NumberRepr::Float(f)
+                            if f.is_infinite()
+                                && succinctly::yaml::NONFINITE_LITERALS.contains(&&**literal) =>
+                        {
+                            "null".to_string()
+                        }
                         // #1498: a `NumberLiteral` can still reach here for
                         // JSON-sourced input despite `to_owned_canonicalizing_numbers`
                         // stripping it at parse time -- `--eval-all`'s
