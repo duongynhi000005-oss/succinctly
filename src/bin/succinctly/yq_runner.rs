@@ -3854,6 +3854,22 @@ fn scan_anchor_soundness<'v, 'c>(
     }
 }
 
+/// [`comment_tree_at_path_mut`], read-only.
+fn comment_tree_at_path<'t>(
+    tree: &'t CommentTree,
+    steps: &[TreeStep<'_>],
+) -> Option<&'t CommentTree> {
+    let mut node = tree;
+    for step in steps {
+        node = match (node, step) {
+            (CommentTree::Object(_, fields, _), TreeStep::Key(k)) => fields.get(*k)?,
+            (CommentTree::Array(_, items), TreeStep::Index(i)) => items.get(*i)?,
+            _ => return None,
+        };
+    }
+    Some(node)
+}
+
 /// Mutable counterpart of [`CommentTree::field`]/[`CommentTree::at_index`],
 /// following a whole path. `None` if any step is missing — which cannot
 /// happen for a path [`scan_anchor_soundness`] just walked, but the
@@ -4189,6 +4205,105 @@ fn copy_alias_marks(src: &CommentTree, dst: &mut CommentTree) {
                 }
             }
         }
+    }
+}
+
+/// Copy the source node's trailing comment and flow style through a plain assignment whose
+/// value is a static read of it (#5249, the comment and flow-style rows of #2505): `.c = .b` on
+/// `b: [*x] # t` writes `c: [*x] # t`, because go-yaml's `Set` copies the whole source node, so
+/// the comments and flow style under it ride along with the value.
+///
+/// What yq copies is decided per slot, each captured against the pinned binary:
+///
+/// - **The trailing comment** is the source's whenever the source has one (`.c = .b` over
+///   `c: 3 # cc` is `c: 2 # bc`) and the target's own otherwise (`b: 2` over `c: 3 # cc` is
+///   `c: 2 # cc`).
+/// - **Everything under the node** (an item's or a field's comment and style, a key's comment)
+///   is the source's, because the target takes the source's content wholesale.
+/// - **The node's own style** is flow when either node is flow, and otherwise the source's
+///   unless the target already is a non-empty container of the same kind, which keeps the style
+///   it had. So `b: [1]` over a block `c: [9]` is `c: [1]`, a block `b` over a non-empty flow
+///   `c` stays flow, and a block `b` over an empty or scalar `c` is block.
+///
+/// Not copied here: a scalar's own quoting (`b: "q"` copies to a new `c: "q"` in yq), an explicit
+/// tag, the node's own head and foot lines, and an anchor declaration, which the target never takes
+/// ([`propagate_assign_alias_marks`] owns every alias mark, so the copy carries none).
+///
+/// The copy is made only when the finished value at the target equals the value at the source:
+/// a source a later stage rewrites (`.c = .b | .b = 5`) has presentation that no longer
+/// describes the target, and a shape-parallel clone of it would not line up with the value. The
+/// same holds for a target a later stage edits (`.c = .b | .c[0].a = 2`), where yq still carries
+/// the comment and style and this prints plain.
+fn propagate_assign_copied_presentation(
+    expr: &Expr,
+    value: &OwnedValue,
+    pristine: &CommentTree,
+    tree: &mut CommentTree,
+) {
+    // Every step below reads from and writes to the document root, as in
+    // [`propagate_assign_spellings`].
+    if !is_plain_assign_chain(expr) {
+        return;
+    }
+    // A plain assign chain always collects.
+    for (path_expr, value_expr) in collect_assign_chain(expr).unwrap_or_default() {
+        let (Some(targets), Some(value_steps)) =
+            (static_nav_targets(path_expr), static_nav_steps(value_expr))
+        else {
+            continue;
+        };
+        let Some(read) = owned_value_at(value, &meta_path_of(&value_steps)) else {
+            continue;
+        };
+        // Only the targets that still hold what was read take a copy, so a stage that copies
+        // nothing clones nothing.
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|steps| owned_value_at(value, &meta_path_of(steps)) == Some(read))
+            .collect();
+        // Read before any target is written, as `(.c, .d) = .c` must copy what `.c` held going in.
+        let Some(source) = comment_tree_at_path_mut(tree, &value_steps).map(|node| node.clone())
+        else {
+            continue;
+        };
+        for path_steps in targets {
+            if let Some(target) = comment_tree_at_path_or_create_mut(tree, &path_steps) {
+                let mut copy = source.clone();
+                strip_anchor_marks(&mut copy);
+                let mut meta = target.meta().clone();
+                if source.meta().comment.is_some() {
+                    meta.comment.clone_from(&source.meta().comment);
+                }
+                // What the target was before the write decides it, not the tree, which the write
+                // has already grown to the new value's shape. An alias target is no container of
+                // its own kind: the write turns it into one.
+                let keeps_own_style = match (comment_tree_at_path(pristine, &path_steps), &copy) {
+                    (Some(old), _) if old.alias_name().is_some() => false,
+                    (Some(CommentTree::Array(_, old)), CommentTree::Array(..)) => !old.is_empty(),
+                    (Some(CommentTree::Object(_, old, _)), CommentTree::Object(..)) => {
+                        !old.is_empty()
+                    }
+                    _ => false,
+                };
+                if !matches!(copy, CommentTree::Leaf(_))
+                    && (!keeps_own_style || source.meta().style == "flow")
+                {
+                    meta.style = source.meta().style;
+                }
+                *copy.meta_mut() = meta;
+                *target = copy;
+            } // patchcov: coverage tolerate-line reason="unreachable: the value at the target exists (checked above), and the tree stops short of it only at a leaf, which the lookup grows (#5249)"
+        }
+    }
+}
+
+/// Drop every anchor declaration and alias mark at or under `node`.
+fn strip_anchor_marks(node: &mut CommentTree) {
+    node.meta_mut().anchor = None;
+    match node {
+        CommentTree::Leaf(_) => {}
+        CommentTree::Array(_, items) => items.iter_mut().for_each(strip_anchor_marks),
+        CommentTree::Object(_, fields, _) => fields.values_mut().for_each(strip_anchor_marks),
     }
 }
 
@@ -6500,6 +6615,15 @@ fn evaluate_yaml_cursor_core<W: AsRef<[u64]> + Clone>(
             for (value, _comments) in docs.iter_mut() {
                 sync_aliased_paths(value, pristine, groups);
             }
+        }
+    }
+
+    // Copy the source's trailing comment and flow style through a plain assignment from a static
+    // read (#5249). It comes before the alias pass below and carries no anchor mark of its own,
+    // so that pass stays the one place an alias mark is decided.
+    if let Some((_, pristine)) = &presentation_sync_ctx {
+        for (value, comments) in docs.iter_mut().flatten() {
+            propagate_assign_copied_presentation(expr, value, pristine, comments);
         }
     }
 

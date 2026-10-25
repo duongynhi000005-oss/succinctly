@@ -55757,11 +55757,22 @@ fn test_yaml_rebind_to_equal_value_is_indistinguishable_from_the_anchor_1351() -
     // one, so `b`'s *value* follows the anchor. Since #2497 the plain `=`
     // clears the stale `*x` mark (its right-hand side is not an alias read),
     // so the followed value prints expanded rather than as `b: *x`.
-    for filter in [".b = .a | .a.p = 9", r#".b = {"p": 1, "q": 2} | .a.p = 9"#] {
+    // A copy read from `.a` brings `.a`'s flow style with it since #5249, as in yq
+    // (`b: {p: 1, q: 2}` there); a literal has no source to copy a style from.
+    for (filter, yaml) in [
+        (
+            ".b = .a | .a.p = 9",
+            "a: &x {p: 9, q: 2}\nb: {p: 9, q: 2}\n",
+        ),
+        (
+            r#".b = {"p": 1, "q": 2} | .a.p = 9"#,
+            "a: &x {p: 9, q: 2}\nb:\n  p: 9\n  q: 2\n",
+        ),
+    ] {
         assert_yq_1351(
             filter,
             "a: &x {p: 1, q: 2}\nb: *x\n",
-            "a: &x {p: 9, q: 2}\nb:\n  p: 9\n  q: 2\n",
+            yaml,
             r#"{"a":{"p":9,"q":2},"b":{"p":9,"q":2}}"#,
         )?;
     }

@@ -5,8 +5,9 @@
 //! Every expected output is what yq v4.53.3 prints for the same input and filter.
 //!
 //! The rows #2505 lists that stay plain (a constructed or computed right side, a compound
-//! assignment, a comment copied from the source, a block copied with its flow style, a later
-//! write through the anchor) are recorded in `docs/compliance/yq/limitations.md`.
+//! assignment, a later write through the anchor) are recorded in
+//! `docs/compliance/yq/limitations.md` and tracked on #5249, which also copies the source's
+//! comment and flow style (`tests/yq_cli/i5249.rs`).
 
 use anyhow::Result;
 
