@@ -2920,9 +2920,10 @@ is the revert that established what the other one costs.
    On a step where the variable the bind destructures is not the register (`marker_identical`), `path_intact` raises in jq, the `try` swallows it, and `FE` is empty: the emission the nested walk made there is dropped (`extract_bind_empty`), so a source such as `(.,.b)` answers `["a"]` once, as jq does, instead of the path and then a refusal.
    Against `/usr/bin/jq` 1.7.1 on 12,000-row random samples of an EXTRACT grid (shape x INIT x source x UPDATE x context x document), four seeds: 66-80 rows now match jq, no row that matched jq differs.
    Since [#5126](https://github.com/rust-works/succinctly/issues/5126) an `if` with a constant condition (`true`, `false`, `null`) names the live arm whatever the other arm holds (`if true then FE else . end`).
-   Not changed: an `if` with another condition whose other arm is `.` rather than `empty`, an INIT that is not a `null` or boolean literal for the dropped emissions (INIT `.` meets a loud refusal that the dropped emission used to end the run before), INIT `.` otherwise, whose loud refusal `[path(..)?]` does not catch where jq's `FE` is empty, and an UPDATE that stores a variable (`$x`), whose loud refusal at the step where the bind passes is older than #5106 and which dropping an earlier step's emission would have unmasked (3 of 12,000 rows turned into refusals when it was tried).
-   A source variable `$i` as the bind's source (`FE = foreach ($i as {a:$a} | .) ..`) over a `false` element still over-emits on the later step (1-2 of 12,000 rows answer the first path and then a refusal where `main` answered `[]` and jq answers the path alone).
-   Pinned, ignored, in `tests/jq_cli/i5106.rs` and `tests/jq_cli/i5102.rs` (the constant-condition rows of #5126 in `tests/jq_cli/i5126.rs`).
+   Not changed: an `if` with another condition whose other arm is `.` rather than `empty`.
+   Since [#5223](https://github.com/rust-works/succinctly/issues/5223) the path-mode interpreter answers the rows #5126 listed as residuals as jq does: INIT `.`, an UPDATE that stores a variable (`$x`), and a source variable `$i` as the bind's source over a `false` element.
+   Those are pinned in `tests/jq_cli/i5106.rs` (`test_5106_former_known_gaps_match_jq`), and the constant-condition rows of #5126 in `tests/jq_cli/i5126.rs`.
+   Rows still pinned, ignored, are in `tests/jq_cli/i5102.rs`.
 
    In the body of a `reduce` whose source moves the register (`..`, `recurse`, `(.,.a)`) the same `foreach` is read by the position of each step's element
    ([#4777](https://github.com/rust-works/succinctly/issues/4777), `foreign_register_markers_with`'s `moved_at`, pinned by

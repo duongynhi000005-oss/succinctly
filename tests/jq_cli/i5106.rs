@@ -275,17 +275,40 @@ fn test_5106_extract_caught_bind_foreach_restates_at_the_bound_child() -> Result
     ])
 }
 
-/// #5106: a row that stays wrong, pinned to jq's answer and ignored until it is fixed: INIT `.`, whose loud refusal
-/// `[path(..)?]` does not catch where jq's `FE` is empty. Captured from `/usr/bin/jq` 1.7.1, both routes.
+/// #5106 / #5126: the residual rows, once ignored as known gaps and answered as jq answers since the path-mode interpreter
+/// (#5223) carries jq's register: INIT `.`, an UPDATE that stores `$x`, and a source `$i` over a `false` element. Captured
+/// from `/usr/bin/jq` 1.7.1, both routes.
 #[test]
-#[ignore = "#5106 residuals"]
 #[allow(clippy::literal_string_with_formatting_args)] // jq object patterns read like format arguments
-fn test_5106_known_gaps() -> Result<()> {
-    assert_path_rows_both_routes_3749(&[(
-        r#"{"a":null,"b":2}"#,
-        r"[path(. as $x | foreach . as $i (.; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
-        "[]\n",
-        "",
-        0,
-    )])
+fn test_5106_former_known_gaps_match_jq() -> Result<()> {
+    assert_path_rows_both_routes_3749(&[
+        (
+            r#"{"a":null,"b":2}"#,
+            r"[path(. as $x | foreach . as $i (.; .; if true then foreach (try ($x as {a:$a} | .)) as $y (.; .; .) else empty end))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r"[path(. as $x | foreach . as $i ({}; $x; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))?]",
+            "[]\n",
+            "",
+            0,
+        ),
+        (
+            r#"{"a":null,"b":2}"#,
+            r"path(. as $x | foreach . as $i ({}; $x; foreach (try ($x as {a:$a} | .)) as $y (.; .; .)))",
+            "",
+            "Invalid path expression with result {\"a\":null,\"b\":2}",
+            5,
+        ),
+        (
+            r#"{"a":false}"#,
+            r"path(. as $x | foreach (.,.a) as $i (0; false; try (foreach ($i as {a:$a} | .) as $y (.; .; .))))",
+            "[\"a\"]\n",
+            "",
+            0,
+        ),
+    ])
 }
