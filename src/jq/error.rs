@@ -1808,6 +1808,14 @@ impl EvalError {
         Self::new("mktime requires array inputs")
     }
 
+    /// `mktime requires parsed datetime inputs` — an array that is not a full
+    /// broken-down time: shorter than 8 elements, or with a non-number among
+    /// its first 8 (#5301). jq's own wording has no `/1`, unlike
+    /// [`Self::requires_parsed_datetime_inputs`].
+    pub fn mktime_requires_parsed_datetime() -> Self {
+        Self::new("mktime requires parsed datetime inputs")
+    }
+
     /// `<name>/1 requires parsed datetime inputs` — `strftime` or
     /// `strflocaltime` (#3046) on an input that's neither a broken-down-time
     /// array nor a raw number.

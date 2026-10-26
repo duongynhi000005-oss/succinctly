@@ -89033,6 +89033,22 @@ fn jq_timegm_secs(
     Ok((secs != -1).then_some(secs))
 }
 
+/// The 8 fields of a broken-down-time array (`year, month, day, hour, minute,
+/// second, weekday, yearday`) truncated to integers as jq's `jv2tm` reads
+/// them, or `None` when the array has fewer than 8 elements or a non-number
+/// among its first 8 (#5301). Elements past the 8th are never read.
+fn broken_down_array_fields(arr: &[OwnedValue]) -> Option<[i64; 8]> {
+    let mut fields = [0i64; 8];
+    for (slot, element) in fields.iter_mut().zip(arr) {
+        *slot = match element {
+            OwnedValue::Int(n) | OwnedValue::NumberLiteral(NumberRepr::Int(n), _) => *n,
+            OwnedValue::Float(f) | OwnedValue::NumberLiteral(NumberRepr::Float(f), _) => *f as i64,
+            _ => return None,
+        };
+    }
+    (arr.len() >= 8).then_some(fields)
+}
+
 /// Builtin: mktime - convert broken-down time to Unix timestamp
 fn builtin_mktime<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     value: StandardJson<'_, W>,
@@ -89042,12 +89058,12 @@ fn builtin_mktime<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
     // -- an undecodable top-level string used to silently become `""` via
     // plain `to_owned_lossy` and get misreported as "not an array" instead of
     // raising its own decode failure (never suppressed by `?`,
-    // #1247/#1620). But `get_int` below only ever extracts *numbers* from
-    // the array (never a `String` arm), so a corrupted string in an
-    // unread element -- e.g. a `gmtime`-shaped 8-element array's unused
-    // weekday/yearday tail -- must not fail a conversion that would
-    // otherwise succeed; recursively checking the whole array like
-    // `to_owned` does was confirmed to regress exactly that case.
+    // #1247/#1620). But `broken_down_array_fields` below only ever reads
+    // the first 8 elements, as numbers (never a `String` arm), so a
+    // corrupted string in an unread element -- one past the 8th -- must
+    // not fail a conversion that would otherwise succeed; recursively
+    // checking the whole array like `to_owned` does was confirmed to
+    // regress exactly that case.
     if let Some(e) = scalar_decode_failure(&value) {
         return QueryResult::Error(e);
     }
@@ -89057,58 +89073,22 @@ fn builtin_mktime<W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         _ => return QueryResult::Error(EvalError::mktime_requires_array()),
     };
 
-    // Need at least 6 elements: [year, month, day, hour, minute, second]
-    if arr.len() < 6 {
+    // #5301: jq's `jv2tm` reads all 8 fields -- weekday and yearday included --
+    // and raises one wording for a short array and for a non-number among them
+    // alike, extra elements past the 8th being ignored.
+    let Some(fields) = broken_down_array_fields(&arr) else {
         if optional {
             return QueryResult::None;
         }
-        return QueryResult::Error(EvalError::new(
-            "mktime requires array with at least 6 elements",
-        ));
-    }
-
-    let get_int = |idx: usize| -> Result<i64, EvalError> {
-        match arr.get(idx) {
-            Some(OwnedValue::Int(n)) => Ok(*n),
-            Some(OwnedValue::Float(f)) => Ok(*f as i64),
-            Some(OwnedValue::NumberLiteral(NumberRepr::Int(n), _)) => Ok(*n),
-            Some(OwnedValue::NumberLiteral(NumberRepr::Float(f), _)) => Ok(*f as i64),
-            _ => Err(EvalError::new(format!(
-                "mktime: element {idx} must be a number"
-            ))),
-        }
+        return QueryResult::Error(EvalError::mktime_requires_parsed_datetime());
     };
 
-    let year = match get_int(0) {
-        Ok(y) => jq_tm_year(y),
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
-    let month = match get_int(1) {
-        Ok(m) => jq_month_index(m), // jq uses 0-indexed months
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
-    let day = match get_int(2) {
-        Ok(d) => jq_tm_field(d),
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
-    let hour = match get_int(3) {
-        Ok(h) => jq_tm_field(h),
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
-    let minute = match get_int(4) {
-        Ok(m) => jq_tm_field(m),
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
-    let second = match get_int(5) {
-        Ok(s) => jq_tm_field(s),
-        Err(_) if optional => return QueryResult::None,
-        Err(e) => return e.into(),
-    };
+    let year = jq_tm_year(fields[0]);
+    let month = jq_month_index(fields[1]); // jq uses 0-indexed months
+    let day = jq_tm_field(fields[2]);
+    let hour = jq_tm_field(fields[3]);
+    let minute = jq_tm_field(fields[4]);
+    let second = jq_tm_field(fields[5]);
 
     let timestamp = match jq_timegm_secs(year, month, day, hour, minute, second) {
         Ok(Some(t)) => t,
@@ -89330,11 +89310,10 @@ fn broken_down_time_fields<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
         // #1820: `scalar_decode_failure` first, same shape as
         // `builtin_mktime`'s own fix above -- and for the same
         // reason, plain `to_owned_lossy` (not `to_owned`) for the
-        // array itself: `get_int` below only ever extracts numbers
-        // (defaulting to 0 for anything else, never a `String`
-        // arm), so a corrupted string in an element it happens not
-        // to need must not fail a conversion that would otherwise
-        // succeed.
+        // array itself: `broken_down_array_fields` below only reads
+        // the first 8 elements, as numbers (never a `String` arm), so
+        // a corrupted string in an element it does not read must not
+        // fail a conversion that would otherwise succeed.
         _ => {
             if let Some(e) = scalar_decode_failure(value) {
                 return Err(QueryResult::Error(e));
@@ -89342,44 +89321,37 @@ fn broken_down_time_fields<'a, W: Clone + AsRef<[u64]>, S: EvalSemantics>(
             match to_owned_lossy::<S, _>(value) {
                 OwnedValue::Array(arr) => {
                     // Real jq requires the full 8-element array — weekday and
-                    // yearday included — not just the 6 fields mktime needs.
-                    // Confirmed empirically: `[2024,0,15,0,0,0] | strftime(...)`
-                    // errors in real jq for every length 1-7, only succeeding at
-                    // 8. Below 8, this codebase used to default weekday/yearday
+                    // yearday included — not just the 6 fields mktime needs, and
+                    // a number in each of them (#5301): `jv2tm` fails on an
+                    // element that is missing or not a number, with this one
+                    // wording. Confirmed empirically: `[2024,0,15,0,0,0] |
+                    // strftime(...)` errors in real jq for every length 1-7,
+                    // only succeeding at 8, as does `["a",0,15,0,0,0,0,0]`.
+                    // Below 8, this codebase used to default weekday/yearday
                     // to 0 instead of erroring, which was harmless before this
                     // PR added specifiers that read those fields (#760) — now it
                     // would silently produce a wrong date instead of matching
                     // jq's error.
-                    if arr.len() < 8 {
+                    let Some(fields) = broken_down_array_fields(&arr) else {
                         if optional {
                             return Err(QueryResult::None); // patchcov: coverage tolerate-line reason="`optional` is never true through either caller of this function -- confirmed live (`eprintln!` probe): `[1,2,3] | todate?` reaches `builtin_todate` with `optional=false`, same as bare `todate`. `?`'s suppression happens entirely outside builtin dispatch here, the same 'optional is never true here' shape eval.rs already documents elsewhere for a different function (#2180's Expr::Object tolerate-line note, ~line 7334) (#3068)"
                         }
                         return Err(QueryResult::Error(
                             EvalError::requires_parsed_datetime_inputs(name),
                         ));
-                    }
-
-                    let get_int = |idx: usize| -> i64 {
-                        match arr.get(idx) {
-                            Some(OwnedValue::Int(n)) => *n, // patchcov: coverage tolerate-line reason="every array literal written in filter source, and every array-element JSON parses, decodes to NumberLiteral (#1035), not a bare Int -- Int is for internally-synthesized values spliced post-parse; probed a computed element ([1970,(0+0),..]) and it still decoded as NumberLiteral here, so this arm has no known real producer (#3068)"
-                            Some(OwnedValue::Float(f)) => *f as i64,
-                            Some(OwnedValue::NumberLiteral(NumberRepr::Int(n), _)) => *n,
-                            Some(OwnedValue::NumberLiteral(NumberRepr::Float(f), _)) => *f as i64,
-                            _ => 0,
-                        }
                     };
 
-                    let month = jq_month_index(get_int(1));
+                    let month = jq_month_index(fields[1]);
 
                     let t = BrokenDownTime {
-                        year: jq_tm_year(get_int(0)),
+                        year: jq_tm_year(fields[0]),
                         month,
-                        day: jq_tm_field(get_int(2)),
-                        hour: jq_tm_field(get_int(3)),
-                        minute: jq_tm_field(get_int(4)),
-                        second: jq_tm_field(get_int(5)),
-                        weekday: jq_tm_field(get_int(6)),
-                        yearday: jq_tm_field(get_int(7)),
+                        day: jq_tm_field(fields[2]),
+                        hour: jq_tm_field(fields[3]),
+                        minute: jq_tm_field(fields[4]),
+                        second: jq_tm_field(fields[5]),
+                        weekday: jq_tm_field(fields[6]),
+                        yearday: jq_tm_field(fields[7]),
                     };
                     // The fields already are local wall-clock time; the zone
                     // only labels them (`%z`, `%Z`, `%s`). `jq_month_for_time`:
@@ -106017,20 +105989,18 @@ mod tests {
     }
 
     /// #1820: `builtin_mktime`/`builtin_strftime` only ever read a fixed
-    /// prefix of their input array as numbers (`get_int` never has a
-    /// `String` arm), so an undecodable string sitting in an element
-    /// neither function reads at all -- e.g. a `gmtime`-shaped array's
-    /// unused weekday/yearday tail -- must not fail a conversion that
-    /// would otherwise succeed. An initial fix recursively decode-checked
+    /// prefix of their input array, as numbers (`broken_down_array_fields`
+    /// has no `String` arm), so an undecodable string sitting in an element
+    /// neither function reads at all -- one past the 8th -- must not fail a
+    /// conversion that would otherwise succeed. An initial fix recursively decode-checked
     /// the whole array via `to_owned` and regressed exactly this;
     /// both now use `scalar_decode_failure` (checks only the top-level
     /// value itself) ahead of a plain, unchecked `to_owned_lossy`.
     #[test]
     fn test_mktime_strftime_ignore_undecodable_unread_tail_elements_1820() {
-        // mktime only reads indices 0..=5; index 6 (an 8-element,
-        // gmtime-shaped array's weekday slot) is never inspected.
+        // mktime only reads indices 0..=7 (#5301); index 8 is never inspected.
         query!(
-            b"[2024,0,15,0,0,0,0,\"\xff\xfe\"]",
+            b"[2024,0,15,0,0,0,0,0,\"\xff\xfe\"]",
             "mktime",
             QueryResult::Owned(OwnedValue::Int(_) | OwnedValue::Float(_)) => {}
         );
@@ -130687,11 +130657,11 @@ mod tests {
             QueryResult::None => {}
         );
 
-        // A non-numeric array element falls back to 0, matching
-        // get_int's existing catch-all for array-input strftime.
+        // A non-number among the 8 fields is the same error (#5301), where
+        // it used to be read as 0.
         query!(br#"["x",0,1,0,0,0,4,0]"#, r#"strftime("%Y")"#,
-            QueryResult::Owned(OwnedValue::String(s)) => {
-                assert_eq!(s, "0000");
+            QueryResult::Error(e) => {
+                assert_eq!(e.message, "strftime/1 requires parsed datetime inputs");
             }
         );
 
