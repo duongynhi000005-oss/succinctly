@@ -361,10 +361,9 @@ pub(crate) enum ReportEntry {
     /// or a module's file exists but could not be read (#3573): jq loads a
     /// module through the same reader, so an unreadable module is printed
     /// `error loading data file <path>: ...` and counted, and the walk goes on
-    /// (`include "m1"; include "perm"` prints `perm`, then `m1`). jq parses the
-    /// module's raw bytes, so a module with invalid UTF-8 is a syntax error
-    /// there, where succinctly's reader refuses it here, a difference of kind
-    /// that keeps the count.
+    /// (`include "m1"; include "perm"` prints `perm`, then `m1`). A module with
+    /// invalid UTF-8 is not unreadable: jq parses the raw bytes, and so does
+    /// [`read_library`] (#5351).
     ///
     /// **Wording is succinctly's own** past the `error loading data file
     /// {path}:` prefix, the same fidelity limit [`Self::Syntax`] already
@@ -573,6 +572,14 @@ impl From<anyhow::Error> for BuildContextError {
 /// jq's own usage-error wording never includes it.
 fn report_usage_error(message: &str) {
     eprintln!("jq: {message}");
+}
+
+/// The text of a library file -- a module, or `~/.jq` -- read as jq reads it (#5351): jq parses
+/// the raw bytes, so a byte that is not UTF-8 is harmless inside a comment, reads as U+FFFD
+/// inside a string, and is a syntax error anywhere else. Decoding it lossily hands the parser
+/// the same three outcomes, where `read_to_string` refused the whole file.
+fn read_library(path: &Path) -> std::io::Result<String> {
+    std::fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Strip Rust's `std::io::Error` Display's own `" (os error N)"` suffix,
@@ -1405,7 +1412,7 @@ impl FailureWalk<'_> {
         if self.visited.contains(&canonical) {
             return 0;
         }
-        let errors = match std::fs::read_to_string(file) {
+        let errors = match read_library(file) {
             // An unreadable module is counted like a data file that did not
             // load, and the walk goes on (see [`ReportEntry::Data`]).
             Err(e) => {
@@ -1498,7 +1505,7 @@ impl ModuleLoader {
                 // One that cannot be used is a compile error for every program (#5351), which
                 // this constructor cannot return: the failure waits for `bind_dot_jq`.
                 let canonical = canonical_or_self(&jq_path);
-                match std::fs::read_to_string(&jq_path) {
+                match read_library(&jq_path) {
                     Err(e) => {
                         dot_jq_path = Some(jq_path.clone());
                         dot_jq_failure = Some(ReportEntry::Data(DataFileFailure {
@@ -1783,7 +1790,7 @@ impl ModuleLoader {
         }
 
         // Read and parse the module
-        let contents = std::fs::read_to_string(&file_path).map_err(|e| {
+        let contents = read_library(&file_path).map_err(|e| {
             ModuleLoadError::single(ReportEntry::Data(DataFileFailure {
                 path: canonical.clone(),
                 detail: strerror_only(&e),
@@ -3999,7 +4006,7 @@ struct ModuleSource {
 
 impl ModuleSource {
     fn read(path: &str) -> Option<Self> {
-        let source = std::fs::read_to_string(path).ok()?;
+        let source = read_library(Path::new(path)).ok()?;
         let defs = jq::collect_def_sites(&source, jq::ParserMode::Jq, true);
         Some(Self {
             source,

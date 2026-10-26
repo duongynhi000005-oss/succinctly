@@ -12867,10 +12867,11 @@ each include themselves names the last-declared one (`c2 -> c2`; before #3573 th
 first-declared order named `c1 -> c1`), which is the one jq would reach first. A module that
 exists but cannot be read is printed as `error loading data file` and counted, and the walk goes
 on, as jq does (`include "m1"; include "perm"` with `perm.jq` unreadable prints `perm`, then
-`m1`, `1 compile error`); the detail after the path is succinctly's own. jq parses a module's
-raw bytes, so a module holding invalid UTF-8 is a *syntax error* there (`unexpected
-INVALID_CHARACTER`), where succinctly's reader refuses it as unreadable: the same count, a
-different kind.
+`m1`, `1 compile error`); the detail after the path is succinctly's own.
+jq parses a library's raw bytes, and so does succinctly since #5351, decoding them lossily: a byte that is not UTF-8 is harmless in a comment, reads as U+FFFD in a string, and is a syntax error anywhere else, as in jq.
+A library is a module or the `~/.jq` file, and both are refused with a compile error when they do not parse (#5351).
+The wording after `jq: error:` is succinctly's own, as for a module's syntax error above; the location, the source echo, the count and exit 3 are jq's.
+A library that holds an expression of its own after its definitions is refused too, with jq's `library should only have function definitions, not a main expression`, checked straight after parsing and counted once, so its own directives are never reached.
 
 **A module body seeing names it should not** — `~/.jq`'s defs, and sibling `include`d and
 `import`ed modules' defs in a declaration-order-dependent way — **is closed**

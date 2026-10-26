@@ -120,6 +120,85 @@ fn test_dot_jq_without_a_fault_is_untouched_5351() -> Result<()> {
     Ok(())
 }
 
+/// jq parses a library's raw bytes: a byte that is not UTF-8 is harmless in a comment, reads as
+/// U+FFFD in a string, and is a syntax error anywhere else.
+#[test]
+fn test_dot_jq_is_read_as_bytes_5351() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    for (bytes, want) in [
+        (&b"# caf\xe9 comment\ndef hb: 1;\n"[..], Some("1\n")),
+        (&b"def hb: \"caf\xe9\";\n"[..], Some("\"caf\u{fffd}\"\n")),
+        (&b"\xff\xfe def hb: 1;\n"[..], None),
+    ] {
+        std::fs::write(home.path().join(".jq"), bytes)?;
+        let (output, code) = spawn_with_signal_retry(
+            || {
+                let mut command = Command::new(succinctly_bin());
+                command
+                    .current_dir(dir.path())
+                    .env("HOME", home.path())
+                    .args(["jq", "-nc", "hb"]);
+                command
+            },
+            None,
+        )?;
+        match want {
+            Some(want) => {
+                assert_eq!(
+                    (output.stdout.as_slice(), code),
+                    (want.as_bytes(), 0),
+                    "{bytes:?}"
+                );
+            }
+            None => {
+                let stderr = String::from_utf8(output.stderr)?;
+                assert_eq!(code, 3, "{bytes:?}: {stderr}");
+                assert!(stderr.ends_with("jq: 1 compile error\n"), "{stderr}");
+                assert!(stderr.contains("/.jq, line 1:"), "{stderr}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `~/.jq` the user cannot read is a compile error too, counted once, with the detail after the
+/// path succinctly's own. Skipped where `chmod 000` still reads (root).
+#[cfg(unix)]
+#[test]
+fn test_unreadable_dot_jq_is_a_compile_error_5351() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    let dot_jq = home.path().join(".jq");
+    std::fs::write(&dot_jq, "def hb: 1;\n")?;
+    std::fs::set_permissions(&dot_jq, std::fs::Permissions::from_mode(0o000))?;
+    if std::fs::read_to_string(&dot_jq).is_ok() {
+        eprintln!("skipped: chmod 000 does not bind this user");
+        return Ok(());
+    }
+    let (output, code) = spawn_with_signal_retry(
+        || {
+            let mut command = Command::new(succinctly_bin());
+            command
+                .current_dir(dir.path())
+                .env("HOME", home.path())
+                .args(["jq", "-nc", "1"]);
+            command
+        },
+        None,
+    )?;
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(code, 3, "{stderr}");
+    assert!(
+        stderr.starts_with("jq: error loading data file ")
+            && stderr.contains("/.jq: Permission denied\n\n")
+            && stderr.ends_with("jq: 1 compile error\n"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
 #[test]
 fn test_dot_jq_fault_is_reported_after_the_programs_own_directives_5351() -> Result<()> {
     // The file is declared ahead of the program, so jq reaches it last, and a missing module
