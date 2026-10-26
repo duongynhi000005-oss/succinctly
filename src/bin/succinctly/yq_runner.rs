@@ -9424,6 +9424,20 @@ fn discard_yq_partial_prefix<V: DocumentValue>(result: GenericResult<V>) -> Gene
     }
 }
 
+/// The results of a top-level `,`'s branches, in order, or only the first failure (#5283).
+///
+/// A query that fails in any branch prints nothing for the others (#2392, #4856), so a branch
+/// that errored is streamed alone and its diagnostic is the whole output.
+fn comma_branch_results<V: DocumentValue>(
+    mut results: Vec<GenericResult<V>>,
+) -> Vec<GenericResult<V>> {
+    let failed = results.iter().position(GenericResult::is_failure);
+    match failed {
+        Some(at) => vec![results.swap_remove(at)],
+        None => results,
+    }
+}
+
 /// Main entry point for the yq command.
 ///
 /// Runs [`run_yq_inner`] behind the net for the depth guards yq's own write
@@ -9828,6 +9842,22 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // input at all: it now gets *both* correct numbers and duplicate-key
     // preservation, matching real yq on both counts.
     let is_m2_streamable = can_use_m2_streaming(&program.expr);
+    // #5283: a query that is itself a `,` of M2-streamable branches streams too. The evaluator
+    // already answers one as the nodes its branches name (`eval_comma_generic`, #1361), and the
+    // DOM route they used to take rebuilt each as an `IndexMap`, collapsing a duplicate mapping
+    // key that yq prints (`., .b` on `a: 1 / a: 2`) and raising on a colliding undecodable key
+    // that `.` echoes (#2645). Stdout only, uncolored and not NUL-terminated: the in-place and slurp gates
+    // keep theirs, and `-C`'s buffered colorizer and `-0`'s lazy separator are tuned to the DOM route.
+    let is_m2_streamable_comma = terminator_from_config(&output_config) != Terminator::Nul
+        && !output_config.use_color
+        && top_level_comma_branches(&program.expr)
+            .is_some_and(|branches| branches.into_iter().all(can_use_m2_streaming));
+    // What each `stream_cursor!` evaluates and streams, in order: the branches of a streamed
+    // comma, each as a query of its own (a node keeps what its cursor carries), else the query.
+    let stream_branches: Vec<&Expr> = match top_level_comma_branches(&program.expr) {
+        Some(branches) if is_m2_streamable_comma => branches,
+        _ => vec![&program.expr],
+    };
     let reorders_root_sequence = reorders_a_sequence(&program.expr);
     // #2276 code review (found live against this exact binary, on top of
     // #2262): `any_input_is_json` -- the same run-wide boolean #978
@@ -9975,7 +10005,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // even without `-r`), so `can_yaml_fast_path` never had this gap.
     let can_stream_json_output_style =
         !output_config.raw_output && (output_config.compact || can_stream_pretty_or_colored);
-    let can_json_fast_path = is_m2_streamable
+    let can_json_fast_path = (is_m2_streamable || is_m2_streamable_comma)
         && can_stream_json_output_style
         && output_config.output_format == OutputFormat::Json
         && !args.null_input
@@ -9996,7 +10026,7 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
     // `-P` never reached its own style-clearing DOM route when combined
     // with `-I0` -- confirmed live, `-I0 -P` on flow-style input left it
     // as flow instead of expanding to block style the way real yq does.
-    let can_yaml_fast_path = is_m2_streamable
+    let can_yaml_fast_path = (is_m2_streamable || is_m2_streamable_comma)
         && can_stream_pretty_or_colored
         && output_config.output_format == OutputFormat::Yaml
         && !args.null_input
@@ -10215,9 +10245,32 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // consulted -- a `Partial(_, Break)` must answer `false`
                     // there just like a bare `Break` already does, not the
                     // unconditional `true` a raw `Partial` would give.
-                    let result = discard_yq_partial_prefix(
-                        eval_with_cursor_using::<YqSemantics, _>(&program.expr, $cursor),
+                    // #5283: a streamed comma is its branches, one `stream_cursor!` result each; only the
+                    // first that produces output may write the document's `---`.
+                    let mut doc_has_output = false;
+                    let branch_results = comma_branch_results(
+                        stream_branches
+                            .iter()
+                            .map(|branch| {
+                                discard_yq_partial_prefix(eval_with_cursor_using::<YqSemantics, _>(
+                                    branch, $cursor,
+                                ))
+                            })
+                            .collect(),
                     );
+                    for result in branch_results {
+                        // A throwaway flag once the document has output: `emit_yaml_doc_separator` sets it.
+                        let mut comma_dummy = false;
+                        let doc_streamed_ref: &mut bool = if doc_has_output {
+                            &mut comma_dummy
+                        } else {
+                            $doc_streamed
+                        };
+                        // A comma that failed in a branch prints the diagnostic and nothing else, not even a
+                        // document separator ahead of it (#5283); one expression keeps its own rule.
+                        let produces_output = result.produces_output()
+                            && !(is_m2_streamable_comma && result.is_failure());
+                        doc_has_output |= produces_output;
                     // `produces_output` is an exhaustive match on
                     // `GenericResult`, not a hand-maintained exclusion
                     // list — a halt/halt_error (#791) with no prior
@@ -10241,15 +10294,15 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // `-0 --colors 'select(.a != 2)'` over three documents
                     // whose middle one matches nothing.
                     let nul_separator = if terminator == Terminator::Nul {
-                        result.produces_output().then_some(DocSeparatorArgs {
-                            doc_streamed: $doc_streamed,
+                        produces_output.then_some(DocSeparatorArgs {
+                            doc_streamed: doc_streamed_ref,
                             no_doc: $output_config.no_doc,
                         })
                     } else {
                         emit_yaml_doc_separator(
                             $writer,
-                            $doc_streamed,
-                            result.produces_output(),
+                            doc_streamed_ref,
+                            produces_output,
                             $output_config.no_doc,
                             terminator,
                         )?;
@@ -10315,6 +10368,10 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     if stats.truncated {
                         stream_truncated.set(true);
                     }
+                        if stream_truncated.get() {
+                            break;
+                        }
+                    }
                 }
             } else {
                 // M2 path: JSON output streaming
@@ -10373,9 +10430,18 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // `stream_maybe_colored` arg below is a hardcoded
                     // `None`), so there's no ordering constraint here beyond
                     // preceding `stream_json` itself.
-                    let result = discard_yq_partial_prefix(
-                        eval_with_cursor_using::<YqSemantics, _>(&program.expr, $cursor),
+                    // #5283: see the YAML arm above.
+                    let branch_results = comma_branch_results(
+                        stream_branches
+                            .iter()
+                            .map(|branch| {
+                                discard_yq_partial_prefix(eval_with_cursor_using::<YqSemantics, _>(
+                                    branch, $cursor,
+                                ))
+                            })
+                            .collect(),
                     );
+                    for result in branch_results {
                     let stats = stream_maybe_colored(
                         $writer,
                         $use_color,
@@ -10445,6 +10511,10 @@ fn run_yq_inner(mut args: YqCommand) -> Result<i32> {
                     // still continue to the next document (#355).
                     if stats.truncated {
                         stream_truncated.set(true);
+                    }
+                        if stream_truncated.get() {
+                            break;
+                        }
                     }
                 }
             }

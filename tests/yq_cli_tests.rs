@@ -29479,16 +29479,21 @@ fn test_yq_comma_multiple_overflow_fields_all_fixed_1168() -> Result<()> {
 #[test]
 fn test_yaml_comma_keeps_anchor_marks_1361() -> Result<()> {
     let input = "x: &a {p: 1}\ny:\n  q: *a\n";
-    let (via_iterate, code) = run_yq_stdin(".[]", input, &["--arg", "z", "1"])?;
+    let (via_iterate, code) = run_yq_stdin(".[]", input, &[])?;
     assert_eq!(code, 0);
-    // The second result stands alone, so a `*a` whose `&a` is in the first result's document is
-    // written out, as it is for `.[]` (the existing per-result soundness rule).
-    assert_eq!(via_iterate, "&a {p: 1}\nq:\n  p: 1\n");
-    for filter in [".x, .y", "(.x, .y)", ".x // .z, .y"] {
+    // The second result keeps its `*a`, as `.[]` and yq print it. The comma streams its branches
+    // (#5283) and so no longer takes the DOM route, which expanded an alias whose `&a` is in
+    // another result (the per-result soundness rule, still pinned by the `-P` row below).
+    assert_eq!(via_iterate, "&a {p: 1}\nq: *a\n");
+    for filter in [".x, .y", "(.x, .y)"] {
         let (out, code) = run_yq_stdin(filter, input, &[])?;
         assert_eq!(code, 0, "{filter}");
         assert_eq!(out, via_iterate, "{filter}");
     }
+    // A branch that is not navigation (`//`) keeps the DOM route and its per-result soundness rule.
+    let (out, code) = run_yq_stdin(".x // .z, .y", input, &[])?;
+    assert_eq!(code, 0);
+    assert_eq!(out, "&a {p: 1}\nq:\n  p: 1\n");
     let (out, code) = run_yq_stdin(".x, .y", input, &["-P"])?;
     assert_eq!(code, 0);
     assert_eq!(out, "&a\np: 1\nq:\n  p: 1\n");

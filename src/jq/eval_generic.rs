@@ -6609,6 +6609,12 @@ pub enum GenericResult<V: DocumentValue> {
 }
 
 impl<V: DocumentValue> GenericResult<V> {
+    /// Whether this is an error, a `break` or a `halt`: a result that carries a failure and no
+    /// value (a `Partial` still has a prefix, and is not one).
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Error(_) | Self::Break(_) | Self::Halt(_))
+    }
+
     /// Whether streaming this result would write at least one value to
     /// output.
     ///

@@ -45,6 +45,8 @@ fn the_cursor_route_keeps_the_repeated_key_2186() -> Result<()> {
         ("{\"a\":1,\"a\":2,\"b\":3}\n".to_string(), 0)
     );
     assert_eq!(run_yq_stdin(".", DUP, &[])?, (DUP.to_string(), 0));
+    // A top-level comma of streamable branches keeps it too (#5283); yq prints a node twice once.
+    assert_eq!(run_yq_stdin(". , .", DUP, &[])?, (DUP.to_string(), 0));
     assert_eq!(
         run_yq_stdin(".", DUP, &["--slurp"])?.0,
         "- a: 1\n  a: 2\n  b: 3\n"
@@ -59,7 +61,6 @@ fn the_dom_forcing_routes_collapse_the_repeated_key_2186() -> Result<()> {
         (".", &["--arg", "z", "y"], COLLAPSED),
         (".", &["--eval-all"], COLLAPSED),
         (".[0]", &["--slurp"], COLLAPSED),
-        (". , .", &[], COLLAPSED),
         (".b = 5", &[], "a: 2\nb: 5\n"),
     ];
     for (filter, args, expected) in rows {
